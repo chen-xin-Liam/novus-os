@@ -1,0 +1,43 @@
+# Tasks
+
+- [x] Task 1: 安装构建与验证工具链
+  - [x] SubTask 1.1: apt 安装 build-essential、qemu-system-x86、ovmf（必要时加装 gcc-mingw-w64-x86-64）
+  - [x] SubTask 1.2: 验证 gcc / ld / objcopy / qemu-system-x86_64 / OVMF 固件文件可用并记录路径
+    - 工具链：x86_64-w64-mingw32-gcc 13-win32、qemu-system-x86_64、/usr/share/OVMF/OVMF_{CODE,VARS}_4M.fd
+- [x] Task 2: 自研 UEFI 头文件与引导入口
+  - [x] SubTask 2.1: 编写 `arch/x86_64/include/uefi.h`：最小 UEFI 结构定义（EFI_SYSTEM_TABLE / EFI_BOOT_SERVICES / EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL / EFI_MEMORY_DESCRIPTOR / EFI_STATUS / EFI_GUID 等），全部自行定义，不含外部头文件
+    - EFI_BOOT_SERVICES 44 个成员按规范顺序完整定义；结构偏移经编译期断言核对（BootServices@SystemTable+96、ExitBootServices@+232 等）
+  - [x] SubTask 2.2: 编写 `arch/x86_64/boot/main.c`：`efi_main` 入口，ConOut 清屏、Reset、打印 "Novus OS" 开机横幅（对应 README 11.4 开机画面文字部分的 M0 形态）
+- [x] Task 3: A核 BSP 基础自检
+  - [x] SubTask 3.1: 编写 CPUID 探测（`arch/x86_64/include/cpu.h` 或内联）：厂商字符串、品牌字符串、逻辑核数，结果经 ConOut 输出
+    - 实测输出：AuthenticAMD / QEMU Virtual CPU version 2.5+ / 1 logical processor
+  - [x] SubTask 3.2: 编写内存图扫描：GetMemoryMap 统计可用内存总量并输出；总量 < 2GiB 时输出错误并停机拒绝启动
+    - 实测：4G 虚拟机 4047 MiB 通过；1G 虚拟机 975 MiB 触发 FATAL 拒绝
+    - 修复记录：uefi.h 原将 EFI 状态码定义为无高位掩码的普通值，与固件返回的 0x8000000000000005 不匹配导致 GetMemoryMap 误判失败；已改为规范编码 EFIERR(a)=0x8000000000000000|a，EFI_ERROR 改为符号位判断
+- [x] Task 4: ExitBootServices 与 A核 BSP 早期阶段
+  - [x] SubTask 4.1: 自检通过后重新获取最终内存图并调用 ExitBootServices，失败则输出错误停机
+    - 含 map key 失效重试（上限 8 次）；实测 4G 场景成功退出 Boot Services
+  - [x] SubTask 4.2: 编写 `kernel/kmain.c`：BSP 早期阶段入口（64 位裸机状态），完成初始化后进入稳定停机循环（cli/hlt）
+    - 实测串口输出 4 行状态后 [HALT]，QEMU 无重启/三重故障
+- [x] Task 5: VGA 文本驱动与串口输出
+  - [x] SubTask 5.1: 编写 `kernel/vga.c/.h`：0xB8000 文本模式驱动（清屏、光标定位、带颜色字符打印、换行滚动）
+  - [x] SubTask 5.2: 编写 `kernel/serial.c/.h`：COM1 (0x3F8) 初始化与单字节/字符串输出
+  - [x] SubTask 5.3: 在 kmain 中初始化两者，并将启动信息同步写入 VGA 与串口（提供统一 puts 风格入口）
+    - kputs 统一入口镜像输出，串口验证通过
+- [x] Task 6: 构建体系与镜像
+  - [x] SubTask 6.1: 编写顶层 `Makefile`：按 spec 边界说明的择优方案产出可由 OVMF 加载的 .efi（PE32+）
+    - mingw-w64 直出 PE32+（file 确认 "PE32+ executable for EFI (application), x86-64"）
+  - [x] SubTask 6.2: 编写最小 `Kconfig` 与 `configs/novus_defconfig`（M0 占位配置项），Makefile 读取 defconfig
+  - [x] SubTask 6.3: 编写 `scripts/run.sh` 与 `make run` 目标：QEMU + OVMF + `-serial stdio` 启动，支持 MEM=1G/4G 参数
+    - make run MEM=4G / MEM=1G 均验证；无 DISPLAY 时自动 -display none
+- [x] Task 7: 端到端验证
+  - [x] SubTask 7.1: `make` 全量构建成功、零错误
+    - make clean 后全量重建：0 error / 0 warning
+  - [x] SubTask 7.2: `make run MEM=4G`：屏幕显示横幅与自检状态，串口输出 BSP 阶段信息，系统稳定停机不重启
+  - [x] SubTask 7.3: `make run MEM=1G`：验证 < 2GiB 拒绝启动路径生效
+
+# Task Dependencies
+- Task 1 是其余全部任务的前置（工具链）
+- Task 3 依赖 Task 2（引导入口与输出通道）；Task 4 依赖 Task 3；Task 5 依赖 Task 4（kmain 中使用）
+- Task 6 可在 Task 1 完成后与 Task 2~5 并行推进（编译单元与产物路径约定固定后）
+- Task 7 依赖 Task 1~6 全部完成

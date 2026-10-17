@@ -1,3 +1,28 @@
+# ------------------------------------------------------------------
+# Novus OS build artifacts (M0 build system)
+# ------------------------------------------------------------------
+
+# Build system output: object files (build/), the final EFI image and
+# QEMU runtime state (out/), and the FAT ESP staging directory (esp/).
+build/
+out/
+esp/
+
+# Rust crate (lib/novuslib-rs) local cargo target dir; the library that
+# lands in build/rust is already covered by build/ above.
+lib/novuslib-rs/target/
+
+# Compiler/linker intermediates and EFI binaries
+*.o
+*.efi
+
+# OVMF non-volatile variable copies created by scripts/run.sh
+OVMF_VARS*.fd
+
+# ------------------------------------------------------------------
+# Generic C/toolchain artifacts
+# ------------------------------------------------------------------
+
 # Prerequisites
 *.d
 

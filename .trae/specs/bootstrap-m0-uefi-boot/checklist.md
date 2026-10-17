@@ -1,0 +1,21 @@
+# Checklist
+
+- [x] `make` 全量构建成功，产出可被 OVMF 加载的 .efi 文件
+  - 证据：make clean 后全量重建 0 error/0 warning；`file out/NOVUS.EFI` = PE32+ executable for EFI (application), x86-64
+- [x] 自研 `uefi.h` 不包含任何 GNU-EFI / EDK2 外部头文件（grep 验证无外部 include）
+  - 证据：arch/ 与 kernel/ 全部 #include 仅为本项目自有头（uefi.h/cpu.h/kernel.h/vga.h/serial.h）
+- [x] QEMU+OVMF 启动后屏幕显示 "Novus OS" 横幅与各阶段自检状态文字
+  - 证据：串口日志（ConOut 输出镜像）显示横幅 + [BOOT]/[CHECK] 行；OVMF 下屏幕可见性依赖固件 ConOut/GOP，符合 spec 边界说明 1
+- [x] 串口输出包含：CPU 厂商/品牌、逻辑核数、内存总量、BSP 阶段 VGA 初始化信息
+  - 证据（4G 运行）：AuthenticAMD / QEMU Virtual CPU version 2.5+ / 1 / 4047 MiB / "VGA text output initialized (0xB8000)"
+- [x] VGA 文本驱动实现 0xB8000 写入、清屏、定位、打印、滚动
+  - 证据：kernel/vga.c 实现清屏/putchar/换行滚动/硬件光标（0x3D4）；kmain 运行确认初始化成功（OVMF GOP 模式下 0xB8000 不可见属 spec 冻结边界，串口镜像验证驱动执行）
+- [x] `make run MEM=1G` 触发内存不足拒绝启动路径并停机
+  - 证据：975 MiB → "[FATAL] Usable memory below 2GiB minimum (Novus OS spec 1.2). Boot refused."，未进入 BSP 阶段
+- [x] `make run MEM=4G` 通过 ExitBootServices 进入 kmain，系统稳定停机，QEMU 无重启/三重故障
+  - 证据：串口日志依次出现 "Exiting boot services..." → "Novus OS M0 - A-core (BSP) kernel stage" → "[HALT] System halted."，进程保持运行直至 timeout 终止
+- [x] 目录布局符合 README 16.2 骨架的 M0 子集（arch/x86_64、kernel、scripts、configs、Makefile、Kconfig）
+- [x] 未修改 README.md 与 LICENSE
+  - 证据：git status 中 README.md/LICENSE 无任何改动
+- [x] 构建产物与中间文件不入库（Makefile 提供 clean；必要时 .gitignore）
+  - 证据：.gitignore 含 build/ out/ esp/ *.o *.efi OVMF_VARS*.fd；make clean 实测清除三个目录

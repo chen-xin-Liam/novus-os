@@ -1,0 +1,32 @@
+# Novus OS - M1 base configuration
+#
+# Plain shell-style variables consumed by the top-level Makefile via
+# '-include'. A full Kconfig parser with menuconfig support is planned
+# for a later milestone; for M1 this file is the single source of build
+# configuration and mirrors the declarations in the top-level Kconfig.
+
+# Target architecture.
+CONFIG_NOVUS_ARCH=x86_64
+
+# Minimum guest/host memory (MB) the kernel expects at boot.
+# 'make run' defaults to MEM=4G, well above this floor.
+CONFIG_NOVUS_MIN_MEMORY_MB=2048
+
+# VGA text-mode output during early boot.
+CONFIG_NOVUS_BOOT_VGA=y
+
+# Serial (COM1) debug output.
+CONFIG_NOVUS_DEBUG_SERIAL=y
+
+# Marker for the M0 milestone build scope.
+CONFIG_NOVUS_BUILD_M0=y
+
+# Disable the A core (BSP): it skips the early self-check and sleeps right
+# after firmware handoff, and the B core (AP) loads and runs the main
+# kernel (README 2.2 step 7). The M8 settings UI can flip the matching
+# shared-memory flag at runtime.
+CONFIG_NOVUS_A_CORE_DISABLE=n
+
+# SMP: assemble the AP trampoline and wake the B core during boot.
+# 'make run' boots QEMU with -smp 2 (AB dual-core, README part 2).
+CONFIG_NOVUS_SMP=y

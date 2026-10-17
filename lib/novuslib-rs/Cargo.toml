@@ -1,0 +1,27 @@
+# Novus OS - lib/ generic library, Rust part (README 16.4: C and Rust code
+# are compiled separately and interact across an explicit FFI boundary).
+#
+# TARGET NOTE (implementation decision): the spec originally mentions
+# x86_64-unknown-none, but that target emits ELF object code, which the
+# mingw PE32+ UEFI linker cannot consume. We therefore build with the
+# x86_64-pc-windows-msvc target: it produces COFF objects using the
+# Microsoft x64 ABI, matching the kernel's mingw-built PE image directly.
+# The msvc target is used purely for object code generation - no MSVC
+# linker or libraries are ever invoked (crate-type staticlib, no_std,
+# zero dependencies, panic=abort).
+
+[package]
+name = "novuslib-rs"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "novuslib_rs"
+crate-type = ["staticlib"]
+
+# Zero external dependencies by design: the kernel FFI surface must stay
+# freestanding and auditable.
+[dependencies]
+
+[profile.release]
+panic = "abort"

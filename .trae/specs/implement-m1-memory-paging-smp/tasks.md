@@ -1,0 +1,47 @@
+# Tasks
+
+- [x] Task 1: 工具链补装与构建参数
+  - [x] SubTask 1.1: 安装 rustup + stable 工具链 + target x86_64-unknown-none；验证 `cargo --version` 与 target 可用（失败则记录降级决策）
+    - 实装决策：改用 **x86_64-pc-windows-msvc** target（COFF 对象），因 unknown-none 产出 ELF 无法被 mingw PE 链接器消费；cargo 1.8x stable，产物 novuslib_rs.lib（COFF ar 归档），Makefile 已适配
+  - [x] SubTask 1.2: `scripts/run.sh` 增加 `-smp 2`（AB 双核），确认 QEMU 启动正常
+- [x] Task 2: 汇编内核主入口
+  - [x] SubTask 2.1: 编写 `arch/x86_64/kernel/entry.S`：`kernel_entry(UINT64 mmap, UINT64 map_size, UINT64 desc_size)`——建立 64KiB 对齐内核栈、清 bss、调 C `kmain`
+    - bss 清零采用 mingw ld PE 脚本提供的 __bss_start__/__bss_end__ 符号（nm 实测存在），rep stosb 双保险（PE 加载器本就零填充无原始数据段）
+  - [x] SubTask 2.2: 修改 `arch/x86_64/boot/main.c`：ExitBootServices 后跳转 `kernel_entry`（C ABI 传参），移除对 kmain 的直接调用
+- [x] Task 3: 共享内存规范
+  - [x] SubTask 3.1: 编写 `kernel/shared_mem.h/.c`：冻结结构体（NVSH 魔数/版本/自检状态/CPU/内存/AP 计数/A核开关/AP 命令/日志缓冲）、固定物理地址 0x7E000 共 2 页、带自旋上限的锁（上限超时打印告警降级，不 panic）
+    - lock cmpxchgl + pause，上限 1<<20；_Static_assert 校验结构体 ≤ 8192
+- [x] Task 4: PMM（Rust 位图 + C 封装）
+  - [x] SubTask 4.1: 编写 `lib/novuslib-rs/`：Cargo.toml（no_std、staticlib、panic=abort、零依赖）+ src/lib.rs 位图原语（bitmap_set/clear/test/find_first_clear_run）+ panic handler（串口 FFI）+ FFI 头 `lib/novuslib_rs.h`
+  - [x] SubTask 4.2: 编写 `kernel/pmm.h/.c`：pmm_init 从 UEFI 内存图建位图（EfiConventionalMemory 可用；内核镜像/EfiLoader* 保留；显式排除 0x7E000-0x7FFFF 共享内存与 0x8000 trampoline 页）、pmm_alloc/pmm_free/free_count、初始化自检测试（分配-释放回归）与统计输出
+- [x] Task 5: 分页与内核堆
+  - [x] SubTask 5.1: 编写 `kernel/mm.h/.c`（页表构建：PML4 恒等映射低 4GiB + physmap 0xFFFF800000000000 覆盖全部 RAM，2MiB 大页）与 `kernel/vmm.h/.c`（vmm_alloc_page/vmm_free_page），CR3 切换与 physmap 读回自检
+    - 1 PML4 + 6 PDPT + N PD，PDE Present|Write|PS；CR3 写入显式清 PCD/PWT
+  - [x] SubTask 5.2: 编写 `kernel/heap.h/.c`：kmalloc/kfree（页粒度，PMM+physmap 背书），模式写入读回自检
+    - 记账方案：外部静态表 256 项 {ptr, pages}（页首放头部会被用户数据覆盖）
+- [x] Task 6: SMP 唤醒 B核
+  - [x] SubTask 6.1: 编写 `kernel/lapic.h/.c`：CPUID 检测 + MSR 0x1B 读取/使能 LAPIC
+    - QEMU 实测 0xFEE00000；另置 spurious 寄存器软件使能（ICR 写入前提）
+  - [x] SubTask 6.2: 编写 `arch/x86_64/kernel/ap_trampoline.S`：16位实模式 → PAE/长模式跳转（复用 BSP 页表 CR3）→ 调 `ap_main`；构建为裸二进制并在运行时复制到物理 0x8000（SIPI 向量 8）
+    - blob 192 字节零重定位（同节符号差 + TRAMP_BASE 汇编期常量）；槽位采用 blob 末尾 24 字节 + 链接期符号差（ap_trampoline_bin_end - 24），nm/objdump 自证偏移
+  - [x] SubTask 6.3: 编写 `kernel/smp.h/.c`：INIT→SIPI→SIPI 序列（10ms/200us 时序，端口 0x80 延时）、ap_main（独立 16KiB 栈自 PMM 分配、共享内存上线计数 +1、串口 "Novus AP (B核) online"、镜像共享内存信息输出）、BSP 有界等待与超时降级告警、A核休眠流程（"[SMP] A核 entering sleep"）
+    - 修复关键 bug：xAPIC 0x310 目标字段应在 bits[31:24]，初版写 1 导致 INIT 打到 BSP 自身引发 vCPU 反复复位（-d cpu_reset 定位）
+  - [x] SubTask 6.4: `kernel/kmain.c` 初始化序列接线：shared_mem → pmm → paging → heap → smp 唤醒 → A核休眠；A核开关标志读取（0=自检启用）传入 boot 阶段语义
+- [x] Task 7: 构建体系扩展
+  - [x] SubTask 7.1: Makefile：新增 entry.S/ap_trampoline.S（trampoline 经 objcopy -O binary 产出 build/ap_trampoline.bin 并 incbin 内嵌）、Rust crate cargo 构建（build/rust/ 产物静态库）并入 PE 链接、SRC 清单与 clean 更新
+    - 集成修复：RUST_LIB 实际产物名 novuslib_rs.lib（MSVC 命名约定）；CARGO 增加 ~/.cargo/bin 回退探测
+  - [x] SubTask 7.2: `configs/novus_defconfig` 增加 `CONFIG_NOVUS_A_CORE_DISABLE=n`、`CONFIG_NOVUS_SMP=y`；Kconfig 同步声明
+- [x] Task 8: 端到端验证
+  - [x] SubTask 8.1: `make` 全量构建 0 error 0 warning；cargo 构建零外部依赖通过
+    - make clean 后全量重建 0 警告（C 13 个翻译单元 + entry.S + trampoline + Rust）
+  - [x] SubTask 8.2: `make run MEM=4G`：串口断言 PMM 统计行、paging CR3 行、heap 自检通过、AP online、AP 计数=2、A核 sleep、[HALT]，QEMU 稳定无重启
+  - [x] SubTask 8.3: `CONFIG_NOVUS_A_CORE_DISABLE=y` 变体：自检跳过、B核仍上线（回归）
+  - [x] SubTask 8.4: `make run MEM=1G`：M0 拒绝启动路径回归通过
+    - 附带清理：kputs_hex 调用点的 "0x" 双前缀（mm.c/lapic.c 格式串），重建后输出 CR3=0x0000000000001000、LAPIC at 0x00000000FEE00000
+
+# Task Dependencies
+- Task 1 前置（Rust 工具链决定 Task 4.1 路径；-smp 2 是 Task 8 前提）
+- Task 2/3 可并行（接口签名固定：kernel_entry(u64,u64,u64)）
+- Task 4 依赖 Task 3（预留区清单）与 Task 1（Rust 工具链）；Task 5 依赖 Task 4；Task 6 依赖 Task 5（CR3/栈分配）
+- Task 7 依赖 Task 2/4/6 的文件清单确定，可与其余并行推进
+- Task 8 依赖全部完成

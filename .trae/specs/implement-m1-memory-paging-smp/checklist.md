@@ -1,0 +1,32 @@
+# Checklist
+
+- [x] 汇编主入口生效：EBS 后首条内核指令为 entry.S 的 kernel_entry（bss 清零、栈建立），kmain 经汇编进入
+  - 证据：main.c EBS 后调 kernel_entry(mmap,size,desc)；entry.S 建 64KiB 栈 + __bss_start__/__bss_end__ rep stosb 清零（nm 实测符号存在）后 call kmain
+- [x] AP trampoline 汇编实现 16位→64位长模式切换，构建为裸二进制并复制到物理 0x8000
+  - 证据：blob 192 字节（gcc -m16 → objcopy -O binary → incbin 内嵌）；objdump -b binary 反汇编核对 lgdt/ljmp/EFER.LME/槽位；运行时 memcpy 至 0x8000 并回填 CR3/栈/ap_main
+- [x] PMM 位图初始化：总页/可用页/保留页统计经串口输出；分配-释放 N 页后 free_count 回归原值
+  - 证据：4G 运行 "[PMM] bitmap 256KiB, pages: total/reserved/free = 0x10000000/0xFF030BE/0xFCF42" + "selftest PASS (alloc/free regression)"
+- [x] 共享内存页（0x7E000-0x7FFFF）与 trampoline 页（0x8000）在 PMM 位图中标记为已用
+  - 证据：pmm_init 显式保留清单（含 0x0 页兜底），代码与 reserved 统计一致
+- [x] Rust crate lib/novuslib-rs 构建（no_std/staticlib/零外部依赖/panic=abort），静态库并入 PE 链接无重复符号
+  - 证据：Cargo.toml [dependencies] 为空；novuslib_rs.lib（COFF）并入链接；全量构建 0 error 0 warning
+- [x] PMM 自检路径实际调用 Rust 位图 FFI 函数（串口有 Rust 模块版本输出行）
+  - 证据："[PMM] novuslib-rs v0.1 FFI active"（novus_rs_version() 返回值驱动）；nm 确认 pmm.o 的 U novus_rs_* 与 .lib 的 T 一一对应
+- [x] 自研页表切换 CR3 成功（串口输出 CR3 值），physmap 读回校验通过，系统继续运行
+  - 证据："[MM] paging enabled, CR3=0x0000000000001000" + "[MM] physmap readback PASS"，切换后 SMP/堆流程正常运行
+- [x] kmalloc/kfree 模式写入读回自检通过，释放后 PMM free_count 恢复
+  - 证据："[HEAP] page-granular heap ready" + "[HEAP] selftest PASS"
+- [x] 共享内存结构冻结布局实现（NVSH 魔数），双核读取的 CPU/内存信息一致（串口比对）
+  - 证据："[SHM] shared memory verified (NVSH v1.1)"；A核 [CHECK] AuthenticAMD/4047 MiB 与 AP 侧 "[AP] CPU: AuthenticAMD / usable mem 4047 MiB" 一致
+- [x] `make run MEM=4G`（-smp 2）串口完整序列：Waking AP → "Novus AP (B核) online" → AP 计数=2 → "A核 entering sleep" → [HALT]，QEMU 无重启/三重故障
+  - 证据（串口原文，exit=124 为 timeout 正常终止）：Waking AP (B-core) → Novus AP (B-core) online → [SMP] AP online, cpu_count=2 → A-core entering sleep (B-core in charge) → [HALT]
+- [x] A核开关关闭变体（CONFIG_NOVUS_A_CORE_DISABLE=y）：自检行跳过且 B核仍上线
+  - 证据：变体构建后串口横幅直接接内核阶段（无 [CHECK] 行），AP 照常上线 cpu_count=2
+- [x] `make run MEM=1G` 回归：低于 2GiB 拒绝启动路径仍生效
+  - 证据：975 MiB → "[FATAL] Usable memory below 2GiB minimum (Novus OS spec 1.2). Boot refused."，M1 内核阶段未进入
+- [x] make clean 全量重建 0 error 0 warning（C 与 Rust）
+  - 证据：make clean && make 输出 grep 警告/错误计数 = 0
+- [x] README.md 与 LICENSE 未修改
+  - 证据：git status 修改列表仅 .gitignore（构建体系授权范围），README.md/LICENSE 无改动
+- [x] 构建产物不入库（.gitignore 覆盖 build/ out/ esp/ target/ 产物）
+  - 证据：.gitignore 含 build/ out/ esp/ *.o *.efi OVMF_VARS*.fd lib/novuslib-rs/target/

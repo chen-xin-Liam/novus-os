@@ -1,0 +1,57 @@
+# Novus OS - top-level Kconfig
+#
+# NOTE (M0): this file is a declaration-only placeholder. The M0 build
+# system reads configs/novus_defconfig directly (plain shell-style
+# variables); a Kconfig parser and menuconfig front-end will be added in
+# a later milestone. Keep the entries below in sync with the defconfig.
+
+config NOVUS_ARCH
+	string
+	default "x86_64"
+	help
+	  Target architecture Novus OS is built for.
+	  M0 supports x86_64 only.
+
+config NOVUS_MIN_MEMORY_MB
+	int
+	default 2048
+	help
+	  Minimum amount of guest/host memory (in MB) the kernel expects
+	  to find at boot. Boot fails below this floor.
+
+config NOVUS_BOOT_VGA
+	bool
+	default y
+	help
+	  Enable VGA text-mode output during early boot.
+
+config NOVUS_DEBUG_SERIAL
+	bool
+	default y
+	help
+	  Enable serial (COM1) debug output. Useful when running under
+	  QEMU with -serial stdio.
+
+config NOVUS_BUILD_M0
+	bool
+	default y
+	help
+	  Selected when building the M0 milestone deliverables.
+
+config NOVUS_A_CORE_DISABLE
+	bool
+	default n
+	help
+	  Disable the A core (BSP): it skips the early self-check and sleeps
+	  right after firmware handoff, so the B core (AP) loads and runs
+	  the main kernel. See README section 2.2 step 7; the matching
+	  shared-memory flag can still be flipped at runtime by the M8
+	  settings UI.
+
+config NOVUS_SMP
+	bool
+	default y
+	help
+	  Enable SMP: assemble the 16-bit AP trampoline and wake the B core
+	  during boot. 'make run' boots QEMU with -smp 2 (AB dual-core,
+	  README part 2).
