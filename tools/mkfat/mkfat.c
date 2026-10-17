@@ -485,6 +485,13 @@ int main(int argc, char **argv) {
   solve_geometry();
   write_bpb();
 
+  /* The first two FAT entries are not clusters: entry 0 carries the
+   * media descriptor in its low byte and entry 1 is the end-of-chain
+   * marker. Some firmware FAT drivers validate them before touching the
+   * volume, and an image with zeroes there is rejected outright. */
+  fat_set(0, 0x0ffffff8u); /* media byte 0xf8 in the low 8 bits */
+  fat_set(1, 0x0fffffffu);
+
   /* Cluster 2 is the root directory and must start zeroed. */
   (void)cluster_alloc();
   memset(cluster_ptr(ROOT_CLUSTER), 0, CLUSTER_SIZE);

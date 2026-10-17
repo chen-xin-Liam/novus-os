@@ -245,6 +245,24 @@ int main(int argc, char **argv) {
     return 1;
   }
 
+  /* Verify what was just built. A formatter that produces an image the
+   * kernel then reports as corrupt is worse than no formatter, so this
+   * is checked here rather than discovered on first boot. */
+  {
+    UINT8 again[NOVUSFS_MERKLE_ROOT_LEN];
+    UINT32 st = novusfs_merkle_verify(&fs, again);
+
+    printf("mkfsnovus: verify after build: %s\n",
+           st == NOVUSFS_MERKLE_OK          ? "OK"
+           : st == NOVUSFS_MERKLE_MISMATCH  ? "MISMATCH"
+           : st == NOVUSFS_MERKLE_NOT_BUILT ? "NOT BUILT"
+                                            : "UNREADABLE");
+    if (st != NOVUSFS_MERKLE_OK) {
+      print_root(again);
+      printf(" <- recomputed\n");
+    }
+  }
+
   fputs("mkfsnovus: ", stdout);
   print_root(root);
   printf("\nmkfsnovus: %s  %llu MiB, merkle root written, merkle_valid=%u\n",

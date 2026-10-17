@@ -182,8 +182,17 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
   UINT32 levels;
   UINT32 lvl;
   UINT64 i;
-  merkle_cache_t src;
-  merkle_cache_t dst;
+  /* One cache for both reading and writing, deliberately.
+   *
+   * Two caches would look tidier and would be wrong: the levels are laid
+   * out consecutively, so the block a level writes into is often the
+   * same block the next level reads from. A separate read cache would
+   * then hold a copy from before the write - or, worse, read a block
+   * from the device while the matching write is still sitting unflushed
+   * in the write cache - and the root would come out different on every
+   * rebuild. One cache makes the write visible to the read by
+   * construction. */
+  merkle_cache_t cache;
   UINT8 *databuf = NULL;
   UINT8  pair[2u * MERKLE_NODE_SIZE];
   UINT8  node[MERKLE_NODE_SIZE];
@@ -218,14 +227,12 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
   }
 
   databuf = (UINT8 *)novusfs_alloc(NOVUSFS_BLOCK_SIZE);
-  src.buf = (UINT8 *)novusfs_alloc(NOVUSFS_BLOCK_SIZE);
-  dst.buf = (UINT8 *)novusfs_alloc(NOVUSFS_BLOCK_SIZE);
-  if (databuf == NULL || src.buf == NULL || dst.buf == NULL) {
+  cache.buf = (UINT8 *)novusfs_alloc(NOVUSFS_BLOCK_SIZE);
+  if (databuf == NULL || cache.buf == NULL) {
     kputs("[MRKL] WARN out of memory for tree buffers\n");
     goto done;
   }
-  src.fs = fs; src.block = 0; src.valid = 0; src.dirty = 0;
-  dst.fs = fs; dst.block = 0; dst.valid = 0; dst.dirty = 0;
+  cache.fs = fs; cache.block = 0; cache.valid = 0; cache.dirty = 0;
 
   /* Level 0: one hash per protected block. */
   for (i = 0; i < leaf_count; i++) {
@@ -235,17 +242,23 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
       kputs("\n");
       goto done;
     }
+    /* A node slot is 64 bytes and holds a 32-byte digest, so the tail
+     * has to be zeroed explicitly: sha256 fills only the first 32 bytes,
+     * and leaving the rest to whatever the buffer last held would make
+     * the root depend on stack contents instead of on the image - the
+     * same build twice would produce two different roots. */
+    memset(node, 0, MERKLE_NODE_SIZE);
     novus_rs_sha256(databuf, NOVUSFS_BLOCK_SIZE, node);
-    if (node_write(&dst, base[0] + i, node) != 0) {
+    if (node_write(&cache, base[0] + i, node) != 0) {
       goto done;
     }
   }
   /* Store the padding duplicate, if the leaf level was odd. */
   if (counts[0] > leaf_count) {
-    if (node_read(&dst, base[0] + leaf_count - 1u, node) != 0) {
+    if (node_read(&cache, base[0] + leaf_count - 1u, node) != 0) {
       goto done;
     }
-    if (node_write(&dst, base[0] + leaf_count, node) != 0) {
+    if (node_write(&cache, base[0] + leaf_count, node) != 0) {
       goto done;
     }
   }
@@ -258,20 +271,23 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
     for (j = 0; j < n; j++) {
       UINT64 left = base[lvl - 1u] + 2u * j;
 
-      if (node_read(&src, left, pair) != 0) {
+      if (node_read(&cache, left, pair) != 0) {
         goto done;
       }
-      if (node_read(&src, left + 1u, pair + MERKLE_NODE_SIZE) != 0) {
+      if (node_read(&cache, left + 1u, pair + MERKLE_NODE_SIZE) != 0) {
         goto done;
       }
+      memset(node, 0, MERKLE_NODE_SIZE);
       novus_rs_sha256(pair, 2u * MERKLE_NODE_SIZE, node);
-      if (node_write(&dst, base[lvl] + j, node) != 0) {
+      if (node_write(&cache, base[lvl] + j, node) != 0) {
         goto done;
       }
     }
   }
 
-  if (cache_sync(&dst) != 0) {
+  /* Flush before the root is read back: the root node is a normal node
+   * and may still be sitting in the cache. */
+  if (cache_sync(&cache) != 0) {
     goto done;
   }
   /* The last level holds exactly one node: the root.
@@ -280,7 +296,7 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
    * 32-byte digest, so the root is read into a node-sized buffer and
    * then narrowed. Reading straight into the caller's 32-byte array
    * would write past its end by 32 bytes. */
-  if (node_read(&dst, base[levels - 1u], node) != 0) {
+  if (node_read(&cache, base[levels - 1u], node) != 0) {
     goto done;
   }
   memcpy(root, node, NOVUSFS_MERKLE_ROOT_LEN);
@@ -299,8 +315,7 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
 
 done:
   if (databuf != NULL) { novusfs_free(databuf); }
-  if (src.buf != NULL) { novusfs_free(src.buf); }
-  if (dst.buf != NULL) { novusfs_free(dst.buf); }
+  if (cache.buf != NULL) { novusfs_free(cache.buf); }
   return rc;
 }
 

@@ -53,9 +53,13 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # Sizes in MiB. The live ESP carries, on top of the boot files, a copy of
 # itself (NOVUS/ESP.IMG) that the installer writes to a target disk, so
 # it is necessarily the largest of the three images.
+# FAT32 only exists above 65525 clusters, which at 512 bytes a cluster
+# puts the floor for an ESP at roughly 34 MiB no matter how little it
+# holds. The template therefore sits just above that floor rather than
+# being sized to its contents.
 SYS_SIZE_MB     ?= 8
-ESP_TPL_SIZE_MB ?= 12
-ESP_SIZE_MB     ?= 28
+ESP_TPL_SIZE_MB ?= 36
+ESP_SIZE_MB     ?= 80
 
 ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
