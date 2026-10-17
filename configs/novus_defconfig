@@ -30,3 +30,20 @@ CONFIG_NOVUS_A_CORE_DISABLE=n
 # SMP: assemble the AP trampoline and wake the B core during boot.
 # 'make run' boots QEMU with -smp 2 (AB dual-core, README part 2).
 CONFIG_NOVUS_SMP=y
+
+# NovusFS filesystem core (M2, README part 4).
+CONFIG_NOVUS_NOVUSFS=y
+
+# NovusFS write-ahead log (M2, README 4.2.1). Requires CONFIG_NOVUS_NOVUSFS.
+CONFIG_NOVUS_WAL=y
+
+# NovusFS integrity tree (M3, README 4.2.2): Merkle root in both
+# superblock copies, verified by the A core in the boot stage.
+CONFIG_NOVUS_MERKLE=y
+
+# Novus kernel module loader (M3, README part 5): SHA-256 digest plus
+# Ed25519 verification against the built-in root keys.
+CONFIG_NOVUS_NKM=y
+
+# Boot-stage installer (M3): GPT + ESP + NovusFS onto a target disk.
+CONFIG_NOVUS_INSTALLER=y

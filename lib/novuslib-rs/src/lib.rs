@@ -15,6 +15,16 @@
 
 #![no_std]
 
+// M3: the crypto primitives needed by the Merkle tree (SHA-256) and by
+// the NKM signature check (SHA-256 + Ed25519, which internally needs
+// SHA-512). crypto/ holds the algorithms, ffi_crypto/ the #[no_mangle]
+// C-ABI wrappers; the host build tools under tools/ include the crypto/
+// sources directly so kernel and host cannot drift apart.
+mod crypto;
+mod ffi_crypto;
+// Compiler-intrinsic support the PE link needs; see the module header.
+mod rt;
+
 extern "C" {
     /// Provided by the C side (kernel/pmm.c): prints "RUST PANIC" plus
     /// the message bytes, then cli/hlt in a loop. Must never return, so
@@ -107,4 +117,60 @@ pub extern "C" fn novus_rs_bitmap_find_first_clear_run(
         }
     }
     -1
+}
+
+// ----------------------------------------------------------------------
+// CRC-32 checksum for block-layer integrity (M2 Task 2).
+// ----------------------------------------------------------------------
+
+/// Reflected CRC-32 lookup table (polynomial 0xEDB88320, i.e. CRC-32/
+/// ISO-HDLC as used by zlib, PNG, gzip and UEFI), built entirely in
+/// const context. Building it at compile time avoids both runtime init
+/// and any `static mut` table.
+const CRC32_TABLE: [u32; 256] = {
+    let mut table = [0u32; 256];
+    let mut i = 0usize;
+    while i < 256 {
+        let mut c = i as u32;
+        let mut j = 0usize;
+        while j < 8 {
+            if c & 1 != 0 {
+                c = 0xEDB8_8320 ^ (c >> 1);
+            } else {
+                c >>= 1;
+            }
+            j += 1;
+        }
+        table[i] = c;
+        i += 1;
+    }
+    table
+};
+
+/// Standard CRC-32/IEEE over `len` bytes starting at `data`.
+///
+/// Frozen M2 semantics (there is NO streaming/chaining contract):
+/// every call is a fully wrapped, self-contained CRC. The register
+/// starts at `seed ^ 0xFFFFFFFF`, runs the usual reflected table
+/// iteration over every byte (`table[(crc ^ byte) & 0xFF] ^ crc >> 8`),
+/// and the returned value is `crc ^ 0xFFFFFFFF`. Continuation across
+/// multiple buffers is deliberately not supported in M2; to obtain the
+/// canonical zlib/PNG checksum of a buffer simply call with
+/// `seed == 0`. The `seed` argument only keeps the FFI shape stable for
+/// a possible future streaming variant. The caller guarantees `data`
+/// points at `len` readable bytes.
+#[no_mangle]
+pub extern "C" fn novus_rs_crc32(seed: u32, data: *const u8, len: usize) -> u32 {
+    let mut crc = seed ^ 0xFFFF_FFFF;
+    unsafe {
+        let mut p = data;
+        let mut remaining = len;
+        while remaining > 0 {
+            let index = ((crc ^ (*p as u32)) & 0xFF) as usize;
+            crc = CRC32_TABLE[index] ^ (crc >> 8);
+            p = p.add(1);
+            remaining -= 1;
+        }
+    }
+    crc ^ 0xFFFF_FFFF
 }

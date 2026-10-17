@@ -280,6 +280,16 @@ typedef EFI_STATUS (EFIAPI *EFI_CONNECT_CONTROLLER)(
 typedef EFI_STATUS (EFIAPI *EFI_DISCONNECT_CONTROLLER)(
     EFI_HANDLE ControllerHandle, EFI_HANDLE DriverImageHandle,
     EFI_HANDLE ChildHandle);
+/* Attributes for BootServices.OpenProtocol. Novus uses GET_PROTOCOL for
+ * the firmware's FAT driver: it only reads files from it and does not
+ * want to hold the handle open. */
+#define EFI_OPEN_PROTOCOL_BY_HANDLE_PROTOCOL   0x00000001u
+#define EFI_OPEN_PROTOCOL_GET_PROTOCOL         0x00000002u
+#define EFI_OPEN_PROTOCOL_TEST_PROTOCOL        0x00000004u
+#define EFI_OPEN_PROTOCOL_BY_CHILD_CONTROLLER  0x00000008u
+#define EFI_OPEN_PROTOCOL_BY_DRIVER            0x00000010u
+#define EFI_OPEN_PROTOCOL_EXCLUSIVE            0x00000020u
+
 typedef EFI_STATUS (EFIAPI *EFI_OPEN_PROTOCOL)(
     EFI_HANDLE Handle, EFI_GUID *Protocol, VOID **Interface,
     EFI_HANDLE AgentHandle, EFI_HANDLE ControllerHandle, UINT32 Attributes);
@@ -374,12 +384,267 @@ typedef struct {
 } EFI_BOOT_SERVICES;
 
 /* ------------------------------------------------------------------ */
+/* Protocol GUIDs (M3: block I/O and the firmware FAT driver)          */
+/* ------------------------------------------------------------------ */
+
+/* GUID constants are compile-time initialisers, so each is a static
+ * const object rather than a macro. All of them follow the UEFI-specified
+ * {Data1, Data2, Data3, Data4[8]} byte order. */
+#define NOVUS_EFI_GUID(a, b, c, d0, d1, d2, d3, d4, d5, d6, d7) \
+  { (a), (b), (c), { (d0), (d1), (d2), (d3), (d4), (d5), (d6), (d7) } }
+
+#define EFI_BLOCK_IO_PROTOCOL_GUID                                        \
+  NOVUS_EFI_GUID(0x964E5B21, 0x6459, 0x11D2, 0x8E, 0x39, 0x00, 0xA0, 0xC9, \
+                 0x69, 0x72, 0x3B)
+#define EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID                              \
+  NOVUS_EFI_GUID(0x0964E5B2, 0x6459, 0x11D2, 0x8E, 0x39, 0x00, 0xA0, 0xC9, \
+                 0x69, 0x72, 0x3B)
+#define EFI_FILE_INFO_ID                                                  \
+  NOVUS_EFI_GUID(0x09576E92, 0x6D3F, 0x11D2, 0x8E, 0x39, 0x00, 0xA0, 0xC9, \
+                 0x69, 0x72, 0x3B)
+#define EFI_LOADED_IMAGE_PROTOCOL_GUID                                    \
+  NOVUS_EFI_GUID(0x5B1B31A1, 0x9562, 0x11D2, 0x8E, 0x3F, 0x00, 0xA0, 0xC9, \
+                 0x69, 0x72, 0x3B)
+#define EFI_DEVICE_PATH_PROTOCOL_GUID                                     \
+  NOVUS_EFI_GUID(0x09576E91, 0x6D3F, 0x11D2, 0x8E, 0x39, 0x00, 0xA0, 0xC9, \
+                 0x69, 0x72, 0x3B)
+
+/* ------------------------------------------------------------------ */
+/* Block I/O protocol                                                  */
+/* ------------------------------------------------------------------ */
+
+typedef UINT64 EFI_LBA; /* logical block address, always 64-bit */
+
+/* Media descriptor. Later revisions append LowestAlignedLba,
+ * LogicalBlocksPerPhysicalBlock and OptimalTransferLengthGranularity
+ * after LastBlock; Novus only reads up to LastBlock, whose offset is
+ * unaffected, so the extra members are declared for completeness. */
+typedef struct {
+  UINT32  MediaId;
+  BOOLEAN RemovableMedia;
+  BOOLEAN MediaPresent;
+  BOOLEAN LogicalPartition;
+  BOOLEAN ReadOnly;
+  BOOLEAN WriteCaching;
+  UINT32  BlockSize;
+  UINT32  IoAlign;
+  EFI_LBA LastBlock;
+  /* EFI_BLOCK_IO_PROTOCOL revision 0x00020001 and later: */
+  EFI_LBA LowestAlignedLba;
+  UINT32  LogicalBlocksPerPhysicalBlock;
+  UINT32  OptimalTransferLengthGranularity; /* revision 0x0002001F+ */
+} EFI_BLOCK_IO_MEDIA;
+
+typedef struct _EFI_BLOCK_IO_PROTOCOL EFI_BLOCK_IO_PROTOCOL;
+
+typedef EFI_STATUS(EFIAPI *EFI_BLOCK_RESET)(EFI_BLOCK_IO_PROTOCOL *This,
+                                            BOOLEAN ExtendedVerification);
+typedef EFI_STATUS(EFIAPI *EFI_BLOCK_READ)(EFI_BLOCK_IO_PROTOCOL *This,
+                                           UINT32 MediaId, EFI_LBA Lba,
+                                           UINTN BufferSize, VOID *Buffer);
+typedef EFI_STATUS(EFIAPI *EFI_BLOCK_WRITE)(EFI_BLOCK_IO_PROTOCOL *This,
+                                            UINT32 MediaId, EFI_LBA Lba,
+                                            UINTN BufferSize, VOID *Buffer);
+typedef EFI_STATUS(EFIAPI *EFI_BLOCK_FLUSH)(EFI_BLOCK_IO_PROTOCOL *This);
+
+/* Member order follows the UEFI spec: Revision, Media, Reset,
+ * ReadBlocks, WriteBlocks, FlushBlocks. */
+struct _EFI_BLOCK_IO_PROTOCOL {
+  UINT64             Revision;
+  EFI_BLOCK_IO_MEDIA *Media;
+  EFI_BLOCK_RESET    Reset;
+  EFI_BLOCK_READ     ReadBlocks;
+  EFI_BLOCK_WRITE    WriteBlocks;
+  EFI_BLOCK_FLUSH    FlushBlocks;
+};
+
+/* ------------------------------------------------------------------ */
+/* Simple File System / File protocols                                 */
+/* ------------------------------------------------------------------ */
+/* Novus never parses FAT itself: the firmware ships a FAT driver and
+ * exposes it through these two protocols, which is how the boot stage
+ * reads system files and signed kernel modules off the EFI system
+ * partition. Both are boot-services protocols and stop working once
+ * ExitBootServices has been called. */
+
+typedef struct _EFI_FILE_PROTOCOL EFI_FILE_PROTOCOL;
+
+typedef EFI_STATUS(EFIAPI *EFI_FILE_OPEN)(EFI_FILE_PROTOCOL *This,
+                                          EFI_FILE_PROTOCOL **NewHandle,
+                                          CHAR16 *FileName, UINT64 OpenMode,
+                                          UINT64 Attributes);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_CLOSE)(EFI_FILE_PROTOCOL *This);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_DELETE)(EFI_FILE_PROTOCOL *This);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_READ)(EFI_FILE_PROTOCOL *This,
+                                          UINTN *BufferSize, VOID *Buffer);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_WRITE)(EFI_FILE_PROTOCOL *This,
+                                           UINTN *BufferSize, VOID *Buffer);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_GET_POSITION)(EFI_FILE_PROTOCOL *This,
+                                                  UINT64 *Position);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_SET_POSITION)(EFI_FILE_PROTOCOL *This,
+                                                  UINT64 Position);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_GET_INFO)(EFI_FILE_PROTOCOL *This,
+                                              EFI_GUID *InformationType,
+                                              UINTN *BufferSize,
+                                              VOID *Buffer);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_SET_INFO)(EFI_FILE_PROTOCOL *This,
+                                              EFI_GUID *InformationType,
+                                              UINTN BufferSize, VOID *Buffer);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_FLUSH)(EFI_FILE_PROTOCOL *This);
+/* Revision 2 additions; unused by Novus, declared only to keep the
+ * struct layout complete. */
+typedef EFI_STATUS(EFIAPI *EFI_FILE_OPEN_EX)(EFI_FILE_PROTOCOL *This,
+                                             EFI_FILE_PROTOCOL **NewHandle,
+                                             CHAR16 *FileName,
+                                             UINT64 OpenMode,
+                                             UINT64 Attributes,
+                                             VOID *Token);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_READ_EX)(EFI_FILE_PROTOCOL *This,
+                                             VOID *Token);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_WRITE_EX)(EFI_FILE_PROTOCOL *This,
+                                              VOID *Token);
+typedef EFI_STATUS(EFIAPI *EFI_FILE_FLUSH_EX)(EFI_FILE_PROTOCOL *This,
+                                              VOID *Token);
+
+struct _EFI_FILE_PROTOCOL {
+  UINT64                Revision;
+  EFI_FILE_OPEN         Open;
+  EFI_FILE_CLOSE        Close;
+  EFI_FILE_DELETE       Delete;
+  EFI_FILE_READ         Read;
+  EFI_FILE_WRITE        Write;
+  EFI_FILE_GET_POSITION GetPosition;
+  EFI_FILE_SET_POSITION SetPosition;
+  EFI_FILE_GET_INFO     GetInfo;
+  EFI_FILE_SET_INFO     SetInfo;
+  EFI_FILE_FLUSH        Flush;
+  EFI_FILE_OPEN_EX      OpenEx;
+  EFI_FILE_READ_EX      ReadEx;
+  EFI_FILE_WRITE_EX     WriteEx;
+  EFI_FILE_FLUSH_EX     FlushEx;
+};
+
+/* Open modes (EFI_FILE_MODE_*). */
+#define EFI_FILE_MODE_READ   0x0000000000000001ULL
+#define EFI_FILE_MODE_WRITE  0x0000000000000002ULL
+#define EFI_FILE_MODE_CREATE 0x8000000000000000ULL
+
+/* Read() reports end of file by returning EFI_SUCCESS with *BufferSize
+ * set to 0; GetInfo() reports EFI_BUFFER_TOO_SMALL when the supplied
+ * buffer cannot hold the EFI_FILE_INFO plus its file name. */
+
+typedef struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL;
+
+typedef EFI_STATUS(EFIAPI *EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_OPEN_VOLUME)(
+    EFI_SIMPLE_FILE_SYSTEM_PROTOCOL *This, EFI_FILE_PROTOCOL **Root);
+
+struct _EFI_SIMPLE_FILE_SYSTEM_PROTOCOL {
+  UINT64                                     Revision;
+  EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_OPEN_VOLUME OpenVolume;
+};
+
+/* ------------------------------------------------------------------ */
+/* File info / time (EFI_FILE_INFO_ID)                                 */
+/* ------------------------------------------------------------------ */
+
+typedef struct {
+  UINT16 Year;
+  UINT8  Month;
+  UINT8  Day;
+  UINT8  Hour;
+  UINT8  Minute;
+  UINT8  Second;
+  UINT8  Pad1;
+  UINT32 Nanosecond;
+  INT16  TimeZone;
+  UINT8  Daylight;
+  UINT8  Pad2;
+} EFI_TIME; /* 16 bytes */
+
+/* The three EFI_TIME members plus the four UINT64s put FileName at
+ * offset 80. The array is declared with one element because the real
+ * name is variable length; callers index past it using that offset. */
+typedef struct {
+  UINT64   Size;
+  UINT64   FileSize;
+  UINT64   PhysicalSize;
+  EFI_TIME CreateTime;
+  EFI_TIME LastAccessTime;
+  EFI_TIME ModificationTime;
+  UINT64   Attribute;
+  CHAR16   FileName[1];
+} EFI_FILE_INFO;
+
+#define EFI_FILE_INFO_NAME_OFFSET 80u
+
+/* ------------------------------------------------------------------ */
+/* Console input                                                       */
+/* ------------------------------------------------------------------ */
+/* The live menu reads keys from ConIn. The system table declares ConIn
+ * as a plain VOID*, so callers cast it to this type.
+ *
+ * ReadKeyStroke returns EFI_NOT_READY when no key is queued; a caller
+ * that wants to block must poll (or wait on WaitForKey with
+ * BootServices.WaitForEvent), which is what the menu does. */
+
+typedef struct {
+  UINT16 ScanCode;
+  CHAR16 UnicodeChar;
+} EFI_INPUT_KEY;
+
+typedef struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL;
+
+typedef EFI_STATUS(EFIAPI *EFI_INPUT_RESET)(
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, BOOLEAN ExtendedVerification);
+typedef EFI_STATUS(EFIAPI *EFI_INPUT_READ_KEY)(
+    EFI_SIMPLE_TEXT_INPUT_PROTOCOL *This, EFI_INPUT_KEY *Key);
+
+struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
+  EFI_INPUT_RESET    Reset;
+  EFI_INPUT_READ_KEY ReadKeyStroke;
+  VOID              *WaitForKey;
+};
+
+/* ------------------------------------------------------------------ */
+/* Loaded Image protocol                                               */
+/* ------------------------------------------------------------------ */
+/* Used to find DeviceHandle, the handle of the device this image was
+ * loaded from, so the boot stage can open the right FAT volume instead
+ * of guessing which SimpleFileSystem instance is the ESP. */
+
+typedef struct _EFI_LOADED_IMAGE_PROTOCOL EFI_LOADED_IMAGE_PROTOCOL;
+
+/* The loaded-image struct points at the system table, which is defined
+ * at the bottom of this header; the tag is declared here so the member
+ * can be typed without moving either definition. */
+struct EFI_SYSTEM_TABLE_;
+
+struct _EFI_LOADED_IMAGE_PROTOCOL {
+  UINT32                   Revision;
+  EFI_HANDLE               ParentHandle;
+  struct EFI_SYSTEM_TABLE_ *SystemTable;
+  EFI_HANDLE               DeviceHandle;
+  EFI_DEVICE_PATH_PROTOCOL *FilePath;
+  VOID                    *Reserved;
+  UINT32                   LoadOptionsSize;
+  VOID                    *LoadOptions;
+  VOID                    *ImageBase;
+  UINT64                   ImageSize;
+  EFI_MEMORY_TYPE          ImageCodeType;
+  EFI_MEMORY_TYPE          ImageDataType;
+  EFI_IMAGE_UNLOAD         Unload;
+};
+
+/* ------------------------------------------------------------------ */
 /* System table                                                        */
 /* ------------------------------------------------------------------ */
 
 /* FirmwareRevision (UINT32) is followed by 8-byte-aligned pointers; the
  * implicit 4-byte tail padding matches the UEFI-specified x86_64 layout. */
-typedef struct {
+/* Tagged so the loaded-image protocol above can forward-reference it. */
+typedef struct EFI_SYSTEM_TABLE_ {
   EFI_TABLE_HEADER Hdr;
   CHAR16          *FirmwareVendor;
   UINT32           FirmwareRevision;

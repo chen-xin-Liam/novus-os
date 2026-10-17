@@ -1,8 +1,10 @@
-# Novus OS - top-level Makefile (Milestone M1)
+# Novus OS - top-level Makefile (Milestone M2)
 #
 # Builds a freestanding UEFI PE32+ application (out/NOVUS.EFI) from the
-# M1 source set, using the x86_64-w64-mingw32-gcc cross compiler with
-# the MS ABI. On top of the M0 flow the image additionally links:
+# M2 source set, using the x86_64-w64-mingw32-gcc cross compiler with
+# the MS ABI. fs/novusfs/ is on the include path (-Ifs/novusfs) so the
+# kernel stage can pull in the filesystem header directly. On top of the
+# M0 flow the image additionally links:
 #   - the 16-bit AP trampoline (arch/x86_64/kernel/ap_trampoline.S):
 #     assembled with -m16 into build/ap_trampoline.o, stripped to the
 #     flat binary build/ap_trampoline.bin via objcopy, and embedded into
@@ -46,7 +48,7 @@ MEM ?= 4G
 # ---------------------------------------------------------------------------
 # Sources and flags
 # ---------------------------------------------------------------------------
-# Source list is pinned for M1; extend it in later milestones.
+# Source list is pinned for M2; extend it in later milestones.
 SRC := arch/x86_64/boot/main.c \
        kernel/kmain.c \
        kernel/vga.c \
@@ -58,13 +60,23 @@ SRC := arch/x86_64/boot/main.c \
        kernel/vmm.c \
        kernel/heap.c \
        kernel/lapic.c \
-       kernel/smp.c
+       kernel/smp.c \
+       kernel/blkdev.c \
+       kernel/gpt.c \
+       fs/novusfs/super.c \
+       fs/novusfs/balloc.c \
+       fs/novusfs/inode.c \
+       fs/novusfs/dir.c \
+       fs/novusfs/wal.c \
+       fs/novusfs/merkle.c \
+       fs/novusfs/novusfs.c \
+       security/nkm/nkm.c
 
 # Assembly sources. Uppercase .S (case-sensitive) makes gcc run the C
 # preprocessor over the file first; gcc invokes the assembler itself.
 ASM_SRC := arch/x86_64/kernel/entry.S
 
-INC := -Iarch/x86_64/include -Ikernel
+INC := -Iarch/x86_64/include -Ikernel -Ifs/novusfs -Isecurity/nkm
 
 # Freestanding UEFI environment: no libc, no host runtime, no stack
 # protector, no PIC, no Red Zone (interrupts may clobber it), small code
@@ -75,7 +87,12 @@ CFLAGS := $(INC) -ffreestanding -fno-builtin -fno-stack-protector -fno-pic \
 # Kconfig-derived preprocessor switches: config 'y' becomes 1, 'n'/unset
 # becomes 0, so sources can test them with #if CONFIG_NOVUS_XXX.
 CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DISABLE)),1,0) \
-          -DCONFIG_NOVUS_SMP=$(if $(filter y,$(CONFIG_NOVUS_SMP)),1,0)
+          -DCONFIG_NOVUS_SMP=$(if $(filter y,$(CONFIG_NOVUS_SMP)),1,0) \
+          -DCONFIG_NOVUS_NOVUSFS=$(if $(filter y,$(CONFIG_NOVUS_NOVUSFS)),1,0) \
+          -DCONFIG_NOVUS_WAL=$(if $(filter y,$(CONFIG_NOVUS_WAL)),1,0) \
+          -DCONFIG_NOVUS_MERKLE=$(if $(filter y,$(CONFIG_NOVUS_MERKLE)),1,0) \
+          -DCONFIG_NOVUS_NKM=$(if $(filter y,$(CONFIG_NOVUS_NKM)),1,0) \
+          -DCONFIG_NOVUS_INSTALLER=$(if $(filter y,$(CONFIG_NOVUS_INSTALLER)),1,0)
 
 # Link as a PE32+ EFI application: subsystem 10 = EFI application,
 # image entry point is efi_main.
@@ -145,7 +162,7 @@ all: banner out/NOVUS.EFI
 
 # Configuration summary printed before anything is built.
 banner:
-	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE)"
+	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL)"
 
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
@@ -207,3 +224,11 @@ run: all
 # Remove all build artifacts.
 clean:
 	rm -rf build out esp
+
+# ---------------------------------------------------------------------------
+# Host image toolchain (tools/, see tools/tools.mk)
+# ---------------------------------------------------------------------------
+# Included last, after every kernel rule: make takes the first target it
+# sees as the default, and 'all' must stay that target. The host rules
+# reuse CARGO, RUST_DIR and RUST_DEPS from the section above.
+include tools/tools.mk

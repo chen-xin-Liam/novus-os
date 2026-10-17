@@ -34,6 +34,27 @@
 #define SHM_STATUS_PASS 0
 #define SHM_STATUS_FAIL 1
 
+/* M3: integrity-tree outcome recorded by the boot stage. The boot stage
+ * is the only phase that can still read the real disk, so it is also
+ * the only phase that can produce this verdict. */
+#define SHM_MERKLE_UNKNOWN    0 /* no system partition was checked   */
+#define SHM_MERKLE_PASS       1 /* root hash matches the content     */
+#define SHM_MERKLE_MISMATCH   2 /* content does not match the root   */
+#define SHM_MERKLE_UNREADABLE 3 /* device or tree could not be read  */
+#define SHM_MERKLE_NOT_BUILT  4 /* no root hash stored yet           */
+
+/* M3: how this boot is meant to proceed. The live menu writes INSTALL
+ * when the operator (or the ESP marker file) asked for an install. */
+#define SHM_BOOT_MODE_LIVE    0
+#define SHM_BOOT_MODE_INSTALL 1
+
+/* M3: module-loading outcome. Modules are verified in the boot stage
+ * too, because they are read off the ESP with the firmware's FAT driver
+ * and that driver stops working at ExitBootServices. */
+#define SHM_NKM_UNKNOWN 0
+#define SHM_NKM_OK      1
+#define SHM_NKM_REFUSED 2
+
 typedef struct {
   UINT32 magic;                    /* 0x000: SHARED_MEM_MAGIC */
   UINT32 version;                  /* 0x004: SHARED_MEM_VERSION */
@@ -49,7 +70,21 @@ typedef struct {
   volatile UINT32 spinlock;        /* 0x07C: 0 = free, 1 = held */
   UINT8  log_buf[512];             /* 0x080: ring buffer, head = log_head */
   volatile UINT32 log_head;        /* 0x280: next write index into log_buf */
-  UINT8  reserved[7548];           /* 0x284: pad to exactly SHARED_MEM_SIZE */
+
+  /* ---- M3, carved out of the reserved tail (spec 2.3 permits this:
+   * repurpose reserved bytes, never move the fields above) ---- */
+  UINT32 merkle_status;            /* 0x284: SHM_MERKLE_* */
+  UINT8  merkle_root[32];          /* 0x288: root hash the A core saw   */
+  UINT32 merkle_height;            /* 0x2A8: tree levels                */
+  UINT32 merkle_leaf_count;        /* 0x2AC: protected blocks           */
+  UINT64 live_root_base;           /* 0x2B0: reserved pages holding the
+                                    *        live root image (phys)     */
+  UINT64 live_root_size;           /* 0x2B8: bytes                      */
+  UINT32 boot_mode;                /* 0x2C0: SHM_BOOT_MODE_*            */
+  UINT32 nkm_status;               /* 0x2C4: SHM_NKM_*                  */
+  UINT32 nkm_loaded;               /* 0x2C8: modules that passed        */
+
+  UINT8  reserved[7476];           /* 0x2CC: pad to exactly 8 KiB       */
 } shared_mem_t;
 
 /* Frozen-layout guarantees; a violation here is a spec 2.3 break. */
@@ -59,6 +94,13 @@ _Static_assert(__builtin_offsetof(shared_mem_t, spinlock) == 0x7C,
                "shared_mem frozen layout drift: spinlock");
 _Static_assert(__builtin_offsetof(shared_mem_t, log_head) == 0x280,
                "shared_mem frozen layout drift: log_head");
+/* The M3 carve-out must not disturb anything above it. */
+_Static_assert(__builtin_offsetof(shared_mem_t, merkle_status) == 0x284,
+               "shared_mem frozen layout drift: merkle_status");
+_Static_assert(__builtin_offsetof(shared_mem_t, boot_mode) == 0x2C0,
+               "shared_mem frozen layout drift: boot_mode");
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x2CC,
+               "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the block at SHARED_MEM_PHYS
  * and fill the frozen header fields. selfcheck_enabled is a plain

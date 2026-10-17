@@ -55,3 +55,47 @@ config NOVUS_SMP
 	  Enable SMP: assemble the 16-bit AP trampoline and wake the B core
 	  during boot. 'make run' boots QEMU with -smp 2 (AB dual-core,
 	  README part 2).
+
+config NOVUS_NOVUSFS
+	bool
+	default y
+	help
+	  Build the NovusFS filesystem core (README part 4): superblock with
+	  dual copies, block bitmap, inode table, directories and the
+	  block-device ramdisk backend the M2 selftest formats.
+
+config NOVUS_WAL
+	bool
+	default y
+	help
+	  Build the NovusFS write-ahead log (README 4.2.1): fixed circular
+	  buffer, per-record CRC-32, commit markers and replay on mount.
+	  Requires NOVUS_NOVUSFS.
+
+config NOVUS_MERKLE
+	bool
+	default y
+	help
+	  Build the NovusFS integrity tree (README 4.2.2): a Merkle tree
+	  over the bitmap, inode table and data area, whose root hash is
+	  stored in both superblock copies. Verification happens in the boot
+	  stage, before ExitBootServices, because that is the only phase
+	  that can still read the real disk.
+	  Requires NOVUS_NOVUSFS.
+
+config NOVUS_NKM
+	bool
+	default y
+	help
+	  Build the Novus kernel module loader (README part 5): header
+	  parsing, the zeroed-field SHA-256 digest and Ed25519 verification
+	  against the built-in root keys. Unsigned or tampered modules are
+	  refused, never fatal.
+
+config NOVUS_INSTALLER
+	bool
+	default y
+	help
+	  Build the boot-stage installer: writes a GPT, an ESP and a
+	  NovusFS system partition to a target disk and builds the Merkle
+	  tree over the result. Requires NOVUS_MERKLE.

@@ -12,6 +12,7 @@
 #include "cpu.h"
 #include "kernel.h"
 #include "shared_mem.h"
+#include "bootio.h"
 
 /* A-core switch (README 2.2 step 7): 1 = skip the boot self-check
  * output. The Makefile passes -DCONFIG_NOVUS_A_CORE_DISABLE=0/1. */
@@ -35,7 +36,7 @@ static UINT32 g_cpu_cores = 0;
 static UINT64 g_usable_bytes = 0;
 static UINT64 g_ram_top_bytes = 0;
 
-static void boot_puts(CHAR16 *s) {
+void boot_puts(CHAR16 *s) {
   if (g_con != 0) {
     g_con->OutputString(g_con, s);
   }
@@ -54,7 +55,7 @@ static void boot_put_hex(UINT64 v) {
   boot_puts(buf);
 }
 
-static void boot_put_dec(UINT64 v) {
+void boot_put_dec(UINT64 v) {
   CHAR16 buf[21];
   UINTN i = 0;
   UINTN j;
@@ -77,7 +78,7 @@ static void boot_put_dec(UINT64 v) {
 }
 
 /* Render a CHAR8 buffer as UTF-16, up to max_len bytes or first NUL. */
-static void boot_put_ascii(const CHAR8 *s, UINTN max_len) {
+void boot_put_ascii(const CHAR8 *s, UINTN max_len) {
   CHAR16 buf[64];
   UINTN i;
   for (i = 0; i < max_len && i < 63 && s[i] != 0; i++) {

@@ -2,7 +2,8 @@
  * Novus OS - M1 A-core (BSP) kernel stage: bring-up sequence.
  *
  * Runs on bare metal right after ExitBootServices. The order is fixed:
- * shared-memory verify -> PMM -> paging -> heap -> LAPIC -> AP wake.
+ * shared-memory verify -> PMM -> paging -> heap -> NovusFS (M2) ->
+ * LAPIC -> AP wake.
  * pmm_init must run before mm_init (the page-table pages come from the
  * PMM); the mmap buffer is EfiLoaderData and identity-mapped, so it
  * stays readable after the CR3 switch (the low 4 GiB identity map is
@@ -20,6 +21,9 @@
 #include "heap.h"
 #include "lapic.h"
 #include "smp.h"
+/* M2: NovusFS lives in fs/novusfs, which the build adds to the include
+ * path, so the kernel stage can reach its public header directly. */
+#include "novusfs.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
@@ -64,6 +68,15 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 
   heap_init();
   heap_selftest();
+
+  /* M2: NovusFS on the ramdisk. It runs here because the filesystem
+   * allocates through kmalloc, and before the AP is woken so that no
+   * second core touches the block layer or the WAL while the selftest
+   * drives them. A failure degrades to a warning and the boot
+   * continues (README 3.4 / 17). */
+  if (novusfs_selftest() != 0) {
+    kputs("[WARN] NovusFS selftest failed, continuing degraded\n");
+  }
 
   /* LAPIC bring-up, then wake the B core (AP) with the kernel CR3. */
   lapic_init();
