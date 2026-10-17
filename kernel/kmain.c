@@ -24,6 +24,10 @@
 /* M2: NovusFS lives in fs/novusfs, which the build adds to the include
  * path, so the kernel stage can reach its public header directly. */
 #include "novusfs.h"
+/* M3: block device table (to adopt the live root) and the signed module
+ * loader, both new this milestone. */
+#include "blkdev.h"
+#include "nkm.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
@@ -76,6 +80,78 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * continues (README 3.4 / 17). */
   if (novusfs_selftest() != 0) {
     kputs("[WARN] NovusFS selftest failed, continuing degraded\n");
+  }
+
+  /* M3: report what the boot stage found. The verification itself had to
+   * happen before ExitBootServices - only the boot stage can still read
+   * a real disk - so the kernel consumes the verdict rather than
+   * recomputing it. */
+  {
+    shared_mem_t *shm = shared_mem_get();
+
+    kputs("[M3] integrity: ");
+    switch (shm->merkle_status) {
+    case SHM_MERKLE_PASS:
+      kputs("PASS\n");
+      break;
+    case SHM_MERKLE_MISMATCH:
+      kputs("MISMATCH - system partition does not match its root hash\n");
+      kputs("[M3] continuing degraded (README 18)\n");
+      break;
+    case SHM_MERKLE_NOT_BUILT:
+      kputs("NOT BUILT - no root hash stored yet\n");
+      break;
+    case SHM_MERKLE_UNREADABLE:
+      kputs("UNREADABLE - device or tree could not be read\n");
+      break;
+    default:
+      kputs("UNKNOWN - no system partition was checked\n");
+      break;
+    }
+  }
+
+  /* M3: adopt the live root. The boot stage read the NovusFS image off
+   * the ESP into reserved pages; the memimg backend turns those pages
+   * back into a block device, so the kernel has a root filesystem
+   * without a disk driver of its own. Failure degrades: the selftest
+   * above already exercised the filesystem on the ramdisk. */
+  {
+    shared_mem_t *shm = shared_mem_get();
+
+    if (shm->live_root_base != 0 && shm->live_root_size != 0) {
+      blkdev_t *dev = blkdev_memimg_init("liveimg", shm->live_root_base,
+                                        shm->live_root_size);
+
+      if (dev == NULL) {
+        kputs("[WARN] live root could not be adopted\n");
+      } else {
+        static novusfs_fs_t livefs;
+        UINT8               root[NOVUSFS_MERKLE_ROOT_LEN];
+
+        if (novusfs_mount(&livefs, dev) != 0) {
+          kputs("[WARN] live root mount failed\n");
+        } else {
+          UINT32 status = novusfs_merkle_verify(&livefs, root);
+
+          kputs("[M3] live root mounted: ");
+          kputs_hex(shm->live_root_size);
+          kputs(" bytes, integrity ");
+          kputs(status == NOVUSFS_MERKLE_OK ? "PASS\n"
+                : status == NOVUSFS_MERKLE_MISMATCH ? "MISMATCH\n"
+                : status == NOVUSFS_MERKLE_NOT_BUILT ? "NOT BUILT\n"
+                                                     : "UNREADABLE\n");
+          novusfs_unmount(&livefs);
+        }
+      }
+    } else {
+      kputs("[M3] no live root published by the boot stage\n");
+    }
+  }
+
+  /* M3: signed module loader. Runs here because it needs kmalloc, which
+   * only exists once the heap is up. */
+  if (nkm_selftest() != 0) {
+    kputs("[WARN] NKM selftest failed, continuing degraded\n");
   }
 
   /* LAPIC bring-up, then wake the B core (AP) with the kernel CR3. */

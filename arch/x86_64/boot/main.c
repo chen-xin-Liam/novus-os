@@ -13,6 +13,7 @@
 #include "kernel.h"
 #include "shared_mem.h"
 #include "bootio.h"
+#include "stage3.h"
 
 /* A-core switch (README 2.2 step 7): 1 = skip the boot self-check
  * output. The Makefile passes -DCONFIG_NOVUS_A_CORE_DISABLE=0/1. */
@@ -42,7 +43,7 @@ void boot_puts(CHAR16 *s) {
   }
 }
 
-static void boot_put_hex(UINT64 v) {
+void boot_put_hex(UINT64 v) {
   static const CHAR16 digits[] = L"0123456789ABCDEF";
   CHAR16 buf[19];
   UINTN i;
@@ -314,9 +315,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   g_con->ClearScreen(g_con);
 
   boot_puts(L"=========================================\r\n");
-  boot_puts(L"      Novus OS - M0 Boot Stage\r\n");
+  boot_puts(L"      Novus OS - M3 Boot Stage\r\n");
   boot_puts(L"=========================================\r\n");
   boot_puts(L"[BOOT] UEFI boot started\r\n");
+
+  /* M3: everything below this line may touch real disks, so the block
+   * device table, the EFI system partition and the filesystem allocator
+   * have to be live first. */
+  stage3_init(ImageHandle, SystemTable);
 
   boot_check_cpu();
 
@@ -337,7 +343,18 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
                                g_usable_bytes, g_ram_top_bytes);
   shared_mem_get()->selfcheck_status = SHM_STATUS_PASS;
 
+  /* M3: probe devices, locate and verify the system partition, read the
+   * live root and the signed modules off the ESP, then offer the menu.
+   * All of it needs boot services, so all of it happens here. */
+  stage3_prepare();
+  stage3_menu();
+
   boot_puts(L"[BOOT] Exiting boot services, entering BSP kernel stage...\r\n");
+
+  /* Cut every tie to the firmware before the final map is taken: the
+   * live root range is published here, and any allocation after this
+   * point would land in a map the kernel then trusts. */
+  stage3_finish();
 
   /* Final memory map. The pool buffer is EfiLoaderData memory, which
    * stays valid after ExitBootServices; it is handed to the kernel. */

@@ -247,6 +247,9 @@ static void say_line(const CHAR16 *s) {
   boot_puts(L"\r\n");
 }
 
+/* Render the first `n` bytes as upper-case hex. Truncated on purpose:
+ * a full 32-byte root on every boot is noise, and the first eight bytes
+ * are enough to recognise a hash across runs. */
 static void hex8(const UINT8 *bytes, UINTN n) {
   static const CHAR16 digits[] = L"0123456789ABCDEF";
   CHAR16 buf[3];
@@ -354,27 +357,15 @@ static int syspart_verify(void) {
 /* ------------------------------------------------------------------ */
 /* Signed modules                                                      */
 /* ------------------------------------------------------------------ */
-/* Modules live on the ESP as NOVUS\*.NKM. They are read and verified
- * here rather than in the kernel for the same reason everything else
- * disk-related is: the firmware FAT driver stops working at
- * ExitBootServices. */
-
-static void say_ascii(const char *s) {
-  CHAR16 buf[64];
-  UINTN  i;
-
-  if (s == NULL) {
-    return;
-  }
-  for (i = 0; i < 63 && s[i] != '\0'; i++) {
-    buf[i] = (CHAR16)(UINT8)s[i];
-  }
-  buf[i] = 0;
-  boot_puts(buf);
-}
+/* Modules live on the ESP under NOVUS, with an 8.3 name ending in
+ * .NKM. They are read and verified here rather than in the kernel for
+ * the same reason everything else disk-related is: the firmware FAT
+ * driver stops working at ExitBootServices. */
 
 static void modules_load(void) {
   shared_mem_t *shm = shared_mem_get();
+  UINT8        *img = NULL;
+  UINT64        len = 0;
 
   shm->nkm_status = SHM_NKM_UNKNOWN;
   shm->nkm_loaded = 0;
@@ -382,16 +373,14 @@ static void modules_load(void) {
   if (g_esp_root == NULL) {
     return;
   }
-  {
-    UINT8 *img = NULL;
-    UINT64 len = 0;
-    int    rc;
+  if (esp_read(L"NOVUS\\TEST.NKM", &img, &len) != 0) {
+    say_line(L"[NKM ] no NOVUS\\TEST.NKM on the ESP");
+    return;
+  }
 
-    if (esp_read(L"NOVUS\\TEST.NKM", &img, &len) != 0) {
-      say_line(L"[NKM ] no NOVUS\\TEST.NKM on the ESP");
-      return;
-    }
-    rc = nkm_load(img, len);
+  {
+    int rc = nkm_load(img, len);
+
     if (rc >= 0) {
       const nkm_module_t *m = nkm_get((UINTN)rc);
 
@@ -405,21 +394,16 @@ static void modules_load(void) {
     } else {
       shm->nkm_status = SHM_NKM_REFUSED;
       say(L"[NKM ] TEST.NKM refused: ");
-      say_ascii(nkm_reject_text(rc));
+      boot_put_ascii((const CHAR8 *)nkm_reject_text(rc), 64);
       say_line(L"");
     }
-    efi_free(img);
   }
+  efi_free(img);
 }
 
 /* ------------------------------------------------------------------ */
 /* Installer                                                           */
 /* ------------------------------------------------------------------ */
-/* Writes a whole disk: GPT, an ESP holding the boot files, and a Novus
- * system partition whose Merkle tree is built on the spot. Every write
- * goes through the firmware block I/O protocol, so this only works
- * before ExitBootServices - which is exactly where it runs. */
-
 #if CONFIG_NOVUS_INSTALLER
 
 /* Pick a plausible target: a whole disk (not a partition), writable and
@@ -437,8 +421,10 @@ static blkdev_t *install_pick_target(void) {
                      BLKDEV_FLAG_PARTITION)) != 0) {
       continue;
     }
+    /* A device too small to hold a GPT and both partitions is not a
+     * usable target however willing it looks. */
     if (d->sector_count < 4096u) {
-      continue; /* too small to hold anything useful */
+      continue;
     }
     return d;
   }
@@ -451,14 +437,14 @@ static int install_blob(blkdev_t *dev, UINT64 lba, const UINT8 *src,
   UINT64 done = 0;
 
   while (done < bytes) {
-    UINT64 remaining_sectors = (bytes - done) / BLKDEV_SECTOR_SIZE;
-    UINTN  chunk = 8u; /* 4 KiB per call keeps the transfer bounded */
+    UINTN  chunk = 8u; /* 4 KiB per call keeps the request small */
+    UINT64 remaining = (bytes - done) / BLKDEV_SECTOR_SIZE;
 
-    if ((UINT64)chunk > remaining_sectors) {
-      chunk = (UINTN)remaining_sectors;
+    if ((UINT64)chunk > remaining) {
+      chunk = (UINTN)remaining;
     }
     if (chunk == 0) {
-      /* Tail that does not fill a sector: pad one and write it. */
+      /* Tail that does not fill a sector: pad and write one. */
       UINT8  tail[BLKDEV_SECTOR_SIZE];
       UINT64 left = bytes - done;
 
@@ -476,4 +462,302 @@ static int install_blob(blkdev_t *dev, UINT64 lba, const UINT8 *src,
     done += (UINT64)chunk * BLKDEV_SECTOR_SIZE;
   }
   return 0;
+}
+
+/* Write a whole disk: GPT, an ESP holding the boot files, and a Novus
+ * system partition whose integrity tree is built on the spot.
+ *
+ * Every write goes through the firmware block I/O protocol, so this can
+ * only run before ExitBootServices - which is exactly where it runs. */
+static int install_run(void) {
+  blkdev_t       *disk;
+  UINT8          *esp_blob = NULL;
+  UINT8          *sys_blob = NULL;
+  UINT64          esp_bytes = 0;
+  UINT64          sys_bytes = 0;
+  UINT64          esp_lba;
+  UINT64          esp_sectors;
+  UINT64          sys_lba;
+  UINT64          sys_sectors;
+  gpt_part_spec_t specs[2];
+  int             rc = -1;
+
+  disk = install_pick_target();
+  if (disk == NULL) {
+    say_line(L"[INST] no writable whole disk found");
+    return -1;
+  }
+  say(L"[INST] target ");
+  boot_put_dec(disk->sector_count);
+  say_line(L" sectors");
+
+  if (esp_read(L"NOVUS\\ESP.IMG", &esp_blob, &esp_bytes) != 0) {
+    say_line(L"[INST] NOVUS\\ESP.IMG missing: cannot build an ESP");
+    return -1;
+  }
+  if (esp_read(L"NOVUS\\SYSTEM.IMG", &sys_blob, &sys_bytes) != 0) {
+    say_line(L"[INST] NOVUS\\SYSTEM.IMG missing: cannot build a system");
+    efi_free(esp_blob);
+    return -1;
+  }
+
+  /* Both payloads start on a 1 MiB boundary, which every alignment
+   * convention in the firmware and in NovusFS is happy with. */
+  esp_lba = 2048u;
+  esp_sectors = (esp_bytes + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
+  sys_lba = esp_lba + esp_sectors;
+  sys_sectors = (sys_bytes + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
+  /* Round the system partition up to a whole MiB so the filesystem's
+   * block count is a clean multiple. */
+  sys_sectors = (sys_sectors + 2047u) & ~(UINT64)2047u;
+
+  if (esp_lba + esp_sectors + sys_sectors + 64u >= disk->sector_count) {
+    say_line(L"[INST] target disk too small");
+    goto done;
+  }
+
+  memset(specs, 0, sizeof(specs));
+  {
+    static const UINT8 esp_guid[16]     = GPT_TYPE_ESP_BYTES;
+    static const UINT8 novusfs_guid[16] = GPT_TYPE_NOVUSFS_BYTES;
+    UINTN i;
+
+    memcpy(specs[0].type_guid, esp_guid, 16);
+    specs[0].first_lba = esp_lba;
+    specs[0].last_lba = esp_lba + esp_sectors - 1u;
+    for (i = 0; i < 4; i++) {
+      specs[0].name[i] = L"EFI "[i];
+    }
+    memcpy(specs[1].type_guid, novusfs_guid, 16);
+    specs[1].first_lba = sys_lba;
+    specs[1].last_lba = sys_lba + sys_sectors - 1u;
+    for (i = 0; i < 6; i++) {
+      specs[1].name[i] = L"NOVUS "[i];
+    }
+  }
+
+  if (gpt_write(disk, specs, 2) != 0) {
+    say_line(L"[INST] GPT write failed");
+    goto done;
+  }
+  say_line(L"[INST] partition table written");
+
+  if (install_blob(disk, esp_lba, esp_blob, esp_bytes) != 0) {
+    say_line(L"[INST] ESP payload write failed");
+    goto done;
+  }
+  if (install_blob(disk, sys_lba, sys_blob, sys_bytes) != 0) {
+    say_line(L"[INST] system payload write failed");
+    goto done;
+  }
+  say_line(L"[INST] partitions written");
+
+  /* Build the integrity tree over the freshly written system
+   * partition: an installed system must boot holding a valid root hash,
+   * not discover on its first boot that it does not have one. */
+  {
+    static stage3_part_ctx_t pctx;
+    static blkdev_t          pdev;
+    static novusfs_fs_t      fs;
+    UINT8 root[NOVUSFS_MERKLE_ROOT_LEN];
+
+    pctx.parent = disk;
+    pctx.base = sys_lba;
+    pctx.sectors = sys_sectors;
+    pdev.name = "instpart";
+    pdev.sector_count = sys_sectors;
+    pdev.flags = BLKDEV_FLAG_PARTITION;
+    pdev.ctx = &pctx;
+    pdev.read = part_read;
+    pdev.write = part_write;
+    if (blkdev_register(&pdev) < 0) {
+      say_line(L"[INST] cannot register the new partition");
+      goto done;
+    }
+    if (novusfs_mount(&fs, &pdev) != 0) {
+      say_line(L"[INST] cannot mount the new system partition");
+      goto done;
+    }
+    if (novusfs_merkle_build(&fs, root) != 0) {
+      say_line(L"[INST] merkle build failed");
+      novusfs_unmount(&fs);
+      goto done;
+    }
+    say(L"[INST] merkle root ");
+    hex8(root, 8);
+    say_line(L"... written");
+    novusfs_unmount(&fs);
+  }
+
+  say_line(L"[INST] install complete");
+  rc = 0;
+
+done:
+  if (esp_blob != NULL) {
+    efi_free(esp_blob);
+  }
+  if (sys_blob != NULL) {
+    efi_free(sys_blob);
+  }
+  return rc;
+}
+
+#endif /* CONFIG_NOVUS_INSTALLER */
+
+/* ------------------------------------------------------------------ */
+/* Live menu                                                           */
+/* ------------------------------------------------------------------ */
+/* A text menu on the firmware console. It is not a shell: it offers
+ * exactly the operations this milestone implements, and it never blocks
+ * forever - an unattended boot falls through to the kernel once the
+ * input goes quiet. */
+
+static EFI_INPUT_KEY menu_wait_key(void) {
+  EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin =
+      (EFI_SIMPLE_TEXT_INPUT_PROTOCOL *)g_st->ConIn;
+  EFI_INPUT_KEY key;
+  UINTN         spins;
+
+  key.ScanCode = 0;
+  key.UnicodeChar = 0;
+  if (conin == NULL || conin->ReadKeyStroke == NULL) {
+    return key;
+  }
+  /* Bounded poll. WaitForEvent would be tidier, but a bounded poll
+   * keeps the menu from hanging on a firmware that never signals. */
+  for (spins = 0; spins < 20000u; spins++) {
+    if (conin->ReadKeyStroke(conin, &key) == EFI_SUCCESS) {
+      return key;
+    }
+    g_bs->Stall(1000u); /* 1 ms; twenty seconds at most */
+  }
+  return key;
+}
+
+static void menu_show(void) {
+  say_line(L"");
+  say_line(L"  ================================================");
+  say_line(L"   Novus OS M3 - live system");
+  say_line(L"  ================================================");
+  say_line(L"   1  Verify the system partition (Merkle)");
+  say_line(L"   2  Load and verify signed modules (NKM)");
+  say_line(L"   3  Install Novus to a disk");
+  say_line(L"   4  Continue into the kernel");
+  say_line(L"");
+  say(L"  choice [4]: ");
+}
+
+static void menu_run(void) {
+  EFI_INPUT_KEY key;
+
+  menu_show();
+  key = menu_wait_key();
+  if (key.UnicodeChar == 0) {
+    say_line(L"4 (no input)");
+    return;
+  }
+  say_line(L"");
+
+  switch (key.UnicodeChar) {
+  case L'1':
+    if (syspart_verify() == 0) {
+      say_line(L"[MENU] nothing to verify: no system partition");
+    }
+    break;
+  case L'2':
+    modules_load();
+    break;
+  case L'3':
+#if CONFIG_NOVUS_INSTALLER
+    (VOID)install_run();
+#else
+    say_line(L"[MENU] installer not built in");
+#endif
+    break;
+  default:
+    break;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Public entry points                                                 */
+/* ------------------------------------------------------------------ */
+
+void stage3_init(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
+  g_image = image;
+  g_st = st;
+  g_bs = st->BootServices;
+
+  /* Point NovusFS at EFI pool memory for the whole boot stage. */
+  novusfs_set_allocator(efi_alloc, efi_free);
+}
+
+/* Probe devices, open the ESP, verify a system partition if one exists,
+ * and load the live root. Safe to call when any of those are missing. */
+void stage3_prepare(void) {
+  shared_mem_t *shm = shared_mem_get();
+  UINTN         ndev;
+
+  ndev = (UINTN)blkdev_uefi_probe(g_st);
+  say(L"[BOOT] block devices: ");
+  boot_put_dec(ndev);
+  say_line(L"");
+
+  if (esp_open() == 0) {
+    say_line(L"[BOOT] EFI system partition opened");
+  } else {
+    say_line(L"[BOOT] WARN no EFI system partition: live root unavailable");
+  }
+
+  shm->boot_mode = SHM_BOOT_MODE_LIVE;
+
+#if CONFIG_NOVUS_MERKLE
+  (VOID)syspart_verify();
+#endif
+
+#if CONFIG_NOVUS_NKM
+  modules_load();
+#endif
+
+  /* Live root: adopt the NovusFS image off the ESP into reserved pages.
+   * Without it the kernel has no filesystem at all, so a failure here is
+   * worth saying loudly - but it is still not fatal. */
+  if (esp_read_reserved(L"NOVUS\\SYSTEM.IMG", &g_live_base, &g_live_size) ==
+      0) {
+    say(L"[BOOT] live root: ");
+    boot_put_dec(g_live_size / 1024u);
+    say(L" KiB at ");
+    boot_put_hex(g_live_base);
+    say_line(L"");
+  } else {
+    say_line(L"[BOOT] WARN live root not loaded");
+    g_live_base = 0;
+    g_live_size = 0;
+  }
+}
+
+void stage3_menu(void) {
+  menu_run();
+}
+
+/* Publish the live root range and cut every tie to the firmware. Must
+ * run immediately before ExitBootServices. */
+void stage3_finish(void) {
+  shared_mem_t *shm = shared_mem_get();
+
+  shm->live_root_base = g_live_base;
+  shm->live_root_size = g_live_size;
+
+  /* Restore the kernel heap allocator: from here on AllocatePool is
+   * gone, and NovusFS must never call into it. */
+  novusfs_set_allocator(NULL, NULL);
+
+  /* Detach every boot-only device so no firmware protocol pointer
+   * survives into the kernel, where calling it would fault. */
+  blkdev_detach_boot_only();
+
+  if (g_esp_root != NULL) {
+    g_esp_root->Close(g_esp_root);
+    g_esp_root = NULL;
+  }
 }

@@ -50,6 +50,7 @@ MEM ?= 4G
 # ---------------------------------------------------------------------------
 # Source list is pinned for M2; extend it in later milestones.
 SRC := arch/x86_64/boot/main.c \
+       arch/x86_64/boot/stage3.c \
        kernel/kmain.c \
        kernel/vga.c \
        kernel/serial.c \
@@ -162,7 +163,7 @@ all: banner out/NOVUS.EFI
 
 # Configuration summary printed before anything is built.
 banner:
-	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL)"
+	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER)"
 
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the

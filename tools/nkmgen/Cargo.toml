@@ -1,0 +1,20 @@
+# Novus OS - host-side NKM signing tool (tools/nkmgen).
+#
+# Runs on the build host (default target), not inside the kernel image.
+# It deliberately has no dependencies and reuses the kernel's own crypto
+# sources through #[path] includes, so a module signed here is signed with
+# the identical arithmetic the kernel uses to check it - the two cannot
+# drift apart.
+#
+# Built by the top-level Makefile (see tools/tools.mk).
+
+[package]
+name = "nkmgen"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[bin]]
+name = "nkmgen"
+path = "src/main.rs"
