@@ -274,10 +274,16 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
   if (cache_sync(&dst) != 0) {
     goto done;
   }
-  /* The last level holds exactly one node: the root. */
-  if (node_read(&dst, base[levels - 1u], root) != 0) {
+  /* The last level holds exactly one node: the root.
+   *
+   * A node slot is 64 bytes and the root the caller wants is the
+   * 32-byte digest, so the root is read into a node-sized buffer and
+   * then narrowed. Reading straight into the caller's 32-byte array
+   * would write past its end by 32 bytes. */
+  if (node_read(&dst, base[levels - 1u], node) != 0) {
     goto done;
   }
+  memcpy(root, node, NOVUSFS_MERKLE_ROOT_LEN);
 
   if (persist) {
     memcpy(fs->sb.merkle_root, root, NOVUSFS_MERKLE_ROOT_LEN);

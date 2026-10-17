@@ -194,8 +194,23 @@ static void write_terminator(void) {
   p[6] = 1;
 }
 
-/* El Torito catalog: a validation entry then the default entry. The
- * checksum is over the 32 validation-entry bytes taken as u16s. */
+/* El Torito boot catalog.
+ *
+ * Three entries, and the middle one is the whole reason a UEFI firmware
+ * will boot this disc:
+ *
+ *   0  validation entry      header 0x01, platform 0x00
+ *  32  section header        header 0x91, platform 0xEF  <- UEFI looks
+ *                            for this platform id; without it the
+ *                            firmware sees no EFI boot image at all and
+ *                            reports "no bootable option"
+ *  64  section entry         bootable, no emulation, points at the ESP
+ *
+ * The section entry's media type is "no emulation" because the ESP image
+ * is not a floppy or hard-disk image: the firmware reads it as a
+ * filesystem and starts EFI/BOOT/BOOTX64.EFI out of it.
+ *
+ * The validation checksum is the negated sum of the entry's 16 u16s. */
 static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
                           uint32_t boot_sectors) {
   uint8_t *p = sector(catalog_lba);
@@ -206,7 +221,7 @@ static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
 
   /* Validation entry. */
   p[0] = 0x01; /* header id */
-  p[1] = 0x00; /* platform: x86 */
+  p[1] = 0x00; /* platform: 0 (x86/BIOS), the neutral choice */
   put_le16(p + 2, 0);
   memset(p + 4, ' ', 24);
   memcpy(p + 4, "NOVUS", 5);
@@ -217,15 +232,22 @@ static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
   }
   put_le16(p + 28, (uint16_t)(0x10000u - (sum & 0xffffu)));
 
-  /* Default entry: no emulation, load the whole ESP image. */
-  p[32] = 0x88; /* bootable */
-  p[33] = 0x00; /* no emulation */
-  put_le16(p + 34, 0x07c0); /* load segment */
-  p[36] = 0x00;             /* system type: x86 boot sector */
-  p[37] = 0x00;
-  put_le16(p + 38, (uint16_t)(boot_sectors > 0xffffu ? 0xffffu : boot_sectors));
-  put_le32(p + 40, boot_lba);
-  memset(p + 44, 0, 20);
+  /* Section header entry: last one, platform EFI, one entry follows. */
+  p[32] = 0x91; /* section header, final */
+  p[33] = 0xef; /* platform: EFI */
+  put_le16(p + 34, 1); /* number of section entries */
+  memset(p + 36, ' ', 28);
+  memcpy(p + 36, "EFI", 3);
+
+  /* Section entry: bootable, no emulation, the ESP image. */
+  p[64] = 0x88; /* boot indicator: bootable */
+  p[65] = 0x00; /* media type: no emulation */
+  put_le16(p + 66, 0); /* load segment: unused without emulation */
+  p[68] = 0x00;        /* system type: x86 */
+  p[69] = 0x00;
+  put_le16(p + 70, (uint16_t)(boot_sectors > 0xffffu ? 0xffffu : boot_sectors));
+  put_le32(p + 72, boot_lba);
+  memset(p + 76, 0, 20);
 }
 
 static void write_path_tables(void) {
@@ -315,7 +337,16 @@ int main(int argc, char **argv) {
   write_terminator();
   write_path_tables();
   write_root_dir();
-  write_catalog(catalog_lba, FILE_LBA, (uint32_t)esp_sectors);
+  /* The catalog's sector count is in 512-byte units, because that is the
+   * sector size of the virtual disk the firmware sees - the ESP image is
+   * a FAT32 volume with 512-byte sectors. Passing the ISO's 2048-byte
+   * sector count here would tell the firmware the disk is a quarter of
+   * its real size. */
+  {
+    uint32_t units = (uint32_t)((esp_bytes + 511u) / 512u);
+
+    write_catalog(catalog_lba, FILE_LBA, units);
+  }
 
   {
     uint64_t remaining = esp_bytes;

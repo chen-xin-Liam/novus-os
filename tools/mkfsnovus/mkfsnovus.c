@@ -2,7 +2,7 @@
  * mkfsnovus - host-side NovusFS image builder.
  *
  * The point of this tool is that it contains no filesystem logic of its
- * own: it compiles the kernel's fs/novusfs/*.c unchanged and only
+ * own: it compiles the kernel's fs/novusfs sources unchanged and only
  * supplies the handful of primitives that code expects (kputs, kmalloc,
  * blkdev). A host-side reimplementation of the format would be a second
  * source of truth that could drift from the kernel's - and a disk image
@@ -27,6 +27,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <unistd.h> /* ftruncate */
 
 #include "novusfs.h"
 
@@ -154,6 +155,26 @@ static int file_write(void *ctx, UINT64 sector, UINTN count,
     return -1;
   }
   return 0;
+}
+
+/* blkdev.c itself is not compiled here: it pulls in the UEFI and ramdisk
+ * backends, which need firmware protocols and the kernel PMM. Only the
+ * two dispatch functions are reimplemented, which is all fs/novusfs
+ * actually calls - and they add no behaviour of their own, so there is
+ * no filesystem logic to drift. */
+int blkdev_read(blkdev_t *dev, UINT64 sector, UINTN count, void *buf) {
+  if (dev == NULL || dev->read == NULL) {
+    return -1;
+  }
+  return dev->read(dev->ctx, sector, count, buf);
+}
+
+int blkdev_write(blkdev_t *dev, UINT64 sector, UINTN count,
+                 const void *buf) {
+  if (dev == NULL || dev->write == NULL) {
+    return -1;
+  }
+  return dev->write(dev->ctx, sector, count, buf);
 }
 
 /* ------------------------------------------------------------------ */

@@ -178,6 +178,16 @@ static int make_short_name(const char *name, uint8_t out[11]) {
   size_t i;
 
   memset(out, ' ', 11);
+  /* "." and ".." are the two names the 8.3 rule does not describe: they
+   * are punctuation, not a base name with an extension. Every FAT driver
+   * expects them in a subdirectory, so they are written verbatim. */
+  if (name[0] == '.' && (name[1] == '\0' ||
+                         (name[1] == '.' && name[2] == '\0'))) {
+    for (i = 0; name[i] != '\0'; i++) {
+      out[i] = (uint8_t)name[i];
+    }
+    return 0;
+  }
   dot = strchr(name, '.');
   if (dot == NULL) {
     base_len = strlen(name);

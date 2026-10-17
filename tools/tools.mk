@@ -17,7 +17,9 @@
 # Nothing under tools/ is linked into NOVUS.EFI.
 
 HOSTCC     ?= gcc
-HOSTCFLAGS ?= -O2 -std=c11 -Wall -Wextra
+# _GNU_SOURCE: mkfsnovus sizes its output with ftruncate and seeks with
+# fseeko, and -std=c11 would otherwise hide both behind __STRICT_ANSI__.
+HOSTCFLAGS ?= -O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE
 
 TOOLS_OUT   := build/tools
 MKFAT       := $(TOOLS_OUT)/mkfat
@@ -93,14 +95,19 @@ $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o: tools/mkfsnovus/mkfsnovus.c \
                                           | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
+# --gc-sections: the precompiled core rlib carries a DWARF reference to
+# Rust's unwind personality even under panic=abort, and nothing defines
+# it in a C-hosted binary. Novus never unwinds, so discarding the unused
+# debug section is correct - and cheaper than pinning a mangled symbol
+# name that changes with the compiler.
 $(MKFSNOVUS): $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o $(NOVUSFS_HOST_OBJS) \
               $(RUST_HOST_LIB)
-	$(HOSTCC) -o $@ $^
+	$(HOSTCC) -Wl,--gc-sections -o $@ $^
 
 $(RUST_HOST_LIB): $(RUST_DEPS)
 	@test -n "$(CARGO)" || { echo "ERROR: cargo not found." >&2; exit 1; }
 	cd $(RUST_DIR) && CARGO_TARGET_DIR=$(CURDIR)/build/rust-host \
-	    $(CARGO) build --release
+	    RUSTFLAGS="-C debuginfo=0" $(CARGO) build --release
 
 # ---------------------------------------------------------------------------
 # Image targets
@@ -153,9 +160,7 @@ run-iso: iso
 install: novus-img
 	scripts/install.sh "$(DEVICE)"
 
-# Regenerate the signed test module after changing the NKM layout.
-nkm-test-module:
-	@test -n "$(CARGO)" || { echo "ERROR: cargo not found." >&2; exit 1; }
-	cd tools/nkmgen && CARGO_TARGET_DIR=$(CURDIR)/build/rust-host \
-	    $(CARGO) run --quiet -- mkmod "$(NKM_SEED)" 1 \
-	    ../../security/nkm/nkm_test_module.h
+# Regenerate the signed test module by hand after changing the NKM
+# layout or the root key. The build already does this through the
+# out/test.nkm rule, which is what the ESP carries.
+nkm-test-module: $(NKM_MOD)
