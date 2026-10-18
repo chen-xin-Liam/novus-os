@@ -185,6 +185,57 @@ void pmm_init(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 /* Allocation                                                           */
 /* ------------------------------------------------------------------ */
 
+void *pmm_alloc_contig(UINT32 count) {
+  UINT32 attempt;
+
+  if (count == 0u) {
+    return NULL;
+  }
+  if (count == 1u) {
+    return pmm_alloc_page();
+  }
+  for (attempt = 0; attempt < 256u; attempt++) {
+    UINT64 first = (UINT64)(UINTN)pmm_alloc_page();
+    UINT32 i;
+    int    ok = 1;
+
+    if (first == 0u) {
+      return NULL;
+    }
+    for (i = 1; i < count; i++) {
+      UINT64 next = (UINT64)(UINTN)pmm_alloc_page();
+
+      if (next != first + (UINT64)i * PMM_PAGE_SIZE) {
+        if (next != 0u) {
+          pmm_free_page((void *)(UINTN)next);
+        }
+        ok = 0;
+        break;
+      }
+    }
+    if (ok) {
+      return (void *)(UINTN)first;
+    }
+    {
+      UINT32 j;
+
+      for (j = 0; j < i; j++) {
+        pmm_free_page((void *)(UINTN)(first + (UINT64)j * PMM_PAGE_SIZE));
+      }
+    }
+  }
+  return NULL;
+}
+
+void pmm_free_contig(void *firstv, UINT32 count) {
+  UINT64 first = (UINT64)(UINTN)firstv;
+  UINT32 i;
+
+  for (i = 0; i < count; i++) {
+    pmm_free_page((void *)(UINTN)(first + (UINT64)i * PMM_PAGE_SIZE));
+  }
+}
+
 void *pmm_alloc_page(void) {
   INT64  idx;
   UINT64 addr;

@@ -32,4 +32,27 @@ static inline UINT8 io_in8(UINT16 port) {
   return v;
 }
 
+static inline void io_out16(UINT16 port, UINT16 val) {
+  __asm__ volatile("outw %0,%1" : : "a"(val), "Nd"(port));
+}
+
+static inline UINT16 io_in16(UINT16 port) {
+  UINT16 v;
+  __asm__ volatile("inw %1,%0" : "=a"(v) : "Nd"(port));
+  return v;
+}
+
+static inline void io_out32(UINT16 port, UINT32 val) {
+  __asm__ volatile("outl %0,%1" : : "a"(val), "Nd"(port));
+}
+
+static inline UINT32 io_in32(UINT16 port) {
+  UINT32 v;
+  __asm__ volatile("inl %1,%0" : "=a"(v) : "Nd"(port));
+  return v;
+}
+
+/* Small settling delay for legacy port writes (PCI config, PIC, ...). */
+static inline void io_wait(void) { io_out8(0x80u, 0u); }
+
 #endif /* NOVUS_CPU_H */

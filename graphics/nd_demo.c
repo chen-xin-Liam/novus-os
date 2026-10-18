@@ -489,6 +489,13 @@ static void on_launch_setup(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)apps_launch(2);
 }
 
+static void on_launch_net(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  menu_close();
+  (void)apps_launch(3);
+}
+
 static void on_about(ng_ctx_t *ctx, ng_widget_t *w) {
   set_status("Novus OS：内核 C + 用户态 Rust，Windows 11 风格桌面");
   on_open_demo(ctx, w);
@@ -603,9 +610,11 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
             on_open_demo);
   ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 206, 320, 38), "控件与列表",
             on_open_widgets);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 250, 320, 38), "关于本系统",
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 250, 320, 38), "网络",
+            on_launch_net);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 294, 320, 38), "关于本系统",
             on_about);
-  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 368, 320, 20), "Novus 用户",
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 372, 320, 20), "Novus 用户",
            ctx->theme.text_dim, 1);
 
   /* Taskbar: centred, floating, launcher on the left, clock on the right. */

@@ -17,6 +17,10 @@ path = "src/bin/taskman.rs"
 name = "settings"
 path = "src/bin/settings.rs"
 
+[[bin]]
+name = "netman"
+path = "src/bin/netman.rs"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

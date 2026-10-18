@@ -22,6 +22,7 @@ static const app_t g_apps[] = {
     {"fileman", k_app_fileman, &k_app_fileman_len},
     {"taskman", k_app_taskman, &k_app_taskman_len},
     {"settings", k_app_settings, &k_app_settings_len},
+    {"netman", k_app_netman, &k_app_netman_len},
 };
 
 UINT32 apps_count(void) { return (UINT32)(sizeof(g_apps) / sizeof(g_apps[0])); }

@@ -38,6 +38,7 @@
 #include "nwm.h"
 #include "apps.h"
 #include "sysinfo.h"
+#include "net.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
@@ -276,6 +277,9 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * launcher buttons on the shell's taskbar start the same three later,
    * which is why apps_launch() refuses a second copy. */
   sysinfo_init();
+  /* M10: bring up PCI and the network stack before the applications, so
+   * the network app has a link to show and DHCP is already running. */
+  (void)net_init();
   (void)apps_launch(0); /* fileman */
   (void)apps_launch(1); /* taskman */
   (void)apps_launch(2); /* settings */

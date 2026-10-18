@@ -346,6 +346,49 @@ static UINT32 free_user_leafs(vm_space_t *sp) {
   return n;
 }
 
+UINT32 vm_space_pages(vm_space_t *sp) {
+  UINT64 *pml4;
+  UINT32  i4, i3, i2, i1, n;
+
+  if (sp == 0 || sp->pml4_phys == 0) {
+    return 0;
+  }
+  n = sp->npages;
+  pml4 = table(sp->pml4_phys);
+  for (i4 = 0; i4 < 256u; i4++) {
+    UINT64 *pdpt;
+
+    if ((pml4[i4] & PTE_P) == 0 || !table_own(sp, pml4[i4] & PTE_ADDR4K)) {
+      continue;
+    }
+    pdpt = table(pml4[i4] & PTE_ADDR4K);
+    for (i3 = 0; i3 < 512u; i3++) {
+      UINT64 *pd;
+
+      if ((pdpt[i3] & PTE_P) == 0 || (pdpt[i3] & PTE_PS) != 0 ||
+          !table_own(sp, pdpt[i3] & PTE_ADDR4K)) {
+        continue;
+      }
+      pd = table(pdpt[i3] & PTE_ADDR4K);
+      for (i2 = 0; i2 < 512u; i2++) {
+        UINT64 *pt;
+
+        if ((pd[i2] & PTE_P) == 0 || (pd[i2] & PTE_PS) != 0 ||
+            !table_own(sp, pd[i2] & PTE_ADDR4K)) {
+          continue;
+        }
+        pt = table(pd[i2] & PTE_ADDR4K);
+        for (i1 = 0; i1 < 512u; i1++) {
+          if ((pt[i1] & PTE_P) != 0 && (pt[i1] & PTE_U) != 0) {
+            n++;
+          }
+        }
+      }
+    }
+  }
+  return n;
+}
+
 UINT32 vm_space_free(vm_space_t *sp) {
   UINT32 i;
   UINT32 freed;

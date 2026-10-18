@@ -27,7 +27,13 @@
 #define SYSINFO_REQ_ACCENT 0x0304u
 #define SYSINFO_REQ_SPAWN  0x0305u
 #define SYSINFO_REQ_THEME  0x0306u /* accent / wallpaper, query or set */
-#define SYSINFO_REQ_KILL   0x0307u /* end a task by pid */
+#define SYSINFO_REQ_KILL   0x0307u
+#define SYSINFO_REQ_NET    0x0308u
+#define SYSINFO_REQ_PING   0x0309u
+#define SYSINFO_REQ_TCP    0x030Au
+#define SYSINFO_REQ_TASKS2 0x030Bu
+#define SYSINFO_REQ_TACT   0x030Cu
+#define SYSINFO_REQ_NETDEVS 0x030Du /* end a task by pid */
 
 /* Replies. Distinct types per query so a client can match its answer
  * without a correlation id. */
@@ -37,6 +43,8 @@
 #define SYSINFO_RSP_STATS  0x0313u
 #define SYSINFO_RSP_ACCENT 0x0314u
 #define SYSINFO_RSP_THEME  0x0315u
+#define SYSINFO_RSP_NET    0x0316u
+#define SYSINFO_RSP_TASKS2 0x0317u
 #define SYSINFO_RSP_ERR    0x03FFu
 
 /* Directories the file manager can browse. */
@@ -125,6 +133,57 @@ typedef struct {
   UINT8  set; /* 0 = query, 1 = apply */
   UINT8  pad[3];
 } sysinfo_accent_t;
+
+/* Network snapshot: link, addresses, DHCP state and counters. */
+typedef struct {
+  UINT8  ndev;
+  UINT8  dhcp;      /* NET_DHCP_* */
+  UINT8  ping_state;/* 0 idle 1 running 2 ok 3 timeout */
+  UINT8  tcp_state; /* 0 idle 1 connecting 2 ok 3 failed */
+  UINT32 ip;
+  UINT32 mask;
+  UINT32 gw;
+  UINT32 rtt_ms;
+  UINT32 tcp_bytes;
+  UINT64 rx_pkts;
+  UINT64 tx_pkts;
+  UINT64 rx_err;
+  UINT64 tx_err;
+  UINT8  link;
+  UINT8  state;
+  UINT8  mac[6];
+  UINT16 speed_mbps;
+  UINT16 pad;
+} sysinfo_net_t;
+
+typedef struct {
+  char  name[10];
+  UINT8 link;
+  UINT8 state;
+  UINT8 mac[6];
+} sysinfo_netdev_t;
+
+typedef struct {
+  UINT8            n;
+  UINT8            pad[3];
+  sysinfo_netdev_t dev[2];
+} sysinfo_netdevs_t;
+
+typedef struct {
+  UINT16 total;
+  UINT8  n;
+  UINT8  pad;
+  UINT32 pad0; /* keeps rec 8-byte aligned, matching the Rust layout */
+  /* sched_info2_t rec[3] follows; declared as raw bytes so this header
+   * does not depend on sched.h. */
+  UINT8  rec[3 * 32];
+} sysinfo_tasks2_t;
+
+typedef struct {
+  UINT64 pid;
+  UINT8  action; /* 0 kill, 1 suspend, 2 resume */
+  UINT8  pad[3];
+} sysinfo_tact_t;
 
 /* Create the port. Call once, after the scheduler owns a task table. */
 void sysinfo_init(void);

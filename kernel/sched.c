@@ -19,6 +19,7 @@
 #include "nd.h"
 #include "nwm.h"
 #include "sysinfo.h"
+#include "net.h"
 #include "nuc.h"
 
 /* Written by trap.S: the stack the syscall gate switches to, and the
@@ -359,6 +360,7 @@ task_t *sched_create_user(const char *name, const vm_space_t *space,
   t->kstack_top = (UINT64)(UINTN)(kstack + SCHED_KSTACK_PAGES * 4096u);
   t->kstack_phys = virt_to_phys(kstack);
   t->slice = SCHED_SLICE_TICKS;
+  t->started = (UINT32)g_ticks;
   t->exit_code = -1;
   for (i = 0; i < sizeof(t->name) - 1u && name[i] != '\0'; i++) {
     t->name[i] = name[i];
@@ -527,6 +529,9 @@ void sched_tick(void) {
   nwm_tick();
   /* M8: the sysinfo service shares the tick with the WM. */
   sysinfo_tick();
+  /* M10: poll the network card and run DHCP/ICMP/TCP timers. Bounded work
+   * per tick - eight frames and a handful of timers. */
+  net_tick();
 #elif CONFIG_NOVUS_DISPLAY
   /* M5: NovusDisplay shares the tick. Input is polled (no new IRQ lines)
    * and at most one damage rectangle is repainted per event, so the cost
@@ -730,6 +735,70 @@ void sched_start(void) {
 /* ---- introspection (M8 task manager) ---------------------------------- */
 
 UINT32 sched_task_count(void) { return SCHED_MAX_TASKS; }
+
+int sched_task_info2(UINT32 idx, sched_info2_t *out) {
+  task_t *t;
+
+  if (out == 0 || idx >= SCHED_MAX_TASKS) {
+    return -1;
+  }
+  t = &g_tasks[idx];
+  if (t->state == TASK_FREE) {
+    return -1;
+  }
+  out->pid = t->pid;
+  out->cpu_ticks = t->ticks;
+  out->mem_pages = vm_space_pages(&t->space);
+  out->started = t->started;
+  out->state = (UINT8)t->state;
+  out->prio = (UINT8)(t->slice != 0u ? t->slice : 0u);
+  {
+    UINT32 i;
+
+    for (i = 0; i < sizeof(out->name) - 1u && i < sizeof(t->name) - 1u &&
+                    t->name[i] != '\0';
+         i++) {
+      out->name[i] = t->name[i];
+    }
+    out->name[i] = '\0';
+  }
+  return 0;
+}
+
+UINT64 sched_total_ticks(void) { return g_ticks; }
+
+int sched_suspend(UINT64 pid) {
+  task_t *t = sched_find_pid(pid);
+
+  if (t == NULL || t->state == TASK_EXITED) {
+    return -1;
+  }
+  if (task_is_vital(t) || t == g_current) {
+    return -2;
+  }
+  if (t->state == TASK_SUSPENDED) {
+    return 0;
+  }
+  t->state = TASK_SUSPENDED;
+  g_need_resched = 1;
+  return 0;
+}
+
+int sched_resume(UINT64 pid) {
+  UINT32 i;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    task_t *t = &g_tasks[i];
+
+    if (t->state == TASK_SUSPENDED && t->pid == pid) {
+      t->state = TASK_READY;
+      t->slice = SCHED_SLICE_TICKS;
+      g_need_resched = 1;
+      return 0;
+    }
+  }
+  return -1;
+}
 
 int sched_task_info(UINT32 idx, sched_info_t *out) {
   task_t *t;

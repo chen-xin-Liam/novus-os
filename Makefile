@@ -94,6 +94,13 @@ SRC := arch/x86_64/boot/main.c \
        kernel/apps.c \
        kernel/sysinfo.c \
        kernel/rtc.c \
+       kernel/pci.c \
+       kernel/net.c \
+       kernel/net_dhcp.c \
+       kernel/net_tcp.c \
+       kernel/net_e1000.c \
+       kernel/net_igb.c \
+       kernel/net_wifi.c \
        wm/novus-wm/nwm.c \
        wm/novus-wm/nwm_demo.c \
        fs/novusfs/super.c \
@@ -132,7 +139,9 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_DISPLAY=$(if $(filter y,$(CONFIG_NOVUS_DISPLAY)),1,0) \
           -DCONFIG_NOVUS_GUI=$(if $(filter y,$(CONFIG_NOVUS_GUI)),1,0) \
           -DCONFIG_NOVUS_WM=$(if $(filter y,$(CONFIG_NOVUS_WM)),1,0) \
-          -DCONFIG_NOVUS_IPC=$(if $(filter y,$(CONFIG_NOVUS_IPC)),1,0)
+          -DCONFIG_NOVUS_IPC=$(if $(filter y,$(CONFIG_NOVUS_IPC)),1,0) \
+          -DCONFIG_NOVUS_PCI=$(if $(filter y,$(CONFIG_NOVUS_PCI)),1,0) \
+          -DCONFIG_NOVUS_NET=$(if $(filter y,$(CONFIG_NOVUS_NET)),1,0)
 
 # Link as a PE32+ EFI application: subsystem 10 = EFI application,
 # image entry point is efi_main.
@@ -235,7 +244,7 @@ $(RUST_LIB): $(RUST_DEPS)
 APPS_DIR    := apps
 APPS_TARGET := $(CURDIR)/build/rust-apps
 APPS_STAMP  := build/apps.stamp
-APPS_NAMES  := fileman taskman settings
+APPS_NAMES  := fileman taskman settings netman
 APPS_BINS   := $(addprefix out/apps/,$(addsuffix .bin,$(APPS_NAMES)))
 APPS_BLOB_H := build/apps_blobs.h
 APPS_DEPS   := $(shell find $(APPS_DIR)/src -type f 2>/dev/null) \

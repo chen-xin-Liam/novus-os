@@ -36,6 +36,14 @@ void pmm_init(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size);
  * exhaustion / uninitialized manager. */
 void *pmm_alloc_page(void);
 
+/* `count` physically contiguous pages (device descriptor rings need DMA
+ * addresses that increase one page at a time). Returns the first physical
+ * page, or 0 when no run was found. */
+void *pmm_alloc_contig(UINT32 count);
+
+/* Return a contiguous run from pmm_alloc_contig(). */
+void pmm_free_contig(void *first, UINT32 count);
+
 /* Return one previously allocated page. Unaligned, out-of-range and
  * double frees are ignored. */
 void pmm_free_page(void *phys);

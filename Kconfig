@@ -56,6 +56,22 @@ config NOVUS_SMP
 	  during boot. 'make run' boots QEMU with -smp 2 (AB dual-core,
 	  README part 2).
 
+config NOVUS_PCI
+	bool
+	default y
+	help
+	  PCI bus enumeration (README part 20): config space over 0xCF8/0xCFC,
+	  BAR sizing, memory decoding and bus mastering. Needed by the network
+	  drivers.
+
+config NOVUS_NET
+	bool
+	default y
+	help
+	  Network stack (README part 20): netdev registry, e1000 and igb(82576)
+	  drivers, WiFi device class, ARP / IPv4 / ICMP / UDP / DHCP and a
+	  minimal TCP client. Requires NOVUS_PCI.
+
 config NOVUS_NOVUSFS
 	bool
 	default y

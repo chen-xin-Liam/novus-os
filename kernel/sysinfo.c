@@ -14,10 +14,12 @@
 #include "nwm.h"
 #include "sched.h"
 #include "sysinfo.h"
+#include "net.h"
 
 #if CONFIG_NOVUS_IPC && CONFIG_NOVUS_WM
 
 static UINT64 g_port;
+static UINT32 g_t2_log;
 
 /* ---- built-in file tree ----------------------------------------------- */
 
@@ -247,6 +249,174 @@ static void req_kill(const ipc_msg_t *m) {
   answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
 }
 
+/* ---- network ---------------------------------------------------------- */
+
+static void req_net(const ipc_msg_t *m) {
+  sysinfo_net_t n;
+  netdev_t     *d = net_active();
+  const net_cfg_t *c = net_cfg();
+  UINT32 i;
+
+  for (i = 0; i < sizeof(n); i++) {
+    ((UINT8 *)&n)[i] = 0;
+  }
+  n.ndev = (UINT8)net_count();
+  n.dhcp = net_dhcp_state();
+  n.ping_state = (UINT8)net_ping_status();
+  n.tcp_state = (UINT8)net_tcp_status();
+  n.ip = c->ip;
+  n.mask = c->mask;
+  n.gw = c->gw;
+  n.rtt_ms = net_ping_rtt_ms();
+  n.tcp_bytes = net_tcp_bytes();
+  if (d != 0) {
+    n.link = d->link;
+    n.state = d->state;
+    n.speed_mbps = (UINT16)d->speed_mbps;
+    n.rx_pkts = d->rx_pkts;
+    n.tx_pkts = d->tx_pkts;
+    n.rx_err = d->rx_err;
+    n.tx_err = d->tx_err;
+    for (i = 0; i < 6u; i++) {
+      n.mac[i] = d->mac[i];
+    }
+  }
+  answer(m, SYSINFO_RSP_NET, &n, sizeof(n));
+}
+
+static void req_netdevs(const ipc_msg_t *m) {
+  sysinfo_netdevs_t out;
+  sysinfo_list_req_t q;
+  UINT32 i;
+
+  if (m->hdr.len < sizeof(q)) {
+    rsp_err(m);
+    return;
+  }
+  memcpy(&q, m->payload, sizeof(q));
+  for (i = 0; i < sizeof(out); i++) {
+    ((UINT8 *)&out)[i] = 0;
+  }
+  out.n = 0;
+  for (i = 0; i < 2u; i++) {
+    netdev_t *d = net_dev((int)(q.index + i));
+
+    if (d == 0) {
+      break;
+    }
+    copy_str(out.dev[i].name, sizeof(out.dev[i].name), d->name);
+    out.dev[i].link = d->link;
+    out.dev[i].state = d->state;
+    {
+      UINT32 k;
+
+      for (k = 0; k < 6u; k++) {
+        out.dev[i].mac[k] = d->mac[k];
+      }
+    }
+    out.n++;
+  }
+  answer(m, SYSINFO_RSP_NET, &out, sizeof(out));
+}
+
+static void req_ping(const ipc_msg_t *m) {
+  UINT32 ip = 0;
+  INT32  rc;
+
+  if (m->hdr.len >= 4u) {
+    memcpy(&ip, m->payload, 4);
+  }
+  rc = (INT32)net_ping(ip);
+  answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
+}
+
+static void req_tcp_test(const ipc_msg_t *m) {
+  UINT32 ip = 0;
+  UINT16 port = 0;
+  INT32  rc;
+
+  if (m->hdr.len >= 6u) {
+    memcpy(&ip, m->payload, 4);
+    memcpy(&port, m->payload + 4, 2);
+  }
+  rc = (INT32)net_tcp_test(ip, port);
+  answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
+}
+
+/* ---- task manager: rich records and actions --------------------------- */
+
+static void req_tasks2(const ipc_msg_t *m) {
+  sysinfo_list_req_t q;
+  sysinfo_tasks2_t   r;
+  UINT32             i;
+  UINT32             live = 0;
+  UINT32             seen = 0;
+  UINT32             out = 0;
+
+  if (m->hdr.len < sizeof(q)) {
+    rsp_err(m);
+    return;
+  }
+  memcpy(&q, m->payload, sizeof(q));
+  if (q.max == 0u || q.max > SYSINFO_RECS) {
+    q.max = SYSINFO_RECS;
+  }
+  for (i = 0; i < sizeof(r); i++) {
+    ((UINT8 *)&r)[i] = 0;
+  }
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    sched_info2_t t;
+
+    if (sched_task_info2(i, &t) == 0 && t.state != 3u) {
+      live++;
+    }
+  }
+  r.total = (UINT16)live;
+  for (i = 0; i < SCHED_MAX_TASKS && out < q.max; i++) {
+    sched_info2_t t;
+
+    if (sched_task_info2(i, &t) != 0) {
+      continue;
+    }
+    if (t.state == 3u) {
+      continue; /* EXITED: not shown in the task manager */
+    }
+    if (seen++ < q.index) {
+      continue;
+    }
+    memcpy(r.rec + out * sizeof(sched_info2_t), &t, sizeof(t));
+    out++;
+  }
+  r.n = (UINT8)out;
+  answer(m, SYSINFO_RSP_TASKS2, &r, sizeof(r));
+}
+
+static void req_task_action(const ipc_msg_t *m) {
+  sysinfo_tact_t a;
+  INT32          rc;
+
+  if (m->hdr.len < sizeof(a)) {
+    rsp_err(m);
+    return;
+  }
+  memcpy(&a, m->payload, sizeof(a));
+  switch (a.action) {
+  case 0:
+    rc = (INT32)sched_kill(a.pid);
+    break;
+  case 1:
+    rc = (INT32)sched_suspend(a.pid);
+    break;
+  case 2:
+    rc = (INT32)sched_resume(a.pid);
+    break;
+  default:
+    rc = -1;
+    break;
+  }
+  answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
+}
+
 static void req_spawn(const ipc_msg_t *m) {
   UINT8 which = 0xFFu;
   INT32 rc;
@@ -277,6 +447,24 @@ static void handle(const ipc_msg_t *m) {
     break;
   case SYSINFO_REQ_ACCENT:
     req_accent(m);
+    break;
+  case SYSINFO_REQ_NET:
+    req_net(m);
+    break;
+  case SYSINFO_REQ_NETDEVS:
+    req_netdevs(m);
+    break;
+  case SYSINFO_REQ_PING:
+    req_ping(m);
+    break;
+  case SYSINFO_REQ_TCP:
+    req_tcp_test(m);
+    break;
+  case SYSINFO_REQ_TASKS2:
+    req_tasks2(m);
+    break;
+  case SYSINFO_REQ_TACT:
+    req_task_action(m);
     break;
   case SYSINFO_REQ_SPAWN:
     req_spawn(m);

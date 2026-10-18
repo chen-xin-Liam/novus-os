@@ -59,6 +59,10 @@ int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot);
 /* Physical page backing `va`, or 0 when unmapped. */
 UINT64 vm_translate(vm_space_t *sp, UINT64 va);
 
+/* Pages this space owns: its private tables plus the user leaves in them.
+ * Used by the task manager to show per-task memory. */
+UINT32 vm_space_pages(vm_space_t *sp);
+
 /* Install the address space. Writing CR3 also flushes the TLB. */
 void vm_switch_cr3(UINT64 cr3);
 
