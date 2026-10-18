@@ -18,6 +18,8 @@
 #
 # Usage:
 #   make              build out/NOVUS.EFI
+#   make cppcc        build the host-side C++98 -> NUC compiler
+#   make cppcc-demo   compile the M7 Hello program to out/cppcc/hello.nuc
 #   make run          build, then boot the image in QEMU (MEM=4G by default)
 #   make iso          build the bootable live ISO (out/novus-live.iso);
 #                     prints the artifact again when it is already current
@@ -41,7 +43,11 @@ OBJCOPY := $(CROSS)objcopy
 
 # Fail early with a clear message when the cross compiler is missing.
 ifeq ($(shell command -v $(CC) 2>/dev/null),)
+ifeq ($(strip $(MAKECMDGOALS)),)
 $(error $(CC) not found in PATH. Install the mingw-w64 x86-64 cross toolchain (e.g. package gcc-mingw-w64-x86-64) or set CROSS=<toolchain-prefix>.)
+else ifneq ($(filter-out cppcc cppcc-demo,$(MAKECMDGOALS)),)
+$(error $(CC) not found in PATH. Install the mingw-w64 x86-64 cross toolchain (e.g. package gcc-mingw-w64-x86-64) or set CROSS=<toolchain-prefix>.)
+endif
 endif
 
 # ---------------------------------------------------------------------------
@@ -51,6 +57,9 @@ endif
 # with a menuconfig front-end is planned for a later milestone; keep
 # configs/novus_defconfig in sync with the top-level Kconfig file.
 -include configs/novus_defconfig
+
+# When enabled, `make run` also builds and stages the C++98 smoke program.
+CPPCC_RUN_DEP := $(if $(filter y,$(CONFIG_USER_CPPCC)),cppcc-demo,)
 
 # Guest memory handed to QEMU by 'make run'.
 MEM ?= 4G
@@ -211,7 +220,7 @@ all: banner out/NOVUS.EFI
 
 # Configuration summary printed before anything is built.
 banner:
-	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER) display=$(CONFIG_NOVUS_DISPLAY) gui=$(CONFIG_NOVUS_GUI) ipc=$(CONFIG_NOVUS_IPC) wm=$(CONFIG_NOVUS_WM)"
+    @echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER) display=$(CONFIG_NOVUS_DISPLAY) gui=$(CONFIG_NOVUS_GUI) ipc=$(CONFIG_NOVUS_IPC) wm=$(CONFIG_NOVUS_WM) cppcc=$(CONFIG_USER_CPPCC)"
 
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
@@ -319,7 +328,11 @@ out build:
 	mkdir -p $@
 
 # Build, then boot the image in QEMU.
-run: all
+run: all $(CPPCC_RUN_DEP)
+	@if [ "$(CONFIG_USER_CPPCC)" = "y" ]; then \
+        mkdir -p esp/APPS; \
+        cp out/cppcc/hello.nuc esp/APPS/DEMO.NUC; \
+    fi
 	scripts/run.sh "$(MEM)"
 
 # Remove all build artifacts.

@@ -358,12 +358,8 @@ int nkm_exit(void)
 }
 ```
 
-编译后由 `cppcc` / `nkm-sign` 工具：
-1. 编译目标文件；
-2. 按本规范拼出 NKM 文件；
-3. 将 hash+sig 字段清零；
-4. 计算 SHA256 填入 `module_hash`；
-5. 用内核私钥对 `module_hash` 做 Ed25519 签名，填入 `module_sig`。
+NUC 与 NKM 是不同格式：`cppcc` 只生成用户态 `.nuc`，不参与 NKM 目标文件编译或签名。
+当前仓库的 `tools/nkmgen` 是主机端 NKM 测试镜像生成器，复用内核 Ed25519/SHA 实现生成并签名测试模块；它不是通用 C/C++ NKM 编译器。通用驱动目标文件到 NKM 的生产工具链不属于 cppcc。
 
 ---
 

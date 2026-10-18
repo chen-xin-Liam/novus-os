@@ -54,6 +54,10 @@ CONFIG_NOVUS_INSTALLER=y
 CONFIG_USER_MOCHI=y
 CONFIG_USER_MOCHI_NUCUTIL=y
 
+# M7 C++98 compiler. `make` builds the host tool; `make run` compiles and
+# stages the Hello sample as APPS/DEMO.NUC for the boot-stage loader.
+CONFIG_USER_CPPCC=y
+
 # M4: scheduler, ring 3, syscalls and the NUC loader.
 CONFIG_NOVUS_SCHED=y
 
