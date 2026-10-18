@@ -235,7 +235,7 @@ MOCHI_PACK_ENABLED := $(if $(and $(filter y,$(CONFIG_USER_MOCHI)),$(MOCHI_PRESEN
 NUC_ESP_DEPS := $(if $(filter y,$(MOCHI_PACK_ENABLED)),$(NUC_APP))
 NUC_ESP_ARGS := $(if $(filter y,$(MOCHI_PACK_ENABLED)),$(NUC_APP):APPS/DEMO.NUC)
 CPPCC_ESP_DEPS := $(if $(filter y,$(CONFIG_USER_CPPCC)),$(CPPCC_HELLO_NUC))
-CPPCC_ESP_ARGS := $(if $(filter y,$(CONFIG_USER_CPPCC)),$(CPPCC_HELLO_NUC):APPS/DEMO.NUC)
+CPPCC_ESP_ARGS := $(if $(filter y,$(CONFIG_USER_CPPCC)),$(CPPCC_HELLO_NUC):DEMO.NUC)
 
 .PHONY: mochi-tools nuc-apps
 mochi-tools: $(MOCHI) $(NUCUTIL)

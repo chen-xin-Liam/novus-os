@@ -449,7 +449,7 @@ struct FunctionOutput {
     relocations: Vec<NucRelocation>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct LocalBinding {
     offset: i32,
     ty: Type,
@@ -989,7 +989,7 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
     }
 
     fn lookup_local(&self, name: &str) -> Option<LocalBinding> {
-        self.locals.iter().rev().find_map(|scope| scope.get(name).copied())
+        self.locals.iter().rev().find_map(|scope| scope.get(name).cloned())
     }
 
     fn allocate_local(&mut self, name: &str, ty: Type) -> Result<i32> {

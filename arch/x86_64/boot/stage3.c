@@ -907,13 +907,13 @@ static void app_load(void) {
   if (g_esp_root == NULL) {
     return;
   }
-  if (esp_read_reserved(L"APPS/DEMO.NUC", &base, &size) != 0) {
-    say_line(L"[NUC ] no APPS/DEMO.NUC on the ESP");
+  if (esp_read_reserved(L"DEMO.NUC", &base, &size) != 0) {
+    say_line(L"[NUC ] no DEMO.NUC on the ESP");
     return;
   }
   shm->app_img_base = base;
   shm->app_img_size = size;
-  say(L"[NUC ] APPS/DEMO.NUC staged: ");
+  say(L"[NUC ] DEMO.NUC staged: ");
   boot_put_dec(size);
   say_line(L" bytes for the kernel stage");
 }

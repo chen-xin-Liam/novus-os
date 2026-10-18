@@ -330,8 +330,8 @@ out build:
 # Build, then boot the image in QEMU.
 run: all $(CPPCC_RUN_DEP)
 	@if [ "$(CONFIG_USER_CPPCC)" = "y" ]; then \
-        mkdir -p esp/APPS; \
-        cp out/cppcc/hello.nuc esp/APPS/DEMO.NUC; \
+        mkdir -p esp; \
+        cp out/cppcc/hello.nuc esp/DEMO.NUC; \
     fi
 	scripts/run.sh "$(MEM)"
 
