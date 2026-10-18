@@ -348,6 +348,7 @@ novus-os/
 ├── graphics/           # NovusDisplay图形栈
 ├── wm/novus-wm/        # 窗口管理器+IPC
 ├── lib/                # 内核通用库（C/Rust混合）
+├── tools/              # 主机端镜像工具（mkfat/mkiso/mkfsnovus/mkdisk/nkmgen）
 ├── user/
 │   ├── shell/          # novus shell
 │   ├── cppcc/          # C++98编译器（Rust编写）

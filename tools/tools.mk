@@ -4,15 +4,19 @@
 # Three host programs produce the artefacts M3 boots from. They are built
 # with the host compiler and are not part of the kernel image:
 #
-#   mkfat      the FAT32 ESP image holding BOOTX64.EFI, the NovusFS system
-#              image and the *.nkm modules. FAT32 is the one filesystem
-#              every UEFI firmware reads without a driver of ours.
+#   mkfat      the FAT ESP image holding BOOTX64.EFI, the NovusFS system
+#              image and the *.nkm modules. FAT is the one filesystem
+#              every UEFI firmware reads without a driver of ours; the
+#              type is picked from the image size (FAT16 while the cluster
+#              count stays under the FAT32 minimum, FAT32 above it).
 #   mkiso      wraps that ESP in an ISO 9660 image with an El Torito boot
 #              entry, so the very same ESP also boots from a CD-ROM.
 #   mkfsnovus  a NovusFS system-partition image, compiled from the kernel's
 #              own fs/novusfs/*.c. Sharing the source is the point: a
 #              second implementation of the format could drift from the
 #              kernel's and write images the kernel cannot mount.
+#   mkdisk     a whole bootable disk (GPT, ESP, NovusFS) assembled on the
+#              host from kernel/gpt.c, for `make install`.
 #
 # Nothing under tools/ is linked into NOVUS.EFI.
 
@@ -25,6 +29,7 @@ TOOLS_OUT   := build/tools
 MKFAT       := $(TOOLS_OUT)/mkfat
 MKISO       := $(TOOLS_OUT)/mkiso
 MKFSNOVUS   := $(TOOLS_OUT)/mkfsnovus
+MKDISK      := $(TOOLS_OUT)/mkdisk
 
 # fs/novusfs is freestanding and declares memcpy/memset/memcmp itself,
 # with a 64-bit length. Renaming them keeps those declarations from
@@ -65,7 +70,13 @@ ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
 NOVUS_IMG := out/novus.img
 ISO_IMG   := out/novus-live.iso
+DISK_IMG  := out/novus-disk.img
 NKM_MOD   := out/test.nkm
+
+# Size of the host-built disk image. The ESP template and the system
+# partition together need a little over 20 MiB; the rest is room for the
+# backup GPT and for whatever the installed system grows into.
+DISK_SIZE_MB ?= 64
 
 # Seed of the development signing key. Deterministic on purpose: the
 # kernel carries the matching public key, so anyone regenerating the
@@ -73,9 +84,9 @@ NKM_MOD   := out/test.nkm
 NKM_SEED ?= $(shell python3 -c \
   "import hashlib;print(hashlib.sha256(b'novus nkm development signing key v1').hexdigest())")
 
-.PHONY: tools esp novus-img iso run-iso install nkm-test-module
+.PHONY: tools esp novus-img disk-img iso run-iso install nkm-test-module
 
-tools: $(MKFAT) $(MKISO) $(MKFSNOVUS)
+tools: $(MKFAT) $(MKISO) $(MKFSNOVUS) $(MKDISK)
 
 $(TOOLS_OUT):
 	mkdir -p $(TOOLS_OUT)
@@ -99,6 +110,12 @@ $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o: tools/mkfsnovus/mkfsnovus.c \
                                           | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
+$(TOOLS_OUT)/tools_mkdisk_mkdisk.o: tools/mkdisk/mkdisk.c | $(TOOLS_OUT)
+	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
+
+$(TOOLS_OUT)/kernel_gpt.o: kernel/gpt.c | $(TOOLS_OUT)
+	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
+
 # --gc-sections: the precompiled core rlib carries a DWARF reference to
 # Rust's unwind personality even under panic=abort, and nothing defines
 # it in a C-hosted binary. Novus never unwinds, so discarding the unused
@@ -106,6 +123,13 @@ $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o: tools/mkfsnovus/mkfsnovus.c \
 # name that changes with the compiler.
 $(MKFSNOVUS): $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o $(NOVUSFS_HOST_OBJS) \
               $(RUST_HOST_LIB)
+	$(HOSTCC) -Wl,--gc-sections -o $@ $^
+
+# mkdisk writes the same GPT the boot-stage installer writes: kernel/gpt.c
+# is linked in unchanged, so a host-built disk and a live-installed disk
+# agree on where every partition starts.
+$(MKDISK): $(TOOLS_OUT)/tools_mkdisk_mkdisk.o $(TOOLS_OUT)/kernel_gpt.o \
+           $(RUST_HOST_LIB)
 	$(HOSTCC) -Wl,--gc-sections -o $@ $^
 
 $(RUST_HOST_LIB): $(RUST_DEPS)
@@ -159,10 +183,18 @@ $(ISO_IMG): $(MKISO) $(ESP_IMG) | out
 run-iso: iso
 	scripts/run-iso.sh "$(MEM)"
 
+# A complete bootable disk: GPT, ESP and the NovusFS system partition,
+# the same layout the live installer writes. Built here so a device or an
+# image file can be seeded without a running Novus.
+disk-img: $(DISK_IMG)
+
+$(DISK_IMG): $(MKDISK) $(ESP_TPL) $(NOVUS_IMG) | out
+	$(MKDISK) $@ $(DISK_SIZE_MB) $(ESP_TPL) $(NOVUS_IMG)
+
 # Write a prepared disk image to a device or to a file. Refuses to touch
 # anything that is not explicitly named on the command line.
-install: novus-img
-	scripts/install.sh "$(DEVICE)"
+install: disk-img
+	DEVICE="$(DEVICE)" scripts/install.sh
 
 # Regenerate the signed test module by hand after changing the NKM
 # layout or the root key. The build already does this through the

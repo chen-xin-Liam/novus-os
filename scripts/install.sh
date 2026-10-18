@@ -2,9 +2,12 @@
 #
 # Novus OS - host-side disk installer
 #
-# Writes the prepared system image (out/novus.img, produced by mkfsnovus
-# from the kernel's own filesystem code, Merkle tree already built) onto
-# a block device or into an image file.
+# Writes the prepared disk image (out/novus-disk.img: GPT, EFI system
+# partition and a NovusFS system partition whose Merkle tree mkfsnovus
+# already built from the kernel's own filesystem code) onto a block
+# device or into an image file. The result boots: the firmware finds
+# EFI/BOOT/BOOTX64.EFI on the ESP and the A core verifies the system
+# partition against its root hash.
 #
 # This is the host half of the install story. The boot-stage installer
 # writes a full disk - GPT, ESP and the NovusFS partition - from inside
@@ -24,7 +27,7 @@ cd "$(dirname "$0")/.."
 
 DEVICE="${DEVICE:-}"
 SIZE_MB="${SIZE_MB:-0}"
-IMG="out/novus.img"
+IMG="out/novus-disk.img"
 
 if [ -z "$DEVICE" ]; then
     echo "usage: DEVICE=<device-or-file> [SIZE_MB=<n>] scripts/install.sh" >&2

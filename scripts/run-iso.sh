@@ -3,7 +3,7 @@
 # Novus OS - QEMU runner for the live ISO
 #
 # Boots out/novus-live.iso as a CD-ROM. The firmware reads the El Torito
-# boot catalog, loads the embedded FAT32 ESP image as a virtual disk and
+# boot catalog, exposes the embedded FAT ESP image as a virtual disk and
 # starts EFI/BOOT/BOOTX64.EFI from it - the same path a real machine
 # takes, which is the whole point of building an ISO rather than booting
 # the bare .EFI off a vvfat directory.

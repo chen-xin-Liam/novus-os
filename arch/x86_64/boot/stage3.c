@@ -816,8 +816,41 @@ static void modules_load(void) {
 /* ------------------------------------------------------------------ */
 #if CONFIG_NOVUS_INSTALLER
 
-/* Pick a plausible target: a whole disk (not a partition), writable and
- * not removable. Returns NULL when there is none. */
+/* A disk the installer must keep its hands off. Two cases, both cheap to
+ * recognise and both exactly the disks that must not be overwritten:
+ *
+ *   - a superfloppy FAT volume (a boot sector and no partition table),
+ *     which is what the live medium itself - and a stick of files - looks
+ *     like. Booting from a hard disk and then installing "to the first
+ *     writable disk" would otherwise wipe the medium we are running from;
+ *   - a disk whose GPT already holds an EFI system partition, i.e. some
+ *     other operating system, or the Novus installation we booted from.
+ *
+ * An unreadable disk is refused too: guessing here is not worth a
+ * destroyed volume. */
+static int install_disk_is_foreign(blkdev_t *d) {
+  static UINT8 first[BLKDEV_SECTOR_SIZE];
+  gpt_table_t  gpt;
+  gpt_part_t   part;
+
+  if (blkdev_read(d, 0, 1, first) != 0) {
+    return 1;
+  }
+  if (first[510] == 0x55u && first[511] == 0xaau &&
+      (memcmp(first + 54, "FAT16   ", 8) == 0 ||
+       memcmp(first + 54, "FAT32   ", 8) == 0 ||
+       memcmp(first + 82, "FAT32   ", 8) == 0)) {
+    return 1;
+  }
+  if (gpt_read(d, &gpt) == 0 && gpt_find_esp(&gpt, &part) == 0) {
+    return 1;
+  }
+  return 0;
+}
+
+/* Pick a plausible target: a whole disk (not a partition), writable, not
+ * removable and not already somebody's system. Returns NULL when there is
+ * none. */
 static blkdev_t *install_pick_target(void) {
   UINTN i;
 
@@ -834,6 +867,9 @@ static blkdev_t *install_pick_target(void) {
     /* A device too small to hold a GPT and both partitions is not a
      * usable target however willing it looks. */
     if (d->sector_count < 4096u) {
+      continue;
+    }
+    if (install_disk_is_foreign(d)) {
       continue;
     }
     return d;
