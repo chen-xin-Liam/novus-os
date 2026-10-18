@@ -14,6 +14,7 @@
 #include "shared_mem.h"
 #include "bootio.h"
 #include "stage3.h"
+#include "nd.h"
 
 /* A-core switch (README 2.2 step 7): 1 = skip the boot self-check
  * output. The Makefile passes -DCONFIG_NOVUS_A_CORE_DISABLE=0/1. */
@@ -348,6 +349,22 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
    * All of it needs boot services, so all of it happens here. */
   stage3_prepare();
   stage3_menu();
+
+#if CONFIG_NOVUS_DISPLAY
+  /* M5: ask the firmware for the current Graphics Output mode while the
+   * protocol still exists. Only the numbers are kept; the framebuffer is
+   * MMIO and stays valid after ExitBootServices. */
+  if (nd_capture_boot(SystemTable)) {
+    const nd_display_t *d = nd_display();
+    boot_puts(L"[BOOT] NovusDisplay framebuffer: ");
+    boot_put_dec(d->width);
+    boot_puts(L"x");
+    boot_put_dec(d->height);
+    boot_puts(L"\r\n");
+  } else {
+    boot_puts(L"[BOOT] NovusDisplay: no linear framebuffer, VGA fallback\r\n");
+  }
+#endif
 
   boot_puts(L"[BOOT] Exiting boot services, entering BSP kernel stage...\r\n");
 

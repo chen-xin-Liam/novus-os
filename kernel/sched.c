@@ -15,6 +15,7 @@
 #include "mm.h"
 #include "pmm.h"
 #include "vm.h"
+#include "nd.h"
 
 /* Written by trap.S: the stack the syscall gate switches to, and the
  * gate itself. */
@@ -379,6 +380,13 @@ void sched_tick(void) {
     kputs(g_current->name);
     kputs("\n");
   }
+
+#if CONFIG_NOVUS_DISPLAY
+  /* M5: NovusDisplay shares the tick. Input is polled (no new IRQ lines)
+   * and at most one damage rectangle is repainted per event, so the cost
+   * stays bounded and the scheduler's own work is unaffected. */
+  nd_demo_tick();
+#endif
 }
 
 void sched_exit_current(int code) {

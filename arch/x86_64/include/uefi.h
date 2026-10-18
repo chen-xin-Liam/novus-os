@@ -459,6 +459,66 @@ struct _EFI_BLOCK_IO_PROTOCOL {
 };
 
 /* ------------------------------------------------------------------ */
+/* Graphics Output protocol (M5: NovusDisplay framebuffer backend)      */
+/* ------------------------------------------------------------------ */
+/* The boot stage asks the firmware for the current mode and hands the
+ * framebuffer base, size and pitch to the kernel stage through a plain
+ * global: both stages are the same loaded image, so a variable written
+ * before ExitBootServices is still readable afterwards. The framebuffer
+ * itself is MMIO and stays valid; only the protocol callbacks do not. */
+
+#define EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID                                 \
+  NOVUS_EFI_GUID(0x9042A9DE, 0x23DC, 0x4A38, 0x96, 0xFB, 0x7A, 0xDE, 0xD0, \
+                 0x80, 0x51, 0x6A)
+
+typedef struct {
+  UINT32 RedMask;
+  UINT32 GreenMask;
+  UINT32 BlueMask;
+  UINT32 ReservedMask;
+} EFI_PIXEL_BITMASK;
+
+/* Byte order inside one pixel. QEMU/OVMF reports BGR for its stdvga
+ * linear framebuffer; the renderer keeps colours as 0x00RRGGBB either
+ * way and converts on the way out. */
+typedef enum {
+  PixelRedGreenBlueReserved8BitPerColor    = 0,
+  PixelBlueGreenRedReserved8BitPerColor    = 1,
+  PixelBitMask                             = 2,
+  PixelBltOnly                             = 3,
+  PixelFormatMax                           = 4
+} EFI_GRAPHICS_PIXEL_FORMAT;
+
+typedef struct {
+  UINT32                    Version;
+  UINT32                    HorizontalResolution;
+  UINT32                    VerticalResolution;
+  EFI_GRAPHICS_PIXEL_FORMAT PixelFormat;
+  EFI_PIXEL_BITMASK         PixelInformation;
+  UINT32                    PixelsPerScanLine;
+} EFI_GRAPHICS_OUTPUT_MODE_INFORMATION;
+
+typedef struct {
+  UINT32                               MaxMode;
+  UINT32                               Mode;
+  EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *Info;
+  UINTN                                SizeOfInfo;
+  EFI_PHYSICAL_ADDRESS                 FrameBufferBase;
+  UINTN                                FrameBufferSize;
+} EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE;
+
+typedef struct _EFI_GRAPHICS_OUTPUT_PROTOCOL EFI_GRAPHICS_OUTPUT_PROTOCOL;
+
+/* Only QueryMode and Mode are used; the other members keep the layout
+ * identical to the specification. */
+struct _EFI_GRAPHICS_OUTPUT_PROTOCOL {
+  VOID                            *QueryMode;
+  VOID                            *SetMode;
+  VOID                            *Blt;
+  EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
+};
+
+/* ------------------------------------------------------------------ */
 /* Simple File System / File protocols                                 */
 /* ------------------------------------------------------------------ */
 /* Novus never parses FAT itself: the firmware ships a FAT driver and

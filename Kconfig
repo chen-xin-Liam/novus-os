@@ -112,3 +112,23 @@ config NOVUS_SCHED
 	  the LAPIC timer, per-process address spaces, the syscall gate and
 	  the NUC loader. The scheduler comes up on the B core; the A core
 	  stays parked (README 2.2 step 6).
+
+config NOVUS_DISPLAY
+	bool
+	default y
+	help
+	  Build NovusDisplay (README part 11): the Graphics Output Protocol
+	  framebuffer HAL captured before ExitBootServices, the 2D software
+	  renderer (rectangles, lines, circles, rounded shapes, alpha blend,
+	  blitting, the built-in 5x7 font), PS/2 keyboard/mouse polling and
+	  the M5 demo desktop. Without a usable linear framebuffer the VGA
+	  text console stays active as the fallback.
+
+config NOVUS_GUI
+	bool
+	default y
+	depends on NOVUS_DISPLAY
+	help
+	  Build the NovusGUI widget library: window, panel, label, button,
+	  checkbox, text box, slider, progress bar, list and tree. Requires
+	  NOVUS_DISPLAY.

@@ -81,6 +81,12 @@ SRC := arch/x86_64/boot/main.c \
        kernel/blkdev.c \
        kernel/gpt.c \
        kernel/nksym.c \
+       graphics/nd_font.c \
+       graphics/nd_core.c \
+       graphics/nd_hal.c \
+       graphics/nd_input.c \
+       graphics/nvgui.c \
+       graphics/nd_demo.c \
        fs/novusfs/super.c \
        fs/novusfs/balloc.c \
        fs/novusfs/inode.c \
@@ -94,7 +100,7 @@ SRC := arch/x86_64/boot/main.c \
 # preprocessor over the file first; gcc invokes the assembler itself.
 ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S
 
-INC := -Iarch/x86_64/include -Ikernel -Ifs/novusfs -Isecurity/nkm
+INC := -Iarch/x86_64/include -Ikernel -Igraphics -Ifs/novusfs -Isecurity/nkm
 
 # Freestanding UEFI environment: no libc, no host runtime, no stack
 # protector, no PIC, no Red Zone (interrupts may clobber it), small code
@@ -111,7 +117,9 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_MERKLE=$(if $(filter y,$(CONFIG_NOVUS_MERKLE)),1,0) \
           -DCONFIG_NOVUS_NKM=$(if $(filter y,$(CONFIG_NOVUS_NKM)),1,0) \
           -DCONFIG_NOVUS_INSTALLER=$(if $(filter y,$(CONFIG_NOVUS_INSTALLER)),1,0) \
-          -DCONFIG_NOVUS_SCHED=$(if $(filter y,$(CONFIG_NOVUS_SCHED)),1,0)
+          -DCONFIG_NOVUS_SCHED=$(if $(filter y,$(CONFIG_NOVUS_SCHED)),1,0) \
+          -DCONFIG_NOVUS_DISPLAY=$(if $(filter y,$(CONFIG_NOVUS_DISPLAY)),1,0) \
+          -DCONFIG_NOVUS_GUI=$(if $(filter y,$(CONFIG_NOVUS_GUI)),1,0)
 
 # Link as a PE32+ EFI application: subsystem 10 = EFI application,
 # image entry point is efi_main.
@@ -181,7 +189,7 @@ all: banner out/NOVUS.EFI
 
 # Configuration summary printed before anything is built.
 banner:
-	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER)"
+	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER) display=$(CONFIG_NOVUS_DISPLAY) gui=$(CONFIG_NOVUS_GUI)"
 
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the

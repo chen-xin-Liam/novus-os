@@ -31,6 +31,8 @@
 #include "blkdev.h"
 #include "nksym.h"
 #include "nkm.h"
+/* M5: NovusDisplay and the GUI widget library. */
+#include "nd.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
@@ -75,6 +77,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 
   heap_init();
   heap_selftest();
+
+  /* M5: NovusDisplay. Bind a surface to the framebuffer the boot stage
+   * captured, then run the renderer/widget self test on an off-screen
+   * surface. Both need the heap, neither needs the scheduler. */
+#if CONFIG_NOVUS_DISPLAY
+  nd_init();
+  nd_selftest();
+#endif
 
   /* M2: NovusFS on the ramdisk. It runs here because the filesystem
    * allocates through kmalloc, and before the AP is woken so that no
@@ -235,6 +245,13 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
       kputs("[NUC] no application staged, running idle only\n");
     }
   }
+
+  /* M5: paint the demo desktop last, so the display shows the finished
+   * scene instead of being overwritten by later boot output. The timer
+   * tick drives input and partial repaints once ring 3 is running. */
+#if CONFIG_NOVUS_DISPLAY
+  nd_demo_init();
+#endif
 
   kputs("[HALT] entering the scheduler (the A core stays parked)\n");
   sched_start();
