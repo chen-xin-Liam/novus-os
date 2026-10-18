@@ -66,6 +66,11 @@ static void put_be32(uint8_t *p, uint32_t v) {
   p[3] = (uint8_t)(v & 0xffu);
 }
 
+static uint32_t read_le32(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
 static uint8_t *sector(uint64_t lba) {
   if (lba >= total_sectors) {
     die("internal: LBA out of range");
@@ -196,31 +201,29 @@ static void write_terminator(void) {
 
 /* El Torito boot catalog.
  *
- * Five entries in two sections, and the platform id is what makes a UEFI
- * firmware see the disc as bootable at all:
+ * Three entries, and the platform id is what makes a UEFI firmware see
+ * the disc as bootable at all:
  *
- *   0  validation entry       header 0x01, platform 0x00
+ *   0  validation entry       header 0x01, platform 0x00, 0x55/0xAA
  *  32  section header         header 0x91, platform 0xEF  <- UEFI looks
  *                             for this platform id; without it the
  *                             firmware sees no EFI boot image and
  *                             reports "no bootable option"
- *  64  section entry          no emulation, points at the ESP
- *  96  section header         header 0x91, platform 0xEF
- * 128  section entry          hard-disk emulation, same image
+ *  64  section entry          bootable, no emulation, the ESP image
  *
- * The first section is no emulation, which is what the UEFI
- * specification describes for an EFI boot image and what every
- * distribution's install media uses: the firmware loads the image as a
- * virtual disk in its own right, rather than pretending it is a floppy
- * or a hard disk. The second is the hard-disk-emulation form of the very
- * same image, for the firmwares that only look for that.
+ * No emulation is what the UEFI specification describes for an EFI boot
+ * image and what every distribution's install media uses: the firmware
+ * loads the image as a virtual disk in its own right, rather than
+ * pretending it is a floppy or a hard disk.
  *
- * Neither form is relied on to hand us a filesystem: the loader reads
- * the ESP through the firmware's SimpleFileSystem when one is there, and
- * falls back to its own FAT reader over block I/O when one is not - so
- * either way the live root and the modules come off the same image.
+ * The loader does not rely on being handed a filesystem for it either: it
+ * reads the ESP through the firmware's SimpleFileSystem when one is
+ * there, and falls back to its own FAT reader over block I/O when one is
+ * not - and it was itself loaded out of that image, so at least one of
+ * the two is guaranteed to work.
  *
- * The validation checksum is the negated sum of the entry's 16 u16s. */
+ * The validation checksum is the negated sum of the entry's 16 u16s, so
+ * that the whole entry adds up to zero. */
 /* One section entry: bootable, `media` emulation, pointing at the image.
  *
  * `sector_count` is in 512-byte units because that is the sector size of
@@ -263,24 +266,25 @@ static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
   }
   put_le16(p + 28, (uint16_t)(0x10000u - (sum & 0xffffu)));
 
-  /* Section header: platform EFI, one entry follows, another section
-   * after it (so not the final one). */
-  p[32] = 0x90; /* section header, more follow */
+  /* Section header: platform EFI, one entry follows, and it is the last
+   * section in the catalog. */
+  p[32] = 0x91; /* section header, final */
   p[33] = 0xef; /* platform: EFI */
   put_le16(p + 34, 1); /* number of section entries */
   memset(p + 36, ' ', 28);
   memcpy(p + 36, "EFI", 3);
 
-  /* Section entry: bootable, no emulation, the ESP image. */
+  /* Section entry: bootable, no emulation, the ESP image.
+   *
+   * No emulation and nothing else. The image is a superfloppy FAT
+   * volume - its first sector is a FAT boot sector, not a partition
+   * table - so it cannot be offered as hard-disk emulation as well:
+   * a firmware that takes that path reads LBA 0 looking for a partition
+   * table, finds a boot sector instead, and reports no bootable option
+   * on a medium that is in fact perfectly good. Offering an entry that
+   * is guaranteed to fail on the firmwares that pick it is worse than
+   * offering one entry that every UEFI firmware handles. */
   write_section_entry(p + 64, 0x00, boot_lba, boot_sectors);
-
-  /* Second section: the same image presented as a hard disk. */
-  p[96] = 0x91; /* section header, final */
-  p[97] = 0xef; /* platform: EFI */
-  put_le16(p + 98, 1);
-  memset(p + 100, ' ', 28);
-  memcpy(p + 100, "EFI", 3);
-  write_section_entry(p + 128, 0x04, boot_lba, boot_sectors);
 }
 
 /* A partition table in the ISO's system area, which the first 32 KiB of
@@ -366,9 +370,97 @@ static void write_root_dir(void) {
   (void)off;
 }
 
+/* Check the finished image against what its own structures claim, before
+ * the file is written out.
+ *
+ * Everything above is written blind into a buffer: an offset that is off
+ * by a few bytes still produces a file that looks finished, and the
+ * machine that discovers it does not boot is the user's. The point of
+ * these checks is that a catalog pointer that lands on the wrong sector,
+ * a missing 0x55/0xAA, a checksum that does not add up, or a boot entry
+ * that does not point at the ESP image all fail here, at build time, with
+ * the reason on the terminal - instead of on someone's laptop as "no
+ * bootable device".
+ *
+ * The last two are the ones that say the image really is a boot image:
+ * the sector the catalog names has a FAT boot sector in it, and the
+ * directory entry for the ESP image names the same sector. */
+static void verify_image(uint32_t catalog_lba, uint32_t boot_lba,
+                         uint32_t boot_sectors) {
+  const uint8_t *brvd = sector(BRVD_LBA);
+  const uint8_t *cat = sector(catalog_lba);
+  const uint8_t *mbr = sector(0);
+  const uint8_t *esp = sector(boot_lba);
+  uint32_t       sum = 0;
+  uint32_t       i;
+
+  if (brvd[0] != 0u || memcmp(brvd + 1, "CD001", 5) != 0 ||
+      memcmp(brvd + 7, "EL TORITO SPECIFICATION", 23) != 0) {
+    die("boot record volume descriptor is malformed");
+  }
+  if (read_le32(brvd + 71) != catalog_lba || catalog_lba == 0u) {
+    die("the boot catalog pointer does not reach the catalog");
+  }
+
+  if (cat[0] != 0x01u || cat[30] != 0x55u || cat[31] != 0xaau) {
+    die("the boot catalog has no validation entry");
+  }
+  for (i = 0; i < 16u; i++) {
+    sum += (uint32_t)cat[i * 2] | ((uint32_t)cat[i * 2 + 1] << 8);
+  }
+  if ((sum & 0xffffu) != 0u) {
+    die("the boot catalog checksum does not add up to zero");
+  }
+  if (cat[32] != 0x91u || cat[33] != 0xefu) {
+    die("the boot catalog has no EFI platform section");
+  }
+  if (cat[64] != 0x88u || cat[65] != 0x00u) {
+    die("the boot entry is not a bootable no-emulation image");
+  }
+  if (read_le32(cat + 64 + 8) != boot_lba ||
+      (uint32_t)(cat[64 + 6] | ((uint32_t)cat[64 + 7] << 8)) !=
+          boot_sectors) {
+    die("the boot entry does not point at the ESP image");
+  }
+
+  if (esp[510] != 0x55u || esp[511] != 0xaau) {
+    die("the sector the catalog points at is not a bootable FAT volume");
+  }
+  {
+    const uint8_t *dir = sector(ROOT_DIR_LBA);
+    uint32_t       off = 0;
+    int            found = 0;
+
+    while (off + 34u <= ISO_SECTOR && dir[off] != 0u) {
+      if (dir[off + 32] == 9u &&
+          memcmp(dir + off + 33, "ESP.IMG;1", 9) == 0) {
+        if (read_le32(dir + off + 2) != boot_lba) {
+          die("the ESP image's directory extent is not the boot image");
+        }
+        found = 1;
+        break;
+      }
+      off += (uint32_t)dir[off];
+    }
+    if (!found) {
+      die("the ESP image is not in the ISO directory");
+    }
+  }
+
+  /* The isohybrid table is what makes the same file bootable off a USB
+   * stick, where it is no longer a disc. It has to cover the image at
+   * its byte offset in the file, in 512-byte sectors. */
+  if (mbr[510] != 0x55u || mbr[511] != 0xaau || mbr[450] != 0xefu ||
+      read_le32(mbr + 454) != boot_lba * (ISO_SECTOR / 512u) ||
+      read_le32(mbr + 458) != boot_sectors) {
+    die("the isohybrid partition table does not cover the ESP image");
+  }
+}
+
 int main(int argc, char **argv) {
   const char *volume_id = "NOVUS_LIVE";
   uint32_t catalog_lba;
+  uint32_t units; /* size of the embedded ESP in 512-byte units */
   uint64_t reserved;
 
   if (argc < 3) {
@@ -418,7 +510,7 @@ int main(int argc, char **argv) {
    * sector count here would tell the firmware the disk is a quarter of
    * its real size. */
   {
-    uint32_t units = (uint32_t)((esp_bytes + 511u) / 512u);
+    units = (uint32_t)((esp_bytes + 511u) / 512u);
 
     write_catalog(catalog_lba, FILE_LBA, units);
     /* The MBR counts in 512-byte sectors too, and FILE_LBA counts in
@@ -445,6 +537,11 @@ int main(int argc, char **argv) {
     }
   }
   fclose(esp_file);
+
+  /* Now that the ESP image is in place: check the boot structures
+   * against what they claim, and refuse to write a file that would not
+   * boot. */
+  verify_image(catalog_lba, FILE_LBA, units);
 
   {
     FILE *out = fopen(argv[1], "wb");
