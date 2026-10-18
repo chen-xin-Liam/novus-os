@@ -83,8 +83,12 @@ typedef struct {
   UINT32 boot_mode;                /* 0x2C0: SHM_BOOT_MODE_*            */
   UINT32 nkm_status;               /* 0x2C4: SHM_NKM_*                  */
   UINT32 nkm_loaded;               /* 0x2C8: modules that passed        */
+  UINT64 nkm_img_base;             /* 0x2D0: reserved pages holding the
+                                    *        module image read off the
+                                    *        ESP (physical address)     */
+  UINT64 nkm_img_size;             /* 0x2D8: bytes                      */
 
-  UINT8  reserved[7476];           /* 0x2CC: pad to exactly 8 KiB       */
+  UINT8  reserved[7456];           /* 0x2E0: pad to exactly 8 KiB       */
 } shared_mem_t;
 
 /* Frozen-layout guarantees; a violation here is a spec 2.3 break. */
@@ -99,7 +103,11 @@ _Static_assert(__builtin_offsetof(shared_mem_t, merkle_status) == 0x284,
                "shared_mem frozen layout drift: merkle_status");
 _Static_assert(__builtin_offsetof(shared_mem_t, boot_mode) == 0x2C0,
                "shared_mem frozen layout drift: boot_mode");
-_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x2CC,
+_Static_assert(__builtin_offsetof(shared_mem_t, nkm_img_base) == 0x2D0,
+               "shared_mem frozen layout drift: nkm_img_base");
+_Static_assert(__builtin_offsetof(shared_mem_t, nkm_img_size) == 0x2D8,
+               "shared_mem frozen layout drift: nkm_img_size");
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x2E0,
                "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the block at SHARED_MEM_PHYS

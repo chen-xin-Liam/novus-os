@@ -74,6 +74,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/smp.c \
        kernel/blkdev.c \
        kernel/gpt.c \
+       kernel/nksym.c \
        fs/novusfs/super.c \
        fs/novusfs/balloc.c \
        fs/novusfs/inode.c \
@@ -223,6 +224,11 @@ build/$(subst /,_,$(basename $(1))).o: $(1) | build
 	$$(CC) $$(CFLAGS) -c $$< -o $$@
 endef
 $(foreach src,$(SRC) $(ASM_SRC),$(eval $(call COMPILE_rule,$(src))))
+
+# nkm.c embeds the generated test module array. Without this edge a
+# regenerated module (make nkm-test-module) leaves the object untouched
+# and the kernel keeps carrying a module image that exists nowhere else.
+build/security_nkm_nkm.o: security/nkm/nkm_test_module.h
 
 # Output directories.
 out build:

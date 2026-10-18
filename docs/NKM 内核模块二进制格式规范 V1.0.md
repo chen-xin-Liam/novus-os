@@ -28,8 +28,8 @@ NKM（Novus Kernel Module）是 Novus OS 的内核动态模块格式，扩展名
 
 ```
 偏移 0x0000 ┌──────────────────────────────┐
-            │  NKM Header (nkm_hdr_t)      │   固定 128 字节
-偏移 0x0080 ├──────────────────────────────┤
+            │  NKM Header (nkm_hdr_t)      │   固定 208 字节
+偏移 0x00D0 ├──────────────────────────────┤
             │  Module Dependencies         │   dep_count × nkm_dep_t (16B/条)
 偏移 ...    ├──────────────────────────────┤
             │  Segment Table               │   seg_count × nkm_segment_t (32B/条)
@@ -48,7 +48,12 @@ NKM（Novus Kernel Module）是 Novus OS 的内核动态模块格式，扩展名
 
 ## 3. NKM Header（文件头）
 
-固定长度 **128 字节**，位于文件偏移 `0x0000`，packed。
+固定长度 **208 字节**（`0x00D0`），位于文件偏移 `0x0000`，packed。
+
+> 修订说明：本节原文写作「128 字节」，与 3.2 的字段偏移表矛盾——表中
+> `reserved[32]` 位于 `0xB0`，加 32 字节后头部实际结束于 `0xD0`；6.3 的
+> 摘要规则（清零 `0x50..0xB0`）也只在 208 字节布局下成立。现按**偏移表**
+> 统一为 208 字节，3.2 字段定义与 3.3 类型编号均未改动。
 
 ### 3.1 结构体定义
 
@@ -58,7 +63,7 @@ NKM（Novus Kernel Module）是 Novus OS 的内核动态模块格式，扩展名
 typedef struct __attribute__((packed)) {
     uint8_t  magic[4];           // 0x00  "NKM!" = 4E 4B 4D 21
     uint16_t abi_version;        // 0x04  bit[0..7]=minor, bit[8..15]=major
-    uint16_t header_size;        // 0x06  = 128 (0x80)，便于扩展
+    uint16_t header_size;        // 0x06  = 208 (0xD0)，便于扩展
     uint64_t min_kernel_ver;     // 0x08  最低兼容内核版本
     uint32_t module_type;        // 0x10  模块类型（驱动/FS/兼容层...）
     uint16_t seg_count;           // 0x14  段数量
@@ -73,7 +78,7 @@ typedef struct __attribute__((packed)) {
     uint8_t  module_hash[32];     // 0x50  模块本体 SHA256（签名校验字段）
     uint8_t  module_sig[64];     // 0x70  Ed25519 签名
     uint8_t  reserved[0x20];      // 0xB0  预留 32 字节
-} nkm_hdr_t;                        // 总大小 128 字节 (0x80)
+} nkm_hdr_t;                        // 总大小 208 字节 (0xD0)
 ```
 
 ### 3.2 字段逐字节定义
@@ -82,7 +87,7 @@ typedef struct __attribute__((packed)) {
 |---|---|---|---|
 | 0x00 | 4 | magic | 固定 `NKM!`，不匹配拒绝加载 |
 | 0x04 | 2 | abi_version | 高字节=major，低字节=minor。当前 `0x0100` |
-| 0x06 | 2 | header_size | 固定 128（0x80），未来扩展用 |
+| 0x06 | 2 | header_size | 固定 208（0xD0），未来扩展用 |
 | 0x08 | 8 | min_kernel_ver | 加载时校验 `内核版本 >= min_kernel_ver` |
 | 0x10 | 4 | module_type | 见 §3.3 |
 | 0x14 | 2 | seg_count | 段数，1~16 |
@@ -238,7 +243,7 @@ int nkm_exit(void);
 ```
 1. nkm_load(path) 被调用
 2. 校验调用者 cap_check(mod.load)，无权限 → NOVUS_EPERM
-3. VFS 打开文件，读取前 128 字节（Header）
+3. VFS 打开文件，读取前 208 字节（Header）
 4. 校验 magic == "NKM!"
 5. 校验 abi_version 主版本号
 6. 校验 min_kernel_ver <= 当前内核版本
@@ -311,7 +316,7 @@ int nkm_exit(void);
 ```
 magic:          4E 4B 4D 21  ("NKM!")
 abi_version:    00 01        (major=1, minor=0)
-header_size:    80 00        (128)
+header_size:    D0 00        (208)
 min_kernel_ver: 00 00 00 00 00 00 00 01   (要求内核 >= 1.0)
 module_type:    00 00 00 00  (DRIVER)
 seg_count:      02 00         (2段)
@@ -366,7 +371,7 @@ int nkm_exit(void)
 
 本规范为 NKM 内核模块格式唯一基准文档。约束：
 
-- Header 128 字节布局；
+- Header 208 字节布局（0x00D0），含 reserved[32]；
 - 哈希跳过 0x50..0xB0（hash+sig 字段）后计算 SHA256；
 - Ed25519 签名原文 = `module_hash`（32 字节）；
 - 内核公钥池最多 4 把，编译时固化；

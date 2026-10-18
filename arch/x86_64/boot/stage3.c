@@ -772,43 +772,36 @@ static int syspart_verify(void) {
  * the same reason everything else disk-related is: the firmware FAT
  * driver stops working at ExitBootServices. */
 
+/* Stage a module for the kernel.
+ *
+ * The boot stage is the only phase that can read the ESP (the firmware's
+ * FAT driver dies at ExitBootServices), but it is not the phase that can
+ * load a module: mapping segments needs the PMM and the heap, and both
+ * belong to the kernel stage. So the image is read into reserved pages
+ * here - the same trick that carries the live root across - and the
+ * kernel does the actual load from those pages. */
 static void modules_load(void) {
   shared_mem_t *shm = shared_mem_get();
-  UINT8        *img = NULL;
-  UINT64        len = 0;
+  UINT64        base = 0;
+  UINT64        size = 0;
 
   shm->nkm_status = SHM_NKM_UNKNOWN;
   shm->nkm_loaded = 0;
+  shm->nkm_img_base = 0;
+  shm->nkm_img_size = 0;
 
   if (g_esp_root == NULL) {
     return;
   }
-  if (esp_read(L"TEST.NKM", &img, &len) != 0) {
-    say_line(L"[NKM ] no NOVUS\\TEST.NKM on the ESP");
+  if (esp_read_reserved(L"TEST.NKM", &base, &size) != 0) {
+    say_line(L"[NKM ] no TEST.NKM on the ESP");
     return;
   }
-
-  {
-    int rc = nkm_load(img, len);
-
-    if (rc >= 0) {
-      const nkm_module_t *m = nkm_get((UINTN)rc);
-
-      shm->nkm_status = SHM_NKM_OK;
-      shm->nkm_loaded = 1;
-      say(L"[NKM ] TEST.NKM accepted, digest ");
-      if (m != NULL) {
-        hex8(m->digest, 8);
-      }
-      say_line(L"...");
-    } else {
-      shm->nkm_status = SHM_NKM_REFUSED;
-      say(L"[NKM ] TEST.NKM refused: ");
-      boot_put_ascii((const CHAR8 *)nkm_reject_text(rc), 64);
-      say_line(L"");
-    }
-  }
-  efi_free(img);
+  shm->nkm_img_base = base;
+  shm->nkm_img_size = size;
+  say(L"[NKM ] TEST.NKM staged: ");
+  boot_put_dec(size / 1024u);
+  say_line(L" KiB for the kernel stage");
 }
 
 /* ------------------------------------------------------------------ */

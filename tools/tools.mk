@@ -70,6 +70,7 @@ ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
 NOVUS_IMG := out/novus.img
 ISO_IMG   := out/novus-live.iso
+NKM_TEST_H := security/nkm/nkm_test_module.h
 DISK_IMG  := out/novus-disk.img
 NKM_MOD   := out/test.nkm
 
@@ -169,12 +170,15 @@ $(ESP_IMG): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) $(NKM_MOD) | out
 	    $(NKM_MOD):TEST.NKM
 
 # A signed test module, produced by the same Ed25519 code the kernel
-# verifies with. Regenerated whenever the crypto or the loader changes.
-$(NKM_MOD): $(RUST_DEPS)
+# verifies with. One nkmgen run writes both outputs - the C array the
+# kernel compiles in and the plain file the boot stage reads off the ESP -
+# so both are listed as targets of the one recipe; naming only the file
+# here would leave a deleted header unrecreated.
+$(NKM_TEST_H) $(NKM_MOD): $(RUST_DEPS)
 	@test -n "$(CARGO)" || { echo "ERROR: cargo not found." >&2; exit 1; }
 	cd tools/nkmgen && CARGO_TARGET_DIR=$(CURDIR)/build/rust-host \
 	    $(CARGO) run --quiet -- mkmod "$(NKM_SEED)" 1 \
-	    ../../security/nkm/nkm_test_module.h ../../$(NKM_MOD)
+	    ../../$(NKM_TEST_H) ../../$(NKM_MOD)
 
 # 'iso' is phony, so this recipe always runs and naming the artifact is
 # what keeps an up-to-date tree from looking like nothing happened. Only
@@ -209,4 +213,4 @@ install: disk-img
 # Regenerate the signed test module by hand after changing the NKM
 # layout or the root key. The build already does this through the
 # out/test.nkm rule, which is what the ESP carries.
-nkm-test-module: $(NKM_MOD)
+nkm-test-module: $(NKM_TEST_H) $(NKM_MOD)

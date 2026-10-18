@@ -22,6 +22,11 @@ void kernel_entry(UINT64 memmap_addr, UINT64 memmap_size, UINT64 desc_size);
 void kputs(const char *s);
 void kputs_hex(UINT64 v);
 
+/* Kernel version, as NKM module headers state it (spec 3.2: a module is
+ * refused when its min_kernel_ver is higher than this). Major in the
+ * high 32 bits, minor in the low 32 bits: 1.0. */
+#define NOVUS_KERNEL_VERSION 0x0000000100000000ULL
+
 /* Freestanding memory helpers; the compiler may emit calls to these. */
 void *memcpy(void *dst, const void *src, UINT64 n);
 void *memset(void *dst, int c, UINT64 n);

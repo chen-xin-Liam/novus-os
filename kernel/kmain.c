@@ -27,6 +27,7 @@
 /* M3: block device table (to adopt the live root) and the signed module
  * loader, both new this milestone. */
 #include "blkdev.h"
+#include "nksym.h"
 #include "nkm.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
@@ -148,8 +149,41 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
     }
   }
 
-  /* M3: signed module loader. Runs here because it needs kmalloc, which
-   * only exists once the heap is up. */
+  /* M3: the symbol table modules resolve against. A module that binds to
+   * a symbol the kernel does not export is a link error, not a runtime
+   * surprise, so the table is checked before anything tries to use it. */
+  nksym_selftest();
+
+  /* M3: signed module loader. Runs here because it needs the heap and
+   * the PMM, neither of which is up in the boot stage. A module staged by
+   * the boot stage is loaded for real; the self test then exercises the
+   * refusal paths with images it builds itself. */
+  {
+    shared_mem_t *shm_m = shared_mem_get();
+
+    if (shm_m->nkm_img_base != 0 && shm_m->nkm_img_size != 0) {
+    int rc = nkm_load((const void *)(UINTN)shm_m->nkm_img_base,
+                      shm_m->nkm_img_size, NKM_FLAG_NONE);
+
+    if (rc >= 0) {
+      const nkm_module_t *m = nkm_get((UINTN)rc);
+
+      shm_m->nkm_status = SHM_NKM_OK;
+      shm_m->nkm_loaded = 1;
+      kputs("[NKM] staged module loaded: ");
+      if (m != NULL) {
+        kputs((const char *)m->name);
+      }
+      kputs("\n");
+    } else {
+      shm_m->nkm_status = SHM_NKM_REFUSED;
+      kputs("[NKM] staged module refused: ");
+      kputs(nkm_err_text(rc));
+      kputs("\n");
+    }
+    }
+  }
+
   if (nkm_selftest() != 0) {
     kputs("[WARN] NKM selftest failed, continuing degraded\n");
   }

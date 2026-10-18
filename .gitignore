@@ -8,6 +8,10 @@ build/
 out/
 esp/
 
+# The host signing tool is a cargo project; its own target directory is
+# not a Novus artifact.
+tools/nkmgen/target/
+
 # Rust crate (lib/novuslib-rs) local cargo target dir; the library that
 # lands in build/rust is already covered by build/ above.
 lib/novuslib-rs/target/
