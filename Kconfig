@@ -103,3 +103,12 @@ config NOVUS_INSTALLER
 # User-space language modules live in their own trees and bring their own
 # Kconfig with them, so the option is declared next to the code it builds.
 source "user/mochi/Kconfig"
+
+config NOVUS_SCHED
+	bool
+	default y
+	help
+	  Build the M4 ring-3 stack: GDT/TSS, IDT and exception handling,
+	  the LAPIC timer, per-process address spaces, the syscall gate and
+	  the NUC loader. The scheduler comes up on the B core; the A core
+	  stays parked (README 2.2 step 6).

@@ -72,6 +72,12 @@ SRC := arch/x86_64/boot/main.c \
        kernel/heap.c \
        kernel/lapic.c \
        kernel/smp.c \
+       kernel/gdt.c \
+       kernel/idt.c \
+       kernel/trap.c \
+       kernel/sched.c \
+       kernel/vm.c \
+       kernel/nuc.c \
        kernel/blkdev.c \
        kernel/gpt.c \
        kernel/nksym.c \
@@ -86,7 +92,7 @@ SRC := arch/x86_64/boot/main.c \
 
 # Assembly sources. Uppercase .S (case-sensitive) makes gcc run the C
 # preprocessor over the file first; gcc invokes the assembler itself.
-ASM_SRC := arch/x86_64/kernel/entry.S
+ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S
 
 INC := -Iarch/x86_64/include -Ikernel -Ifs/novusfs -Isecurity/nkm
 
@@ -104,7 +110,8 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_WAL=$(if $(filter y,$(CONFIG_NOVUS_WAL)),1,0) \
           -DCONFIG_NOVUS_MERKLE=$(if $(filter y,$(CONFIG_NOVUS_MERKLE)),1,0) \
           -DCONFIG_NOVUS_NKM=$(if $(filter y,$(CONFIG_NOVUS_NKM)),1,0) \
-          -DCONFIG_NOVUS_INSTALLER=$(if $(filter y,$(CONFIG_NOVUS_INSTALLER)),1,0)
+          -DCONFIG_NOVUS_INSTALLER=$(if $(filter y,$(CONFIG_NOVUS_INSTALLER)),1,0) \
+          -DCONFIG_NOVUS_SCHED=$(if $(filter y,$(CONFIG_NOVUS_SCHED)),1,0)
 
 # Link as a PE32+ EFI application: subsystem 10 = EFI application,
 # image entry point is efi_main.

@@ -21,6 +21,8 @@
 #include "heap.h"
 #include "lapic.h"
 #include "smp.h"
+#include "sched.h"
+#include "nuc.h"
 /* M2: NovusFS lives in fs/novusfs, which the build adds to the include
  * path, so the kernel stage can reach its public header directly. */
 #include "novusfs.h"
@@ -195,8 +197,51 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* A core rests: last shared-memory log entry, then park (README 2.2
    * step 6). */
   shared_mem_log("A-core asleep");
+
+#if CONFIG_NOVUS_SCHED
+  /* M4: bring up ring 3 and the scheduler on the B core.
+   *
+   * Order matters: the idle task first, so there is always a runnable
+   * task even if the staged application fails to load; then the
+   * application; then the first switch, which ends in ring 3 and never
+   * returns. A failed application is reported and does not stop the
+   * system - the README asks for a bug to cost the process, not the
+   * machine. */
+  sched_init();
+
+  if (nuc_create_idle() != 0) {
+    kputs("[SCHED] ERROR: idle task could not be created\n");
+  }
+  if (nuc_selftest() != 0) {
+    kputs("[NUC] self test could not load its own image\n");
+  }
+  /* M4: a task that never yields, so the log can show the timer taking
+   * the CPU away from it; and one that starts on a non-executable page,
+   * so the log can show NX refusing it. */
+  (void)nuc_create_spin();
+  (void)nuc_nx_probe();
+  {
+    shared_mem_t *shm_a = shared_mem_get();
+
+    if (shm_a->app_img_base != 0 && shm_a->app_img_size != 0) {
+      int rc = nuc_load((const void *)(UINTN)shm_a->app_img_base,
+                        shm_a->app_img_size, "demo");
+      if (rc != 0) {
+        kputs("[NUC] application refused: error ");
+        kputs_hex((UINT64)(UINT32)rc);
+        kputs("\n");
+      }
+    } else {
+      kputs("[NUC] no application staged, running idle only\n");
+    }
+  }
+
+  kputs("[HALT] entering the scheduler (the A core stays parked)\n");
+  sched_start();
+#else
   kputs("[HALT] System halted.\n");
   for (;;) {
     __asm__ volatile("cli; hlt");
   }
+#endif
 }

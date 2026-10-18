@@ -191,12 +191,18 @@ NUC_APP     := out/demo.nuc
 
 # Empty unless the configuration asks for Mochi, so the ESP rule neither
 # waits for the application nor names it.
-NUC_ESP_DEPS := $(if $(filter y,$(CONFIG_USER_MOCHI)),$(NUC_APP))
-NUC_ESP_ARGS := $(if $(filter y,$(CONFIG_USER_MOCHI)),$(NUC_APP):APPS/DEMO.NUC)
+# The submodule is optional. Without it there is no compiler to build an
+# application with, so the ESP carries none - the kernel's own NUC self
+# test still exercises the loader, so M4 does not depend on a checkout.
+MOCHI_PRESENT := $(wildcard $(MOCHI_DIR)/src/codegen.c)
+NUC_ESP_DEPS := $(if $(and $(filter y,$(CONFIG_USER_MOCHI)),$(MOCHI_PRESENT)),$(NUC_APP))
+NUC_ESP_ARGS := $(if $(and $(filter y,$(CONFIG_USER_MOCHI)),$(MOCHI_PRESENT)),$(NUC_APP):APPS/DEMO.NUC)
 
 .PHONY: mochi-tools nuc-apps
 mochi-tools: $(MOCHI) $(NUCUTIL)
 nuc-apps: $(NUC_APP)
+
+ifneq ($(MOCHI_PRESENT),)
 
 $(MOCHI): $(MOCHI_LANG_SRC) $(MOCHI_FMT_SRC) $(MOCHI_DIR)/include/mochi.h \
           $(MOCHI_DIR)/include/nucfmt.h $(MOCHI_DIR)/include/codegen.h \
@@ -222,6 +228,8 @@ $(NUC_APP): $(NUC_APP_SRC) $(MOCHI) $(NUCUTIL) | out
 out/%.nuc: $(MOCHI_DIR)/samples/%.mochi $(MOCHI) $(NUCUTIL) | out
 	$(MOCHI) -c $< -o $@
 	$(NUCUTIL) validate $@
+
+endif # MOCHI_PRESENT
 
 # ---------------------------------------------------------------------------
 # Image targets

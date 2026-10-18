@@ -42,6 +42,12 @@
   校验，产物随live ESP打包为`APPS/DEMO.NUC`。格式见
   `docs/NUC 可执行二进制格式规范 V1.0.md`；内核侧的NUC加载器尚未实现
 
+- 调度器与进程（M4）：GDT/TSS + IDT（0-31异常向量，32=LAPIC定时器），每任务独立
+  页表与64 KiB内核栈；时钟中断驱动的时间片轮转（默认4 tick/片），不主动让出的纯计算
+  任务同样会被抢占；系统调用经x86_64 `syscall`门（EFER.SCE/STAR/LSTAR/FMASK），已提供
+  yield/write/exit；NUC加载器按规范§9映射段、重定位并进入ring3，用户态异常只终止该
+  进程、内核继续运行。由`CONFIG_NOVUS_SCHED`控制
+
 ### 1.3 顶层功能清单
 1. 两阶段SMP启动（A核BSP自检，完成休眠；B核AP主内核）
 2. 内存管理、虚拟内存、OOM内存保护

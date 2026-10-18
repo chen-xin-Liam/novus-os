@@ -53,3 +53,6 @@ CONFIG_NOVUS_INSTALLER=y
 # APPS/DEMO.NUC. Requires the submodule to be checked out.
 CONFIG_USER_MOCHI=y
 CONFIG_USER_MOCHI_NUCUTIL=y
+
+# M4: scheduler, ring 3, syscalls and the NUC loader.
+CONFIG_NOVUS_SCHED=y

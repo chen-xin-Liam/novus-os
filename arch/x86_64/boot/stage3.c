@@ -893,6 +893,31 @@ static void modules_load(void) {
   say_line(L" KiB for the kernel stage");
 }
 
+/* M4: the NUC application, staged exactly like the module - into reserved
+ * pages, published through shared memory - because the kernel cannot read
+ * the ESP once boot services are gone. A medium without an application is
+ * not an error: the scheduler still comes up with its idle task. */
+static void app_load(void) {
+  shared_mem_t *shm = shared_mem_get();
+  UINT64        base = 0;
+  UINT64        size = 0;
+
+  shm->app_img_base = 0;
+  shm->app_img_size = 0;
+  if (g_esp_root == NULL) {
+    return;
+  }
+  if (esp_read_reserved(L"APPS/DEMO.NUC", &base, &size) != 0) {
+    say_line(L"[NUC ] no APPS/DEMO.NUC on the ESP");
+    return;
+  }
+  shm->app_img_base = base;
+  shm->app_img_size = size;
+  say(L"[NUC ] APPS/DEMO.NUC staged: ");
+  boot_put_dec(size);
+  say_line(L" bytes for the kernel stage");
+}
+
 /* ------------------------------------------------------------------ */
 /* Installer                                                           */
 /* ------------------------------------------------------------------ */
@@ -1365,6 +1390,9 @@ void stage3_prepare(void) {
 #if CONFIG_NOVUS_NKM
   modules_load();
 #endif
+
+  /* M4: stage the NUC application next to the module. */
+  app_load();
 
   /* Live root: adopt the NovusFS image off the ESP into reserved pages.
    * Without it the kernel has no filesystem at all, so a failure here is
