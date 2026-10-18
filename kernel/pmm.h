@@ -43,6 +43,9 @@ void pmm_free_page(void *phys);
 /* Current free page count. */
 UINT64 pmm_free_count(void);
 
+/* Conventional pages handed to the allocator = the machine's RAM. */
+UINT64 pmm_usable_pages(void);
+
 /* Number of free() calls on a page that was already free: 0 in a healthy
  * kernel, and a caller bug otherwise. */
 UINT32 pmm_double_free_count(void);

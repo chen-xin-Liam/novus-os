@@ -26,6 +26,8 @@
 #define SYSINFO_REQ_STATS  0x0303u
 #define SYSINFO_REQ_ACCENT 0x0304u
 #define SYSINFO_REQ_SPAWN  0x0305u
+#define SYSINFO_REQ_THEME  0x0306u /* accent / wallpaper, query or set */
+#define SYSINFO_REQ_KILL   0x0307u /* end a task by pid */
 
 /* Replies. Distinct types per query so a client can match its answer
  * without a correlation id. */
@@ -34,6 +36,7 @@
 #define SYSINFO_RSP_FILES  0x0312u
 #define SYSINFO_RSP_STATS  0x0313u
 #define SYSINFO_RSP_ACCENT 0x0314u
+#define SYSINFO_RSP_THEME  0x0315u
 #define SYSINFO_RSP_ERR    0x03FFu
 
 /* Directories the file manager can browse. */
@@ -83,13 +86,32 @@ typedef struct {
 typedef struct {
   UINT64 uptime;   /* ticks since boot */
   UINT64 free_kb;
+  UINT64 total_kb; /* usable RAM, for the settings memory bar */
   UINT32 tasks;    /* live tasks */
   UINT32 windows;  /* windows the WM holds */
   UINT32 ipc_sent;
   UINT32 ipc_drop;
   UINT32 accent;
-  UINT32 pad;
+  UINT32 wallpaper;
 } sysinfo_stats_t;
+
+/* Theme query/set. id 0 = accent (rgb), 1 = wallpaper index (0..2).
+ * A query ignores `value`. */
+typedef struct {
+  UINT8  id;
+  UINT8  pad[3];
+  UINT32 value;
+} sysinfo_theme_t;
+
+typedef struct {
+  UINT32 accent;
+  UINT32 wallpaper;
+} sysinfo_theme_rsp_t;
+
+/* Kill: the pid to end. Reply is an INT32 status through RSP_OK. */
+typedef struct {
+  UINT64 pid;
+} sysinfo_kill_t;
 
 typedef struct {
   UINT16 index;

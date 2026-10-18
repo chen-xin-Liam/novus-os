@@ -15,12 +15,15 @@ pub const REQ_FILES: u16 = 0x0302;
 pub const REQ_STATS: u16 = 0x0303;
 pub const REQ_ACCENT: u16 = 0x0304;
 pub const REQ_SPAWN: u16 = 0x0305;
+pub const REQ_THEME: u16 = 0x0306;
+pub const REQ_KILL: u16 = 0x0307;
 
 pub const RSP_OK: u16 = 0x0310;
 pub const RSP_TASKS: u16 = 0x0311;
 pub const RSP_FILES: u16 = 0x0312;
 pub const RSP_STATS: u16 = 0x0313;
 pub const RSP_ACCENT: u16 = 0x0314;
+pub const RSP_THEME: u16 = 0x0315;
 pub const RSP_ERR: u16 = 0x03FF;
 
 pub const DIR_APPS: u8 = 0;
@@ -80,12 +83,26 @@ pub struct FilesRsp {
 pub struct Stats {
     pub uptime: u64,
     pub free_kb: u64,
+    pub total_kb: u64,
     pub tasks: u32,
     pub windows: u32,
     pub ipc_sent: u32,
     pub ipc_drop: u32,
     pub accent: u32,
+    pub wallpaper: u32,
 }
+
+/// Accent + wallpaper in one reply (sysinfo_theme_rsp_t).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Theme {
+    pub accent: u32,
+    pub wallpaper: u32,
+}
+
+/// Theme ids for set_theme().
+pub const THEME_ACCENT: u8 = 0;
+pub const THEME_WALLPAPER: u8 = 1;
 
 #[repr(C)]
 struct ListReq {
@@ -93,6 +110,13 @@ struct ListReq {
     max: u8,
     dir: u8,
     pad: u32,
+}
+
+#[repr(C)]
+struct ThemeReq {
+    id: u8,
+    pad: [u8; 3],
+    value: u32,
 }
 
 #[repr(C)]
@@ -184,6 +208,34 @@ pub fn accent(port: u64) -> Option<u32> {
     };
 
     query(port, REQ_ACCENT, ipc::bytes_of(&req), RSP_ACCENT)?.read()
+}
+
+/// Current accent and wallpaper.
+pub fn theme(port: u64) -> Option<Theme> {
+    let req = ThemeReq {
+        id: 0,
+        pad: [0; 3],
+        value: 0,
+    };
+
+    query(port, REQ_THEME, ipc::bytes_of(&req), RSP_THEME)?.read()
+}
+
+/// Apply one theme value: THEME_ACCENT (rgb) or THEME_WALLPAPER (index).
+pub fn set_theme(port: u64, id: u8, value: u32) -> Option<Theme> {
+    let req = ThemeReq {
+        id,
+        pad: [0; 3],
+        value,
+    };
+
+    query(port, REQ_THEME, ipc::bytes_of(&req), RSP_THEME)?.read()
+}
+
+/// End a task. 0 = terminated, -1 = no such task, -2 = refused (idle/spin),
+/// -3 = it was already exiting.
+pub fn kill(port: u64, pid: u64) -> Option<i32> {
+    query(port, REQ_KILL, &pid.to_le_bytes(), RSP_OK)?.read::<i32>()
 }
 
 /// Start built-in application `which` (index into the kernel's app table).

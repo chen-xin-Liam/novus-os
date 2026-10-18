@@ -37,6 +37,10 @@ int nwm_spawn_client(void);
 UINT32 nwm_accent_get(void);
 void   nwm_accent_set(UINT32 rgb);
 
+/* Desktop wallpaper (0..2): the shell's mica gradient pair. */
+UINT32 nwm_wallpaper_get(void);
+void   nwm_wallpaper_set(UINT32 idx);
+
 /* Windows currently held, for the sysinfo stats reply. */
 UINT32 nwm_window_count(void);
 

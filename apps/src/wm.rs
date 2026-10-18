@@ -20,6 +20,7 @@ pub const REQ_EFFECT: u16 = 0x010C;
 pub const REQ_CLEAR: u16 = 0x010D;
 pub const REQ_SHAPE: u16 = 0x010E;
 pub const REQ_TEXT: u16 = 0x010F;
+pub const REQ_INVALIDATE: u16 = 0x0110;
 
 pub const RSP_OK: u16 = 0x0001;
 pub const RSP_ERR: u16 = 0x0002;
@@ -34,6 +35,11 @@ pub const OP_FRAME: u8 = 2;
 pub const OP_HLINE: u8 = 3;
 pub const OP_VLINE: u8 = 4;
 pub const OP_CIRCLE: u8 = 5;
+
+/// Height of the title bar the WM draws above the client area. A window's
+/// `h` passed to create() must be client height plus this, or the bottom
+/// rows of the content are cut off.
+pub const TITLE_H: i32 = 32;
 
 pub const TITLE_MAX: usize = 24;
 pub const TEXT_MAX: usize = 96;
@@ -264,6 +270,15 @@ impl Win {
         };
 
         send(self.port, REQ_TITLE, 0, ipc::bytes_of(&t));
+    }
+
+    /// Repaint the whole client area from the display list. Call it once
+    /// at the end of a frame: the WM then composites every item together
+    /// instead of repainting one rectangle per message.
+    pub fn invalidate(&self) {
+        let w = self.id.to_le_bytes();
+
+        send(self.port, REQ_INVALIDATE, 0, &w);
     }
 
     pub fn raise(&self) {

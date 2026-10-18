@@ -43,6 +43,7 @@ static UINT64 pmm_total; /* pages: pmm_top / 4096 */
 static UINT64 pmm_bits;  /* pages actually tracked by the bitmap */
 static UINT64 pmm_free;
 static UINT64 pmm_resv;
+static UINT64 pmm_usable; /* conventional pages the allocator owns */
 static UINT32 pmm_double_free;
 static int    pmm_ready;
 
@@ -134,8 +135,13 @@ void pmm_init(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * and other firmware-loaded regions) stay used. */
   memset(pmm_bitmap, 0xFF, PMM_BITMAP_BYTES);
 
-  /* Pass 2: Type == EfiConventionalMemory -> free (0). */
+  /* Pass 2: Type == EfiConventionalMemory -> free (0).
+   * `pmm_usable` counts the pages this pass actually handed to the
+   * allocator: that is the machine's real RAM. pmm_total above counts
+   * address space up to the highest descriptor, which on a PC includes
+   * the PCI/MMIO windows above RAM and is several times larger. */
   pmm_free = 0;
+  pmm_usable = 0;
   for (off = 0; off + sizeof(EFI_MEMORY_DESCRIPTOR) <= map_size;
        off += desc_size) {
     d = (const EFI_MEMORY_DESCRIPTOR *)(mmap_addr + off);
@@ -148,6 +154,7 @@ void pmm_init(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
       if (novus_rs_bitmap_test(pmm_bitmap, start_pg) != 0) {
         novus_rs_bitmap_clear(pmm_bitmap, start_pg);
         pmm_free++;
+        pmm_usable++;
       }
       start_pg++;
     }
@@ -235,6 +242,13 @@ void pmm_free_page(void *phys) {
 
 UINT64 pmm_free_count(void) {
   return pmm_free;
+}
+
+/* Real RAM: the conventional pages this allocator manages. Free + used
+ * always adds up to it; pmm_total_pages() does not (it counts address
+ * space, including the PCI hole). */
+UINT64 pmm_usable_pages(void) {
+  return pmm_usable;
 }
 
 UINT64 pmm_total_pages(void) {

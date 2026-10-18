@@ -29,8 +29,8 @@
 
 #define NWM_MAX_WINDOWS 8
 #define NWM_MAX_CMDS    7  /* (IPC_PAYLOAD_MAX - 8) / 16 */
-#define NWM_MAX_SHAPES  28 /* per-window display list, v1.1 */
-#define NWM_MAX_TEXTS   40
+#define NWM_MAX_SHAPES  40 /* per-window display list, v1.1 */
+#define NWM_MAX_TEXTS   48
 #define NWM_TEXT_MAX    96
 #define NWM_TITLE_MAX   24
 #define NWM_TITLE_H     32
@@ -57,6 +57,10 @@
 #define NWM_REQ_CLEAR    0x010Du
 #define NWM_REQ_SHAPE    0x010Eu
 #define NWM_REQ_TEXT     0x010Fu
+/* Redraw the whole client area from the display list. A client that builds
+ * a full frame in one burst ends with this, so the frame is composited
+ * once with every item present instead of one rectangle per message. */
+#define NWM_REQ_INVALIDATE 0x0110u
 
 /* Replies: WM -> requester's inbox, flagged IPC_F_REPLY. */
 #define NWM_RSP_OK  0x0001u

@@ -77,6 +77,7 @@ static UINT32    g_events;
 static UINT32    g_dropped;
 static UINT32    g_liveness_tick;
 static UINT32    g_next_stats;
+static UINT32    g_full_log;
 
 /* ---- small helpers ---------------------------------------------------- */
 
@@ -749,6 +750,12 @@ static void req_text(const ipc_msg_t *m) {
     return;
   }
   if (w->text_n >= NWM_MAX_TEXTS) {
+    if (g_full_log < 8u) {
+      g_full_log++;
+      kputs("[NWM] WARN display list full (text) win=");
+      kputs_hex(w->id);
+      kputs("\n");
+    }
     ack(m, w->id, NWM_EFULL);
     return;
   }
@@ -772,6 +779,27 @@ static void req_text(const ipc_msg_t *m) {
                                         (INT32)nd_text_height(t.text,
                                                               t.scale))));
   }
+  ack(m, w->id, NWM_OK);
+}
+
+/* Repaint the whole client from the list. The owner check is the same as
+ * every other op: a window can only invalidate itself. */
+static void req_invalidate(const ipc_msg_t *m) {
+  nwm_win_t     r;
+  nwm_window_t *w;
+  int           st = NWM_OK;
+
+  if (m->hdr.len < sizeof(r)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&r, m->payload, sizeof(r));
+  w = win_get(r.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, r.win, st);
+    return;
+  }
+  damage(client_rect(w));
   ack(m, w->id, NWM_OK);
 }
 
@@ -862,6 +890,9 @@ static void handle_request(const ipc_msg_t *m) {
     break;
   case NWM_REQ_TEXT:
     req_text(m);
+    break;
+  case NWM_REQ_INVALIDATE:
+    req_invalidate(m);
     break;
   default:
     ack(m, 0, NWM_EBADREQ);
@@ -1125,6 +1156,34 @@ void nwm_accent_set(UINT32 rgb) {
   c->theme.accent = rgb;
   /* One full repaint: at 1280x800 the composite is a few milliseconds and
    * it happens when a human clicks a colour, not per frame. */
+  ng_damage(nd_rect(0, 0, s->w, s->h));
+}
+
+/* Desktop wallpapers: the (top, bottom) pair of the mica gradient the
+ * shell paints. Kept here so the shell and the settings panel share one
+ * source of truth - the client only ever sends an index. */
+static const UINT32 g_papers[][2] = {
+    {0x00EEF2F8u, 0x00E3EAF3u}, /* 云母蓝 */
+    {0x00F2F2F2u, 0x00E2E2E2u}, /* 晨雾灰 */
+    {0x00EAF4F0u, 0x00DCEDE6u}, /* 青瓷 */
+};
+
+#define NWM_WALLPAPER_COUNT (sizeof(g_papers) / sizeof(g_papers[0]))
+
+static UINT32 g_paper;
+
+UINT32 nwm_wallpaper_get(void) { return g_paper; }
+
+void nwm_wallpaper_set(UINT32 idx) {
+  ng_ctx_t     *c = ng_ctx_get();
+  nd_surface_t *s = screen();
+
+  if (c == 0 || s == 0 || idx >= NWM_WALLPAPER_COUNT) {
+    return;
+  }
+  g_paper = idx;
+  c->theme.desktop_top = g_papers[idx][0];
+  c->theme.desktop_bottom = g_papers[idx][1];
   ng_damage(nd_rect(0, 0, s->w, s->h));
 }
 

@@ -135,7 +135,10 @@ static void task_reap(task_t *t) {
   UINT32 freed;
   UINT64 pml4;
 
-  if (t == NULL || t == g_current) {
+  /* EXITED only. A slot can be reused between the moment a task is queued
+   * for reaping and the reap itself, and freeing the *new* owner's space
+   * from a stale pointer would take a running app down with it. */
+  if (t == NULL || t == g_current || t->state != TASK_EXITED) {
     return;
   }
   /* vm_space_free() clears the space, so remember what it was for the log
@@ -469,6 +472,20 @@ void sched_tick(void) {
   g_ticks++;
   sched_expire_waiters();
 
+  /* Reap tasks that were killed while they were not the running one:
+   * their pages are still mapped and their slot is still taken. Doing it
+   * here is safe - this runs on the current task's stack, with its CR3. */
+  if ((g_ticks % 40u) == 0u) {
+    UINT32 i;
+
+    for (i = 0; i < SCHED_MAX_TASKS; i++) {
+      if (g_tasks[i].state == TASK_EXITED && &g_tasks[i] != g_current &&
+          &g_tasks[i] != g_reap) {
+        task_reap(&g_tasks[i]);
+      }
+    }
+  }
+
   if (g_current != NULL) {
     g_current->ticks++;
     if (g_current->slice > 0u) {
@@ -575,6 +592,80 @@ UINT64 sched_ticks(void) { return g_ticks; }
 /* Task by name, for the M8 launcher: refusing a second copy of an
  * application is a name lookup, and names are what the file manager and
  * the task manager show. Exited tasks are skipped. */
+/* The two tasks the scheduler owns: killing them would take the desktop
+ * down with the process, so the service refuses instead. */
+static int task_is_vital(const task_t *t) {
+  const char *a = t->name;
+  const char *b = "idle";
+
+  while (*a != '\0' && *a == *b) {
+    a++;
+    b++;
+  }
+  if (*a == '\0' && *b == '\0') {
+    return 1;
+  }
+  a = t->name;
+  b = "spin";
+  while (*a != '\0' && *a == *b) {
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+/* End a task from outside (M9 settings panel). 0 = gone, -1 = no such
+ * task, -2 = refused, -3 = it was already on its way out.
+ *
+ * The task is not reaped here: that has to happen from another task's
+ * stack with another CR3, which is what the sweep in sched_tick() is
+ * for. Marking it EXITED is enough to make every other path ignore it. */
+int sched_kill(UINT64 pid) {
+  task_t *t = NULL;
+  UINT32  i;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    if (g_tasks[i].state != TASK_FREE && g_tasks[i].pid == pid) {
+      t = &g_tasks[i];
+      break;
+    }
+  }
+
+  if (t == NULL) {
+    return -1;
+  }
+  if (task_is_vital(t)) {
+    return -2;
+  }
+  if (t->state == TASK_EXITED) {
+    return -3;
+  }
+  t->state = TASK_EXITED;
+  t->exit_code = -1;
+  g_exit_count++;
+  g_need_resched = 1;
+  /* Same cleanup as a self-exit: its inbox and named ports go, its
+   * waiters are woken so they fail fast instead of timing out, and the
+   * WM closes its windows on the next tick (owner gone). */
+  ipc_owner_exit(pid);
+  sched_wake_port(pid);
+  /* Reap now when it is not the running task: this runs in the timer tick
+   * with the current task's CR3, which is exactly what task_reap() needs.
+   * Leaving it to the sweep would keep the slot busy for up to 40 ticks and
+   * a "start it again" click right after the kill would fail with "no free
+   * task slot". */
+  if (t != g_current) {
+    task_reap(t);
+  }
+
+  kputs("[SCHED] task ");
+  kputs(t->name);
+  kputs(" killed (pid ");
+  kputs_hex(pid);
+  kputs(")\n");
+  return 0;
+}
+
 task_t *sched_find_name(const char *name) {
   UINT32 i;
 
@@ -600,7 +691,11 @@ task_t *sched_find_pid(UINT64 pid) {
   UINT32 i;
 
   for (i = 0; i < SCHED_MAX_TASKS; i++) {
-    if (g_tasks[i].state != TASK_FREE && g_tasks[i].pid == pid) {
+    /* EXITED counts as gone: the WM closes its windows one tick earlier
+     * and nothing can address it any more. sched_kill() does its own raw
+     * lookup so it can still answer "already exiting". */
+    if (g_tasks[i].state != TASK_FREE && g_tasks[i].state != TASK_EXITED &&
+        g_tasks[i].pid == pid) {
       return &g_tasks[i];
     }
   }

@@ -125,7 +125,7 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 470, 402, CW as i32 + 2, CH as i32 + 25, "任务管理器")
+    let Some(win) = wm::Win::create(wm_port, 470, 402, CW as i32 + 2, CH as i32 + wm::TITLE_H, "任务管理器")
     else {
         sys::exit(3);
     };

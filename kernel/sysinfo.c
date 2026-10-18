@@ -12,6 +12,7 @@
 #include "pmm.h"
 #include "apps.h"
 #include "nwm.h"
+#include "sched.h"
 #include "sysinfo.h"
 
 #if CONFIG_NOVUS_IPC && CONFIG_NOVUS_WM
@@ -92,8 +93,8 @@ static void req_tasks(const ipc_msg_t *m) {
   for (i = 0; i < slot; i++) {
     sched_info_t t;
 
-    if (sched_task_info(i, &t) == 0) {
-      live++;
+    if (sched_task_info(i, &t) == 0 && t.state != 3u) {
+      live++; /* state 3 = EXITED: still listed, but not alive */
     }
   }
   r.h.total = (UINT16)live;
@@ -172,12 +173,16 @@ static void req_stats(const ipc_msg_t *m) {
 
   memset(&st, 0, sizeof(st));
   st.uptime = sched_ticks();
-  st.free_kb = pmm_free_count() * 4u; /* pages are 4 KiB */
+  st.free_kb = pmm_free_count() * 4u;  /* pages are 4 KiB */
+  /* Managed RAM = free + reserved. pmm_total_pages() counts up to the top
+   * of the physical address space, which on a PC includes the PCI hole and
+   * is not "memory"; free + reserved is exactly what the bitmap tracks. */
+  st.total_kb = pmm_usable_pages() * 4u;
   for (i = 0; i < sched_task_count(); i++) {
     sched_info_t t;
 
-    if (sched_task_info(i, &t) == 0) {
-      live++;
+    if (sched_task_info(i, &t) == 0 && t.state != 3u) {
+      live++; /* state 3 = EXITED: still listed, but not alive */
     }
   }
   st.tasks = live;
@@ -191,6 +196,7 @@ static void req_stats(const ipc_msg_t *m) {
     }
   }
   st.accent = nwm_accent_get();
+  st.wallpaper = nwm_wallpaper_get();
   answer(m, SYSINFO_RSP_STATS, &st, sizeof(st));
 }
 
@@ -206,6 +212,39 @@ static void req_accent(const ipc_msg_t *m) {
   }
   rgb = nwm_accent_get();
   answer(m, SYSINFO_RSP_ACCENT, &rgb, sizeof(rgb));
+}
+
+/* Theme: one struct, two ids. The reply always carries both values so a
+ * client can refresh its swatches without a second round trip. */
+static void req_theme(const ipc_msg_t *m) {
+  sysinfo_theme_t     q;
+  sysinfo_theme_rsp_t r;
+
+  if (m->hdr.len >= sizeof(q)) {
+    memcpy(&q, m->payload, sizeof(q));
+    if (q.id == 0u && q.value != 0u) {
+      nwm_accent_set(q.value);
+    } else if (q.id == 1u) {
+      nwm_wallpaper_set(q.value);
+    }
+  }
+  r.accent = nwm_accent_get();
+  r.wallpaper = nwm_wallpaper_get();
+  answer(m, SYSINFO_RSP_THEME, &r, sizeof(r));
+}
+
+/* Kill: the reply says what happened, the client shows it. */
+static void req_kill(const ipc_msg_t *m) {
+  sysinfo_kill_t q;
+  INT32          rc;
+
+  if (m->hdr.len < sizeof(q)) {
+    rsp_err(m);
+    return;
+  }
+  memcpy(&q, m->payload, sizeof(q));
+  rc = sched_kill(q.pid);
+  answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
 }
 
 static void req_spawn(const ipc_msg_t *m) {
@@ -241,6 +280,12 @@ static void handle(const ipc_msg_t *m) {
     break;
   case SYSINFO_REQ_SPAWN:
     req_spawn(m);
+    break;
+  case SYSINFO_REQ_THEME:
+    req_theme(m);
+    break;
+  case SYSINFO_REQ_KILL:
+    req_kill(m);
     break;
   default:
     rsp_err(m);

@@ -83,6 +83,11 @@ void sched_tick(void);
  * the trap. */
 void sched_exit_current(int code);
 
+/* End a task by pid, from outside (the settings panel's "end task").
+ * 0 = terminated, -1 = no such task, -2 = refused (idle/spin),
+ * -3 = it was already exiting. Reaped by the next scheduler sweep. */
+int sched_kill(UINT64 pid);
+
 /* Give up the rest of the slice (SYS_YIELD). */
 void sched_yield(void);
 
