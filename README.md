@@ -32,8 +32,10 @@
 - 存储（M3，冻结）：所有设备经UEFI Block I/O抽象，不区分控制器——IDE、AHCI/SATA、
   NVMe（含4Kn，即4096字节逻辑块）、USB与光驱均走同一`blkdev_t`接口；上层一律按
   512字节扇区寻址，块大小不同的设备由后端自行切分
-- 启动介质（M3，冻结）：ISO 9660 + El Torito，同时提供UEFI标准的no-emulation段与
-  硬盘仿真段；ISO系统区内置isohybrid分区表，因此同一镜像写入U盘后亦可被固件识别启动
+- 启动介质（M3，冻结）：ISO 9660 + El Torito，内嵌ESP作为UEFI标准的no-emulation启动
+  镜像；同一ESP的内容另以目录树发布在ISO中（/EFI/BOOT/BOOTX64.EFI、/SYSTEM.IMG、
+  /ESP.IMG），固件与挂载镜像的人都能直接看到引导路径；ISO系统区内置isohybrid分区表，
+  因此同一镜像写入U盘后亦可被固件识别启动
 
 ### 1.3 顶层功能清单
 1. 两阶段SMP启动（A核BSP自检，完成休眠；B核AP主内核）

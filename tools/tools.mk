@@ -11,13 +11,14 @@
 #              count stays under the FAT32 minimum, FAT32 above it).
 #   mkiso      wraps that ESP in an ISO 9660 image with an El Torito boot
 #              entry, so the very same ESP also boots from a CD-ROM. The
-#              catalog carries the UEFI no-emulation form first - what
-#              the specification describes for an EFI boot image and what
-#              every distribution ships - and the hard-disk-emulation form
-#              of the same image second, for firmwares that look only for
-#              that. The ISO's unused system area gets a partition table
-#              pointing at the embedded ESP, so the image written straight
-#              onto a USB stick is bootable too.
+#              catalog names it as a no-emulation EFI boot image - what the
+#              UEFI specification describes for one and what every
+#              distribution ships - and the ESP's contents are published as
+#              an ISO directory tree as well, so the boot file is also at
+#              /EFI/BOOT/BOOTX64.EFI where anyone can see it. The ISO's
+#              unused system area gets a partition table pointing at the
+#              embedded ESP, so the image written straight onto a USB stick
+#              is bootable too.
 #   mkfsnovus  a NovusFS system-partition image, compiled from the kernel's
 #              own fs/novusfs/*.c. Sharing the source is the point: a
 #              second implementation of the format could drift from the
