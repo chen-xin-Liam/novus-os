@@ -99,3 +99,7 @@ config NOVUS_INSTALLER
 	  Build the boot-stage installer: writes a GPT, an ESP and a
 	  NovusFS system partition to a target disk and builds the Merkle
 	  tree over the result. Requires NOVUS_MERKLE.
+
+# User-space language modules live in their own trees and bring their own
+# Kconfig with them, so the option is declared next to the code it builds.
+source "user/mochi/Kconfig"

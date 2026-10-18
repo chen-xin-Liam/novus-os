@@ -47,3 +47,9 @@ CONFIG_NOVUS_NKM=y
 
 # Boot-stage installer (M3): GPT + ESP + NovusFS onto a target disk.
 CONFIG_NOVUS_INSTALLER=y
+
+# Mochi language and its NUC toolchain (user/mochi submodule): compiles a
+# .mochi source into a NUC application and packs it into the live ESP as
+# APPS/DEMO.NUC. Requires the submodule to be checked out.
+CONFIG_USER_MOCHI=y
+CONFIG_USER_MOCHI_NUCUTIL=y

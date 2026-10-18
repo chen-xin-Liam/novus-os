@@ -37,6 +37,11 @@
   /ESP.IMG），固件与挂载镜像的人都能直接看到引导路径；ISO系统区内置isohybrid分区表，
   因此同一镜像写入U盘后亦可被固件识别启动
 
+- 应用工具链（Mochi → NUC）：`user/mochi`子模块提供Lisp风格语言Mochi与其NUC原生
+  格式工具链，由`CONFIG_USER_MOCHI`控制；构建期把`.mochi`源码编译为NUC应用并即时
+  校验，产物随live ESP打包为`APPS/DEMO.NUC`。格式见
+  `docs/NUC 可执行二进制格式规范 V1.0.md`；内核侧的NUC加载器尚未实现
+
 ### 1.3 顶层功能清单
 1. 两阶段SMP启动（A核BSP自检，完成休眠；B核AP主内核）
 2. 内存管理、虚拟内存、OOM内存保护

@@ -152,6 +152,78 @@ $(RUST_HOST_LIB): $(RUST_DEPS)
 	    RUSTFLAGS="-C debuginfo=0" $(CARGO) build --release
 
 # ---------------------------------------------------------------------------
+# Mochi -> NUC: the toolchain that turns a .mochi source into a NUC
+# application
+# ---------------------------------------------------------------------------
+#
+# Mochi lives in a submodule (user/mochi) and is compiled here rather than
+# in its own tree, so the binaries land next to the other host tools in
+# build/tools and nothing is ever written into the submodule - which is
+# somebody else's working tree, and would show up as untracked files in it.
+#
+# Two binaries: `mochi -c` reads a .mochi source and writes a .nuc, and
+# nucutil validates what came out. The validation runs at build time, for
+# the same reason mkiso checks its own boot structures: a malformed
+# application is otherwise discovered by whatever tries to load it, and by
+# then the image is already on a disk.
+
+MOCHI_DIR := user/mochi
+MOCHI     := $(TOOLS_OUT)/mochi
+NUCUTIL   := $(TOOLS_OUT)/nucutil
+
+# codegen.c is the part that emits .text. It parses with the reader and
+# writes through the format library, so all three belong in one binary;
+# main.c's -c mode is the only caller. The host tool needs the format
+# library alone.
+MOCHI_LANG_SRC := $(MOCHI_DIR)/src/value.c $(MOCHI_DIR)/src/reader.c \
+                  $(MOCHI_DIR)/src/env.c $(MOCHI_DIR)/src/eval.c \
+                  $(MOCHI_DIR)/src/native.c $(MOCHI_DIR)/src/codegen.c \
+                  $(MOCHI_DIR)/src/main.c
+MOCHI_FMT_SRC  := $(MOCHI_DIR)/src/nucfmt.c
+MOCHI_UTIL_SRC := $(MOCHI_DIR)/src/nucutil.c
+
+# Mochi's backend covers the integer-arithmetic subset so far, and this is
+# the sample written for it: (define a 6) (define b 7) (+ (* a b) 100).
+# The other samples exercise closures, strings and lists, which the
+# compiler does not emit yet - building them would fail the build.
+NUC_APP_SRC := $(MOCHI_DIR)/samples/compile-demo.mochi
+NUC_APP     := out/demo.nuc
+
+# Empty unless the configuration asks for Mochi, so the ESP rule neither
+# waits for the application nor names it.
+NUC_ESP_DEPS := $(if $(filter y,$(CONFIG_USER_MOCHI)),$(NUC_APP))
+NUC_ESP_ARGS := $(if $(filter y,$(CONFIG_USER_MOCHI)),$(NUC_APP):APPS/DEMO.NUC)
+
+.PHONY: mochi-tools nuc-apps
+mochi-tools: $(MOCHI) $(NUCUTIL)
+nuc-apps: $(NUC_APP)
+
+$(MOCHI): $(MOCHI_LANG_SRC) $(MOCHI_FMT_SRC) $(MOCHI_DIR)/include/mochi.h \
+          $(MOCHI_DIR)/include/nucfmt.h $(MOCHI_DIR)/include/codegen.h \
+          | $(TOOLS_OUT)
+	@test -f $(MOCHI_DIR)/src/codegen.c || { echo "ERROR: $(MOCHI_DIR) is empty - run: git submodule update --init" >&2; exit 1; }
+	$(HOSTCC) $(HOSTCFLAGS) -I$(MOCHI_DIR)/include $(MOCHI_LANG_SRC) \
+	    $(MOCHI_FMT_SRC) -o $@ -lm
+
+$(NUCUTIL): $(MOCHI_UTIL_SRC) $(MOCHI_FMT_SRC) $(MOCHI_DIR)/include/nucfmt.h \
+            | $(TOOLS_OUT)
+	$(HOSTCC) $(HOSTCFLAGS) -I$(MOCHI_DIR)/include $(MOCHI_UTIL_SRC) \
+	    $(MOCHI_FMT_SRC) -o $@ -lm
+
+# One source in, one .nuc out, validated before anything packs it.
+$(NUC_APP): $(NUC_APP_SRC) $(MOCHI) $(NUCUTIL) | out
+	$(MOCHI) -c $< -o $@
+	$(NUCUTIL) validate $@
+
+# The same for any sample, by hand: `make out/fib.nuc` compiles
+# user/mochi/samples/fib.mochi. Most of them need more of the backend
+# than exists - the compiler says so itself, and the build stops there
+# rather than packing something that cannot run.
+out/%.nuc: $(MOCHI_DIR)/samples/%.mochi $(MOCHI) $(NUCUTIL) | out
+	$(MOCHI) -c $< -o $@
+	$(NUCUTIL) validate $@
+
+# ---------------------------------------------------------------------------
 # Image targets
 # ---------------------------------------------------------------------------
 
@@ -173,13 +245,17 @@ $(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) | out
 
 # The live ESP. BOOTX64.EFI is the firmware's default fallback path;
 # NOVUS/SYSTEM.IMG is the live root; NOVUS/ESP.IMG is the install
-# template; NOVUS/TEST.NKM is the signed module the loader verifies.
-$(ESP_IMG): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) $(NKM_MOD) | out
+# template; NOVUS/TEST.NKM is the signed module the loader verifies;
+# APPS/DEMO.NUC is a NUC application built from a .mochi source, sitting
+# on the ESP because that is where a loader looks for one.
+$(ESP_IMG): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) $(NKM_MOD) \
+            $(NUC_ESP_DEPS) | out
 	$(MKFAT) $@ $(ESP_SIZE_MB) \
 	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
 	    $(NOVUS_IMG):SYSTEM.IMG \
 	    $(ESP_TPL):ESP.IMG \
-	    $(NKM_MOD):TEST.NKM
+	    $(NKM_MOD):TEST.NKM \
+	    $(NUC_ESP_ARGS)
 
 # A signed test module, produced by the same Ed25519 code the kernel
 # verifies with. One nkmgen run writes both outputs - the C array the
