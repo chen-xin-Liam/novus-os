@@ -33,4 +33,11 @@ int nwm_selftest(void);
  * repaint when the WM sends it input. Returns 0 when the task is running. */
 int nwm_spawn_client(void);
 
+/* Desktop accent (theme colour) - read by the settings panel. */
+UINT32 nwm_accent_get(void);
+void   nwm_accent_set(UINT32 rgb);
+
+/* Windows currently held, for the sysinfo stats reply. */
+UINT32 nwm_window_count(void);
+
 #endif /* NOVUS_NWM_H */

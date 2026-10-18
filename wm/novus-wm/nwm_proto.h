@@ -23,12 +23,15 @@
 
 #include "uefi.h"
 
-#define NWM_PROTO_VERSION 0x00010000u /* 1.0, major in the high half */
+#define NWM_PROTO_VERSION 0x00010001u /* 1.1: window content lists */
 #define NWM_PORT_NAME     "nwm"
 #define NWM_PID_SHELL     0ull /* the desktop itself: no inbox, local call */
 
 #define NWM_MAX_WINDOWS 8
 #define NWM_MAX_CMDS    7  /* (IPC_PAYLOAD_MAX - 8) / 16 */
+#define NWM_MAX_SHAPES  28 /* per-window display list, v1.1 */
+#define NWM_MAX_TEXTS   40
+#define NWM_TEXT_MAX    96
 #define NWM_TITLE_MAX   24
 #define NWM_TITLE_H     24
 
@@ -47,6 +50,13 @@
 #define NWM_REQ_DRAW     0x010Au
 #define NWM_REQ_TITLE    0x010Bu
 #define NWM_REQ_EFFECT   0x010Cu
+/* v1.1: a window's content is a list of shapes and text runs. CLEAR
+ * empties it, SHAPE and TEXT append one item each. Small messages on
+ * purpose: the payload limit is 128 bytes, and one item per message keeps
+ * every field inside it without a shared buffer. */
+#define NWM_REQ_CLEAR    0x010Du
+#define NWM_REQ_SHAPE    0x010Eu
+#define NWM_REQ_TEXT     0x010Fu
 
 /* Replies: WM -> requester's inbox, flagged IPC_F_REPLY. */
 #define NWM_RSP_OK  0x0001u
@@ -114,6 +124,26 @@ typedef struct {
 #define NWM_OP_HLINE  3u
 #define NWM_OP_VLINE  4u
 #define NWM_OP_CIRCLE 5u /* outline, radius = w */
+
+/* One shape in the v1.1 display list. */
+typedef struct {
+  UINT32 win;
+  UINT8  op; /* NWM_OP_* */
+  UINT8  pad;
+  INT16  x, y, w, h;
+  UINT32 color;
+} nwm_shape_t;
+
+/* One text run. `scale` 1 is 5x7, 2 is double; coordinates are relative
+ * to the client area, `len` is the number of bytes actually used. */
+typedef struct {
+  UINT32 win;
+  INT16  x, y;
+  UINT8  scale;
+  UINT8  len;
+  UINT32 color;
+  char   text[NWM_TEXT_MAX];
+} nwm_text_t;
 
 typedef struct {
   UINT32    win;

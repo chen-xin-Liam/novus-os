@@ -17,6 +17,7 @@
 #include "kernel.h"
 #include "nvgui.h"
 #include "nd_input.h"
+#include "apps.h"
 
 #if CONFIG_NOVUS_GUI
 
@@ -383,6 +384,28 @@ static ng_widget_t *add_label(ng_widget_t *p, INT32 x, INT32 y, const char *text
                   NG_TEXT_SCALE);
 }
 
+/* M8 launcher: the buttons on the shell's taskbar start the built-in
+ * applications. One callback each so the index is not smuggled through
+ * widget memory, and the kernel's app table stays the single source of
+ * names and order. */
+static void on_launch_files(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  (void)apps_launch(0);
+}
+
+static void on_launch_tasks(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  (void)apps_launch(1);
+}
+
+static void on_launch_setup(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  (void)apps_launch(2);
+}
+
 static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_widget_t *win;
   static const char *items[5] = {"Create a process", "Map a page",
@@ -458,8 +481,21 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   nodes[6].expanded = 0;
   ng_tree(ng_create(win, NG_TREE, 16, 268, 348, 156), nodes, 7, on_tree);
 
+  /* M8: taskbar across the top of the desktop, with the launcher. The
+   * windows are positioned below it (y >= 44), so it never covers one. */
+  ng_panel(ng_create(ctx->root, NG_PANEL, 0, 0, screen->w, 34),
+           ND_RGB(0x16, 0x1C, 0x26));
+  ng_label(ng_create(ctx->root, NG_LABEL, 12, 9, 80, 16), "novus",
+           ctx->theme.accent, NG_TEXT_SCALE);
+  ng_button(ng_create(ctx->root, NG_BUTTON, 90, 5, 92, 24), "Files",
+            on_launch_files);
+  ng_button(ng_create(ctx->root, NG_BUTTON, 190, 5, 92, 24), "Tasks",
+            on_launch_tasks);
+  ng_button(ng_create(ctx->root, NG_BUTTON, 290, 5, 92, 24), "Setup",
+            on_launch_setup);
+
   /* Status line, on the desktop itself. */
-  set_status("Ready - M5 NovusDisplay");
+  set_status("Ready - M8 NovusDisplay");
   g_status_label = ng_label(
       ng_create(ctx->root, NG_LABEL, 40, screen->h - 28, 900, 16), g_status,
       ctx->theme.text_dim, 1);

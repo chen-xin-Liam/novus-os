@@ -102,6 +102,24 @@ task_t *sched_current(void);
 /* Task by pid, or NULL. */
 task_t *sched_find_pid(UINT64 pid);
 
+/* Task by name among live tasks, or NULL. */
+task_t *sched_find_name(const char *name);
+
+/* Snapshot of one task slot, for the M8 task manager. Returns 0 on
+ * success, -1 for a free or out-of-range slot. */
+typedef struct {
+  UINT64 pid;
+  UINT32 ticks;
+  INT32  exit_code;
+  UINT8  state;
+  UINT8  slice;
+  char   name[16];
+  UINT8  pad[2];
+} sched_info_t;
+
+UINT32 sched_task_count(void);
+int    sched_task_info(UINT32 idx, sched_info_t *out);
+
 /* Count of tasks that have exited, for the boot log. */
 UINT32 sched_exit_count(void);
 

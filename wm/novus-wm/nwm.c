@@ -45,6 +45,14 @@ typedef struct {
   UINT8     alpha; /* content effect: 255 opaque .. 0 invisible */
   UINT32    draw_n;
   nwm_cmd_t draw[NWM_MAX_CMDS];
+  /* v1.1 content list: shapes and text runs a client appends one message
+   * at a time (nwm_proto.h NWM_REQ_CLEAR/SHAPE/TEXT). Kept per window so
+   * the compositor can replay it after any repaint, which is what makes
+   * damage-driven redraw work at all. */
+  UINT32      shape_n;
+  nwm_shape_t shape[NWM_MAX_SHAPES];
+  UINT32      text_n;
+  nwm_text_t  text[NWM_MAX_TEXTS];
   nd_rect_t restore; /* geometry to come back to from maximized */
 } nwm_window_t;
 
@@ -251,34 +259,43 @@ static void clamp_rect(nd_rect_t *r) {
 
 /* ---- compositor ------------------------------------------------------- */
 
-static void paint_commands(nwm_window_t *w, nd_rect_t client) {
+/* One drawing primitive. Both display-list formats (the M6 command
+ * array and the v1.1 shape list) end up here, so a client of either
+ * version draws identically and there is one place to add an op. */
+static void paint_shape(nd_rect_t client, UINT8 op, INT32 x, INT32 y, INT32 w,
+                        INT32 h, UINT32 color, INT32 thickness) {
   nd_surface_t *s = target();
-  UINT32        i;
+  nd_rect_t     r = nd_rect(client.x + x, client.y + y, w, h);
+
+  switch (op) {
+  case NWM_OP_FILL:
+    nd_fill_rect(s, r, color);
+    break;
+  case NWM_OP_FRAME:
+    nd_frame(s, r, (thickness > 0) ? thickness : 1, color);
+    break;
+  case NWM_OP_HLINE:
+    nd_hline(s, r.x, r.x + r.w, r.y, color);
+    break;
+  case NWM_OP_VLINE:
+    nd_vline(s, r.x, r.y, r.y + r.h, color);
+    break;
+  case NWM_OP_CIRCLE:
+    nd_circle(s, r.x, r.y, (w > 0) ? w : 1, color);
+    break;
+  default:
+    break; /* forward compatible: unknown ops are ignored */
+  }
+}
+
+static void paint_commands(nwm_window_t *w, nd_rect_t client) {
+  UINT32 i;
 
   for (i = 0; i < w->draw_n; i++) {
     const nwm_cmd_t *c = &w->draw[i];
-    nd_rect_t        r = nd_rect(client.x + c->x, client.y + c->y, c->w, c->h);
 
-    switch (c->op) {
-    case NWM_OP_FILL:
-      nd_fill_rect(s, r, c->color);
-      break;
-    case NWM_OP_FRAME:
-      nd_frame(s, nd_rect(client.x + c->x, client.y + c->y, c->w, c->h),
-               (c->pad2 > 0u) ? (INT32)c->pad2 : 1, c->color);
-      break;
-    case NWM_OP_HLINE:
-      nd_hline(s, r.x, r.x + r.w, r.y, c->color);
-      break;
-    case NWM_OP_VLINE:
-      nd_vline(s, r.x, r.y, r.y + r.h, c->color);
-      break;
-    case NWM_OP_CIRCLE:
-      nd_circle(s, r.x, r.y, (c->w > 0) ? (INT32)c->w : 1, c->color);
-      break;
-    default:
-      break; /* forward compatible: unknown ops are ignored */
-    }
+    paint_shape(client, c->op, c->x, c->y, c->w, c->h, c->color,
+                (c->pad2 > 0u) ? (INT32)c->pad2 : 1);
   }
 }
 
@@ -342,6 +359,21 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_surface_set_clip(s, nd_rect_intersect(clip, client));
   nd_fill_rect(s, client, ND_RGB(0x10, 0x14, 0x1C));
   paint_commands(w, client);
+  {
+    UINT32 k;
+
+    for (k = 0; k < w->shape_n; k++) {
+      const nwm_shape_t *sh = &w->shape[k];
+
+      paint_shape(client, sh->op, sh->x, sh->y, sh->w, sh->h, sh->color, 1);
+    }
+    for (k = 0; k < w->text_n; k++) {
+      const nwm_text_t *tx = &w->text[k];
+
+      nd_text(s, client.x + tx->x, client.y + tx->y, tx->text, tx->color,
+              (tx->scale != 0u) ? tx->scale : 1u);
+    }
+  }
   if (w->alpha < 255u) {
     /* Fade effect: the content is dimmed towards the background. */
     nd_blend_rect(s, client, ND_RGB(0, 0, 0), (UINT8)(255u - w->alpha));
@@ -637,6 +669,97 @@ static void req_draw(const ipc_msg_t *m) {
   ack(m, w->id, NWM_OK);
 }
 
+/* ---- v1.1 content list ------------------------------------------------ */
+
+static void req_clear(const ipc_msg_t *m) {
+  nwm_win_t     r;
+  nwm_window_t *w;
+  int           st = NWM_OK;
+
+  if (m->hdr.len < sizeof(r)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&r, m->payload, sizeof(r));
+  w = win_get(r.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, r.win, st);
+    return;
+  }
+  w->draw_n = 0;
+  w->shape_n = 0;
+  w->text_n = 0;
+  damage(client_rect(w));
+  ack(m, w->id, NWM_OK);
+}
+
+static void req_shape(const ipc_msg_t *m) {
+  nwm_shape_t   s;
+  nwm_window_t *w;
+  int           st = NWM_OK;
+
+  if (m->hdr.len < sizeof(s)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&s, m->payload, sizeof(s));
+  w = win_get(s.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, s.win, st);
+    return;
+  }
+  if (w->shape_n >= NWM_MAX_SHAPES) {
+    ack(m, w->id, NWM_EFULL);
+    return;
+  }
+  w->shape[w->shape_n++] = s;
+  {
+    nd_rect_t c = client_rect(w);
+
+    damage(nd_rect_intersect(c, nd_rect(c.x + s.x, c.y + s.y, s.w, s.h)));
+  }
+  ack(m, w->id, NWM_OK);
+}
+
+static void req_text(const ipc_msg_t *m) {
+  nwm_text_t    t;
+  nwm_window_t *w;
+  int           st = NWM_OK;
+  UINT32        len;
+
+  if (m->hdr.len < sizeof(t)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&t, m->payload, sizeof(t));
+  w = win_get(t.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, t.win, st);
+    return;
+  }
+  if (w->text_n >= NWM_MAX_TEXTS) {
+    ack(m, w->id, NWM_EFULL);
+    return;
+  }
+  /* The run is a byte string, not a C string: trust the length, cap it,
+   * and terminate the copy so a client cannot run off the array. */
+  len = t.len;
+  if (len >= NWM_TEXT_MAX) {
+    len = NWM_TEXT_MAX - 1u;
+  }
+  t.text[len] = '\0';
+  t.len = (UINT8)len;
+  w->text[w->text_n++] = t;
+  {
+    nd_rect_t c = client_rect(w);
+
+    damage(nd_rect_intersect(c, nd_rect(c.x + t.x, c.y + t.y,
+                                        (INT32)len * 6 * (INT32)t.scale,
+                                        (INT32)nd_font_height(t.scale))));
+  }
+  ack(m, w->id, NWM_OK);
+}
+
 static void req_title(const ipc_msg_t *m) {
   nwm_title_t t;
   nwm_window_t  *w;
@@ -715,6 +838,15 @@ static void handle_request(const ipc_msg_t *m) {
     break;
   case NWM_REQ_EFFECT:
     req_effect(m);
+    break;
+  case NWM_REQ_CLEAR:
+    req_clear(m);
+    break;
+  case NWM_REQ_SHAPE:
+    req_shape(m);
+    break;
+  case NWM_REQ_TEXT:
+    req_text(m);
     break;
   default:
     ack(m, 0, NWM_EBADREQ);
@@ -939,6 +1071,39 @@ static void sweep_owners(void) {
       memset(w, 0, sizeof(*w));
     }
   }
+}
+
+/* The desktop accent lives in the widget theme, which the shell and the
+ * WM both draw from, so one write here repaints title bars, focus rings
+ * and the shell's progress bar together. M8's settings panel is the only
+ * caller. */
+UINT32 nwm_accent_get(void) {
+  return ng_ctx_get()->theme.accent;
+}
+
+void nwm_accent_set(UINT32 rgb) {
+  ng_ctx_t *c = ng_ctx_get();
+  nd_surface_t *s = screen();
+
+  if (c == 0 || s == 0) {
+    return;
+  }
+  c->theme.accent = rgb;
+  /* One full repaint: at 1280x800 the composite is a few milliseconds and
+   * it happens when a human clicks a colour, not per frame. */
+  ng_damage(nd_rect(0, 0, s->w, s->h));
+}
+
+UINT32 nwm_window_count(void) {
+  UINT32 i;
+  UINT32 n = 0;
+
+  for (i = 0; i < NWM_MAX_WINDOWS; i++) {
+    if (g_wins[i].used) {
+      n++;
+    }
+  }
+  return n;
 }
 
 void nwm_tick(void) {

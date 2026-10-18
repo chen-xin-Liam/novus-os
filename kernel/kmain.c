@@ -36,6 +36,8 @@
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
 #include "ipc.h"
 #include "nwm.h"
+#include "apps.h"
+#include "sysinfo.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
@@ -269,7 +271,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * is started that asks it for a window over IPC. */
 #if CONFIG_NOVUS_WM && CONFIG_NOVUS_DISPLAY
   nwm_init();
-  (void)nwm_spawn_client();
+  /* M8: the sysinfo service and the three built-in applications. The
+   * apps are Rust programs embedded in this image (kernel/apps.c); the
+   * launcher buttons on the shell's taskbar start the same three later,
+   * which is why apps_launch() refuses a second copy. */
+  sysinfo_init();
+  (void)apps_launch(0); /* fileman */
+  (void)apps_launch(1); /* taskman */
+  (void)apps_launch(2); /* settings */
 #endif
 
   kputs("[HALT] entering the scheduler (the A core stays parked)\n");

@@ -1,0 +1,25 @@
+[package]
+name = "novus-apps"
+version = "0.1.0"
+edition = "2021"
+
+# One binary per built-in application. Each is linked flat at 0x400000,
+# turned into a raw blob and embedded in the kernel image (M8).
+[[bin]]
+name = "fileman"
+path = "src/bin/fileman.rs"
+
+[[bin]]
+name = "taskman"
+path = "src/bin/taskman.rs"
+
+[[bin]]
+name = "settings"
+path = "src/bin/settings.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

@@ -439,8 +439,10 @@ int nuc_spawn_blob(const char *name, const UINT8 *blob, UINT32 size,
                    UINT32 entry) {
   /* Header + one segment entry + the blob. The image is built in a
    * static buffer: the loader copies it into the new address space
-   * before returning, so nothing has to outlive this call. */
-  static UINT8 img[NUC_HDR_SIZE + NUC_SEG_SIZE + 1024u];
+   * before returning, so nothing has to outlive this call. The buffer
+   * covers the largest built-in application (M8: ~6 KB, 64 KB here so a
+   * growing app is a build-time size check, not a runtime surprise). */
+  static UINT8 img[NUC_HDR_SIZE + NUC_SEG_SIZE + 65536u];
   UINT32       strtab = NUC_HDR_SIZE + NUC_SEG_SIZE;
 
   if (blob == 0 || size == 0u || entry >= size ||

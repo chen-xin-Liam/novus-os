@@ -18,6 +18,7 @@
 #include "ipc.h"
 #include "nd.h"
 #include "nwm.h"
+#include "sysinfo.h"
 
 /* Written by trap.S: the stack the syscall gate switches to, and the
  * gate itself. */
@@ -417,6 +418,8 @@ void sched_tick(void) {
    * the IPC server queue and the compositor. M5's nd_demo_tick() is what
    * runs instead when the window manager is configured out. */
   nwm_tick();
+  /* M8: the sysinfo service shares the tick with the WM. */
+  sysinfo_tick();
 #elif CONFIG_NOVUS_DISPLAY
   /* M5: NovusDisplay shares the tick. Input is polled (no new IRQ lines)
    * and at most one damage rectangle is repainted per event, so the cost
@@ -479,6 +482,30 @@ void sched_wake_port(UINT64 port) {
 
 UINT64 sched_ticks(void) { return g_ticks; }
 
+/* Task by name, for the M8 launcher: refusing a second copy of an
+ * application is a name lookup, and names are what the file manager and
+ * the task manager show. Exited tasks are skipped. */
+task_t *sched_find_name(const char *name) {
+  UINT32 i;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    const char *a = g_tasks[i].name;
+    const char *b = name;
+
+    if (g_tasks[i].state == TASK_FREE || g_tasks[i].state == TASK_EXITED) {
+      continue;
+    }
+    while (*a != '\0' && *a == *b) {
+      a++;
+      b++;
+    }
+    if (*a == '\0' && *b == '\0') {
+      return &g_tasks[i];
+    }
+  }
+  return NULL;
+}
+
 task_t *sched_find_pid(UINT64 pid) {
   UINT32 i;
 
@@ -513,4 +540,34 @@ void sched_start(void) {
   kputs(first->name);
   kputs("\n");
   sched_enter(first->rsp);
+}
+
+/* ---- introspection (M8 task manager) ---------------------------------- */
+
+UINT32 sched_task_count(void) { return SCHED_MAX_TASKS; }
+
+int sched_task_info(UINT32 idx, sched_info_t *out) {
+  task_t *t;
+
+  if (out == 0 || idx >= SCHED_MAX_TASKS) {
+    return -1;
+  }
+  t = &g_tasks[idx];
+  if (t->state == TASK_FREE) {
+    return -1;
+  }
+  out->pid = t->pid;
+  out->state = (UINT8)t->state;
+  out->exit_code = t->exit_code;
+  out->ticks = t->ticks;
+  out->slice = t->slice;
+  {
+    UINT32 i;
+
+    for (i = 0; i + 1u < sizeof(out->name) && t->name[i] != '\0'; i++) {
+      out->name[i] = t->name[i];
+    }
+    out->name[i] = '\0';
+  }
+  return 0;
 }
