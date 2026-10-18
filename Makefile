@@ -17,9 +17,19 @@
 # 'make run' boots the image under QEMU with OVMF firmware.
 #
 # Usage:
-#   make          build out/NOVUS.EFI
-#   make run      build, then boot the image in QEMU (MEM=4G by default)
-#   make clean    remove build/, out/ and esp/
+#   make              build out/NOVUS.EFI
+#   make run          build, then boot the image in QEMU (MEM=4G by default)
+#   make iso          build the bootable live ISO (out/novus-live.iso);
+#                     prints the artifact again when it is already current
+#   make iso-force    delete and rebuild the ISO unconditionally
+#   make run-iso      build the ISO and boot it in QEMU as a CD-ROM
+#   make disk-img     build a bootable disk image (out/novus-disk.img)
+#   make install      write that disk image to a device: DEVICE=/dev/sdX
+#   make clean        remove build/, out/ and esp/
+#
+# The image targets (iso / run-iso / disk-img / install / novus-img) are
+# defined in tools/tools.mk, which is included at the bottom of this file
+# so that 'all' stays the default target.
 
 # ---------------------------------------------------------------------------
 # Toolchain

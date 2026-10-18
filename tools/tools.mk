@@ -84,7 +84,8 @@ DISK_SIZE_MB ?= 64
 NKM_SEED ?= $(shell python3 -c \
   "import hashlib;print(hashlib.sha256(b'novus nkm development signing key v1').hexdigest())")
 
-.PHONY: tools esp novus-img disk-img iso run-iso install nkm-test-module
+.PHONY: tools esp novus-img disk-img iso iso-force run-iso install \
+        nkm-test-module
 
 tools: $(MKFAT) $(MKISO) $(MKFSNOVUS) $(MKDISK)
 
@@ -175,10 +176,19 @@ $(NKM_MOD): $(RUST_DEPS)
 	    $(CARGO) run --quiet -- mkmod "$(NKM_SEED)" 1 \
 	    ../../security/nkm/nkm_test_module.h ../../$(NKM_MOD)
 
+# 'iso' is phony, so this recipe always runs and naming the artifact is
+# what keeps an up-to-date tree from looking like nothing happened. Only
+# the rule below rebuilds, and only when a real input changed.
 iso: $(ISO_IMG)
+	@echo "iso: $(ISO_IMG) ($(shell wc -c < $(ISO_IMG) 2>/dev/null || echo 0) bytes)"
 
 $(ISO_IMG): $(MKISO) $(ESP_IMG) | out
 	$(MKISO) $@ $(ESP_IMG) NOVUS_LIVE
+
+# Throw the ISO away and rebuild it whatever make thinks about timestamps.
+iso-force:
+	rm -f $(ISO_IMG)
+	$(MAKE) iso
 
 run-iso: iso
 	scripts/run-iso.sh "$(MEM)"
