@@ -1,17 +1,30 @@
 /*
  * mkiso - build a bootable ISO 9660 image with an El Torito entry.
  *
- * The ISO is only a carrier. Its single job is to hand the firmware the
- * FAT32 ESP image produced by mkfat: the El Torito boot catalog points
- * at that image, the firmware loads it as a virtual disk, and from
- * there on the boot path is identical to booting from a real ESP. So
- * this file writes a minimal ISO - one primary volume descriptor, one
- * root directory holding the ESP image, one path-table entry - and
- * nothing else. Novus does not read files out of the ISO, which means
- * no directory tree walk, no Joliet and no Rock Ridge.
+ * The ISO carries the FAT32 ESP image produced by mkfat twice over, for
+ * two different readers:
+ *
+ *   - embedded, as an El Torito boot image. The catalog points at it, the
+ *     firmware loads it as a virtual disk, and from there the boot path is
+ *     identical to booting off a real ESP. This is what makes the disc
+ *     bootable, and it is not a file anyone can see.
+ *
+ *   - published, as a directory tree in the ISO 9660 filesystem: the ESP's
+ *     own contents - EFI/BOOT/BOOTX64.EFI, SYSTEM.IMG, ESP.IMG - so that
+ *     the image is also a folder you can open. A firmware finds its boot
+ *     file at \EFI\BOOT\BOOTX64.EFI, and so does anyone who mounts the
+ *     image or unpacks it with an archive tool: the guide path is there in
+ *     the open, not sealed inside an image file.
+ *
+ * So this writes a small ISO: one primary volume descriptor, a directory
+ * tree of a handful of entries, and the structures that boot it. Novus
+ * does not read files out of the ISO, so there is no Joliet and no Rock
+ * Ridge - but the tree is written properly enough for any other reader,
+ * because an install image that only a firmware can understand is an
+ * install image nobody can check.
  *
  * Usage:
- *   mkiso <out.iso> <esp.img> [volume-id]
+ *   mkiso <out.iso> <esp.img> [volume-id] [--file <iso-path> <host-path>]...
  */
 
 #include <stdio.h>
@@ -27,15 +40,46 @@
 #define PATH_TABLE_LBA  19u    /* little-endian table */
 #define PATH_TABLE_M_LBA 20u   /* big-endian table */
 #define ROOT_DIR_LBA    21u
-#define FILE_LBA        22u    /* first sector after the root record */
+
+#define MAX_NODES       64u
+#define MAX_NAME        40u
 
 #define ISO_EPOCH_YEAR  1970   /* date fields are written as zeros */
 
+/* Where the embedded ESP begins. 2048-byte ISO sectors, so aligning to
+ * eight of them puts the image on a 16 KiB boundary - which is also a
+ * 4096-byte one, so the isohybrid partition describing it starts on a
+ * block boundary even on a 4Kn disk. */
+#define ESP_ALIGN_SECTORS 8u
+
 static uint8_t *image;
 static uint64_t total_sectors;
+static uint32_t next_lba;
 static FILE    *esp_file;
 static uint64_t esp_bytes;
 static uint64_t esp_sectors;
+
+/* ------------------------------------------------------------------ */
+/* The directory tree                                                  */
+/* ------------------------------------------------------------------ */
+/* Built from the --file arguments, which give a path in the ISO and the
+ * host file to take it from. Directories appear only as the parents of
+ * files: there is no --dir, because a directory with nothing in it is not
+ * something an ISO needs. */
+typedef struct node {
+  char         name[MAX_NAME]; /* exactly as written into the ISO */
+  int          is_dir;
+  uint32_t     lba;
+  uint32_t     size;           /* bytes; ISO_SECTOR for a directory */
+  const char  *host;           /* host file, NULL for directories */
+  uint16_t     dir_num;        /* path-table number, directories only */
+  struct node *parent;
+  struct node *child;          /* first child */
+  struct node *next;           /* next sibling */
+} node_t;
+
+static node_t  nodes[MAX_NODES];
+static uint32_t nnodes;
 
 static void die(const char *msg) {
   fprintf(stderr, "mkiso: %s\n", msg);
@@ -78,6 +122,173 @@ static uint8_t *sector(uint64_t lba) {
   return image + lba * ISO_SECTOR;
 }
 
+static void upper_iso_name(char *dst, size_t cap, const char *src) {
+  size_t i;
+
+  for (i = 0; src[i] != '\0' && i + 1u < cap; i++) {
+    char c = src[i];
+    if (c >= 'a' && c <= 'z') {
+      c = (char)(c - 'a' + 'A');
+    }
+    dst[i] = c;
+  }
+  dst[i] = '\0';
+}
+
+static node_t *new_node(const char *name, int is_dir, node_t *parent) {
+  node_t *n;
+
+  if (nnodes >= MAX_NODES) {
+    die("too many files");
+  }
+  n = &nodes[nnodes++];
+  memset(n, 0, sizeof(*n));
+  upper_iso_name(n->name, sizeof(n->name), name);
+  n->is_dir = is_dir;
+  n->parent = parent;
+  n->size = is_dir ? ISO_SECTOR : 0u;
+  return n;
+}
+
+/* Sorted insertion: ISO 9660 wants a directory's records ordered, and
+ * keeping the children sorted also makes the record order agree with the
+ * path table order, which is what a reader checking the two against each
+ * other expects. */
+static node_t *add_child(node_t *dir, const char *name, int is_dir) {
+  node_t **link = &dir->child;
+  node_t  *n;
+
+  while (*link != NULL) {
+    if (strcmp((*link)->name, name) == 0) {
+      return *link;
+    }
+    if (strcmp((*link)->name, name) > 0) {
+      break;
+    }
+    link = &(*link)->next;
+  }
+  n = new_node(name, is_dir, dir);
+  n->next = *link;
+  *link = n;
+  return n;
+}
+
+/* "EFI/BOOT/BOOTX64.EFI" -> two directories and a file. The file gets the
+ * ";1" version suffix ISO 9660 puts on every file name. */
+static void add_file(const char *iso_path, const char *host) {
+  node_t     *dir = &nodes[0];
+  const char *p = iso_path;
+
+  if (*p == '/') {
+    p++;
+  }
+  for (;;) {
+    const char *slash = strchr(p, '/');
+    size_t      n = slash != NULL ? (size_t)(slash - p) : strlen(p);
+    char        comp[MAX_NAME];
+
+    if (n == 0u || n >= sizeof(comp)) {
+      die("bad ISO path");
+    }
+    memcpy(comp, p, n);
+    comp[n] = '\0';
+
+    if (slash == NULL) {
+      char     fname[MAX_NAME + 2u];
+      size_t   len = strlen(comp);
+      node_t  *f;
+
+      if (len + 2u > sizeof(fname)) {
+        die("file name too long");
+      }
+      memcpy(fname, comp, len);
+      fname[len] = ';';
+      fname[len + 1u] = '1';
+      fname[len + 2u] = '\0';
+      f = add_child(dir, fname, 0);
+      f->host = host;
+      return;
+    }
+    dir = add_child(dir, comp, 1);
+    p = slash + 1;
+  }
+}
+
+/* ------------------------------------------------------------------ */
+/* Layout                                                              */
+/* ------------------------------------------------------------------ */
+/* Directories first, then file data, both in depth-first order - which
+ * is also the order the path table is written in, so a directory's number
+ * is always lower than its children's. */
+static void assign_dirs(node_t *d, uint16_t *num) {
+  node_t *c;
+
+  d->dir_num = *num;
+  (*num)++;
+  if (d->parent == NULL) {
+    d->lba = ROOT_DIR_LBA;
+  } else {
+    d->lba = next_lba++;
+  }
+  for (c = d->child; c != NULL; c = c->next) {
+    if (c->is_dir) {
+      assign_dirs(c, num);
+    }
+  }
+}
+
+static void assign_files(node_t *d) {
+  node_t *c;
+
+  for (c = d->child; c != NULL; c = c->next) {
+    if (c->is_dir) {
+      assign_files(c);
+      continue;
+    }
+    {
+      FILE *fp = fopen(c->host, "rb");
+      long  end;
+
+      if (fp == NULL) {
+        die("cannot open a file named in the ISO");
+      }
+      fseek(fp, 0, SEEK_END);
+      end = ftell(fp);
+      fclose(fp);
+      if (end < 0 || (uint64_t)end > 0xffffffffu) {
+        die("cannot size a file named in the ISO");
+      }
+      c->size = (uint32_t)end;
+    }
+    c->lba = next_lba;
+    next_lba += (c->size + ISO_SECTOR - 1u) / ISO_SECTOR;
+  }
+}
+
+/* The path table: one entry per directory, parents before children. */
+static uint32_t path_table_size(const node_t *d) {
+  const node_t *c;
+  uint32_t      n = 0;
+
+  if (d->parent == NULL) {
+    n = 10u; /* root: one byte of name, which is the 0x00 filler */
+  } else {
+    n = 8u + (uint32_t)strlen(d->name);
+    if ((strlen(d->name) & 1u) == 0u) {
+      n += 1u; /* pad to even */
+    }
+  }
+  for (c = d->child; c != NULL; c = c->next) {
+    if (c->is_dir) {
+      n += path_table_size(c);
+    }
+  }
+  return n;
+}
+
+/* ------------------------------------------------------------------ */
+/* ISO 9660 structures                                                 */
+/* ------------------------------------------------------------------ */
 /* One directory record. `name` is written verbatim; the caller supplies
  * the 0x00 byte for "." and "..", and ";1" for file version. */
 static uint32_t write_dir_record(uint8_t *p, uint32_t extent, uint32_t size,
@@ -105,18 +316,15 @@ static uint32_t write_dir_record(uint8_t *p, uint32_t extent, uint32_t size,
   return 33u + name_len;
 }
 
-static void write_pvd(const char *volume_id) {
+static void write_pvd(const char *volume_id, uint32_t path_size) {
   uint8_t *p = sector(PVD_LBA);
   uint32_t off;
 
   memset(p, 0, ISO_SECTOR);
   p[0] = 1; /* primary volume descriptor */
   memcpy(p + 1, "CD001", 5);
-  p[6] = 1; /* version */
-
-  memset(p + 8, ' ', 32);
-  memcpy(p + 8, "NOVUS", 5);  /* system identifier */
-  memset(p + 40, ' ', 32);
+  p[6] = 1;
+  memset(p + 7, 0, 32); /* system identifier */
   {
     size_t n = strlen(volume_id);
     if (n > 32) {
@@ -137,7 +345,7 @@ static void write_pvd(const char *volume_id) {
   put_le16(p + 128, ISO_SECTOR);
   put_be16(p + 130, ISO_SECTOR);
 
-  put_le32(p + 132, 10u); /* path table size: one root entry == 10 bytes */
+  put_le32(p + 132, path_size);
   put_le32(p + 136, PATH_TABLE_LBA);
   put_le32(p + 140, 0);
   put_be32(p + 144, PATH_TABLE_M_LBA);
@@ -197,6 +405,127 @@ static void write_terminator(void) {
   p[0] = 255;
   memcpy(p + 1, "CD001", 5);
   p[6] = 1;
+}
+
+static void write_path_table_entry(uint8_t *p, uint32_t *off,
+                                   const node_t *d, int big_endian) {
+  uint32_t name_len = (d->parent == NULL) ? 1u : (uint32_t)strlen(d->name);
+  uint32_t o = *off;
+
+  p[o] = (uint8_t)name_len;
+  p[o + 1u] = 0; /* extended attribute record length */
+  if (big_endian) {
+    put_be32(p + o + 2u, d->lba);
+    put_be16(p + o + 6u, d->parent != NULL ? d->parent->dir_num : d->dir_num);
+  } else {
+    put_le32(p + o + 2u, d->lba);
+    put_le16(p + o + 6u, d->parent != NULL ? d->parent->dir_num : d->dir_num);
+  }
+  if (d->parent == NULL) {
+    p[o + 8u] = 0x00; /* root's name is a single zero byte */
+  } else {
+    memcpy(p + o + 8u, d->name, strlen(d->name));
+  }
+  o += 8u + name_len;
+  if ((name_len & 1u) == 0u) {
+    p[o] = 0;
+    o += 1u;
+  }
+  *off = o;
+}
+
+static void write_path_tables_node(const node_t *d, uint8_t *le, uint8_t *be,
+                                   uint32_t *off) {
+  const node_t *c;
+
+  write_path_table_entry(le, off, d, 0);
+  {
+    uint32_t o = *off;
+    write_path_table_entry(be, &o, d, 1);
+  }
+  for (c = d->child; c != NULL; c = c->next) {
+    if (c->is_dir) {
+      write_path_tables_node(c, le, be, off);
+    }
+  }
+}
+
+static void write_path_tables(void) {
+  uint8_t *le = sector(PATH_TABLE_LBA);
+  uint8_t *be = sector(PATH_TABLE_M_LBA);
+  uint32_t off = 0;
+
+  memset(le, 0, ISO_SECTOR);
+  memset(be, 0, ISO_SECTOR);
+  write_path_tables_node(&nodes[0], le, be, &off);
+}
+
+/* One directory: ".", "..", then its children in order. */
+static void write_dir(const node_t *d) {
+  uint8_t *p = sector(d->lba);
+  uint32_t off = 0;
+  uint8_t  dot[1];
+  const node_t *c;
+
+  dot[0] = 0x00;
+  memset(p, 0, ISO_SECTOR);
+  off += write_dir_record(p + off, d->lba, ISO_SECTOR, 0x02, dot, 1);
+  off += write_dir_record(p + off,
+                          d->parent != NULL ? d->parent->lba : d->lba,
+                          ISO_SECTOR, 0x02, dot, 1);
+  for (c = d->child; c != NULL; c = c->next) {
+    off += write_dir_record(p + off, c->lba, c->size,
+                            c->is_dir ? 0x02u : 0x00u,
+                            (const uint8_t *)c->name,
+                            (uint32_t)strlen(c->name));
+  }
+}
+
+static void write_dirs(const node_t *d) {
+  const node_t *c;
+
+  write_dir(d);
+  for (c = d->child; c != NULL; c = c->next) {
+    if (c->is_dir) {
+      write_dirs(c);
+    }
+  }
+}
+
+/* File data, copied in whole sectors with the tail zero-filled: an ISO
+ * file is a run of sectors, so the last one is padded rather than left
+ * short. */
+static void copy_files(const node_t *d) {
+  const node_t *c;
+
+  for (c = d->child; c != NULL; c = c->next) {
+    if (c->is_dir) {
+      copy_files(c);
+      continue;
+    }
+    {
+      FILE   *fp = fopen(c->host, "rb");
+      uint64_t remaining = c->size;
+      uint32_t lba = c->lba;
+
+      if (fp == NULL) {
+        die("cannot open a file named in the ISO");
+      }
+      while (remaining > 0) {
+        size_t chunk =
+            (remaining > ISO_SECTOR) ? ISO_SECTOR : (size_t)remaining;
+        if (fread(sector(lba), 1, chunk, fp) != chunk) {
+          die("short read on a file named in the ISO");
+        }
+        if (chunk < ISO_SECTOR) {
+          memset(sector(lba) + chunk, 0, ISO_SECTOR - chunk);
+        }
+        remaining -= chunk;
+        lba++;
+      }
+      fclose(fp);
+    }
+  }
 }
 
 /* El Torito boot catalog.
@@ -304,8 +633,7 @@ static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
  * the conventional "start at 0/0/1, end at max" pair; anything reading
  * this uses the LBA fields. There is no legacy boot code because Novus
  * is UEFI-only: a firmware that starts this sector as 16-bit code finds
- * a message instead of a stub that would hang.
- */
+ * a message instead of a stub that would hang. */
 static void write_isohybrid_mbr(uint32_t image_lba, uint32_t image_sectors) {
   uint8_t *p = sector(0);
   static const char note[] = "Novus: UEFI only. This image has no legacy "
@@ -329,45 +657,29 @@ static void write_isohybrid_mbr(uint32_t image_lba, uint32_t image_sectors) {
   p[511] = 0xaa;
 }
 
-static void write_path_tables(void) {
-  uint8_t *le = sector(PATH_TABLE_LBA);
-  uint8_t *be = sector(PATH_TABLE_M_LBA);
+/* ------------------------------------------------------------------ */
+/* Verification                                                        */
+/* ------------------------------------------------------------------ */
+/* Look a name up in a directory record. Returns the entry's extent and
+ * size, or 0 if it is not there. */
+static int dir_find(const uint8_t *dir, const char *name, uint32_t *extent,
+                    uint32_t *size, uint8_t *flags) {
+  uint32_t   off = 0;
+  uint32_t   want = (uint32_t)strlen(name);
 
-  memset(le, 0, ISO_SECTOR);
-  le[0] = 1;                    /* name length: root's 0x00 byte */
-  put_le32(le + 2, ROOT_DIR_LBA);
-  put_le16(le + 6, 1);          /* parent directory number */
-  le[8] = 0x00;                 /* name */
-  le[9] = 0;                    /* padding to even */
+  while (off + 33u <= ISO_SECTOR && dir[off] != 0u) {
+    uint32_t nlen = dir[off + 32];
 
-  memset(be, 0, ISO_SECTOR);
-  be[0] = 1;
-  put_be32(be + 2, ROOT_DIR_LBA);
-  put_be16(be + 6, 1);
-  be[8] = 0x00;
-  be[9] = 0;
-}
-
-/* Root directory: ".", ".." and the ESP image. */
-static void write_root_dir(void) {
-  uint8_t *p = sector(ROOT_DIR_LBA);
-  uint32_t off = 0;
-
-  memset(p, 0, ISO_SECTOR);
-  {
-    uint8_t dot[1];
-    dot[0] = 0x00;
-    off += write_dir_record(p + off, ROOT_DIR_LBA, ISO_SECTOR, 0x02, dot, 1);
-    off += write_dir_record(p + off, ROOT_DIR_LBA, ISO_SECTOR, 0x02, dot, 1);
+    if (off + 33u + nlen <= ISO_SECTOR && nlen == want &&
+        memcmp(dir + off + 33, name, nlen) == 0) {
+      *extent = read_le32(dir + off + 2);
+      *size = read_le32(dir + off + 10);
+      *flags = dir[off + 25];
+      return 1;
+    }
+    off += (uint32_t)dir[off];
   }
-  {
-    const char *fname = "ESP.IMG;1";
-    uint32_t size = (esp_bytes > 0xffffffffu) ? 0xffffffffu
-                                              : (uint32_t)esp_bytes;
-    off += write_dir_record(p + off, FILE_LBA, size, 0x00,
-                            (const uint8_t *)fname, (uint32_t)strlen(fname));
-  }
-  (void)off;
+  return 0;
 }
 
 /* Check the finished image against what its own structures claim, before
@@ -377,14 +689,11 @@ static void write_root_dir(void) {
  * by a few bytes still produces a file that looks finished, and the
  * machine that discovers it does not boot is the user's. The point of
  * these checks is that a catalog pointer that lands on the wrong sector,
- * a missing 0x55/0xAA, a checksum that does not add up, or a boot entry
- * that does not point at the ESP image all fail here, at build time, with
- * the reason on the terminal - instead of on someone's laptop as "no
- * bootable device".
- *
- * The last two are the ones that say the image really is a boot image:
- * the sector the catalog names has a FAT boot sector in it, and the
- * directory entry for the ESP image names the same sector. */
+ * a missing 0x55/0xAA, a checksum that does not add up, a boot entry
+ * that does not point at the ESP image, or a boot file that is not where
+ * a firmware looks for it all fail here, at build time, with the reason
+ * on the terminal - instead of on someone's laptop as "no bootable
+ * device". */
 static void verify_image(uint32_t catalog_lba, uint32_t boot_lba,
                          uint32_t boot_sectors) {
   const uint8_t *brvd = sector(BRVD_LBA);
@@ -423,27 +732,34 @@ static void verify_image(uint32_t catalog_lba, uint32_t boot_lba,
     die("the boot entry does not point at the ESP image");
   }
 
+  /* The sector the catalog names really holds a FAT volume. */
   if (esp[510] != 0x55u || esp[511] != 0xaau) {
     die("the sector the catalog points at is not a bootable FAT volume");
   }
-  {
-    const uint8_t *dir = sector(ROOT_DIR_LBA);
-    uint32_t       off = 0;
-    int            found = 0;
 
-    while (off + 34u <= ISO_SECTOR && dir[off] != 0u) {
-      if (dir[off + 32] == 9u &&
-          memcmp(dir + off + 33, "ESP.IMG;1", 9) == 0) {
-        if (read_le32(dir + off + 2) != boot_lba) {
-          die("the ESP image's directory extent is not the boot image");
-        }
-        found = 1;
-        break;
-      }
-      off += (uint32_t)dir[off];
+  /* And the boot file is where a firmware looks for it. This is the
+   * check for the other half of the image: the copy of the ESP that is
+   * published as a directory tree, that anyone can open, and that a
+   * firmware finding \EFI\BOOT\BOOTX64.EFI relies on. */
+  {
+    uint32_t lba = 0;
+    uint32_t size = 0;
+    uint8_t  flags = 0;
+
+    if (!dir_find(sector(ROOT_DIR_LBA), "EFI", &lba, &size, &flags) ||
+        (flags & 0x02u) == 0u) {
+      die("the ISO has no /EFI directory");
     }
-    if (!found) {
-      die("the ESP image is not in the ISO directory");
+    if (!dir_find(sector(lba), "BOOT", &lba, &size, &flags) ||
+        (flags & 0x02u) == 0u) {
+      die("the ISO has no /EFI/BOOT directory");
+    }
+    if (!dir_find(sector(lba), "BOOTX64.EFI;1", &lba, &size, &flags) ||
+        (flags & 0x02u) != 0u) {
+      die("the ISO has no /EFI/BOOT/BOOTX64.EFI");
+    }
+    if (size == 0u || sector(lba)[0] != 'M' || sector(lba)[1] != 'Z') {
+      die("/EFI/BOOT/BOOTX64.EFI is not a PE image");
     }
   }
 
@@ -457,18 +773,51 @@ static void verify_image(uint32_t catalog_lba, uint32_t boot_lba,
   }
 }
 
+static void report_tree(const node_t *d, const char *prefix) {
+  const node_t *c;
+
+  for (c = d->child; c != NULL; c = c->next) {
+    if (c->is_dir) {
+      char sub[MAX_NAME + 32u];
+      snprintf(sub, sizeof(sub), "%s%s/", prefix, c->name);
+      printf("mkiso:   %s%s/ (directory)\n", prefix, c->name);
+      report_tree(c, sub);
+    } else {
+      printf("mkiso:   %s%s  %u bytes\n", prefix, c->name, c->size);
+    }
+  }
+}
+
 int main(int argc, char **argv) {
   const char *volume_id = "NOVUS_LIVE";
   uint32_t catalog_lba;
+  uint32_t boot_lba;
   uint32_t units; /* size of the embedded ESP in 512-byte units */
-  uint64_t reserved;
+  uint16_t dir_num = 1;
+  int      i;
 
   if (argc < 3) {
-    fprintf(stderr, "usage: mkiso <out.iso> <esp.img> [volume-id]\n");
+    fprintf(stderr, "usage: mkiso <out.iso> <esp.img> [volume-id] "
+                    "[--file <iso-path> <host-path>]...\n");
     return 2;
   }
-  if (argc >= 4) {
+  memset(nodes, 0, sizeof(nodes));
+  nnodes = 1; /* nodes[0] is the root */
+
+  if (argc >= 4 && strcmp(argv[3], "--file") != 0) {
     volume_id = argv[3];
+    i = 4;
+  } else {
+    i = 3;
+  }
+  for (; i < argc; i++) {
+    if (strcmp(argv[i], "--file") == 0 && i + 2 < argc) {
+      add_file(argv[i + 1], argv[i + 2]);
+      i += 2;
+    } else {
+      fprintf(stderr, "mkiso: unexpected argument '%s'\n", argv[i]);
+      return 2;
+    }
   }
 
   esp_file = fopen(argv[2], "rb");
@@ -487,42 +836,33 @@ int main(int argc, char **argv) {
   }
   esp_sectors = (esp_bytes + ISO_SECTOR - 1u) / ISO_SECTOR;
 
-  /* Layout: descriptors and tables, catalog, root, file, then 150
-   * sectors of slack so a slightly larger ESP still fits without
+  /* Layout: descriptors and tables, the directory tree, the published
+   * files, then the embedded ESP on an aligned boundary, the catalog,
+   * and 150 sectors of slack so a slightly larger ESP still fits without
    * recomputing anything. */
-  reserved = FILE_LBA + esp_sectors + 150u;
-  total_sectors = reserved;
-  catalog_lba = FILE_LBA + esp_sectors;
+  next_lba = ROOT_DIR_LBA + 1u;
+  assign_dirs(&nodes[0], &dir_num);
+  assign_files(&nodes[0]);
+  boot_lba = (next_lba + (ESP_ALIGN_SECTORS - 1u)) &
+             ~(uint32_t)(ESP_ALIGN_SECTORS - 1u);
+  catalog_lba = boot_lba + (uint32_t)esp_sectors;
+  total_sectors = (uint64_t)catalog_lba + 1u + 150u;
 
   image = calloc(1, (size_t)(total_sectors * ISO_SECTOR));
   if (image == NULL) {
     die("out of memory");
   }
 
-  write_pvd(volume_id);
+  write_pvd(volume_id, path_table_size(&nodes[0]));
   write_boot_record(catalog_lba);
   write_terminator();
   write_path_tables();
-  write_root_dir();
-  /* The catalog's sector count is in 512-byte units, because that is the
-   * sector size of the virtual disk the firmware sees - the ESP image is
-   * a FAT32 volume with 512-byte sectors. Passing the ISO's 2048-byte
-   * sector count here would tell the firmware the disk is a quarter of
-   * its real size. */
-  {
-    units = (uint32_t)((esp_bytes + 511u) / 512u);
-
-    write_catalog(catalog_lba, FILE_LBA, units);
-    /* The MBR counts in 512-byte sectors too, and FILE_LBA counts in
-     * 2048-byte ones: the image starts at byte FILE_LBA * 2048, which is
-     * sector FILE_LBA * 4 - a multiple of eight, so it stays on a block
-     * boundary even on a 4Kn disk. */
-    write_isohybrid_mbr(FILE_LBA * (ISO_SECTOR / 512u), units);
-  }
+  write_dirs(&nodes[0]);
+  copy_files(&nodes[0]);
 
   {
     uint64_t remaining = esp_bytes;
-    uint64_t lba = FILE_LBA;
+    uint64_t lba = boot_lba;
 
     while (remaining > 0) {
       size_t chunk = (remaining > ISO_SECTOR) ? ISO_SECTOR : (size_t)remaining;
@@ -538,10 +878,20 @@ int main(int argc, char **argv) {
   }
   fclose(esp_file);
 
-  /* Now that the ESP image is in place: check the boot structures
-   * against what they claim, and refuse to write a file that would not
-   * boot. */
-  verify_image(catalog_lba, FILE_LBA, units);
+  /* The catalog's sector count is in 512-byte units, because that is the
+   * sector size of the virtual disk the firmware sees - the ESP image is
+   * a FAT32 volume with 512-byte sectors. Passing the ISO's 2048-byte
+   * sector count here would tell the firmware the disk is a quarter of
+   * its real size. */
+  units = (uint32_t)((esp_bytes + 511u) / 512u);
+  write_catalog(catalog_lba, boot_lba, units);
+  /* The MBR counts in 512-byte sectors too, and boot_lba counts in
+   * 2048-byte ones. */
+  write_isohybrid_mbr(boot_lba * (ISO_SECTOR / 512u), units);
+
+  /* Now that everything is in place: check the boot structures against
+   * what they claim, and refuse to write a file that would not boot. */
+  verify_image(catalog_lba, boot_lba, units);
 
   {
     FILE *out = fopen(argv[1], "wb");
@@ -556,17 +906,18 @@ int main(int argc, char **argv) {
   }
 
   /* Report the parts that decide whether the result boots, not just its
-   * size: where the catalog is, what the boot entry names, and where the
-   * isohybrid table says the ESP lives once the image is on a stick. */
-  printf("mkiso: %s  %llu sectors, ESP at LBA %u (%llu bytes)\n", argv[1],
-         (unsigned long long)total_sectors, FILE_LBA,
-         (unsigned long long)esp_bytes);
+   * size: what the image contains, where the catalog is, what the boot
+   * entry names, and where the isohybrid table says the ESP lives once
+   * the image is on a stick. */
+  printf("mkiso: %s  %llu sectors\n", argv[1],
+         (unsigned long long)total_sectors);
+  report_tree(&nodes[0], "");
   printf("mkiso:   boot catalog LBA %u, boot entry: no emulation, "
-         "LBA %u, %u x 512B\n",
-         catalog_lba, FILE_LBA, units);
+         "embedded ESP at LBA %u, %u x 512B\n",
+         catalog_lba, boot_lba, units);
   printf("mkiso:   isohybrid MBR: partition 1 type 0xEF at LBA %u, %u "
          "sectors (USB stick boot)\n",
-         FILE_LBA * (ISO_SECTOR / 512u), units);
+         boot_lba * (ISO_SECTOR / 512u), units);
   free(image);
   return 0;
 }

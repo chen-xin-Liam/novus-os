@@ -197,8 +197,20 @@ $(NKM_TEST_H) $(NKM_MOD): $(RUST_DEPS)
 iso: $(ISO_IMG)
 	@echo "iso: $(ISO_IMG) ($(shell wc -c < $(ISO_IMG) 2>/dev/null || echo 0) bytes)"
 
-$(ISO_IMG): $(MKISO) $(ESP_IMG) | out
-	$(MKISO) $@ $(ESP_IMG) NOVUS_LIVE
+# The ISO holds the ESP twice, for two readers: embedded as the El Torito
+# boot image, which is what boots it, and published as a directory tree,
+# which is what makes it an image you can open - the boot file sits at
+# /EFI/BOOT/BOOTX64.EFI where a firmware looks for it and so does anyone
+# mounting the disc.
+#
+# ESP.IMG here is the install template, not the live ESP: it is what the
+# installer copies onto the target disk's system partition, so it carries
+# the boot loader and the system image and nothing else.
+$(ISO_IMG): $(MKISO) $(ESP_IMG) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) | out
+	$(MKISO) $@ $(ESP_IMG) NOVUS_LIVE \
+	    --file EFI/BOOT/BOOTX64.EFI out/NOVUS.EFI \
+	    --file SYSTEM.IMG $(NOVUS_IMG) \
+	    --file ESP.IMG $(ESP_TPL)
 
 # Throw the ISO away and rebuild it whatever make thinks about timestamps.
 iso-force:

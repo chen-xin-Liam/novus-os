@@ -1,0 +1,3 @@
+[submodule "user/mochi"]
+	path = user/mochi
+	url = git@github.com:Ryan-cpu-lang/mochi.git
