@@ -53,13 +53,13 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # Sizes in MiB. The live ESP carries, on top of the boot files, a copy of
 # itself (NOVUS/ESP.IMG) that the installer writes to a target disk, so
 # it is necessarily the largest of the three images.
-# FAT32 only exists above 65525 clusters, which at 512 bytes a cluster
-# puts the floor for an ESP at roughly 34 MiB no matter how little it
-# holds. The template therefore sits just above that floor rather than
-# being sized to its contents.
+# mkfat now picks FAT16 for small images, so the install template can
+# stay well under the 32 MiB limit imposed by the El Torito hard-disk
+# emulation sector-count field. The live ESP is only slightly larger
+# because it also carries the template.
 SYS_SIZE_MB     ?= 8
-ESP_TPL_SIZE_MB ?= 36
-ESP_SIZE_MB     ?= 80
+ESP_TPL_SIZE_MB ?= 12
+ESP_SIZE_MB     ?= 24
 
 ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
@@ -131,7 +131,7 @@ esp: $(ESP_IMG)
 $(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) | out
 	$(MKFAT) $@ $(ESP_TPL_SIZE_MB) \
 	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
-	    $(NOVUS_IMG):NOVUS/SYSTEM.IMG
+	    $(NOVUS_IMG):SYSTEM.IMG
 
 # The live ESP. BOOTX64.EFI is the firmware's default fallback path;
 # NOVUS/SYSTEM.IMG is the live root; NOVUS/ESP.IMG is the install
@@ -139,9 +139,9 @@ $(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) | out
 $(ESP_IMG): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) $(NKM_MOD) | out
 	$(MKFAT) $@ $(ESP_SIZE_MB) \
 	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
-	    $(NOVUS_IMG):NOVUS/SYSTEM.IMG \
-	    $(ESP_TPL):NOVUS/ESP.IMG \
-	    $(NKM_MOD):NOVUS/TEST.NKM
+	    $(NOVUS_IMG):SYSTEM.IMG \
+	    $(ESP_TPL):ESP.IMG \
+	    $(NKM_MOD):TEST.NKM
 
 # A signed test module, produced by the same Ed25519 code the kernel
 # verifies with. Regenerated whenever the crypto or the loader changes.

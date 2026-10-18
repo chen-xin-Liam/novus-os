@@ -67,6 +67,18 @@ static UINT64 g_live_size;
  * through an explicit setter, so this is where EFI AllocatePool is
  * spliced in - and restored again in stage3_finish(). */
 
+/* Large EFI pool allocations are unreliable; track anything over 1 MiB
+ * and use AllocatePages / FreePages for it. */
+#define EFI_BIG_THRESHOLD (1u << 20)
+
+typedef struct {
+  VOID   *ptr;
+  UINT64  pages;
+} efi_big_alloc_t;
+
+static efi_big_alloc_t efi_big_allocs[8];
+static UINTN           efi_big_alloc_count = 0;
+
 static void *efi_alloc(UINT64 bytes) {
   VOID *p = NULL;
   UINTN n = (UINTN)bytes;
@@ -77,6 +89,18 @@ static void *efi_alloc(UINT64 bytes) {
   if (n == 0) {
     n = 1;
   }
+  if (bytes >= EFI_BIG_THRESHOLD && efi_big_alloc_count < 8) {
+    EFI_PHYSICAL_ADDRESS addr = 0;
+    UINT64               pages = (bytes + 4095u) / 4096u;
+
+    if (g_bs->AllocatePages(NOVUS_EFI_ALLOCATE_ANY_PAGES, EfiLoaderData,
+                            (UINTN)pages, &addr) == EFI_SUCCESS) {
+      efi_big_allocs[efi_big_alloc_count].ptr = (VOID *)(UINTN)addr;
+      efi_big_allocs[efi_big_alloc_count].pages = pages;
+      efi_big_alloc_count++;
+      return (VOID *)(UINTN)addr;
+    }
+  }
   if (g_bs->AllocatePool(EfiLoaderData, n, &p) != EFI_SUCCESS) {
     return NULL;
   }
@@ -84,6 +108,22 @@ static void *efi_alloc(UINT64 bytes) {
 }
 
 static void efi_free(void *ptr) {
+  UINTN i;
+
+  if (g_bs == NULL || ptr == NULL) {
+    return;
+  }
+  for (i = 0; i < efi_big_alloc_count; i++) {
+    if (efi_big_allocs[i].ptr == ptr) {
+      g_bs->FreePages((EFI_PHYSICAL_ADDRESS)(UINTN)ptr,
+                      (UINTN)efi_big_allocs[i].pages);
+      efi_big_alloc_count--;
+      if (i < efi_big_alloc_count) {
+        efi_big_allocs[i] = efi_big_allocs[efi_big_alloc_count];
+      }
+      return;
+    }
+  }
   if (g_bs != NULL && ptr != NULL) {
     g_bs->FreePool(ptr);
   }
@@ -132,7 +172,15 @@ static int esp_open(void) {
   return -1;
 }
 
-/* Read a whole file into a freshly allocated pool buffer. */
+/* Forward: the built-in FAT32 reader lives below the partition
+ * wrapper, but esp_read may call it as a fallback. */
+static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
+                           UINT64 *out_len);
+
+/* Read a whole file into a freshly allocated pool buffer. Uses the
+ * firmware's SimpleFileSystem when it is available; otherwise falls
+ * back to the built-in FAT32 reader, which is needed on firmwares that
+ * only expose Block I/O for the boot device. */
 static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   EFI_GUID           info_guid = EFI_FILE_INFO_ID;
   UINT8              info_buf[512];
@@ -143,16 +191,16 @@ static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   UINTN              got;
 
   if (g_esp_root == NULL) {
-    return -1;
+    return fat32_read_file(path, out_buf, out_len);
   }
   if (g_esp_root->Open(g_esp_root, &f, (CHAR16 *)path, EFI_FILE_MODE_READ,
                        0) != EFI_SUCCESS ||
       f == NULL) {
-    return -1;
+    return fat32_read_file(path, out_buf, out_len);
   }
   if (f->GetInfo(f, &info_guid, &info_size, info_buf) != EFI_SUCCESS) {
     f->Close(f);
-    return -1;
+    return fat32_read_file(path, out_buf, out_len);
   }
   size = ((EFI_FILE_INFO *)info_buf)->FileSize;
   if (size == 0 || size > (64u * 1024u * 1024u)) {
@@ -199,6 +247,368 @@ static int esp_read_reserved(const CHAR16 *path, UINT64 *out_base,
   efi_free(tmp);
   *out_base = (UINT64)addr;
   *out_size = len;
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Built-in FAT32 reader                                               */
+/* ------------------------------------------------------------------ */
+/* Some firmwares (notably OVMF under hard-disk emulation) expose the
+ * boot device as Block I/O but do not bind SimpleFileSystem. Rather than
+ * fail to load the live root, this tiny reader parses the FAT32 volume
+ * directly. It only handles the image this very boot stage produces:
+ * FAT32, 512-byte sectors, 8.3 short names in the root directory. */
+
+typedef struct {
+  blkdev_t *dev;
+  UINT32    bytes_per_sector;
+  UINT32    sectors_per_cluster;
+  UINT32    fat_start;
+  UINT32    data_start;
+  /* Root directory: FAT16 uses a fixed sector range, FAT32 uses a
+   * cluster chain starting at root_cluster. */
+  UINT32    root_lba;
+  UINT32    root_sectors;
+  UINT32    root_cluster;
+  UINT32    fat_type; /* 16 or 32 */
+  UINT8    *fat;
+  UINT32    fat_sectors;
+} fat32_ctx_t;
+
+static int fat32_read_sectors(fat32_ctx_t *ctx, UINT64 lba, UINTN count,
+                              void *buf) {
+  return blkdev_read(ctx->dev, lba, count, buf);
+}
+
+static UINT32 fat32_get(fat32_ctx_t *ctx, UINT32 clus) {
+  UINT8 *p = ctx->fat + (UINT64)clus * (ctx->fat_type == 16 ? 2u : 4u);
+
+  if (ctx->fat_type == 16) {
+    UINT32 v = (UINT32)p[0] | ((UINT32)p[1] << 8);
+
+    return (v >= 0xfff8u) ? 0x0fffffffu : v;
+  }
+  return (UINT32)p[0] | ((UINT32)p[1] << 8) | ((UINT32)p[2] << 16) |
+         ((UINT32)p[3] << 24);
+}
+
+static UINT64 fat32_cluster_lba(fat32_ctx_t *ctx, UINT32 clus) {
+  return (UINT64)ctx->data_start +
+         ((UINT64)clus - 2u) * (UINT64)ctx->sectors_per_cluster;
+}
+
+/* Convert a CHAR16 path into an 8.3 short-name buffer (11 bytes, no
+ * dot, spaces padded). Only the characters the boot stage uses are
+ * supported; any exotic name is rejected. */
+static int fat32_short_name(const CHAR16 *path, UINT8 *out) {
+  UINTN i;
+  UINTN dot = 0;
+
+  for (i = 0; i < 11; i++) {
+    out[i] = ' ';
+  }
+  for (i = 0; i < 11 && path[i] != 0; i++) {
+    if (path[i] == L'.') {
+      dot = i;
+      break;
+    }
+  }
+  if (dot == 0) {
+    for (i = 0; i < 11 && path[i] != 0; i++) {
+      out[i] = (UINT8)(UINT16)path[i];
+    }
+  } else {
+    for (i = 0; i < dot && i < 8; i++) {
+      out[i] = (UINT8)(UINT16)path[i];
+    }
+    for (i = dot + 1; path[i] != 0 && (i - dot - 1) < 3; i++) {
+      out[8 + (i - dot - 1)] = (UINT8)(UINT16)path[i];
+    }
+  }
+  for (i = 0; i < 11; i++) {
+    if (out[i] >= 'a' && out[i] <= 'z') {
+      out[i] = (UINT8)(out[i] - 'a' + 'A');
+    }
+  }
+  return 0;
+}
+
+/* Find a root-directory entry. `cluster_out` and `size_out` are filled
+ * on success. Returns 0 when found, -1 otherwise. */
+static int fat32_scan_dir(const UINT8 *target, UINT32 *cluster_out,
+                          UINT64 *size_out, const UINT8 *buf,
+                          UINTN entries) {
+  UINTN ent;
+
+  for (ent = 0; ent < entries; ent++) {
+    const UINT8 *e = buf + ent * 32u;
+
+    if (e[0] == 0x00u) {
+      return -1;
+    }
+    if (e[0] == 0xe5u || (e[11] & 0x0fu) == 0x0fu) {
+      continue; /* deleted or long-name slot */
+    }
+    if ((e[11] & 0x10u) != 0u) {
+      continue; /* directory */
+    }
+    if (memcmp(e, target, 11) == 0) {
+      UINT32 cl = (UINT32)e[26] | ((UINT32)e[27] << 8) |
+                  ((UINT32)e[20] << 16) | ((UINT32)e[21] << 24);
+      UINT64 sz = (UINT64)e[28] | ((UINT64)e[29] << 8) |
+                  ((UINT64)e[30] << 16) | ((UINT64)e[31] << 24);
+
+      *cluster_out = cl;
+      *size_out = sz;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static int fat32_find_root(fat32_ctx_t *ctx, const CHAR16 *path,
+                           UINT32 *cluster_out, UINT64 *size_out) {
+  UINT8  target[11];
+  UINT8 *buf = NULL;
+
+  if (fat32_short_name(path, target) != 0) {
+    return -1;
+  }
+
+  if (ctx->fat_type == 16) {
+    /* FAT16 root directory is a fixed contiguous range. */
+    buf = (UINT8 *)efi_alloc((UINT64)ctx->root_sectors * ctx->bytes_per_sector);
+    if (buf == NULL) {
+      return -1;
+    }
+    if (fat32_read_sectors(ctx, ctx->root_lba, ctx->root_sectors, buf) != 0) {
+      efi_free(buf);
+      return -1;
+    }
+    if (fat32_scan_dir(target, cluster_out, size_out, buf,
+                       (ctx->root_sectors * ctx->bytes_per_sector) / 32u) ==
+        0) {
+      efi_free(buf);
+      return 0;
+    }
+    efi_free(buf);
+    return -1;
+  }
+
+  /* FAT32 root directory is a cluster chain. */
+  {
+    UINT32 clus = ctx->root_cluster;
+
+    buf = (UINT8 *)efi_alloc(ctx->bytes_per_sector * ctx->sectors_per_cluster);
+    if (buf == NULL) {
+      return -1;
+    }
+    while (clus < 0x0ffffff8u) {
+      UINT64 lba = fat32_cluster_lba(ctx, clus);
+
+      if (fat32_read_sectors(ctx, lba, ctx->sectors_per_cluster, buf) != 0) {
+        efi_free(buf);
+        return -1;
+      }
+      if (fat32_scan_dir(target, cluster_out, size_out, buf,
+                         (ctx->bytes_per_sector * ctx->sectors_per_cluster) /
+                             32u) == 0) {
+        efi_free(buf);
+        return 0;
+      }
+      clus = fat32_get(ctx, clus) & 0x0fffffffu;
+    }
+    efi_free(buf);
+    return -1;
+  }
+}
+
+static int fat32_init(fat32_ctx_t *ctx) {
+  UINT8    bpb[512];
+  UINT32   total_sectors;
+  UINT32   fat_sectors;
+  UINT32   root_entries;
+  UINT32   reserved_sectors;
+  UINT32   num_fats;
+  UINTN    i;
+
+  memset(ctx, 0, sizeof(*ctx));
+  /* The first uefi* device is not necessarily the boot volume: a second
+   * raw target disk may have been enumerated before the CD's virtual
+   * hard disk. Scan every device and pick the one whose first sector is
+   * a plausible FAT boot sector. A disk with an accidental 0x55/0xAA
+   * but nonsense fields must be skipped. */
+  for (i = 0; i < (UINTN)blkdev_count(); i++) {
+    blkdev_t *d = blkdev_get_at(i);
+    UINT32    rs;
+    UINT32    nf;
+    UINT32    ts;
+    UINT32    fsz32;
+    UINT32    fsz16;
+    UINT32    rc;
+
+    if (d == NULL || d->sector_count == 0) {
+      continue;
+    }
+    ctx->dev = d;
+    if (fat32_read_sectors(ctx, 0, 1, bpb) != 0) {
+      continue;
+    }
+    if (bpb[510] != 0x55u || bpb[511] != 0xaau) {
+      continue;
+    }
+    rs = (UINT32)bpb[14] | ((UINT32)bpb[15] << 8);
+    nf = (UINT32)bpb[16];
+    root_entries = (UINT32)bpb[17] | ((UINT32)bpb[18] << 8);
+    fsz16 = (UINT32)bpb[22] | ((UINT32)bpb[23] << 8);
+    fsz32 = (UINT32)bpb[36] | ((UINT32)bpb[37] << 8) |
+            ((UINT32)bpb[38] << 16) | ((UINT32)bpb[39] << 24);
+    rc = (UINT32)bpb[44] | ((UINT32)bpb[45] << 8) |
+         ((UINT32)bpb[46] << 16) | ((UINT32)bpb[47] << 24);
+    ts = (UINT32)bpb[19] | ((UINT32)bpb[20] << 8);
+    if (ts == 0) {
+      ts = (UINT32)bpb[32] | ((UINT32)bpb[33] << 8) |
+           ((UINT32)bpb[34] << 16) | ((UINT32)bpb[35] << 24);
+    }
+    if (ts == 0) {
+      ts = (UINT32)bpb[72] | ((UINT32)bpb[73] << 8) |
+           ((UINT32)bpb[74] << 16) | ((UINT32)bpb[75] << 24);
+    }
+    if (((UINT32)bpb[11] | ((UINT32)bpb[12] << 8)) == 512u &&
+        bpb[13] == 1u && rs != 0 && nf != 0 && nf <= 2 && ts != 0 &&
+        (UINT64)ts <= d->sector_count) {
+      /* FAT16: root_entries != 0 and fat_size_16 != 0.
+       * FAT32: root_entries == 0 and fat_size_32 != 0 and root_cluster >= 2. */
+      if (root_entries != 0 && fsz16 != 0) {
+        ctx->fat_type = 16;
+        break;
+      }
+      if (root_entries == 0 && fsz32 != 0 && rc >= 2u) {
+        ctx->fat_type = 32;
+        break;
+      }
+    }
+  }
+  if (ctx->dev == NULL || ctx->fat_type == 0) {
+    return -1;
+  }
+  ctx->bytes_per_sector = (UINT32)bpb[11] | ((UINT32)bpb[12] << 8);
+  ctx->sectors_per_cluster = (UINT32)bpb[13];
+  reserved_sectors = (UINT32)bpb[14] | ((UINT32)bpb[15] << 8);
+  num_fats = (UINT32)bpb[16];
+  total_sectors = (UINT32)bpb[19] | ((UINT32)bpb[20] << 8);
+  if (total_sectors == 0) {
+    total_sectors = (UINT32)bpb[32] | ((UINT32)bpb[33] << 8) |
+                    ((UINT32)bpb[34] << 16) | ((UINT32)bpb[35] << 24);
+  }
+  if (total_sectors == 0) {
+    total_sectors = (UINT32)bpb[72] | ((UINT32)bpb[73] << 8) |
+                    ((UINT32)bpb[74] << 16) | ((UINT32)bpb[75] << 24);
+  }
+  if (ctx->fat_type == 16) {
+    fat_sectors = (UINT32)bpb[22] | ((UINT32)bpb[23] << 8);
+    root_entries = (UINT32)bpb[17] | ((UINT32)bpb[18] << 8);
+  } else {
+    fat_sectors = (UINT32)bpb[36] | ((UINT32)bpb[37] << 8) |
+                  ((UINT32)bpb[38] << 16) | ((UINT32)bpb[39] << 24);
+    root_entries = 0;
+    ctx->root_cluster = (UINT32)bpb[44] | ((UINT32)bpb[45] << 8) |
+                        ((UINT32)bpb[46] << 16) | ((UINT32)bpb[47] << 24);
+  }
+  if (ctx->bytes_per_sector == 0 || ctx->sectors_per_cluster == 0 ||
+      ctx->bytes_per_sector != BLKDEV_SECTOR_SIZE || fat_sectors == 0 ||
+      total_sectors == 0) {
+    return -1;
+  }
+  ctx->fat_start = reserved_sectors;
+  ctx->fat_sectors = fat_sectors;
+  ctx->fat = (UINT8 *)efi_alloc((UINT64)fat_sectors * ctx->bytes_per_sector);
+  if (ctx->fat == NULL) {
+    return -1;
+  }
+  if (fat32_read_sectors(ctx, ctx->fat_start, fat_sectors, ctx->fat) != 0) {
+    efi_free(ctx->fat);
+    ctx->fat = NULL;
+    return -1;
+  }
+  if (ctx->fat_type == 16) {
+    ctx->root_lba = reserved_sectors + num_fats * fat_sectors;
+    ctx->root_sectors = (root_entries * 32u + ctx->bytes_per_sector - 1u) /
+                        ctx->bytes_per_sector;
+    ctx->data_start = ctx->root_lba + ctx->root_sectors;
+  } else {
+    ctx->data_start = reserved_sectors + num_fats * fat_sectors;
+  }
+  return 0;
+}
+
+static void fat32_close(fat32_ctx_t *ctx) {
+  if (ctx->fat != NULL) {
+    efi_free(ctx->fat);
+    ctx->fat = NULL;
+  }
+}
+
+/* Read an entire file from the FAT32 volume into an EfiLoaderData
+ * buffer. Returns 0 on success. The mkfat this boot stage pairs with
+ * allocates clusters sequentially, so runs of consecutive clusters are
+ * read in one Block I/O call rather than one sector at a time. */
+static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
+                         UINT64 *out_len) {
+  fat32_ctx_t ctx;
+  UINT32      clus;
+  UINT64      size;
+  UINT8      *buf;
+  UINT64      wrote;
+
+  if (fat32_init(&ctx) != 0) {
+    return -1;
+  }
+  if (fat32_find_root(&ctx, path, &clus, &size) != 0 || size == 0 ||
+      size > (64u * 1024u * 1024u)) {
+    fat32_close(&ctx);
+    return -1;
+  }
+  buf = (UINT8 *)efi_alloc(size);
+  if (buf == NULL) {
+    fat32_close(&ctx);
+    return -1;
+  }
+  wrote = 0;
+  while (wrote < size && clus < 0x0ffffff8u) {
+    UINT32 run_start = clus;
+    UINT32 run_len = 1;
+    UINT32 next;
+    UINT64 chunk;
+
+    /* Gather a run of consecutive clusters. UEFI Block I/O does not
+     * guarantee huge transfers, so 4 KiB (8 sectors) is a conservative
+     * size that any firmware should accept while still cutting the call
+     * count compared to one sector at a time. */
+    while (run_len < 8u) {
+      next = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
+      if (next != run_start + run_len) {
+        break;
+      }
+      run_len++;
+    }
+
+    chunk = (UINT64)run_len * ctx.bytes_per_sector;
+    if (size - wrote < chunk) {
+      chunk = size - wrote;
+    }
+    if (fat32_read_sectors(&ctx, fat32_cluster_lba(&ctx, run_start),
+                           run_len, buf + wrote) != 0) {
+      efi_free(buf);
+      fat32_close(&ctx);
+      return -1;
+    }
+    wrote += chunk;
+    clus = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
+  }
+  fat32_close(&ctx);
+  *out_buf = buf;
+  *out_len = size;
   return 0;
 }
 
@@ -373,7 +783,7 @@ static void modules_load(void) {
   if (g_esp_root == NULL) {
     return;
   }
-  if (esp_read(L"NOVUS\\TEST.NKM", &img, &len) != 0) {
+  if (esp_read(L"TEST.NKM", &img, &len) != 0) {
     say_line(L"[NKM ] no NOVUS\\TEST.NKM on the ESP");
     return;
   }
@@ -464,6 +874,74 @@ static int install_blob(blkdev_t *dev, UINT64 lba, const UINT8 *src,
   return 0;
 }
 
+/* Stream a file from the boot volume's FAT32 directly to the target disk
+ * without loading the whole file into memory. This is used for the ESP
+ * template, which is too large for a single EFI pool allocation on some
+ * firmwares. */
+/* Shared 4 KiB scratch for streaming copies. Static so the large array
+ * does not pull in mingw's stack-probe helper in a -nostdlib build. */
+static UINT8 fat32_copy_buf[8u * 512u];
+
+static int fat32_copy_to_disk(const CHAR16 *path, blkdev_t *dev, UINT64 lba,
+                              UINT64 *copied) {
+  fat32_ctx_t ctx;
+  UINT32      clus;
+  UINT64      size;
+  UINT64      wrote = 0;
+
+  if (copied != NULL) {
+    *copied = 0;
+  }
+  if (fat32_init(&ctx) != 0) {
+    say_line(L"[FAT32] copy init failed");
+    return -1;
+  }
+  if (fat32_find_root(&ctx, path, &clus, &size) != 0 || size == 0) {
+    say_line(L"[FAT32] copy find failed");
+    fat32_close(&ctx);
+    return -1;
+  }
+
+  while (wrote < size && clus < 0x0ffffff8u) {
+    UINT32 run_start = clus;
+    UINT32 run_len = 1;
+    UINT32 next;
+    UINT64 chunk;
+
+    while (run_len < 8u) {
+      next = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
+      if (next != run_start + run_len) {
+        break;
+      }
+      run_len++;
+    }
+
+    chunk = (UINT64)run_len * ctx.bytes_per_sector;
+    if (size - wrote < chunk) {
+      chunk = size - wrote;
+    }
+    if (fat32_read_sectors(&ctx, fat32_cluster_lba(&ctx, run_start),
+                           run_len, fat32_copy_buf) != 0) {
+      fat32_close(&ctx);
+      return -1;
+    }
+    if (blkdev_write(dev, lba + wrote / BLKDEV_SECTOR_SIZE,
+                     (UINTN)(chunk / BLKDEV_SECTOR_SIZE),
+                     fat32_copy_buf) != 0) {
+      fat32_close(&ctx);
+      return -1;
+    }
+    wrote += chunk;
+    clus = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
+  }
+
+  fat32_close(&ctx);
+  if (copied != NULL) {
+    *copied = wrote;
+  }
+  return (wrote == size) ? 0 : -1;
+}
+
 /* Write a whole disk: GPT, an ESP holding the boot files, and a Novus
  * system partition whose integrity tree is built on the spot.
  *
@@ -471,12 +949,11 @@ static int install_blob(blkdev_t *dev, UINT64 lba, const UINT8 *src,
  * only run before ExitBootServices - which is exactly where it runs. */
 static int install_run(void) {
   blkdev_t       *disk;
-  UINT8          *esp_blob = NULL;
   UINT8          *sys_blob = NULL;
-  UINT64          esp_bytes = 0;
   UINT64          sys_bytes = 0;
   UINT64          esp_lba;
   UINT64          esp_sectors;
+  UINT64          esp_copied = 0;
   UINT64          sys_lba;
   UINT64          sys_sectors;
   gpt_part_spec_t specs[2];
@@ -491,20 +968,21 @@ static int install_run(void) {
   boot_put_dec(disk->sector_count);
   say_line(L" sectors");
 
-  if (esp_read(L"NOVUS\\ESP.IMG", &esp_blob, &esp_bytes) != 0) {
-    say_line(L"[INST] NOVUS\\ESP.IMG missing: cannot build an ESP");
-    return -1;
-  }
-  if (esp_read(L"NOVUS\\SYSTEM.IMG", &sys_blob, &sys_bytes) != 0) {
-    say_line(L"[INST] NOVUS\\SYSTEM.IMG missing: cannot build a system");
-    efi_free(esp_blob);
+  if (esp_read(L"SYSTEM.IMG", &sys_blob, &sys_bytes) != 0) {
+    say_line(L"[INST] SYSTEM.IMG missing: cannot build a system");
     return -1;
   }
 
   /* Both payloads start on a 1 MiB boundary, which every alignment
-   * convention in the firmware and in NovusFS is happy with. */
+   * convention in the firmware and in NovusFS is happy with. The ESP
+   * payload is streamed directly from the boot volume, so its size is
+   * discovered by the copy routine rather than read into memory first. */
   esp_lba = 2048u;
-  esp_sectors = (esp_bytes + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
+  if (fat32_copy_to_disk(L"ESP.IMG", disk, esp_lba, &esp_copied) != 0) {
+    say_line(L"[INST] ESP.IMG missing: cannot build an ESP");
+    return -1;
+  }
+  esp_sectors = (esp_copied + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
   sys_lba = esp_lba + esp_sectors;
   sys_sectors = (sys_bytes + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
   /* Round the system partition up to a whole MiB so the filesystem's
@@ -542,10 +1020,8 @@ static int install_run(void) {
   }
   say_line(L"[INST] partition table written");
 
-  if (install_blob(disk, esp_lba, esp_blob, esp_bytes) != 0) {
-    say_line(L"[INST] ESP payload write failed");
-    goto done;
-  }
+  /* The ESP payload has already been streamed to the disk above, before
+   * the system partition size was known; now write the system image. */
   if (install_blob(disk, sys_lba, sys_blob, sys_bytes) != 0) {
     say_line(L"[INST] system payload write failed");
     goto done;
@@ -593,9 +1069,6 @@ static int install_run(void) {
   rc = 0;
 
 done:
-  if (esp_blob != NULL) {
-    efi_free(esp_blob);
-  }
   if (sys_blob != NULL) {
     efi_free(sys_blob);
   }
@@ -647,8 +1120,36 @@ static void menu_show(void) {
   say(L"  choice [4]: ");
 }
 
+/* The unattended path. A machine with no keyboard - or a scripted run -
+ * drops INSTALL.YES in the root of the ESP and gets the installer straight
+ * away instead of the menu. The marker is deliberately absent from any
+ * image the build produces: the default is the menu, and skipping it only
+ * skips the prompt, never the installer's own checks on the target disk.
+ * The name has to be 8.3 because the built-in FAT reader does not walk
+ * subdirectories. */
+#define MENU_MARKER_INSTALL L"INSTALL.YES"
+
+static int menu_marker_present(void) {
+  UINT8 *buf = NULL;
+  UINT64 len = 0;
+
+  if (esp_read(MENU_MARKER_INSTALL, &buf, &len) != 0) {
+    return 0;
+  }
+  efi_free(buf);
+  return 1;
+}
+
 static void menu_run(void) {
   EFI_INPUT_KEY key;
+
+#if CONFIG_NOVUS_INSTALLER
+  if (menu_marker_present()) {
+    say_line(L"[MENU] INSTALL.YES on the ESP: running the installer");
+    (VOID)install_run();
+    return;
+  }
+#endif
 
   menu_show();
   key = menu_wait_key();
@@ -722,7 +1223,7 @@ void stage3_prepare(void) {
   /* Live root: adopt the NovusFS image off the ESP into reserved pages.
    * Without it the kernel has no filesystem at all, so a failure here is
    * worth saying loudly - but it is still not fatal. */
-  if (esp_read_reserved(L"NOVUS\\SYSTEM.IMG", &g_live_base, &g_live_size) ==
+  if (esp_read_reserved(L"SYSTEM.IMG", &g_live_base, &g_live_size) ==
       0) {
     say(L"[BOOT] live root: ");
     boot_put_dec(g_live_size / 1024u);

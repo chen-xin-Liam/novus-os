@@ -239,11 +239,18 @@ static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
   memset(p + 36, ' ', 28);
   memcpy(p + 36, "EFI", 3);
 
-  /* Section entry: bootable, no emulation, the ESP image. */
+  /* Section entry: bootable, hard-disk emulation, the ESP image.
+   *
+   * UEFI boot images are often marked "no emulation", and OVMF will
+   * boot a no-emulation image, but the resulting ImageHandle's device
+   * has no SimpleFileSystem protocol - so our loader cannot read any
+   * other file off the CD. Hard-disk emulation exposes the ESP image as
+   * a normal FAT32 disk with both Block I/O and SimpleFileSystem, which
+   * lets us load the live root and the NKM module from it. */
   p[64] = 0x88; /* boot indicator: bootable */
-  p[65] = 0x00; /* media type: no emulation */
-  put_le16(p + 66, 0); /* load segment: unused without emulation */
-  p[68] = 0x00;        /* system type: x86 */
+  p[65] = 0x04; /* media type: hard disk emulation */
+  put_le16(p + 66, 0); /* load segment */
+  p[68] = 0x00;        /* system type */
   p[69] = 0x00;
   put_le16(p + 70, (uint16_t)(boot_sectors > 0xffffu ? 0xffffu : boot_sectors));
   put_le32(p + 72, boot_lba);

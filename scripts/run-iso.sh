@@ -44,7 +44,7 @@ if [ -n "$DISK" ]; then
         echo "disk image not found: $DISK" >&2
         exit 1
     fi
-    DISK_ARGS=(-drive "format=raw,file=$DISK,if=virtio")
+    DISK_ARGS=(-drive "format=raw,file=$DISK,if=ide")
 fi
 
 # -no-reboot turns a triple fault into an exit instead of a loop, and the

@@ -427,6 +427,14 @@ int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st) {
     return 0;
   }
 
+  /* Force the firmware to enumerate and connect every driver it can find
+   * before we ask for handles. Without this, OVMF started from a CD-ROM
+   * may never even create Block I/O handles for IDE/virtio disks that are
+   * present but not part of the boot path. */
+  if (st->BootServices->ConnectController != NULL) {
+    st->BootServices->ConnectController(NULL, NULL, NULL, TRUE);
+  }
+
   status = st->BootServices->LocateHandleBuffer(ByProtocol, &guid, NULL,
                                                 &count, &handles);
   if (EFI_ERROR(status) || handles == NULL || count == 0) {
@@ -439,8 +447,14 @@ int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st) {
     blkdev_t              *d;
     UINT32                 flags = BLKDEV_FLAG_BOOT_ONLY;
 
+    /* Ask the firmware to bind every protocol driver that claims this
+     * handle. For hard-disk and CD emulation this is what makes the
+     * SimpleFileSystem protocol appear on the virtual disk, without it
+     * the loader cannot read files even though Block I/O is already
+     * there. */
+    st->BootServices->ConnectController(handles[i], NULL, NULL, TRUE);
     status = st->BootServices->HandleProtocol(handles[i], &guid,
-                                              (VOID **)&bio);
+                                            (VOID **)&bio);
     if (EFI_ERROR(status) || bio == NULL || bio->Media == NULL) {
       continue;
     }
