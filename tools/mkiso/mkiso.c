@@ -196,21 +196,52 @@ static void write_terminator(void) {
 
 /* El Torito boot catalog.
  *
- * Three entries, and the middle one is the whole reason a UEFI firmware
- * will boot this disc:
+ * Five entries in two sections, and the platform id is what makes a UEFI
+ * firmware see the disc as bootable at all:
  *
- *   0  validation entry      header 0x01, platform 0x00
- *  32  section header        header 0x91, platform 0xEF  <- UEFI looks
- *                            for this platform id; without it the
- *                            firmware sees no EFI boot image at all and
- *                            reports "no bootable option"
- *  64  section entry         bootable, no emulation, points at the ESP
+ *   0  validation entry       header 0x01, platform 0x00
+ *  32  section header         header 0x91, platform 0xEF  <- UEFI looks
+ *                             for this platform id; without it the
+ *                             firmware sees no EFI boot image and
+ *                             reports "no bootable option"
+ *  64  section entry          no emulation, points at the ESP
+ *  96  section header         header 0x91, platform 0xEF
+ * 128  section entry          hard-disk emulation, same image
  *
- * The section entry's media type is "no emulation" because the ESP image
- * is not a floppy or hard-disk image: the firmware reads it as a
- * filesystem and starts EFI/BOOT/BOOTX64.EFI out of it.
+ * The first section is no emulation, which is what the UEFI
+ * specification describes for an EFI boot image and what every
+ * distribution's install media uses: the firmware loads the image as a
+ * virtual disk in its own right, rather than pretending it is a floppy
+ * or a hard disk. The second is the hard-disk-emulation form of the very
+ * same image, for the firmwares that only look for that.
+ *
+ * Neither form is relied on to hand us a filesystem: the loader reads
+ * the ESP through the firmware's SimpleFileSystem when one is there, and
+ * falls back to its own FAT reader over block I/O when one is not - so
+ * either way the live root and the modules come off the same image.
  *
  * The validation checksum is the negated sum of the entry's 16 u16s. */
+/* One section entry: bootable, `media` emulation, pointing at the image.
+ *
+ * `sector_count` is in 512-byte units because that is the sector size of
+ * the virtual disk the firmware builds out of the image - the ESP is a
+ * FAT volume with 512-byte sectors. Passing the ISO's 2048-byte sector
+ * count here would tell the firmware the disk is a quarter of its real
+ * size, which is a classic "boots, then cannot see its own filesystem"
+ * failure. */
+static void write_section_entry(uint8_t *p, uint8_t media, uint32_t boot_lba,
+                                uint32_t sector_count) {
+  p[0] = 0x88;   /* boot indicator: bootable */
+  p[1] = media;  /* 0x00 no emulation, 0x04 hard-disk emulation */
+  put_le16(p + 2, 0); /* load segment */
+  p[4] = 0x00;        /* system type */
+  p[5] = 0x00;
+  p[6] = (uint8_t)(sector_count & 0xffu);
+  p[7] = (uint8_t)((sector_count >> 8) & 0xffu);
+  put_le32(p + 8, boot_lba);
+  memset(p + 12, 0, 20);
+}
+
 static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
                           uint32_t boot_sectors) {
   uint8_t *p = sector(catalog_lba);
@@ -232,29 +263,66 @@ static void write_catalog(uint32_t catalog_lba, uint32_t boot_lba,
   }
   put_le16(p + 28, (uint16_t)(0x10000u - (sum & 0xffffu)));
 
-  /* Section header entry: last one, platform EFI, one entry follows. */
-  p[32] = 0x91; /* section header, final */
+  /* Section header: platform EFI, one entry follows, another section
+   * after it (so not the final one). */
+  p[32] = 0x90; /* section header, more follow */
   p[33] = 0xef; /* platform: EFI */
   put_le16(p + 34, 1); /* number of section entries */
   memset(p + 36, ' ', 28);
   memcpy(p + 36, "EFI", 3);
 
-  /* Section entry: bootable, hard-disk emulation, the ESP image.
-   *
-   * UEFI boot images are often marked "no emulation", and OVMF will
-   * boot a no-emulation image, but the resulting ImageHandle's device
-   * has no SimpleFileSystem protocol - so our loader cannot read any
-   * other file off the CD. Hard-disk emulation exposes the ESP image as
-   * a normal FAT32 disk with both Block I/O and SimpleFileSystem, which
-   * lets us load the live root and the NKM module from it. */
-  p[64] = 0x88; /* boot indicator: bootable */
-  p[65] = 0x04; /* media type: hard disk emulation */
-  put_le16(p + 66, 0); /* load segment */
-  p[68] = 0x00;        /* system type */
-  p[69] = 0x00;
-  put_le16(p + 70, (uint16_t)(boot_sectors > 0xffffu ? 0xffffu : boot_sectors));
-  put_le32(p + 72, boot_lba);
-  memset(p + 76, 0, 20);
+  /* Section entry: bootable, no emulation, the ESP image. */
+  write_section_entry(p + 64, 0x00, boot_lba, boot_sectors);
+
+  /* Second section: the same image presented as a hard disk. */
+  p[96] = 0x91; /* section header, final */
+  p[97] = 0xef; /* platform: EFI */
+  put_le16(p + 98, 1);
+  memset(p + 100, ' ', 28);
+  memcpy(p + 100, "EFI", 3);
+  write_section_entry(p + 128, 0x04, boot_lba, boot_sectors);
+}
+
+/* A partition table in the ISO's system area, which the first 32 KiB of
+ * an ISO 9660 image leaves unused - and which is exactly the first
+ * sector of the medium once the image has been written straight onto a
+ * USB stick.
+ *
+ * That is the whole point: an ISO written to a stick is not a CD any
+ * more, and a firmware that looks at a stick sees a disk and looks for a
+ * partition table. Without this sector such a stick has no ESP on it as
+ * far as the firmware can tell, so it offers no boot option at all -
+ * which is most of the "this ISO does not boot on my machine" reports,
+ * because a USB stick is how these images are actually used.
+ *
+ * One entry: bootable, type 0xEF (EFI system partition), covering the
+ * embedded ESP image at its byte offset in the image. The CHS fields are
+ * the conventional "start at 0/0/1, end at max" pair; anything reading
+ * this uses the LBA fields. There is no legacy boot code because Novus
+ * is UEFI-only: a firmware that starts this sector as 16-bit code finds
+ * a message instead of a stub that would hang.
+ */
+static void write_isohybrid_mbr(uint32_t image_lba, uint32_t image_sectors) {
+  uint8_t *p = sector(0);
+  static const char note[] = "Novus: UEFI only. This image has no legacy "
+                             "boot code.";
+
+  memset(p, 0, 512);
+  memcpy(p + 0x03, note, sizeof(note) - 1u);
+
+  p[446] = 0x80; /* bootable */
+  p[447] = 0x00; /* start head */
+  p[448] = 0x01; /* start sector/cylinder */
+  p[449] = 0x00; /* start cylinder (low) */
+  p[450] = 0xef; /* type: EFI system partition */
+  p[451] = 0xfe; /* end head */
+  p[452] = 0xff; /* end sector/cylinder */
+  p[453] = 0xff; /* end cylinder (low) */
+  put_le32(p + 454, image_lba);
+  put_le32(p + 458, image_sectors);
+
+  p[510] = 0x55;
+  p[511] = 0xaa;
 }
 
 static void write_path_tables(void) {
@@ -353,6 +421,11 @@ int main(int argc, char **argv) {
     uint32_t units = (uint32_t)((esp_bytes + 511u) / 512u);
 
     write_catalog(catalog_lba, FILE_LBA, units);
+    /* The MBR counts in 512-byte sectors too, and FILE_LBA counts in
+     * 2048-byte ones: the image starts at byte FILE_LBA * 2048, which is
+     * sector FILE_LBA * 4 - a multiple of eight, so it stays on a block
+     * boundary even on a 4Kn disk. */
+    write_isohybrid_mbr(FILE_LBA * (ISO_SECTOR / 512u), units);
   }
 
   {

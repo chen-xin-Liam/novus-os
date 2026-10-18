@@ -13,7 +13,11 @@
  * raw, unpartitioned disk is a legitimate install target, so
  * gpt_read() returning -1 is not an error for the installer.
  *
- * All offsets are in 512-byte sectors, matching blkdev's addressing.
+ * The table itself counts in the disk's own blocks - that is what is
+ * written in it and what every other OS reads out of it. blkdev counts in
+ * 512-byte sectors. On the usual 512-byte disk the two are the same
+ * number; on a 4Kn NVMe namespace one is eight times the other, so this
+ * reader converts on the way in and out rather than assuming they match.
  */
 
 #ifndef NOVUS_GPT_H
@@ -48,11 +52,19 @@
   { 0x46, 0x53, 0x56, 0x4E, 0x53, 0x46, 0x4F, 0x4E,                    \
     0x56, 0x55, 0x53, 0x46, 0x53, 0x00, 0x00, 0x01 }
 
+/* A partition as the table on disk describes it. `*_lba` are the values
+ * straight out of the entry - counted in the disk's own blocks, which on
+ * a 4Kn disk are 4096 bytes - and `first_sector` / `sector_count` are the
+ * same range expressed in the 512-byte sectors the block layer counts in.
+ * Keeping both is the point: the LBA is what goes back into a table that
+ * is written, the sector is what blkdev_read() wants, and mixing the two
+ * up is invisible on a 512-byte disk and silently wrong on a 4Kn one. */
 typedef struct {
   UINT8  type_guid[16];
-  UINT64 first_lba;    /* first sector of the partition */
-  UINT64 last_lba;     /* last sector, inclusive */
-  UINT64 sector_count; /* last_lba - first_lba + 1 */
+  UINT64 first_lba;    /* first block of the partition, in disk blocks */
+  UINT64 last_lba;     /* last block, inclusive, in disk blocks */
+  UINT64 first_sector; /* first_lba in 512-byte sectors */
+  UINT64 sector_count; /* last_lba - first_lba + 1, in 512-byte sectors */
   CHAR16 name[36];     /* UTF-16 name, not NUL-terminated if 36 chars */
 } gpt_part_t;
 

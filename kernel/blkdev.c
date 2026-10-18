@@ -71,6 +71,17 @@ int blkdev_register(blkdev_t *dev) {
   if (dev == NULL || dev->name == NULL) {
     return -1;
   }
+  /* A block size the layer cannot express in 512-byte sectors would make
+   * every caller above it silently mis-address the device. Refuse it here
+   * rather than hand out a disk that reads the wrong bytes. */
+  if (dev->block_size != 0 &&
+      (dev->block_size % BLKDEV_SECTOR_SIZE != 0 ||
+       dev->block_size > BLKDEV_BLOCK_MAX)) {
+    kputs("[BLK] unsupported block size, rejected ");
+    kputs(dev->name);
+    kputs("\n");
+    return -1;
+  }
   /* Replace a device that was registered under the same name: the boot
    * stage probes once, but a re-probe must not leave two entries
    * claiming "uefi0". */
@@ -270,6 +281,7 @@ blkdev_t *ramdisk_init(UINT64 bytes) {
 
   ramdisk_dev.name = "ramdisk";
   ramdisk_dev.sector_count = bytes / (UINT64)BLKDEV_SECTOR_SIZE;
+  ramdisk_dev.block_size = BLKDEV_SECTOR_SIZE; /* memory: any granularity */
   ramdisk_dev.flags = 0; /* writable, non-removable, survives EBS */
   ramdisk_dev.ctx = &ramdisk_ctx;
   ramdisk_dev.read = ramdisk_read;
@@ -347,6 +359,7 @@ blkdev_t *blkdev_memimg_init(const char *name, UINT64 phys_base,
 
   d->name = name;
   d->sector_count = bytes / (UINT64)BLKDEV_SECTOR_SIZE;
+  d->block_size = BLKDEV_SECTOR_SIZE; /* memory: any granularity */
   d->flags = 0;
   d->ctx = m;
   d->read = memimg_read;
@@ -379,39 +392,108 @@ static uefi_ctx_t uefi_ctxs[BLKDEV_MAX_DEVICES];
 static blkdev_t   uefi_devs[BLKDEV_MAX_DEVICES];
 
 static const char *const uefi_names[BLKDEV_MAX_DEVICES] = {
-    "uefi0", "uefi1", "uefi2", "uefi3",
-    "uefi4", "uefi5", "uefi6", "uefi7"};
+    "uefi0",  "uefi1",  "uefi2",  "uefi3",  "uefi4",  "uefi5",
+    "uefi6",  "uefi7",  "uefi8",  "uefi9",  "uefi10", "uefi11",
+    "uefi12", "uefi13", "uefi14", "uefi15"};
 
-static int uefi_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
-  uefi_ctx_t *u = (uefi_ctx_t *)ctx;
-  EFI_STATUS  status;
+/* One hardware block of scratch space. The firmware only moves whole
+ * blocks, so a request that starts or ends in the middle of one - which
+ * is what reading a 512-byte sector out of a 4Kn disk looks like - has to
+ * go through here: the block comes in, the wanted part is taken out of it
+ * or patched into it, and on a write the block goes back. Sized for
+ * BLKDEV_BLOCK_MAX, the largest block this layer accepts. */
+static UINT8 uefi_bounce[BLKDEV_BLOCK_MAX];
+
+/* Move `count` 512-byte sectors to/from `buf`, in whatever block size the
+ * device speaks. MediaId is re-read on every call rather than cached: it
+ * changes whenever the media does, and a stale id makes the firmware
+ * refuse the request. */
+static int uefi_xfer(uefi_ctx_t *u, UINT64 sector, UINTN count, void *buf,
+                     int is_write) {
+  UINT32       block;
+  UINT64       byte_off;
+  UINT64       bytes;
+  UINT8       *p = (UINT8 *)buf;
+  UINT64       done = 0;
 
   if (u == NULL || u->bio == NULL || u->bio->Media == NULL) {
     return -1;
   }
-  status = u->bio->ReadBlocks(u->bio, u->bio->Media->MediaId, sector,
-                              (UINTN)((UINT64)count * BLKDEV_SECTOR_SIZE),
-                              buf);
-  return EFI_ERROR(status) ? -1 : 0;
+  block = u->bio->Media->BlockSize;
+  if (block == 0 || (block % BLKDEV_SECTOR_SIZE) != 0 ||
+      block > BLKDEV_BLOCK_MAX) {
+    return -1;
+  }
+  if (is_write && u->bio->Media->ReadOnly) {
+    return -1;
+  }
+  bytes = (UINT64)count * (UINT64)BLKDEV_SECTOR_SIZE;
+  if (bytes == 0) {
+    return 0;
+  }
+  byte_off = sector * (UINT64)BLKDEV_SECTOR_SIZE;
+
+  while (done < bytes) {
+    UINT64      cur = byte_off + done;
+    UINT64      blk = cur / block;
+    UINT64      in_blk = cur % block;
+    UINT64      chunk = block - in_blk;
+    EFI_STATUS  status;
+    UINTN       moved;
+
+    if (chunk > bytes - done) {
+      chunk = bytes - done;
+    }
+
+    if (in_blk == 0 && chunk == block) {
+      /* Block-aligned head (or middle): hand every whole block to the
+       * firmware in one call. This is the common case - a filesystem
+       * reads in block-sized runs - and it is the fast one. */
+      moved = (UINTN)((bytes - done) / block);
+      if (is_write) {
+        status = u->bio->WriteBlocks(u->bio, u->bio->Media->MediaId, blk,
+                                     moved * block, p + done);
+      } else {
+        status = u->bio->ReadBlocks(u->bio, u->bio->Media->MediaId, blk,
+                                    moved * block, p + done);
+      }
+      if (EFI_ERROR(status)) {
+        return -1;
+      }
+      done += (UINT64)moved * block;
+      continue;
+    }
+
+    /* Partial block: read it, then read out of it or write back into it. */
+    status = u->bio->ReadBlocks(u->bio, u->bio->Media->MediaId, blk, block,
+                                uefi_bounce);
+    if (EFI_ERROR(status)) {
+      return -1;
+    }
+    if (is_write) {
+      memcpy(uefi_bounce + in_blk, p + done, (UINTN)chunk);
+      /* ReadBlocks/WriteBlocks take a non-const buffer; the block layer
+       * guarantees the source is not modified. */
+      status = u->bio->WriteBlocks(u->bio, u->bio->Media->MediaId, blk,
+                                   block, uefi_bounce);
+      if (EFI_ERROR(status)) {
+        return -1;
+      }
+    } else {
+      memcpy(p + done, uefi_bounce + in_blk, (UINTN)chunk);
+    }
+    done += chunk;
+  }
+  return 0;
+}
+
+static int uefi_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
+  return uefi_xfer((uefi_ctx_t *)ctx, sector, count, buf, 0);
 }
 
 static int uefi_write(void *ctx, UINT64 sector, UINTN count,
                       const void *buf) {
-  uefi_ctx_t *u = (uefi_ctx_t *)ctx;
-  EFI_STATUS  status;
-
-  if (u == NULL || u->bio == NULL || u->bio->Media == NULL) {
-    return -1;
-  }
-  if (u->bio->Media->ReadOnly) {
-    return -1;
-  }
-  /* ReadBlocks/WriteBlocks take a non-const buffer pointer; the block
-   * layer guarantees the source is not modified. */
-  status = u->bio->WriteBlocks(u->bio, u->bio->Media->MediaId, sector,
-                               (UINTN)((UINT64)count * BLKDEV_SECTOR_SIZE),
-                               (VOID *)buf);
-  return EFI_ERROR(status) ? -1 : 0;
+  return uefi_xfer((uefi_ctx_t *)ctx, sector, count, (void *)buf, 1);
 }
 
 int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st) {
@@ -461,8 +543,15 @@ int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st) {
     if (!bio->Media->MediaPresent) {
       continue; /* no media in the drive */
     }
-    if (bio->Media->BlockSize != BLKDEV_SECTOR_SIZE) {
-      continue; /* CD-ROM and friends: reached through FAT instead */
+    /* Block sizes other than 512 are hardware, not an error: a 4Kn NVMe
+     * namespace and an optical disc both work through uefi_xfer(), which
+     * splits a 512-byte-sector request into whole device blocks. Devices
+     * coarser than BLKDEV_BLOCK_MAX cannot be addressed at all and are
+     * the only ones turned away here. */
+    if (bio->Media->BlockSize == 0 ||
+        (bio->Media->BlockSize % BLKDEV_SECTOR_SIZE) != 0 ||
+        bio->Media->BlockSize > BLKDEV_BLOCK_MAX) {
+      continue;
     }
     if (registered >= BLKDEV_MAX_DEVICES) {
       break;
@@ -482,11 +571,26 @@ int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st) {
     u->bio = bio;
 
     d->name = uefi_names[registered];
-    d->sector_count = bio->Media->LastBlock + 1u;
+    /* LastBlock counts hardware blocks; the table below counts 512-byte
+     * sectors, so the two only agree when the block is 512 bytes. */
+    d->sector_count = ((UINT64)bio->Media->LastBlock + 1u) *
+                      (UINT64)(bio->Media->BlockSize / BLKDEV_SECTOR_SIZE);
+    d->block_size = bio->Media->BlockSize;
     d->flags = flags;
     d->ctx = u;
     d->read = uefi_read;
     d->write = uefi_write;
+
+    /* Say so when a device is not 512-byte: it used to be skipped
+     * outright, and "my NVMe is 4Kn" is the kind of fact that decides
+     * whether the disk appears at all. */
+    if (d->block_size != BLKDEV_SECTOR_SIZE) {
+      kputs("[BLK] ");
+      kputs(d->name);
+      kputs(": ");
+      kputs_hex((UINT64)d->block_size);
+      kputs("-byte blocks\n");
+    }
 
     if (blkdev_register(d) < 0) {
       break;

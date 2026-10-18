@@ -262,6 +262,8 @@ static int esp_read_reserved(const CHAR16 *path, UINT64 *out_base,
 typedef struct {
   blkdev_t *dev;
   UINT32    bytes_per_sector;
+  UINT32    sectors_per_block; /* bytes_per_sector / 512: a FAT sector on
+                                * a 4Kn volume is eight block-layer ones */
   UINT32    sectors_per_cluster;
   UINT32    fat_start;
   UINT32    data_start;
@@ -275,9 +277,14 @@ typedef struct {
   UINT32    fat_sectors;
 } fat32_ctx_t;
 
+/* `lba` and `count` are in the volume's own sectors, which is what every
+ * BPB field is counted in; the block layer counts 512-byte sectors. They
+ * are the same number except on a 4Kn volume, where they differ by eight
+ * and reading LBA 1 as sector 1 fetches the wrong bytes. */
 static int fat32_read_sectors(fat32_ctx_t *ctx, UINT64 lba, UINTN count,
                               void *buf) {
-  return blkdev_read(ctx->dev, lba, count, buf);
+  return blkdev_read(ctx->dev, lba * (UINT64)ctx->sectors_per_block,
+                     count * (UINTN)ctx->sectors_per_block, buf);
 }
 
 static UINT32 fat32_get(fat32_ctx_t *ctx, UINT32 clus) {
@@ -430,6 +437,7 @@ static int fat32_init(fat32_ctx_t *ctx) {
   UINT32   root_entries;
   UINT32   reserved_sectors;
   UINT32   num_fats;
+  UINT32   bps;
   UINTN    i;
 
   memset(ctx, 0, sizeof(*ctx));
@@ -474,9 +482,19 @@ static int fat32_init(fat32_ctx_t *ctx) {
       ts = (UINT32)bpb[72] | ((UINT32)bpb[73] << 8) |
            ((UINT32)bpb[74] << 16) | ((UINT32)bpb[75] << 24);
     }
-    if (((UINT32)bpb[11] | ((UINT32)bpb[12] << 8)) == 512u &&
-        bpb[13] == 1u && rs != 0 && nf != 0 && nf <= 2 && ts != 0 &&
-        (UINT64)ts <= d->sector_count) {
+    /* bytes-per-sector has to be a power of two the block layer can
+     * express; a 4Kn volume names 4096. `ts` counts those sectors, so it
+     * is compared against the device's capacity converted the same way. */
+    bps = (UINT32)bpb[11] | ((UINT32)bpb[12] << 8);
+    if (bps == 0u || (bps & (bps - 1u)) != 0u ||
+        bps < BLKDEV_SECTOR_SIZE || bps > BLKDEV_BLOCK_MAX) {
+      continue;
+    }
+    if (bpb[13] == 0u || rs == 0u || nf == 0u || nf > 2u || ts == 0u ||
+        (UINT64)ts > d->sector_count / (UINT64)(bps / BLKDEV_SECTOR_SIZE)) {
+      continue;
+    }
+    {
       /* FAT16: root_entries != 0 and fat_size_16 != 0.
        * FAT32: root_entries == 0 and fat_size_32 != 0 and root_cluster >= 2. */
       if (root_entries != 0 && fsz16 != 0) {
@@ -515,11 +533,18 @@ static int fat32_init(fat32_ctx_t *ctx) {
     ctx->root_cluster = (UINT32)bpb[44] | ((UINT32)bpb[45] << 8) |
                         ((UINT32)bpb[46] << 16) | ((UINT32)bpb[47] << 24);
   }
-  if (ctx->bytes_per_sector == 0 || ctx->sectors_per_cluster == 0 ||
-      ctx->bytes_per_sector != BLKDEV_SECTOR_SIZE || fat_sectors == 0 ||
+  /* A volume formatted with 4096-byte sectors is normal on a 4Kn disk,
+   * and the reader handles any power-of-two sector size the BPB can name
+   * that the block layer can express. It is not 512-specific. */
+  if (ctx->bytes_per_sector == 0 ||
+      (ctx->bytes_per_sector & (ctx->bytes_per_sector - 1u)) != 0 ||
+      ctx->bytes_per_sector < BLKDEV_SECTOR_SIZE ||
+      ctx->bytes_per_sector > BLKDEV_BLOCK_MAX ||
+      ctx->sectors_per_cluster == 0 || fat_sectors == 0 ||
       total_sectors == 0) {
     return -1;
   }
+  ctx->sectors_per_block = ctx->bytes_per_sector / BLKDEV_SECTOR_SIZE;
   ctx->fat_start = reserved_sectors;
   ctx->fat_sectors = fat_sectors;
   ctx->fat = (UINT8 *)efi_alloc((UINT64)fat_sectors * ctx->bytes_per_sector);
@@ -708,10 +733,11 @@ static int syspart_verify(void) {
       UINT32 status;
 
       pctx.parent = disk;
-      pctx.base = part.first_lba;
+      pctx.base = part.first_sector; /* LBA converted to 512-byte sectors */
       pctx.sectors = part.sector_count;
       pdev.name = "syspart";
       pdev.sector_count = part.sector_count;
+      pdev.block_size = BLKDEV_SECTOR_SIZE; /* a window over the parent */
       pdev.flags = BLKDEV_FLAG_PARTITION;
       pdev.ctx = &pctx;
       pdev.read = part_read;
@@ -903,86 +929,26 @@ static int install_blob(blkdev_t *dev, UINT64 lba, const UINT8 *src,
   return 0;
 }
 
-/* Stream a file from the boot volume's FAT32 directly to the target disk
- * without loading the whole file into memory. This is used for the ESP
- * template, which is too large for a single EFI pool allocation on some
- * firmwares. */
-/* Shared 4 KiB scratch for streaming copies. Static so the large array
- * does not pull in mingw's stack-probe helper in a -nostdlib build. */
-static UINT8 fat32_copy_buf[8u * 512u];
-
-static int fat32_copy_to_disk(const CHAR16 *path, blkdev_t *dev, UINT64 lba,
-                              UINT64 *copied) {
-  fat32_ctx_t ctx;
-  UINT32      clus;
-  UINT64      size;
-  UINT64      wrote = 0;
-
-  if (copied != NULL) {
-    *copied = 0;
-  }
-  if (fat32_init(&ctx) != 0) {
-    say_line(L"[FAT32] copy init failed");
-    return -1;
-  }
-  if (fat32_find_root(&ctx, path, &clus, &size) != 0 || size == 0) {
-    say_line(L"[FAT32] copy find failed");
-    fat32_close(&ctx);
-    return -1;
-  }
-
-  while (wrote < size && clus < 0x0ffffff8u) {
-    UINT32 run_start = clus;
-    UINT32 run_len = 1;
-    UINT32 next;
-    UINT64 chunk;
-
-    while (run_len < 8u) {
-      next = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
-      if (next != run_start + run_len) {
-        break;
-      }
-      run_len++;
-    }
-
-    chunk = (UINT64)run_len * ctx.bytes_per_sector;
-    if (size - wrote < chunk) {
-      chunk = size - wrote;
-    }
-    if (fat32_read_sectors(&ctx, fat32_cluster_lba(&ctx, run_start),
-                           run_len, fat32_copy_buf) != 0) {
-      fat32_close(&ctx);
-      return -1;
-    }
-    if (blkdev_write(dev, lba + wrote / BLKDEV_SECTOR_SIZE,
-                     (UINTN)(chunk / BLKDEV_SECTOR_SIZE),
-                     fat32_copy_buf) != 0) {
-      fat32_close(&ctx);
-      return -1;
-    }
-    wrote += chunk;
-    clus = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
-  }
-
-  fat32_close(&ctx);
-  if (copied != NULL) {
-    *copied = wrote;
-  }
-  return (wrote == size) ? 0 : -1;
-}
-
-/* Write a whole disk: GPT, an ESP holding the boot files, and a Novus
- * system partition whose integrity tree is built on the spot.
+/* Lay Novus out on a whole disk: a GPT with an EFI system partition and
+ * a NovusFS system partition, the two payloads copied off the boot
+ * volume, and the system partition's integrity tree built on the spot.
+ *
+ * Both payloads are read through the file protocol rather than through a
+ * block device of the boot volume: whether one exists depends on how the
+ * firmware chose to present the image it booted us from, while the file
+ * protocol is what the loader was itself read through and therefore
+ * always there.
  *
  * Every write goes through the firmware block I/O protocol, so this can
  * only run before ExitBootServices - which is exactly where it runs. */
 static int install_run(void) {
   blkdev_t       *disk;
   UINT8          *sys_blob = NULL;
+  UINT8          *esp_blob = NULL;
   UINT64          sys_bytes = 0;
+  UINT64          esp_bytes = 0;
   UINT64          esp_lba;
   UINT64          esp_sectors;
-  UINT64          esp_copied = 0;
   UINT64          sys_lba;
   UINT64          sys_sectors;
   gpt_part_spec_t specs[2];
@@ -1003,19 +969,29 @@ static int install_run(void) {
   }
 
   /* Both payloads start on a 1 MiB boundary, which every alignment
-   * convention in the firmware and in NovusFS is happy with. The ESP
-   * payload is streamed directly from the boot volume, so its size is
-   * discovered by the copy routine rather than read into memory first. */
+   * convention in the firmware and in NovusFS is happy with.
+   *
+   * The ESP image is read the same way as the system image rather than
+   * streamed off the boot volume through its own block device: whether
+   * the firmware even *gives* us a block device for the boot image
+   * depends on how it was started - an El Torito no-emulation image is
+   * handed over as a filesystem and nothing more on some firmwares. The
+   * file protocol is the one interface that is guaranteed to be there,
+   * since the loader itself was read through it. */
   esp_lba = 2048u;
-  if (fat32_copy_to_disk(L"ESP.IMG", disk, esp_lba, &esp_copied) != 0) {
+  if (esp_read(L"ESP.IMG", &esp_blob, &esp_bytes) != 0) {
     say_line(L"[INST] ESP.IMG missing: cannot build an ESP");
     return -1;
   }
-  esp_sectors = (esp_copied + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
+  esp_sectors = (esp_bytes + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
+  /* Round both partitions up to a whole MiB. Besides keeping the
+   * filesystem's block count clean, it keeps them on a device-block
+   * boundary on a 4Kn disk (1 MiB is a multiple of every block size in
+   * use), which a partition table has to be: gpt_write() refuses a range
+   * the disk cannot address rather than write one no firmware accepts. */
+  esp_sectors = (esp_sectors + 2047u) & ~(UINT64)2047u;
   sys_lba = esp_lba + esp_sectors;
   sys_sectors = (sys_bytes + BLKDEV_SECTOR_SIZE - 1u) / BLKDEV_SECTOR_SIZE;
-  /* Round the system partition up to a whole MiB so the filesystem's
-   * block count is a clean multiple. */
   sys_sectors = (sys_sectors + 2047u) & ~(UINT64)2047u;
 
   if (esp_lba + esp_sectors + sys_sectors + 64u >= disk->sector_count) {
@@ -1049,8 +1025,12 @@ static int install_run(void) {
   }
   say_line(L"[INST] partition table written");
 
-  /* The ESP payload has already been streamed to the disk above, before
-   * the system partition size was known; now write the system image. */
+  /* Write both payloads now that the table is on disk. The ESP goes
+   * first: it is what a firmware looks at when it boots the result. */
+  if (install_blob(disk, esp_lba, esp_blob, esp_bytes) != 0) {
+    say_line(L"[INST] ESP payload write failed");
+    goto done;
+  }
   if (install_blob(disk, sys_lba, sys_blob, sys_bytes) != 0) {
     say_line(L"[INST] system payload write failed");
     goto done;
@@ -1100,6 +1080,9 @@ static int install_run(void) {
 done:
   if (sys_blob != NULL) {
     efi_free(sys_blob);
+  }
+  if (esp_blob != NULL) {
+    efi_free(esp_blob);
   }
   return rc;
 }

@@ -10,7 +10,14 @@
 #              type is picked from the image size (FAT16 while the cluster
 #              count stays under the FAT32 minimum, FAT32 above it).
 #   mkiso      wraps that ESP in an ISO 9660 image with an El Torito boot
-#              entry, so the very same ESP also boots from a CD-ROM.
+#              entry, so the very same ESP also boots from a CD-ROM. The
+#              catalog carries the UEFI no-emulation form first - what
+#              the specification describes for an EFI boot image and what
+#              every distribution ships - and the hard-disk-emulation form
+#              of the same image second, for firmwares that look only for
+#              that. The ISO's unused system area gets a partition table
+#              pointing at the embedded ESP, so the image written straight
+#              onto a USB stick is bootable too.
 #   mkfsnovus  a NovusFS system-partition image, compiled from the kernel's
 #              own fs/novusfs/*.c. Sharing the source is the point: a
 #              second implementation of the format could drift from the
@@ -115,7 +122,11 @@ $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o: tools/mkfsnovus/mkfsnovus.c \
 $(TOOLS_OUT)/tools_mkdisk_mkdisk.o: tools/mkdisk/mkdisk.c | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
-$(TOOLS_OUT)/kernel_gpt.o: kernel/gpt.c | $(TOOLS_OUT)
+# The headers matter here: gpt.c reaches the block layer through
+# blkdev.h, and part of that interface is inline, so a change to the
+# header changes the object even though the .c file is untouched.
+$(TOOLS_OUT)/kernel_gpt.o: kernel/gpt.c kernel/gpt.h kernel/blkdev.h \
+                           | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
 # --gc-sections: the precompiled core rlib carries a DWARF reference to

@@ -42,12 +42,24 @@
 #define NULL ((VOID *)0)
 #endif
 
-/* Logical sector size of every registered device. */
+/* Logical sector size of every registered device. This is the unit the
+ * whole block layer - and every layer above it - counts in, whatever the
+ * hardware underneath is really made of. */
 #define BLKDEV_SECTOR_SIZE 512
 
-/* Capacity of the device table. The boot stage needs at most a handful:
- * firmware block devices plus the live root. */
-#define BLKDEV_MAX_DEVICES 8
+/* Largest device block size the firmware backend will drive. NVMe
+ * namespaces and some SAS/SATA drives present 4096-byte logical blocks
+ * ("4Kn"); anything coarser than this is not addressable in 512-byte
+ * units without a larger bounce buffer, so it is refused rather than
+ * silently mis-read. */
+#define BLKDEV_BLOCK_MAX 4096
+
+/* Capacity of the device table. A current desktop presents more devices
+ * than it used to: one or two NVMe namespaces, an AHCI disk, the optical
+ * drive and a card reader all show up as block I/O handles, and the
+ * installer needs to see the target as well as the medium it booted
+ * from. */
+#define BLKDEV_MAX_DEVICES 16
 
 /* Device properties, reported by the backend and used to pick an
  * install target (a writable, non-removable whole disk). */
@@ -67,15 +79,53 @@ typedef int (*blk_write_fn)(void *ctx, UINT64 sector, UINTN count,
 typedef struct blkdev {
   const char  *name;         /* short static name, e.g. "ramdisk" */
   UINT64       sector_count; /* total addressable 512-byte sectors */
+  UINT32       block_size;   /* real logical block size of the hardware;
+                              * 512 on anything that is not a 4Kn drive.
+                              * Transfers are still counted in 512-byte
+                              * sectors - a backend whose blocks are
+                              * larger splits them itself. */
   UINT32       flags;        /* BLKDEV_FLAG_* */
   void        *ctx;          /* backend-private data */
   blk_read_fn  read;
   blk_write_fn write;
 } blkdev_t;
 
+/* Hardware block size in bytes, how many 512-byte sectors that is, and
+ * the two conversions every on-disk format needs: GPT, FAT and partition
+ * tables all count in *their own* blocks, which on a 4Kn disk are eight
+ * 512-byte sectors each. Addressing a 4Kn disk's LBA 1 as sector 1 reads
+ * the middle of its boot block, which is how a drive ends up looking
+ * unpartitioned - or, for the installer, unusable.
+ *
+ * A device that never filled the field in is assumed to be 512: that is
+ * what every backend but the firmware one is.
+ *
+ * These are inline because kernel/gpt.c is linked into the host mkdisk
+ * tool on its own, with none of the block layer around it. */
+static inline UINT32 blkdev_block_size(const blkdev_t *dev) {
+  if (dev == NULL || dev->block_size == 0) {
+    return BLKDEV_SECTOR_SIZE;
+  }
+  return dev->block_size;
+}
+
+static inline UINT32 blkdev_sectors_per_block(const blkdev_t *dev) {
+  return blkdev_block_size(dev) / BLKDEV_SECTOR_SIZE;
+}
+
+static inline UINT64 blkdev_lba_to_sector(const blkdev_t *dev, UINT64 lba) {
+  return lba * (UINT64)blkdev_sectors_per_block(dev);
+}
+
+static inline UINT64 blkdev_lba_count(const blkdev_t *dev,
+                                      UINT64 lba_count) {
+  return lba_count * (UINT64)blkdev_sectors_per_block(dev);
+}
+
 /* Register a block device. Returns its index in the table, or -1 when
- * the table is full or `dev` is NULL. The device object must outlive its
- * registration (backends use static storage). */
+ * the table is full, `dev` is NULL, or the block size is not a multiple
+ * of 512 no larger than BLKDEV_BLOCK_MAX. The device object must outlive
+ * its registration (backends use static storage). */
 int blkdev_register(blkdev_t *dev);
 
 /* Return the first registered device, or NULL if none. Kept for the M2
@@ -130,11 +180,17 @@ blkdev_t *blkdev_memimg_init(const char *name, UINT64 phys_base,
 /* Firmware block-device backend (M3, boot stage only).
  *
  * Enumerates every EFI_BLOCK_IO_PROTOCOL handle and registers it as
- * "uefi0", "uefi1", ... with BLKDEV_FLAG_BOOT_ONLY set. Devices whose
- * media block size is not BLKDEV_SECTOR_SIZE are skipped: Novus
- * addresses everything in 512-byte sectors and a CD-ROM (2048-byte
- * blocks) is reached through the firmware FAT driver instead, not
- * through block I/O.
+ * "uefi0", "uefi1", ... with BLKDEV_FLAG_BOOT_ONLY set. Whatever the
+ * firmware has a driver for - IDE, AHCI/SATA, NVMe, USB, virtio - arrives
+ * here already abstracted, so there is no per-controller code to write:
+ * the device is used through the same protocol on all of them.
+ *
+ * Devices are no longer filtered by block size. A 4Kn NVMe namespace
+ * (4096-byte blocks) or an optical disc (2048-byte blocks) is registered
+ * like any other and its transfers are split into whole hardware blocks
+ * behind the 512-byte-sector interface; skipping them meant a machine
+ * whose only disk is 4Kn had no disk at all as far as Novus could tell,
+ * and the installer could never offer it as a target.
  *
  * Returns the number of devices registered (0 on failure), which is
  * also 0 when boot services are gone. */
