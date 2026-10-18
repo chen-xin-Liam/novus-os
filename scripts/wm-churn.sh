@@ -120,11 +120,15 @@ click_at() {
 }
 
 # Window frames from the M8 sources: fileman(40,396,418,329),
-# taskman(470,430,428,311), settings(905,500,358,275). The close box sits
-# 18 px in from the right edge, 12 px down the title bar.
-close_fileman() { click_at $((40 + 418 - 18)) $((396 + 12)); }
-taskbar_files() { click_at 136 17; }
-taskbar_tasks() { click_at 236 17; }
+# taskman(470,402,428,311), settings(902,438,358,275). Windows 11 caption
+# buttons are 46x32 and flush with the top-right corner, so close is the
+# first one: 23 px in from the right edge, 16 px down.
+close_fileman() { click_at $((40 + 418 - 23)) $((396 + 16)); }
+# Windows 11 taskbar: 560 px wide, centred, 12 px above the bottom edge.
+# 开始 at +8, 文件 at +64 (104 wide), 任务 at +176.
+taskbar_start() { click_at 384 764; }
+taskbar_files() { click_at 476 764; }
+taskbar_tasks() { click_at 588 764; }
 
 wait_for "demo desktop painted" 240 || fail "the desktop never came up"
 wait_for "[APP] settings up" 40 || fail "the M8 applications did not start"
@@ -145,9 +149,9 @@ done
 # to be able to start one again.
 close_fileman
 sleep 0.4
-click_at $((470 + 428 - 18)) $((430 + 12))   # close taskman
+click_at $((470 + 428 - 23)) $((402 + 16))   # close taskman
 sleep 0.4
-click_at $((905 + 358 - 18)) $((500 + 12))   # close settings
+click_at $((902 + 358 - 23)) $((438 + 16))   # close settings
 sleep 0.6
 taskbar_tasks
 sleep 1.2

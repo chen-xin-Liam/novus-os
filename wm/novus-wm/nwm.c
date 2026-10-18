@@ -29,11 +29,13 @@
 
 #if CONFIG_NOVUS_WM
 
-#define NWM_SHADOW   6
+#define NWM_SHADOW   14
 #define NWM_MIN_W    120
 #define NWM_MIN_H    48
-#define NWM_BTN      12
-#define NWM_BTN_GAP  6
+/* Windows 11 caption buttons: 46x32 hit areas, flush with the top-right
+ * corner, no gaps - the hover highlight is the only affordance. */
+#define NWM_BTN      46
+#define NWM_BTN_GAP  0
 
 typedef struct {
   UINT8     used;
@@ -60,6 +62,8 @@ static nwm_window_t g_wins[NWM_MAX_WINDOWS];
 static UINT8     g_z[NWM_MAX_WINDOWS]; /* window indices, bottom -> top */
 static UINT32    g_zcount;
 static UINT64    g_port;      /* the "nwm" port id */
+static INT32     g_mouse_x;   /* last pointer position, for hover states */
+static INT32     g_mouse_y;
 static UINT32    g_next_id;
 static int       g_ready;
 static int       g_focus;   /* index, -1 = the shell */
@@ -299,6 +303,9 @@ static void paint_commands(nwm_window_t *w, nd_rect_t client) {
   }
 }
 
+static UINT8 title_button(const nwm_window_t *w, INT32 x, INT32 y);
+static INT32 caption_hover(const nwm_window_t *w);
+
 static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_surface_t     *s = target();
   const ng_theme_t *t;
@@ -317,47 +324,42 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   t = &ng_ctx_get()->theme;
   nd_surface_set_clip(s, vis);
 
-  nd_shadow(s, w->rect, NWM_SHADOW, 90);
-  nd_round_rect(s, w->rect, 6, t->win_bg);
+  nd_shadow(s, w->rect, NWM_SHADOW, 42);
+  nd_round_rect(s, w->rect, 10, t->win_bg);
 
+  /* Title band clipped to the rounded top: fill the corner rows with the
+   * curve inset, exactly like the shell's own windows. */
   title_bg = (g_focus >= 0 && &g_wins[g_focus] == w) ? t->win_title
                                                      : t->win_title_dim;
-  nd_fill_rect(s, nd_rect(w->rect.x + 1, w->rect.y + 1, w->rect.w - 2,
-                          NWM_TITLE_H - 1),
-               title_bg);
-  nd_round_frame(s, w->rect, 6, 1, t->win_border);
-  nd_text(s, w->rect.x + 8,
-          w->rect.y + (NWM_TITLE_H - (INT32)nd_font_height(1)) / 2, w->title,
-          t->text, 1);
+  {
+    static const INT32 corner[10] = {10, 7, 5, 4, 3, 2, 2, 1, 1, 1};
+    INT32              k;
 
-  /* Title-bar buttons: close, maximize, minimize (right to left). */
-  for (i = 0; i < 3u; i++) {
-    nd_rect_t b = nd_rect(w->rect.x + w->rect.w - (INT32)(i + 1u) * NWM_BTN -
-                              (INT32)i * NWM_BTN_GAP - 6,
-                          w->rect.y + (NWM_TITLE_H - NWM_BTN) / 2, NWM_BTN,
-                          NWM_BTN);
-    UINT8 mark = (UINT8)(2u - i); /* 2 close, 1 maximize, 0 minimize */
+    for (k = 0; k < NWM_TITLE_H && k < w->rect.h; k++) {
+      INT32 inset = (k < 10) ? corner[k] : 0;
 
-    nd_round_rect(s, b, 3, (mark == 2u) ? ND_RGB(0x5A, 0x2A, 0x33)
-                                        : t->ctrl_bg);
-    if (mark == 2u) {
-      nd_line(s, b.x + 3, b.y + 3, b.x + NWM_BTN - 4, b.y + NWM_BTN - 4,
-              ND_RGB(0xE8, 0xEC, 0xF2));
-      nd_line(s, b.x + NWM_BTN - 4, b.y + 3, b.x + 3, b.y + NWM_BTN - 4,
-              ND_RGB(0xE8, 0xEC, 0xF2));
-    } else if (mark == 1u) {
-      nd_frame(s, nd_rect(b.x + 3, b.y + 3, NWM_BTN - 6, NWM_BTN - 6), 1,
-               t->text_dim);
-    } else {
-      nd_hline(s, b.x + 3, b.x + NWM_BTN - 4, b.y + NWM_BTN / 2, t->text_dim);
+      nd_fill_rect(s, nd_rect(w->rect.x + inset, w->rect.y + k,
+                              w->rect.w - inset * 2, 1),
+                   title_bg);
     }
   }
+  nd_hline(s, w->rect.x + 1, w->rect.x + w->rect.w - 2,
+           w->rect.y + NWM_TITLE_H - 1, t->win_border);
+  nd_round_frame(s, w->rect, 10, 1, t->win_border);
+  nd_text(s, w->rect.x + 12,
+          w->rect.y + (NWM_TITLE_H - (INT32)nd_text_height(w->title, 2)) / 2,
+          w->title, t->text, 2);
+
+  /* Caption buttons, drawn by the same helper the shell windows use. */
+  ng_draw_caption(s, w->rect, t, caption_hover(w), 3);
+
+  (void)i;
 
   /* Client area. The clip narrows to it, so no command can spill into the
    * decorations or the window next door. */
   client = client_rect(w);
   nd_surface_set_clip(s, nd_rect_intersect(clip, client));
-  nd_fill_rect(s, client, ND_RGB(0x10, 0x14, 0x1C));
+  nd_fill_rect(s, client, t->win_bg);
   paint_commands(w, client);
   {
     UINT32 k;
@@ -395,6 +397,15 @@ static void paint(nd_rect_t clip) {
   nd_surface_set_clip(dst, nd_rect_intersect(clip, nd_rect(0, 0, dst->w, dst->h)));
   for (i = 0; i < g_zcount; i++) {
     paint_window(&g_wins[g_z[i]], clip);
+  }
+  /* The shell's overlay layer (start menu, IME popup) goes above the
+   * client windows, the way a start menu does on a real desktop. */
+  {
+    nd_surface_t *ov = target();
+
+    if (ov != 0) {
+      ng_render_overlay(clip);
+    }
   }
   nd_surface_reset_clip(dst);
 
@@ -752,10 +763,14 @@ static void req_text(const ipc_msg_t *m) {
   w->text[w->text_n++] = t;
   {
     nd_rect_t c = client_rect(w);
+    /* Width from the font, not from the byte count: a Chinese run is three
+     * bytes per glyph and would otherwise damage three times the area. */
+    UINT32 tw = nd_text_width(t.text, (t.scale != 0u) ? t.scale : 1u);
 
     damage(nd_rect_intersect(c, nd_rect(c.x + t.x, c.y + t.y,
-                                        (INT32)len * 6 * (INT32)t.scale,
-                                        (INT32)nd_font_height(t.scale))));
+                                        (INT32)tw + 1,
+                                        (INT32)nd_text_height(t.text,
+                                                              t.scale))));
   }
   ack(m, w->id, NWM_OK);
 }
@@ -880,17 +895,22 @@ static void deliver_key(nwm_window_t *w, const nd_event_t *ev) {
   deliver(w->owner, NWM_EV_KEY, &m, sizeof(m));
 }
 
+/* 1..3 when the pointer is over one of this window's caption buttons. */
+static INT32 caption_hover(const nwm_window_t *w) {
+  UINT8 b = title_button(w, g_mouse_x, g_mouse_y);
+
+  return (b == 0u) ? 0 : (INT32)b;
+}
+
 /* Which decoration did the press land on? 0 none, 1 close, 2 maximize,
- * 3 minimize. Geometry matches paint_window(): three 12x12 boxes, right
- * to left, 6 px apart, 6 px from the frame edge. */
+ * 3 minimize. Geometry matches paint_window(): three 46x32 boxes flush
+ * with the right edge. */
 static UINT8 title_button(const nwm_window_t *w, INT32 x, INT32 y) {
   UINT32 i;
 
   for (i = 0; i < 3u; i++) {
-    nd_rect_t b = nd_rect(w->rect.x + w->rect.w - (INT32)(i + 1u) * NWM_BTN -
-                              (INT32)i * NWM_BTN_GAP - 6,
-                          w->rect.y + (NWM_TITLE_H - NWM_BTN) / 2, NWM_BTN,
-                          NWM_BTN);
+    nd_rect_t b = nd_rect(w->rect.x + w->rect.w - (INT32)(i + 1u) * NWM_BTN,
+                          w->rect.y, NWM_BTN, NWM_TITLE_H);
 
     if (nd_rect_contains(b, x, y)) {
       return (UINT8)(i == 0u ? 1u : (i == 1u ? 2u : 3u));
@@ -901,6 +921,20 @@ static UINT8 title_button(const nwm_window_t *w, INT32 x, INT32 y) {
 
 static void route(const nd_event_t *ev) {
   int idx;
+
+  g_mouse_x = ev->x;
+  g_mouse_y = ev->y;
+
+  /* An open start menu (or any overlay card) takes the pointer before the
+   * windows do: it is drawn above them, so it must be clicked above them
+   * too. Dragging a window keeps priority so a drag cannot be swallowed. */
+  if (g_drag < 0 &&
+      (ev->type == ND_EV_MOUSE_MOVE || ev->type == ND_EV_MOUSE_DOWN ||
+       ev->type == ND_EV_MOUSE_UP || ev->type == ND_EV_WHEEL) &&
+      ng_overlay_hit(ev->x, ev->y)) {
+    nd_demo_dispatch(ev);
+    return;
+  }
 
   switch (ev->type) {
   case ND_EV_MOUSE_MOVE:
@@ -1119,6 +1153,8 @@ void nwm_tick(void) {
   }
   pump();
   sweep_owners();
+  /* The shell owns the taskbar clock; the WM owns the tick. */
+  nd_demo_idle();
 
   if (nd_demo_take_damage(&d)) {
     damage(d);

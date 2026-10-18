@@ -82,6 +82,9 @@ SRC := arch/x86_64/boot/main.c \
        kernel/gpt.c \
        kernel/nksym.c \
        graphics/nd_font.c \
+       graphics/nd_font_cjk.c \
+       graphics/nd_ime_dict.c \
+       graphics/nd_ime.c \
        graphics/nd_core.c \
        graphics/nd_hal.c \
        graphics/nd_input.c \
@@ -90,6 +93,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/ipc.c \
        kernel/apps.c \
        kernel/sysinfo.c \
+       kernel/rtc.c \
        wm/novus-wm/nwm.c \
        wm/novus-wm/nwm_demo.c \
        fs/novusfs/super.c \

@@ -176,14 +176,44 @@ void nd_blit_alpha(nd_surface_t *dst, INT32 x, INT32 y,
 #define ND_FONT_ADV 6
 #define ND_FONT_LINE 9
 
+/* CJK text is a 16x16 bitmap font: one advance, one height, independent of
+ * the ASCII scale. Mixed lines take the taller cell and share a baseline,
+ * so a Chinese label next to a number sits on the same line. */
+#define ND_CJK_W 16
+#define ND_CJK_H 16
+#define ND_CJK_ADV 16
+
+/* Decode one UTF-8 codepoint and advance the cursor past it. Invalid bytes
+ * decode as 0xFFFD and consume one byte, so a broken string still renders
+ * something and cannot loop. */
+UINT32 nd_utf8_next(const char **text);
+
+/* Advance of one codepoint at `scale` (ASCII scales, CJK does not). */
+UINT32 nd_char_adv(UINT32 cp, UINT32 scale);
+
 UINT32 nd_text_width(const char *text, UINT32 scale);
+
+/* Width of at most `bytes` bytes of `text`, stopping on a codepoint
+ * boundary. Used by the text box for its scroll window and caret. */
+UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale);
 UINT32 nd_font_height(UINT32 scale);
+
+/* Height of the cell this string needs: ASCII-only keeps 7*scale, a line
+ * with CJK needs 16. Callers centre with this, not with nd_font_height. */
+UINT32 nd_text_height(const char *text, UINT32 scale);
+
 void nd_text(nd_surface_t *s, INT32 x, INT32 y, const char *text, nd_color_t c,
              UINT32 scale);
+/* `max_px` limits the painted width (0 = unlimited); clipping at a
+ * character boundary, never mid-glyph. */
 void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
-                   UINT32 max_chars, nd_color_t c, UINT32 scale);
+                   UINT32 max_px, nd_color_t c, UINT32 scale);
 
 /* ---- M5 demo and self test ------------------------------------------- */
+
+/* Shell housekeeping the WM tick calls: the taskbar clock, and anything
+ * else that must advance even when the shell is not being painted. */
+void nd_demo_idle(void);
 
 /* Draws into an off-screen surface, checks exact pixels, widget state and
  * event routing, and prints PASS/FAIL on COM1. Runs before ring 3. */

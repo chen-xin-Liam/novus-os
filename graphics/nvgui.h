@@ -31,6 +31,9 @@
 #define NG_WF_VISIBLE   0x0001u
 #define NG_WF_ENABLED   0x0002u
 #define NG_WF_FOCUSABLE 0x0004u
+/* Drawn by ng_render_overlay(), i.e. above client windows: the start menu
+ * and anything else that has to float over the desktop. */
+#define NG_WF_OVERLAY  0x0008u
 
 /* Runtime state bits. */
 #define NG_ST_HOVER   0x0001u
@@ -39,7 +42,7 @@
 #define NG_ST_DRAG    0x0008u
 
 /* Theme metrics, in pixels at text scale 2. */
-#define NG_TITLE_H  30
+#define NG_TITLE_H  32
 /* Drop shadow falloff around a window, in pixels. Damage for a window has
  * to cover this ring as well as the window rectangle. */
 #define NG_SHADOW_SPREAD 10
@@ -143,6 +146,8 @@ struct ng_widget {
     } tree;
     struct {
       nd_color_t color;
+      UINT8      frame;  /* 1 px rounded border, for floating cards */
+      UINT8      radius;
     } panel;
   } u;
 };
@@ -207,6 +212,8 @@ ng_widget_t *ng_list(ng_widget_t *w, const char **items, UINT32 count,
 ng_widget_t *ng_tree(ng_widget_t *w, ng_tnode_t *nodes, UINT32 count,
                      ng_value_fn fn);
 ng_widget_t *ng_panel(ng_widget_t *w, nd_color_t color);
+/* Give a panel a rounded border and corner radius (start menu, taskbar). */
+void ng_panel_frame(ng_widget_t *w, int on);
 
 /* Show/hide and enable/disable (both damage the widget). */
 void ng_show(ng_widget_t *w, int visible);
@@ -215,6 +222,31 @@ void ng_set_enabled(ng_widget_t *w, int enabled);
 /* Compute absolute rectangles from the relative layout. Call after moving
  * or resizing anything. */
 void ng_layout(void);
+
+/* Text editing used by the IME: insert one codepoint (or a UTF-8 string)
+ * at the caret. Both return 1 on success, 0 when the buffer is full. */
+int ng_edit_insert_cp(ng_widget_t *w, UINT32 cp);
+int ng_edit_insert_text(ng_widget_t *w, const char *text);
+
+/* Screen rectangle of the focused text box's caret, if it has one. */
+int ng_focus_caret(nd_rect_t *out);
+
+/* Windows 11 caption buttons (minimise, maximise, close) at the top right
+ * of `frame`. `hovered` is 1..count for the button under the pointer, or 0.
+ * Shared by the shell's windows and the window manager's. */
+void ng_draw_caption(nd_surface_t *s, nd_rect_t frame, const ng_theme_t *t,
+                     int hovered, int count);
+
+/* Mark a widget (and its children) as overlay content. */
+void ng_set_overlay(ng_widget_t *w, int on);
+
+/* True when (x,y) is over a visible overlay card (an open start menu). */
+int ng_overlay_hit(INT32 x, INT32 y);
+
+/* Draw only the overlay widgets, on top of client windows. The window
+ * manager calls this after compositing, so the start menu and the IME
+ * candidate window stay visible even when a window covers them. */
+void ng_render_overlay(nd_rect_t clip);
 
 /* Draw the scene clipped to `clip`; ng_render_all() is the full screen. */
 void ng_render(nd_rect_t clip);

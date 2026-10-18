@@ -15,13 +15,13 @@ const CW: i16 = 356;
 const CH: i16 = 250;
 
 const PRESETS: [u32; 4] = [0x004C8DFF, 0x0059C98A, 0x00E0A34A, 0x00C06CE0];
-const NAMES: [&str; 4] = ["Blue", "Green", "Amber", "Violet"];
+const NAMES: [&str; 4] = ["蓝", "绿", "琥珀", "紫"];
 
 fn draw(w: &wm::Win, accent: u32, st: &sinfo::Stats) {
     w.clear();
-    ui::shell(w, CW, CH, "desktop + system", accent);
+    ui::shell(w, CW, CH, "桌面与系统", accent);
 
-    w.text(10, 38, ui::DIM, "Desktop accent");
+    w.text(10, 38, ui::DIM, "桌面强调色");
     for (i, c) in PRESETS.iter().enumerate() {
         let x = 10 + i as i16 * 40;
 
@@ -42,30 +42,31 @@ fn draw(w: &wm::Win, accent: u32, st: &sinfo::Stats) {
     w.shape(wm::OP_HLINE, 0, 88, CW, 1, ui::LINE);
     let mut b = [0u8; 16];
 
-    w.text(10, 98, ui::DIM, "Uptime");
+    w.text(10, 98, ui::DIM, "运行时间");
     let s = ui::fmt_u32((st.uptime / 100) as u32, &mut b);
     w.text(120, 98, ui::TEXT, s);
-    w.text(10 + 6 * (s.len() as i16) + 120, 98, ui::DIM, "s");
+    let s = s; /* width() below measures the same string */
+    w.text(120 + ui::width(s) + 4, 98, ui::DIM, "秒");
 
-    w.text(10, 116, ui::DIM, "Free memory");
+    w.text(10, 116, ui::DIM, "空闲内存");
     let s = ui::fmt_size((st.free_kb * 1024) as u32, &mut b);
     w.text(120, 116, ui::TEXT, s);
 
-    w.text(10, 134, ui::DIM, "Tasks alive");
+    w.text(10, 134, ui::DIM, "任务数");
     let s = ui::fmt_u32(st.tasks, &mut b);
     w.text(120, 134, ui::TEXT, s);
 
-    w.text(10, 152, ui::DIM, "Windows");
+    w.text(10, 152, ui::DIM, "窗口数");
     let s = ui::fmt_u32(st.windows, &mut b);
     w.text(120, 152, ui::TEXT, s);
 
-    w.text(10, 170, ui::DIM, "IPC sent / dropped");
+    w.text(10, 170, ui::DIM, "IPC 收发");
     let mut line = ui::Buf::new();
 
     line.num(st.ipc_sent).s(" / ").num(st.ipc_drop);
     w.text(150, 170, ui::TEXT, line.str());
 
-    ui::button(w, CW - 84, CH - 30, 74, 22, "Refresh", accent);
+    ui::button(w, CW - 84, CH - 30, 74, 22, "刷新", accent);
 }
 
 #[no_mangle]
@@ -77,7 +78,7 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 905, 500, CW as i32 + 2, CH as i32 + 25, "Settings")
+    let Some(win) = wm::Win::create(wm_port, 902, 438, CW as i32 + 2, CH as i32 + 25, "设置")
     else {
         sys::exit(3);
     };

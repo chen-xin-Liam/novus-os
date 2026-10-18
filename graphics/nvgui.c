@@ -15,6 +15,7 @@
 
 #include "kernel.h"
 #include "nvgui.h"
+#include "nd_ime.h"
 
 static ng_ctx_t    g_ctx;
 static ng_widget_t g_pool[NG_POOL_SIZE];
@@ -66,20 +67,23 @@ static void fmt_int(char *buf, INT32 value) {
   buf[i] = '\0';
 }
 
+/* Windows 11 Fluent, light: a mica-blue desktop, white cards, one blue
+ * accent. Every colour here is used by the shell, the window manager and
+ * the applications through one theme, so a change lands everywhere. */
 static void theme_init(ng_theme_t *t) {
-  t->desktop_top = ND_RGB(0x0C, 0x12, 0x1E);
-  t->desktop_bottom = ND_RGB(0x18, 0x24, 0x38);
-  t->win_bg = ND_RGB(0x1C, 0x23, 0x2E);
-  t->win_title = ND_RGB(0x2A, 0x35, 0x47);
-  t->win_title_dim = ND_RGB(0x22, 0x2B, 0x39);
-  t->win_border = ND_RGB(0x3C, 0x4A, 0x60);
-  t->text = ND_RGB(0xC9, 0xD5, 0xE6);
-  t->text_dim = ND_RGB(0x7C, 0x8B, 0xA2);
-  t->accent = ND_RGB(0x4C, 0x8D, 0xFF);
+  t->desktop_top = ND_RGB(0xEE, 0xF2, 0xF8);
+  t->desktop_bottom = ND_RGB(0xE3, 0xEA, 0xF3);
+  t->win_bg = ND_RGB(0xFF, 0xFF, 0xFF);
+  t->win_title = ND_RGB(0xF3, 0xF3, 0xF3);
+  t->win_title_dim = ND_RGB(0xF8, 0xF8, 0xF8);
+  t->win_border = ND_RGB(0xE1, 0xE5, 0xEA);
+  t->text = ND_RGB(0x1B, 0x1B, 0x1B);
+  t->text_dim = ND_RGB(0x5F, 0x63, 0x68);
+  t->accent = ND_RGB(0x00, 0x67, 0xC0);
   t->accent_text = ND_RGB(0xFF, 0xFF, 0xFF);
-  t->ctrl_bg = ND_RGB(0x27, 0x30, 0x3F);
-  t->ctrl_hover = ND_RGB(0x32, 0x3E, 0x52);
-  t->ctrl_border = ND_RGB(0x44, 0x53, 0x6B);
+  t->ctrl_bg = ND_RGB(0xFB, 0xFB, 0xFB);
+  t->ctrl_hover = ND_RGB(0xF0, 0xF0, 0xF0);
+  t->ctrl_border = ND_RGB(0xE1, 0xE5, 0xEA);
 }
 
 /* ---- damage ----------------------------------------------------------- */
@@ -312,7 +316,18 @@ ng_widget_t *ng_tree(ng_widget_t *w, ng_tnode_t *nodes, UINT32 count,
 
 ng_widget_t *ng_panel(ng_widget_t *w, nd_color_t color) {
   w->u.panel.color = color;
+  w->u.panel.frame = 0;
+  w->u.panel.radius = 0;
   return w;
+}
+
+void ng_panel_frame(ng_widget_t *w, int on) {
+  if (w == 0 || w->type != NG_PANEL) {
+    return;
+  }
+  w->u.panel.frame = (on != 0) ? 1u : 0u;
+  w->u.panel.radius = 12u;
+  ng_damage_widget(w);
 }
 
 /* ---- visibility, focus, z-order --------------------------------------- */
@@ -454,7 +469,8 @@ static void draw_label(ng_widget_t *w) {
   UINT32          scale = (w->u.label.scale != 0u) ? w->u.label.scale : 1u;
   UINT32          tw = nd_text_width(w->u.label.text, scale);
   INT32           x = w->abs.x;
-  INT32           y = w->abs.y + (w->abs.h - (INT32)nd_font_height(scale)) / 2;
+  INT32           y = w->abs.y +
+                (w->abs.h - (INT32)nd_text_height(w->u.label.text, scale)) / 2;
 
   if (w->u.label.align == 1u) {
     x += (w->abs.w - (INT32)tw) / 2;
@@ -497,7 +513,8 @@ static void draw_button(ng_widget_t *w) {
                    4, 1, t->accent);
   }
   tw = nd_text_width(w->u.button.text, NG_TEXT_SCALE);
-  ty = w->abs.y + (w->abs.h - (INT32)nd_font_height(NG_TEXT_SCALE)) / 2;
+  ty = w->abs.y +
+       (w->abs.h - (INT32)nd_text_height(w->u.button.text, NG_TEXT_SCALE)) / 2;
   nd_text(s, w->abs.x + ((w->abs.w - (INT32)tw) / 2), ty, w->u.button.text, fg,
           NG_TEXT_SCALE);
 }
@@ -519,19 +536,114 @@ static void draw_checkbox(ng_widget_t *w) {
     nd_line(s, box.x + 5, box.y + 9, box.x + 9, box.y + 13, t->accent);
     nd_line(s, box.x + 9, box.y + 13, box.x + 15, box.y + 5, t->accent);
   }
-  nd_text(s, box.x + 28, w->abs.y + (w->abs.h - (INT32)nd_font_height(2)) / 2,
+  nd_text(s, box.x + 28,
+          w->abs.y +
+              (w->abs.h - (INT32)nd_text_height(w->u.check.text, 2)) / 2,
           w->u.check.text, fg, NG_TEXT_SCALE);
+}
+
+/* Byte offset one codepoint after `off`. */
+static UINT32 edit_skip(ng_widget_t *w, UINT32 off, int steps) {
+  while (steps-- > 0 && off < w->u.edit.len) {
+    const char *p = w->u.edit.buf + off;
+
+    (void)nd_utf8_next(&p);
+    off = (UINT32)(p - w->u.edit.buf);
+  }
+  return off;
+}
+
+/* Previous codepoint boundary before `off`. */
+static UINT32 edit_prev(ng_widget_t *w, UINT32 off) {
+  if (off == 0u) {
+    return 0u;
+  }
+  off--;
+  while (off > 0u && ((UINT8)w->u.edit.buf[off] & 0xC0u) == 0x80u) {
+    off--;
+  }
+  return off;
+}
+
+/* Insert one codepoint at the caret. Returns 0 when the buffer is full. */
+int ng_edit_insert_cp(ng_widget_t *w, UINT32 cp) {
+  UINT8  enc[4];
+  UINT32 i;
+  UINT32 len = 0;
+  UINT32 off;
+
+  if (w == 0 || w->type != NG_TEXTBOX) {
+    return 0;
+  }
+  if (cp < 0x80u) {
+    enc[0] = (UINT8)cp;
+    len = 1;
+  } else if (cp < 0x800u) {
+    enc[0] = (UINT8)(0xC0u | (cp >> 6));
+    enc[1] = (UINT8)(0x80u | (cp & 0x3Fu));
+    len = 2;
+  } else if (cp < 0x10000u) {
+    enc[0] = (UINT8)(0xE0u | (cp >> 12));
+    enc[1] = (UINT8)(0x80u | ((cp >> 6) & 0x3Fu));
+    enc[2] = (UINT8)(0x80u | (cp & 0x3Fu));
+    len = 3;
+  } else {
+    return 0;
+  }
+  if (w->u.edit.len + len + 1u > w->u.edit.cap) {
+    return 0;
+  }
+  off = w->u.edit.cursor;
+  for (i = w->u.edit.len + len; i > off; i--) {
+    w->u.edit.buf[i] = w->u.edit.buf[i - len];
+  }
+  for (i = 0; i < len; i++) {
+    w->u.edit.buf[off + i] = (char)enc[i];
+  }
+  w->u.edit.len += len;
+  w->u.edit.cursor = off + len;
+  w->u.edit.buf[w->u.edit.len] = '\0';
+  ng_damage_widget(w);
+  return 1;
+}
+
+/* Insert UTF-8 text (used by the IME for a whole candidate). */
+int ng_edit_insert_text(ng_widget_t *w, const char *text) {
+  int ok = 1;
+
+  while (text != 0 && *text != '\0') {
+    UINT32 cp = nd_utf8_next(&text);
+
+    if (!ng_edit_insert_cp(w, cp)) {
+      ok = 0;
+      break;
+    }
+  }
+  (void)nd_utf8_next;
+  return ok;
+}
+
+static nd_rect_t g_caret; /* last drawn caret, screen coordinates */
+static int       g_caret_ok;
+
+int ng_focus_caret(nd_rect_t *out) {
+  if (!g_caret_ok) {
+    return 0;
+  }
+  if (out != 0) {
+    *out = g_caret;
+  }
+  return 1;
 }
 
 static void draw_textbox(ng_widget_t *w) {
   nd_surface_t  *s = g_ctx.surf;
   const ng_theme_t *t = &g_ctx.theme;
   INT32          tx = w->abs.x + NG_PAD;
-  INT32          ty = w->abs.y + (w->abs.h - (INT32)nd_font_height(NG_TEXT_SCALE)) / 2;
-  UINT32         adv = ND_FONT_ADV * NG_TEXT_SCALE;
-  UINT32         max_chars;
+  INT32          ty;
+  UINT32         max_px;
+  UINT32         cell;
   const char    *shown;
-  nd_color_t     fg;
 
   nd_round_rect(s, w->abs, 5, t->ctrl_bg);
   nd_round_frame(s, w->abs, 5, 1,
@@ -540,43 +652,54 @@ static void draw_textbox(ng_widget_t *w) {
   if (w->abs.w <= NG_PAD * 2) {
     return;
   }
-  max_chars = (UINT32)(w->abs.w - NG_PAD * 2) / adv;
+  cell = nd_text_height(w->u.edit.buf, NG_TEXT_SCALE);
+  ty = w->abs.y + (w->abs.h - (INT32)cell) / 2;
+  max_px = (UINT32)(w->abs.w - NG_PAD * 2);
   if (w->u.edit.len == 0u && w->u.edit.placeholder != 0) {
-    shown = w->u.edit.placeholder;
-    fg = t->text_dim;
-    nd_text_limit(s, tx, ty, shown, max_chars, fg, NG_TEXT_SCALE);
+    nd_text_limit(s, tx, ty, w->u.edit.placeholder, max_px, t->text_dim,
+                  NG_TEXT_SCALE);
     return;
   }
 
-  /* Keep the caret visible by scrolling whole characters. */
+  /* Scroll by codepoint so the caret stays inside the box: pull the window
+   * forward while the text before the caret is wider than the box. */
   if (w->u.edit.cursor < w->u.edit.scroll) {
     w->u.edit.scroll = w->u.edit.cursor;
   }
-  if (max_chars > 1u && w->u.edit.cursor >= w->u.edit.scroll + max_chars) {
-    w->u.edit.scroll = w->u.edit.cursor - max_chars + 1u;
+  while (w->u.edit.scroll < w->u.edit.cursor &&
+         nd_text_width_n(w->u.edit.buf + w->u.edit.scroll,
+                         w->u.edit.cursor - w->u.edit.scroll,
+                         NG_TEXT_SCALE) > max_px) {
+    w->u.edit.scroll = edit_skip(w, w->u.edit.scroll, 1);
   }
   shown = w->u.edit.buf + w->u.edit.scroll;
   if (w->u.edit.password != 0u) {
     static char dots[128];
-    UINT32      i;
-    UINT32      n = w->u.edit.len - w->u.edit.scroll;
-    if (n > sizeof(dots) - 1u) {
-      n = sizeof(dots) - 1u;
+    UINT32      i = 0;
+    UINT32      off = w->u.edit.scroll;
+
+    while (off < w->u.edit.len && i + 1u < sizeof(dots)) {
+      dots[i++] = '*';
+      off = edit_skip(w, off, 1);
     }
-    for (i = 0; i < n; i++) {
-      dots[i] = '*';
-    }
-    dots[n] = '\0';
+    dots[i] = '\0';
     shown = dots;
   }
-  nd_text_limit(s, tx, ty, shown, max_chars, t->text, NG_TEXT_SCALE);
+  nd_text_limit(s, tx, ty, shown, max_px, t->text, NG_TEXT_SCALE);
 
   if ((w->state & NG_ST_FOCUS) != 0u) {
-    INT32 cx = tx + (INT32)((w->u.edit.cursor - w->u.edit.scroll) * adv);
-    nd_fill_rect(s, nd_rect(cx, ty - 1, 2, (INT32)nd_font_height(NG_TEXT_SCALE) + 2),
-                 t->accent);
+    INT32 cx = tx + (INT32)nd_text_width_n(w->u.edit.buf + w->u.edit.scroll,
+                                           w->u.edit.cursor - w->u.edit.scroll,
+                                           NG_TEXT_SCALE) +
+               3;
+    nd_fill_rect(s, nd_rect(cx, ty - 1, 2, (INT32)cell + 2), t->accent);
+    g_caret = nd_rect(cx, ty, 2, (INT32)cell);
+    g_caret_ok = 1;
+  } else if (g_ctx.focus == w) {
+    g_caret_ok = 0;
   }
 }
+
 
 static void draw_slider(ng_widget_t *w) {
   nd_surface_t  *s = g_ctx.surf;
@@ -670,7 +793,9 @@ static void draw_list(ng_widget_t *w) {
       nd_round_rect(s, row, 4, t->accent);
     }
     nd_text(s, row.x + 8,
-            row.y + (NG_ROW_H - (INT32)nd_font_height(NG_TEXT_SCALE)) / 2,
+            row.y + (NG_ROW_H -
+                     (INT32)nd_text_height(w->u.list.items[idx],
+                                           NG_TEXT_SCALE)) / 2,
             w->u.list.items[idx],
             (idx == w->u.list.sel) ? t->accent_text : t->text, NG_TEXT_SCALE);
   }
@@ -761,7 +886,8 @@ static void draw_tree(ng_widget_t *w) {
     nd_rect_t   row = nd_rect(w->abs.x + 2, w->abs.y + 1 + i * NG_ROW_H,
                               w->abs.w - 4, NG_ROW_H);
     INT32       x = row.x + 6 + (INT32)n->depth * 16;
-    INT32       ty = row.y + (NG_ROW_H - (INT32)nd_font_height(NG_TEXT_SCALE)) / 2;
+    INT32       ty = row.y + (NG_ROW_H -
+                              (INT32)nd_text_height(n->text, NG_TEXT_SCALE)) / 2;
 
     if (idx == w->u.tree.sel) {
       nd_round_rect(s, row, 4, t->accent);
@@ -779,43 +905,76 @@ static void draw_tree(ng_widget_t *w) {
   }
 }
 
+/* Windows 11 caption buttons: 46x32 hit areas, right-aligned, close turns
+ * red under the pointer. Shared shape with the WM's own chrome so a shell
+ * window and a client window look like the same system. */
+void ng_draw_caption(nd_surface_t *s, nd_rect_t frame, const ng_theme_t *t,
+                     int hovered, int count) {
+  INT32        bw = 46;
+  INT32        bh = 32;
+  INT32        i;
+
+  for (i = 0; i < count; i++) {
+    nd_rect_t b = nd_rect(frame.x + frame.w - (INT32)(i + 1) * bw,
+                          frame.y, bw, bh);
+    int       is_close = (i == 0);
+    int       hot = (hovered == (INT32)i + 1);
+
+    if (hot) {
+      nd_fill_rect(s, b, is_close ? ND_RGB(0xC4, 0x2B, 0x1C) : t->ctrl_hover);
+    }
+    if (is_close) {
+      INT32 c = b.x + bw / 2;
+      INT32 m = b.y + bh / 2;
+
+      nd_line(s, c - 5, m - 5, c + 5, m + 5,
+              hot ? ND_RGB(0xFF, 0xFF, 0xFF) : t->text);
+      nd_line(s, c + 5, m - 5, c - 5, m + 5,
+              hot ? ND_RGB(0xFF, 0xFF, 0xFF) : t->text);
+    } else if (i == 1) {
+      nd_frame(s, nd_rect(b.x + bw / 2 - 5, b.y + bh / 2 - 5, 10, 10), 1,
+               t->text);
+    } else {
+      nd_hline(s, b.x + bw / 2 - 5, b.x + bw / 2 + 6, b.y + bh / 2, t->text);
+    }
+  }
+}
+
 static void draw_window(ng_widget_t *w) {
   nd_surface_t     *s = g_ctx.surf;
   const ng_theme_t *t = &g_ctx.theme;
   nd_color_t        title_bg;
-  INT32             i;
 
-  nd_shadow(s, w->abs, NG_SHADOW_SPREAD, 90);
-  nd_round_rect(s, w->abs, 8, t->win_bg);
+  nd_shadow(s, w->abs, 14, 42);
+  nd_round_rect(s, w->abs, 10, t->win_bg);
 
-  /* Title band: follows the window's own top curve row by row, so the
-   * accent bar never spills past the rounded corners. */
-  title_bg = t->win_title;
-  for (i = 0; i < NG_TITLE_H && i < w->abs.h; i++) {
-    /* radius - sqrt(r^2 - (r-i)^2) with r = 8: the corner curve is tiny
-     * and fixed, so a table is cheaper and clearer than an isqrt call. */
-    static const INT32 corner[8] = {8, 5, 3, 2, 2, 1, 1, 1};
-    INT32             inset = (i < 8) ? corner[i] : 0;
-    nd_fill_rect(s, nd_rect(w->abs.x + inset, w->abs.y + i,
-                            w->abs.w - inset * 2, 1),
-                 title_bg);
+  title_bg = (w->state & NG_ST_DRAG) != 0u ? t->win_title : t->win_title;
+  {
+    INT32 i;
+    /* Rounded top: a radius-10 corner curve, row by row. */
+    static const INT32 corner[10] = {10, 7, 5, 4, 3, 2, 2, 1, 1, 1};
+
+    for (i = 0; i < NG_TITLE_H && i < w->abs.h; i++) {
+      INT32 inset = (i < 10) ? corner[i] : 0;
+
+      nd_fill_rect(s, nd_rect(w->abs.x + inset, w->abs.y + i,
+                              w->abs.w - inset * 2, 1),
+                   title_bg);
+    }
   }
-  nd_fill_rect(s, nd_rect(w->abs.x + 1, w->abs.y + NG_TITLE_H - 1,
-                          w->abs.w - 2, 1),
-               t->win_border);
-  nd_round_frame(s, w->abs, 8, 1, t->win_border);
+  nd_hline(s, w->abs.x + 1, w->abs.x + w->abs.w - 2,
+           w->abs.y + NG_TITLE_H - 1, t->win_border);
+  nd_round_frame(s, w->abs, 10, 1, t->win_border);
 
-  nd_text(s, w->abs.x + 14,
-          w->abs.y + (NG_TITLE_H - (INT32)nd_font_height(NG_TEXT_SCALE)) / 2,
+  nd_text(s, w->abs.x + 12,
+          w->abs.y + (NG_TITLE_H - (INT32)nd_text_height(w->u.window.title, 2)) / 2,
           w->u.window.title, t->text, NG_TEXT_SCALE);
 
   if (w->u.window.closable != 0u) {
-    nd_rect_t box = nd_rect(w->abs.x + w->abs.w - 24, w->abs.y + 8, 16, 14);
-    nd_fill_rect(s, nd_rect(box.x + 4, box.y + 4, 8, 2), t->text_dim);
-    nd_fill_rect(s, nd_rect(box.x + 4, box.y + 9, 8, 2), t->text_dim);
-    (void)t;
+    ng_draw_caption(s, w->abs, t, -1, 3);
   }
 }
+
 
 static void draw_self(ng_widget_t *w) {
   switch (w->type) {
@@ -827,7 +986,16 @@ static void draw_self(ng_widget_t *w) {
     draw_window(w);
     break;
   case NG_PANEL:
-    nd_fill_rect(g_ctx.surf, w->abs, w->u.panel.color);
+    if (w->u.panel.radius != 0u) {
+      nd_round_rect(g_ctx.surf, w->abs, (INT32)w->u.panel.radius,
+                    w->u.panel.color);
+      if (w->u.panel.frame != 0u) {
+        nd_round_frame(g_ctx.surf, w->abs, (INT32)w->u.panel.radius, 1,
+                       g_ctx.theme.win_border);
+      }
+    } else {
+      nd_fill_rect(g_ctx.surf, w->abs, w->u.panel.color);
+    }
     break;
   case NG_LABEL:
     draw_label(w);
@@ -858,11 +1026,26 @@ static void draw_self(ng_widget_t *w) {
   }
 }
 
+void ng_set_overlay(ng_widget_t *w, int on) {
+  if (w == 0) {
+    return;
+  }
+  if (on != 0) {
+    w->flags |= NG_WF_OVERLAY;
+  } else {
+    w->flags &= ~NG_WF_OVERLAY;
+  }
+  ng_damage_widget(w);
+}
+
 static void draw_widget(ng_widget_t *w) {
   ng_widget_t *c;
 
   if ((w->flags & NG_WF_VISIBLE) == 0u) {
     return;
+  }
+  if ((w->flags & NG_WF_OVERLAY) != 0u) {
+    return; /* drawn by the overlay pass, above the client windows */
   }
   if (w->type != NG_DESKTOP && !rect_hits(w->abs, g_ctx.surf->clip)) {
     return; /* outside the damage rectangle, children included */
@@ -885,8 +1068,77 @@ void ng_render(nd_rect_t clip) {
   }
   nd_surface_set_clip(g_ctx.surf, area);
   draw_widget(g_ctx.root);
+  /* The IME popup is a layer of its own: drawn last, inside the damage
+   * rectangle like everything else. */
+  nd_ime_draw(g_ctx.surf);
   nd_surface_reset_clip(g_ctx.surf);
   g_ctx.frame++;
+}
+
+/* Draw one overlay subtree: same recursion as draw_widget, but only
+ * widgets that are visible (the overlay flag is a property of the root of
+ * the subtree). */
+static void draw_widget_overlay(ng_widget_t *w) {
+  ng_widget_t *c;
+
+  if ((w->flags & NG_WF_VISIBLE) == 0u) {
+    return;
+  }
+  if (w->type != NG_DESKTOP && !rect_hits(w->abs, g_ctx.surf->clip)) {
+    return;
+  }
+  draw_self(w);
+  for (c = w->first; c != 0; c = c->next) {
+    draw_widget_overlay(c);
+  }
+}
+
+/* Is (x,y) inside a visible overlay card? The window manager asks before
+ * its own hit test, so an open start menu owns the pointer instead of the
+ * window that happens to be under it. */
+int ng_overlay_hit(INT32 x, INT32 y) {
+  UINT32 i;
+
+  if (!g_ready) {
+    return 0;
+  }
+  for (i = 0; i < g_used; i++) {
+    ng_widget_t *w = &g_pool[i];
+
+    if ((w->flags & NG_WF_OVERLAY) == 0u ||
+        (w->flags & NG_WF_VISIBLE) == 0u) {
+      continue;
+    }
+    if (nd_rect_contains(w->abs, x, y)) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Second pass: overlay widgets and the IME popup, after the windows. */
+void ng_render_overlay(nd_rect_t clip) {
+  nd_rect_t area;
+  UINT32    i;
+
+  if (!g_ready) {
+    return;
+  }
+  area = nd_rect_intersect(clip, nd_rect(0, 0, g_ctx.surf->w, g_ctx.surf->h));
+  if (nd_rect_empty(area)) {
+    return;
+  }
+  nd_surface_set_clip(g_ctx.surf, area);
+  for (i = 0; i < g_used; i++) {
+    if ((g_pool[i].flags & NG_WF_OVERLAY) != 0u &&
+        (g_pool[i].flags & NG_WF_VISIBLE) != 0u) {
+      if (g_pool[i].parent == 0 || (g_pool[i].parent->flags & NG_WF_OVERLAY) == 0u) {
+        draw_widget_overlay(&g_pool[i]);
+      }
+    }
+  }
+  nd_ime_draw(g_ctx.surf);
+  nd_surface_reset_clip(g_ctx.surf);
 }
 
 void ng_render_all(void) {
@@ -935,20 +1187,29 @@ static void checkbox_toggle(ng_widget_t *w) {
   button_fire(w);
 }
 
-static void textbox_key(ng_widget_t *w, UINT32 key) {
+/* Remove the bytes [from, to) and put the caret at `from`. */
+static void edit_delete(ng_widget_t *w, UINT32 from, UINT32 to) {
   UINT32 i;
 
+  if (to <= from || to > w->u.edit.len) {
+    return;
+  }
+  for (i = from; i + (to - from) <= w->u.edit.len; i++) {
+    w->u.edit.buf[i] = w->u.edit.buf[i + (to - from)];
+  }
+  w->u.edit.len -= (to - from);
+  w->u.edit.cursor = from;
+  ng_damage_widget(w);
+}
+
+static void textbox_key(ng_widget_t *w, UINT32 key) {
   switch (key) {
   case ND_KEY_LEFT:
-    if (w->u.edit.cursor > 0u) {
-      w->u.edit.cursor--;
-    }
+    w->u.edit.cursor = edit_prev(w, w->u.edit.cursor);
     ng_damage_widget(w);
     return;
   case ND_KEY_RIGHT:
-    if (w->u.edit.cursor < w->u.edit.len) {
-      w->u.edit.cursor++;
-    }
+    w->u.edit.cursor = edit_skip(w, w->u.edit.cursor, 1);
     ng_damage_widget(w);
     return;
   case ND_KEY_HOME:
@@ -960,23 +1221,10 @@ static void textbox_key(ng_widget_t *w, UINT32 key) {
     ng_damage_widget(w);
     return;
   case ND_KEY_BACK:
-    if (w->u.edit.cursor > 0u) {
-      for (i = w->u.edit.cursor - 1u; i + 1u < w->u.edit.cap; i++) {
-        w->u.edit.buf[i] = w->u.edit.buf[i + 1u];
-      }
-      w->u.edit.cursor--;
-      w->u.edit.len--;
-      ng_damage_widget(w);
-    }
+    edit_delete(w, edit_prev(w, w->u.edit.cursor), w->u.edit.cursor);
     return;
   case ND_KEY_DELETE:
-    if (w->u.edit.cursor < w->u.edit.len) {
-      for (i = w->u.edit.cursor; i + 1u < w->u.edit.cap; i++) {
-        w->u.edit.buf[i] = w->u.edit.buf[i + 1u];
-      }
-      w->u.edit.len--;
-      ng_damage_widget(w);
-    }
+    edit_delete(w, w->u.edit.cursor, edit_skip(w, w->u.edit.cursor, 1));
     return;
   case ND_KEY_ENTER:
     button_fire(w);
@@ -985,17 +1233,13 @@ static void textbox_key(ng_widget_t *w, UINT32 key) {
     break;
   }
 
-  if (key >= 0x20u && key <= 0x7Eu && w->u.edit.len + 1u < w->u.edit.cap) {
-    for (i = w->u.edit.len + 1u; i > w->u.edit.cursor; i--) {
-      w->u.edit.buf[i] = w->u.edit.buf[i - 1u];
-    }
-    w->u.edit.buf[w->u.edit.cursor] = (char)key;
-    w->u.edit.cursor++;
-    w->u.edit.len++;
-    w->u.edit.buf[w->u.edit.len] = '\0';
-    ng_damage_widget(w);
+  /* Printable ASCII goes straight in; anything else arrives through the
+   * IME (ng_edit_insert_cp) or is ignored. */
+  if (key >= 0x20u && key <= 0x7Eu) {
+    (void)ng_edit_insert_cp(w, key);
   }
 }
+
 
 static void list_click(ng_widget_t *w, INT32 y) {
   INT32 row = w->u.list.top + (y - (w->abs.y + 1)) / NG_ROW_H;
@@ -1178,7 +1422,11 @@ static void key_dispatch(const nd_event_t *ev) {
     }
     break;
   case NG_TEXTBOX:
-    textbox_key(w, ev->key);
+    /* Latin letters start (or continue) pinyin composition; the IME only
+     * hands the key back when it is idle and the key is not a letter. */
+    if (!nd_ime_key(w, ev->key)) {
+      textbox_key(w, ev->key);
+    }
     break;
   case NG_SLIDER:
     if (ev->key == ND_KEY_LEFT) {
@@ -1324,16 +1572,30 @@ void ng_dispatch(const nd_event_t *ev) {
       ng_damage_widget(w);
       break;
     case NG_TEXTBOX:
-      /* Caret placement by character cell. */
+      /* Caret placement by measured width, so a click between two Chinese
+       * characters lands on the boundary between them. */
       {
-        UINT32 adv = ND_FONT_ADV * NG_TEXT_SCALE;
         INT32  rel = ev->x - (w->abs.x + NG_PAD);
-        UINT32 idx = (rel > 0) ? (UINT32)rel / adv : 0u;
-        idx += w->u.edit.scroll;
-        if (idx > w->u.edit.len) {
-          idx = w->u.edit.len;
+        UINT32 off = w->u.edit.scroll;
+        INT32  acc = 0;
+
+        if (rel <= 0) {
+          off = w->u.edit.scroll;
+        } else {
+          while (off < w->u.edit.len) {
+            const char *p = w->u.edit.buf + off;
+            UINT32      cp = nd_utf8_next(&p);
+            UINT32      nxt = (UINT32)(p - w->u.edit.buf);
+            INT32       adv = (INT32)nd_char_adv(cp, NG_TEXT_SCALE);
+
+            if (acc + adv / 2 > rel) {
+              break;
+            }
+            acc += adv;
+            off = nxt;
+          }
         }
-        w->u.edit.cursor = idx;
+        w->u.edit.cursor = off;
         ng_damage_widget(w);
       }
       break;

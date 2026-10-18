@@ -4,18 +4,39 @@
 
 use crate::wm;
 
-pub const BG: u32 = 0x0010141C;
-pub const PANEL: u32 = 0x001A2230;
-pub const ROW: u32 = 0x00161E29;
-pub const ROW_SEL: u32 = 0x00243855;
-pub const LINE: u32 = 0x002C3A4E;
-pub const TEXT: u32 = 0x00C9D5E6;
-pub const DIM: u32 = 0x007C8AA0;
-pub const ACCENT: u32 = 0x004C8DFF;
-pub const GOOD: u32 = 0x0059C98A;
-pub const WARN: u32 = 0x00E0A34A;
+/* Windows 11, light: the window manager draws the frame in the same
+ * palette, so a client's content and its chrome read as one surface. */
+pub const BG: u32 = 0x00FFFFFF;
+pub const PANEL: u32 = 0x00F3F3F3;
+pub const ROW: u32 = 0x00F7F7F9;
+pub const ROW_SEL: u32 = 0x00E5F1FB;
+pub const LINE: u32 = 0x00E1E5EA;
+pub const TEXT: u32 = 0x001B1B1B;
+pub const DIM: u32 = 0x005F6368;
+pub const ACCENT: u32 = 0x000067C0;
+pub const GOOD: u32 = 0x00107C10;
+pub const WARN: u32 = 0x00B45309;
 
 pub const ROW_H: i16 = 22;
+
+/// Advance of one character, mirroring nd_char_adv(): ASCII is 6 px at the
+/// UI scale, a CJK glyph is a 16 px cell.
+pub fn char_adv(c: char) -> i16 {
+    if (c as u32) < 0x80 { 6 } else { 16 }
+}
+
+/// Painted width of `s`, matching nd_text_width(): the last cell has no
+/// inter-character gap.
+pub fn width(s: &str) -> i16 {
+    let mut w = 0;
+    let mut n = 0;
+
+    for c in s.chars() {
+        w += char_adv(c);
+        n += 1;
+    }
+    if n == 0 { 0 } else { w - 1 }
+}
 
 /// A fixed-width text line. The font is monospaced at 6 px per column, so
 /// padding with spaces is what aligns the columns - and one text run per
@@ -148,7 +169,7 @@ pub fn row(
     }
     w.text(12, y + 6, if selected { TEXT } else { color }, label);
     if !value.is_empty() {
-        let vw = (value.len() as i16) * 6; /* ND_FONT_ADV */
+        let vw = width(value);
         w.text(cw - 10 - vw, y + 6, DIM, value);
     }
     (4, y, cw - 8, ROW_H - 2)

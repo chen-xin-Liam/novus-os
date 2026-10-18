@@ -11,6 +11,7 @@
  */
 
 #include "nd_internal.h"
+#include "nd_font_cjk.h"
 
 static const UINT8 g_font[95][ND_GLYPH_H] = {
     /* 32 ' ' */ {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -117,21 +118,129 @@ const UINT8 *nd_font_rows(UINT8 ch) {
   return g_font[ch - 32u];
 }
 
+/* ---- UTF-8 and mixed metrics ------------------------------------------ */
+
+UINT32 nd_utf8_next(const char **text) {
+  const UINT8 *p = (const UINT8 *)*text;
+  UINT32       cp;
+  UINT32       extra;
+
+  if (p == 0 || p[0] == 0u) {
+    return 0;
+  }
+  if (p[0] < 0x80u) {
+    *text += 1;
+    return p[0];
+  }
+  if ((p[0] & 0xE0u) == 0xC0u) {
+    cp = (UINT32)(p[0] & 0x1Fu);
+    extra = 1u;
+  } else if ((p[0] & 0xF0u) == 0xE0u) {
+    cp = (UINT32)(p[0] & 0x0Fu);
+    extra = 2u;
+  } else if ((p[0] & 0xF8u) == 0xF0u) {
+    cp = (UINT32)(p[0] & 0x07u);
+    extra = 3u;
+  } else {
+    *text += 1;
+    return 0xFFFDu; /* stray continuation byte */
+  }
+  {
+    UINT32 i;
+
+    for (i = 1; i <= extra; i++) {
+      if ((p[i] & 0xC0u) != 0x80u) {
+        *text += 1;
+        return 0xFFFDu; /* truncated sequence */
+      }
+      cp = (cp << 6) | (UINT32)(p[i] & 0x3Fu);
+    }
+  }
+  *text += (INT32)(extra + 1u);
+  return cp;
+}
+
+UINT32 nd_char_adv(UINT32 cp, UINT32 scale) {
+  if (scale == 0u) {
+    scale = 1u;
+  }
+  return (cp < 0x80u) ? ND_FONT_ADV * scale : ND_CJK_ADV;
+}
+
 UINT32 nd_text_width(const char *text, UINT32 scale) {
-  UINT32 n = 0;
+  const char *p = text;
+  UINT32      w = 0;
+  UINT32      n = 0;
 
   if (text == 0 || scale == 0u) {
     return 0;
   }
-  while (text[n] != '\0') {
+  while (p != 0 && *p != '\0') {
+    UINT32 cp = nd_utf8_next(&p);
+
+    w += nd_char_adv(cp, scale);
     n++;
   }
-  if (n == 0u) {
+  /* The last cell carries no advance: a glyph is 5 columns wide and the
+   * 6th is the inter-character gap (CJK the same, one column of padding). */
+  return (n == 0u) ? 0u : (w - 1u);
+}
+
+UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
+  const char *p = text;
+  const char *end = text + bytes;
+  UINT32      w = 0;
+  UINT32      n = 0;
+
+  if (text == 0 || scale == 0u) {
     return 0;
   }
-  /* The last cell carries no advance: the glyph itself is 5 columns wide,
-   * the 6th is the inter-character gap. */
-  return (n * ND_FONT_ADV - 1u) * scale;
+  while (p < end && *p != '\0') {
+    UINT32 cp = nd_utf8_next(&p);
+
+    if (p > end) {
+      break; /* the range ended inside a sequence: stop before it */
+    }
+    w += nd_char_adv(cp, scale);
+    n++;
+  }
+  return (n == 0u) ? 0u : (w - 1u);
+}
+
+UINT32 nd_text_height(const char *text, UINT32 scale) {
+  const char *p = text;
+  UINT32      h = (scale != 0u) ? ND_GLYPH_H * scale : ND_GLYPH_H;
+
+  if (text == 0) {
+    return h;
+  }
+  while (p != 0 && *p != '\0') {
+    UINT32 cp = nd_utf8_next(&p);
+
+    if (cp >= 0x80u) {
+      return (h > ND_CJK_H) ? h : ND_CJK_H;
+    }
+  }
+  return h;
+}
+
+const UINT16 *nd_cjk_find(UINT32 cp) {
+  UINT32 lo = 0;
+  UINT32 hi = g_cjk_count;
+
+  while (lo < hi) {
+    UINT32 mid = (lo + hi) / 2u;
+
+    if (g_cjk_cp[mid] == cp) {
+      return &g_cjk_bits[mid * ND_CJK_H];
+    }
+    if (g_cjk_cp[mid] < cp) {
+      lo = mid + 1u;
+    } else {
+      hi = mid;
+    }
+  }
+  return 0;
 }
 
 UINT32 nd_font_height(UINT32 scale) { return (scale != 0u) ? ND_GLYPH_H * scale : 0u; }

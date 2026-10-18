@@ -49,7 +49,7 @@ impl State {
 
         while self.n < MAX_ROWS {
             let Some(page) = sinfo::files(port, self.dir, index) else {
-                self.status = "sysinfo unreachable";
+                self.status = "无法连接系统服务";
                 return;
             };
             self.total = page.h.total;
@@ -79,7 +79,7 @@ impl State {
 
 fn draw(w: &wm::Win, st: &State, accent: u32) {
     w.clear();
-    ui::shell(w, CW, CH, "built-in tree", accent);
+    ui::shell(w, CW, CH, "内置目录", accent);
 
     /* Directory tabs. */
     let names = ["/apps", "/dev", "/proc"];
@@ -95,49 +95,42 @@ fn draw(w: &wm::Win, st: &State, accent: u32) {
     }
 
     if st.n == 0 {
-        w.text(12, 40, ui::DIM, "(empty)");
+        w.text(12, 40, ui::DIM, "（空）");
     }
     for i in 0..st.n {
         let r = &st.rows[i];
-        let mut line = ui::Buf::new();
         let color = match r.kind {
             sinfo::KIND_APP => ui::ACCENT,
             sinfo::KIND_DEV => ui::GOOD,
             _ => ui::WARN,
         };
-
-        line.s(r.name()).col(30);
-        match r.kind {
-            sinfo::KIND_APP => {
-                let mut sb = [0u8; 16];
-                line.s(ui::fmt_size(r.size, &mut sb));
-            }
-            sinfo::KIND_DEV => {
-                line.s("device");
-            }
-            _ => {
-                line.s("virtual");
-            }
-        }
+        let mut sb = [0u8; 16];
+        let value = match r.kind {
+            sinfo::KIND_APP => ui::fmt_size(r.size, &mut sb),
+            sinfo::KIND_DEV => "设备",
+            _ => "虚拟",
+        };
         let y = 34 + i as i16 * ui::ROW_H;
+
         if i == st.sel {
             w.fill(4, y, CW - 8, ui::ROW_H - 2, ui::ROW_SEL);
         } else {
             w.fill(4, y, CW - 8, ui::ROW_H - 2, ui::ROW);
         }
-        w.text(12, y + 6, if i == st.sel { ui::TEXT } else { color }, line.str());
+        w.text(12, y + 6, if i == st.sel { ui::TEXT } else { color }, r.name());
+        w.text(CW - 12 - ui::width(value), y + 6, ui::DIM, value);
     }
 
     w.fill(0, CH - 38, CW, 1, ui::LINE);
     let can_run = st.n > 0 && st.rows[st.sel].kind == sinfo::KIND_APP;
-    ui::button(w, 10, CH - 30, 66, 22, "Run",
+    ui::button(w, 10, CH - 30, 66, 22, "运行",
                if can_run { accent } else { ui::LINE });
     w.text(88, CH - 24, ui::DIM, st.status);
 
     let mut n = [0u8; 12];
     let shown = ui::fmt_u32(st.total as u32, &mut n);
-    w.text(CW - 80, CH - 24, ui::DIM, shown);
-    w.text(CW - 62, CH - 24, ui::DIM, "entries");
+    w.text(CW - 12 - 28, CH - 24, ui::DIM, shown);
+    w.text(CW - 12 - ui::width("项"), CH - 24, ui::DIM, "项");
 }
 
 #[no_mangle]
@@ -149,7 +142,7 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 40, 396, CW as i32 + 2, CH as i32 + 25, "Files")
+    let Some(win) = wm::Win::create(wm_port, 40, 396, CW as i32 + 2, CH as i32 + 25, "文件管理器")
     else {
         sys::exit(3);
     };
@@ -164,7 +157,7 @@ pub extern "C" fn _start() -> ! {
         n: 0,
         sel: 0,
         total: 0,
-        status: "click a row, then Run",
+        status: "选中一行后点运行",
     };
     st.reload(sys_port);
     draw(&win, &st, accent);
@@ -185,9 +178,9 @@ pub extern "C" fn _start() -> ! {
                         {
                             st.dir = i as u8;
                             st.sel = 0;
-                            st.status = "listing";
+                            st.status = "读取中";
                             st.reload(sys_port);
-                            st.status = "click a row, then Run";
+                            st.status = "选中一行后点运行";
                             draw(&win, &st, accent);
                         }
                     }
@@ -205,9 +198,9 @@ pub extern "C" fn _start() -> ! {
                              * /apps listing is built in. */
                             let which = st.sel as u8;
                             st.status = match sinfo::spawn(sys_port, which) {
-                                Some(0) => "started",
-                                Some(-100) => "already running",
-                                _ => "cannot start",
+                                Some(0) => "已启动",
+                                Some(-100) => "已在运行",
+                                _ => "无法启动",
                             };
                             draw(&win, &st, accent);
                         }

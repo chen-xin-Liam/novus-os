@@ -33,7 +33,7 @@
 #define NWM_MAX_TEXTS   40
 #define NWM_TEXT_MAX    96
 #define NWM_TITLE_MAX   24
-#define NWM_TITLE_H     24
+#define NWM_TITLE_H     32
 
 /* ---- message types ---------------------------------------------------- */
 

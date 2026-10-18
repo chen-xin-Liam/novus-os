@@ -17,6 +17,8 @@
 #include "kernel.h"
 #include "nvgui.h"
 #include "nd_input.h"
+#include "nd_ime.h"
+#include "rtc.h"
 #include "apps.h"
 
 #if CONFIG_NOVUS_GUI
@@ -317,21 +319,20 @@ static void set_status(const char *s) {
 static void on_apply(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  set_status("Apply pressed: settings applied");
+  set_status("已应用设置");
   kputs("[ND] GUI: Apply pressed\n");
 }
 
 static void on_cancel(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  set_status("Cancel pressed");
+  set_status("已取消");
 }
 
 static void on_nx(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
-  set_status(w->u.check.checked != 0u
-                 ? "NX protection enabled"
-                 : "NX protection disabled");
+  set_status(w->u.check.checked != 0u ? "已启用 NX 保护"
+                                     : "已关闭 NX 保护");
 }
 
 static void on_slider(ng_ctx_t *ctx, ng_widget_t *w, INT32 value) {
@@ -374,7 +375,7 @@ static void on_tree(ng_ctx_t *ctx, ng_widget_t *w, INT32 row) {
 static void on_close(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   ng_show(w, 0);
-  set_status("Window closed");
+  set_status("窗口已关闭");
   kputs("[ND] GUI: window closed\n");
 }
 
@@ -384,61 +385,150 @@ static ng_widget_t *add_label(ng_widget_t *p, INT32 x, INT32 y, const char *text
                   NG_TEXT_SCALE);
 }
 
-/* M8 launcher: the buttons on the shell's taskbar start the built-in
- * applications. One callback each so the index is not smuggled through
- * widget memory, and the kernel's app table stays the single source of
- * names and order. */
+/* ---- Windows 11 style shell ------------------------------------------- */
+
+static ng_widget_t *g_win_demo;
+static ng_widget_t *g_win_widgets;
+static ng_widget_t *g_start_menu;
+static ng_widget_t *g_clock_label;
+static char         g_clock[8] = "00:00";
+
+/* The RTC is optional: without one the taskbar just keeps the placeholder. */
+static void clock_refresh(void) {
+  UINT8 h = 0;
+  UINT8 m = 0;
+  char  buf[8];
+  UINT32 i;
+
+  if (!rtc_now(&h, &m)) {
+    return;
+  }
+  buf[0] = (char)('0' + (h / 10u) % 10u);
+  buf[1] = (char)('0' + h % 10u);
+  buf[2] = ':';
+  buf[3] = (char)('0' + (m / 10u) % 10u);
+  buf[4] = (char)('0' + m % 10u);
+  buf[5] = '\0';
+  for (i = 0; i < sizeof(g_clock); i++) {
+    if (g_clock[i] == buf[i]) {
+      if (buf[i] == '\0') {
+        return; /* same minute: nothing to repaint */
+      }
+      continue;
+    }
+    break;
+  }
+  for (i = 0; i < sizeof(g_clock); i++) {
+    g_clock[i] = buf[i];
+    if (buf[i] == '\0') {
+      break;
+    }
+  }
+  if (g_clock_label != 0) {
+    g_clock_label->u.label.text = g_clock;
+    ng_damage_widget(g_clock_label);
+  }
+}
+
+/* Called from the window manager's tick: the shell owns the clock, but the
+ * WM owns the timer path once it is running. */
+void nd_demo_idle(void) { clock_refresh(); }
+
+static void menu_close(void) {
+  if (g_start_menu != 0) {
+    ng_show(g_start_menu, 0);
+  }
+}
+
+static void on_start(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  if (g_start_menu != 0) {
+    ng_show(g_start_menu, (g_start_menu->flags & NG_WF_VISIBLE) == 0u);
+  }
+}
+
+static void on_open_demo(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  menu_close();
+  if (g_win_demo != 0) {
+    ng_show(g_win_demo, 1);
+    ng_raise(g_win_demo);
+  }
+}
+
+static void on_open_widgets(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  menu_close();
+  if (g_win_widgets != 0) {
+    ng_show(g_win_widgets, 1);
+    ng_raise(g_win_widgets);
+  }
+}
+
 static void on_launch_files(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
+  menu_close();
   (void)apps_launch(0);
 }
 
 static void on_launch_tasks(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
+  menu_close();
   (void)apps_launch(1);
 }
 
 static void on_launch_setup(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
+  menu_close();
   (void)apps_launch(2);
+}
+
+static void on_about(ng_ctx_t *ctx, ng_widget_t *w) {
+  set_status("Novus OS：内核 C + 用户态 Rust，Windows 11 风格桌面");
+  on_open_demo(ctx, w);
 }
 
 static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_widget_t *win;
-  static const char *items[5] = {"Create a process", "Map a page",
-                                 "Check NX protection", "Switch CR3",
-                                 "Exit with code 0"};
+  static const char *items[5] = {"创建进程", "映射页面", "检查 NX 保护",
+                                 "切换 CR3", "退出码 0"};
   static ng_tnode_t nodes[7];
+  INT32 tw = 560;
+  INT32 th = 48;
+  INT32 tx = (screen->w - tw) / 2;
+  INT32 ty = screen->h - th - 12;
 
-  /* Window 1: renderer + settings. */
-  win = ng_create(ctx->root, NG_WINDOW, 40, 44, 520, 336);
-  ng_window(win, "NovusDisplay", 0);
-  ng_label(ng_create(win, NG_LABEL, 16, 10, 480, 16),
-           "2D renderer + GUI controls", ctx->theme.accent, NG_TEXT_SCALE);
-  add_label(win, 16, 38, "Built-in 5x7 font, clipping, alpha blend",
-            ctx->theme.text_dim);
-  ng_progress(ng_create(win, NG_PROGRESS, 16, 70, 488, 26), 720, 0);
-  ng_button(ng_create(win, NG_BUTTON, 16, 110, 110, 34), "Apply", on_apply);
-  ng_button(ng_create(win, NG_BUTTON, 138, 110, 110, 34), "Cancel",
-            on_cancel);
-  ng_checkbox(ng_create(win, NG_CHECKBOX, 16, 158, 440, 26),
-              "Protect data pages with NX", 1, on_nx);
-  add_label(win, 16, 196, "Slider", ctx->theme.text_dim);
-  ng_slider(ng_create(win, NG_SLIDER, 16, 216, 300, 30), 0, 100, 65,
+  /* Window 1: renderer + settings. Hidden until the start menu opens it. */
+  win = ng_create(ctx->root, NG_WINDOW, 40, 44, 520, 340);
+  g_win_demo = win;
+  ng_window(win, "显示与控件", 0);
+  ng_label(ng_create(win, NG_LABEL, 16, 10, 480, 20), "2D 渲染与控件演示",
+           ctx->theme.accent, NG_TEXT_SCALE);
+  add_label(win, 16, 40, "内置点阵字体、裁剪与透明混合", ctx->theme.text_dim);
+  ng_progress(ng_create(win, NG_PROGRESS, 16, 72, 488, 26), 720, 0);
+  ng_button(ng_create(win, NG_BUTTON, 16, 112, 110, 34), "应用", on_apply);
+  ng_button(ng_create(win, NG_BUTTON, 138, 112, 110, 34), "取消", on_cancel);
+  ng_checkbox(ng_create(win, NG_CHECKBOX, 16, 160, 440, 26),
+              "使用 NX 保护数据页", 1, on_nx);
+  add_label(win, 16, 198, "滑块", ctx->theme.text_dim);
+  ng_slider(ng_create(win, NG_SLIDER, 16, 218, 300, 30), 0, 100, 65,
             on_slider);
-  g_slider_label = add_label(win, 330, 222, "65", ctx->theme.text);
-  ng_label(ng_create(win, NG_LABEL, 16, 262, 480, 16),
-           "Drag the title bar, click a control, Tab to focus",
-           ctx->theme.text_dim, 1);
+  g_slider_label = add_label(win, 330, 224, "65", ctx->theme.text);
+  ng_label(ng_create(win, NG_LABEL, 16, 264, 480, 16),
+           "拖动标题栏、点击控件、Tab 切换焦点", ctx->theme.text_dim, 1);
 
   /* Window 2: the text/list/tree half of the widget set. */
   win = ng_create(ctx->root, NG_WINDOW, 600, 64, 380, 440);
-  ng_window(win, "Widgets", 1);
+  g_win_widgets = win;
+  ng_window(win, "控件", 1);
   win->on_action = on_close;
-  add_label(win, 16, 8, "Text box", ctx->theme.text_dim);
+  add_label(win, 16, 8, "文本框", ctx->theme.text_dim);
   g_input[0] = 'h';
   g_input[1] = 'e';
   g_input[2] = 'l';
@@ -446,10 +536,10 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   g_input[4] = 'o';
   g_input[5] = '\0';
   ng_textbox(ng_create(win, NG_TEXTBOX, 16, 32, 348, 32), g_input,
-             sizeof(g_input), "type here");
-  add_label(win, 16, 76, "List", ctx->theme.text_dim);
+             sizeof(g_input), "在此输入");
+  add_label(win, 16, 76, "列表", ctx->theme.text_dim);
   ng_list(ng_create(win, NG_LIST, 16, 100, 348, 132), items, 5, on_list);
-  add_label(win, 16, 244, "Tree", ctx->theme.text_dim);
+  add_label(win, 16, 244, "树", ctx->theme.text_dim);
 
   nodes[0].text = "novus-os";
   nodes[0].depth = 0;
@@ -481,26 +571,74 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   nodes[6].expanded = 0;
   ng_tree(ng_create(win, NG_TREE, 16, 268, 348, 156), nodes, 7, on_tree);
 
-  /* M8: taskbar across the top of the desktop, with the launcher. The
-   * windows are positioned below it (y >= 44), so it never covers one. */
-  ng_panel(ng_create(ctx->root, NG_PANEL, 0, 0, screen->w, 34),
-           ND_RGB(0x16, 0x1C, 0x26));
-  ng_label(ng_create(ctx->root, NG_LABEL, 12, 9, 80, 16), "novus",
-           ctx->theme.accent, NG_TEXT_SCALE);
-  ng_button(ng_create(ctx->root, NG_BUTTON, 90, 5, 92, 24), "Files",
+  /* Desktop: watermark and the icon grid. */
+  ng_label(ng_create(ctx->root, NG_LABEL, 24, 16, 240, 20), "Novus OS",
+           ctx->theme.text_dim, 1);
+  ng_button(ng_create(ctx->root, NG_BUTTON, 24, 52, 108, 76), "文件管理器",
             on_launch_files);
-  ng_button(ng_create(ctx->root, NG_BUTTON, 190, 5, 92, 24), "Tasks",
+  ng_button(ng_create(ctx->root, NG_BUTTON, 24, 140, 108, 76), "任务管理器",
             on_launch_tasks);
-  ng_button(ng_create(ctx->root, NG_BUTTON, 290, 5, 92, 24), "Setup",
+  ng_button(ng_create(ctx->root, NG_BUTTON, 144, 52, 108, 76), "设置",
             on_launch_setup);
+  ng_button(ng_create(ctx->root, NG_BUTTON, 144, 140, 108, 76), "控件演示",
+            on_open_demo);
 
-  /* Status line, on the desktop itself. */
-  set_status("Ready - M8 NovusDisplay");
+  /* Start menu: a floating card above the taskbar, hidden until asked. */
+  g_start_menu = ng_panel(ng_create(ctx->root, NG_PANEL, tx + 24,
+                                    ty - 8 - 402, 360, 402),
+                          ND_RGB(0xFB, 0xFB, 0xFB));
+  ng_panel_frame(g_start_menu, 1);
+  ng_set_overlay(g_start_menu, 1);
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 14, 200, 20), "已固定",
+           ctx->theme.text, NG_TEXT_SCALE);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 44, 100, 72), "文件管理器",
+            on_launch_files);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 132, 44, 100, 72),
+            "任务管理器", on_launch_tasks);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 244, 44, 100, 72), "设置",
+            on_launch_setup);
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 132, 200, 20), "推荐",
+           ctx->theme.text, NG_TEXT_SCALE);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 162, 320, 38), "控件演示",
+            on_open_demo);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 206, 320, 38), "控件与列表",
+            on_open_widgets);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 250, 320, 38), "关于本系统",
+            on_about);
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 368, 320, 20), "Novus 用户",
+           ctx->theme.text_dim, 1);
+
+  /* Taskbar: centred, floating, launcher on the left, clock on the right. */
+  {
+    ng_widget_t *bar = ng_panel(ng_create(ctx->root, NG_PANEL, tx, ty, tw, th),
+                                ND_RGB(0xF9, 0xF9, 0xF9));
+
+    ng_panel_frame(bar, 1);
+    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 8, ty + 6, 48, 36), "开始",
+              on_start);
+    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 64, ty + 6, 104, 36),
+              "文件", on_launch_files);
+    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 176, ty + 6, 104, 36),
+              "任务", on_launch_tasks);
+    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 288, ty + 6, 104, 36),
+              "设置", on_launch_setup);
+    g_clock_label = ng_label(
+        ng_create(ctx->root, NG_LABEL, tx + tw - 116, ty + 14, 108, 20), g_clock,
+        ctx->theme.text, 2);
+    g_clock_label->u.label.align = 2; /* right aligned */
+  }
+
+  /* Status line, bottom left, small and quiet. */
+  set_status("就绪");
   g_status_label = ng_label(
-      ng_create(ctx->root, NG_LABEL, 40, screen->h - 28, 900, 16), g_status,
+      ng_create(ctx->root, NG_LABEL, 120, 16, 760, 20), g_status,
       ctx->theme.text_dim, 1);
 
   ng_layout();
+  clock_refresh();
+  ng_show(g_win_demo, 0);
+  ng_show(g_win_widgets, 0);
+  ng_show(g_start_menu, 0);
 }
 
 void nd_demo_init(void) {
@@ -517,6 +655,7 @@ void nd_demo_init(void) {
     kputs("[ND] demo: GUI init failed\n");
     return;
   }
+  nd_ime_init();
   build_desktop(screen, ctx);
   ng_render_all();
   nd_cursor_set(screen->w / 2, screen->h / 3);
@@ -528,6 +667,14 @@ void nd_demo_init(void) {
 int nd_demo_ready(void) { return g_demo_ready; }
 
 void nd_demo_dispatch(const nd_event_t *ev) {
+  /* A press anywhere outside the start menu closes it, the way it does on
+   * Windows - including a press on a window the menu was covering. */
+  if (g_start_menu != 0 &&
+      (g_start_menu->flags & NG_WF_VISIBLE) != 0u &&
+      ev->type == ND_EV_MOUSE_DOWN &&
+      !nd_rect_contains(g_start_menu->abs, ev->x, ev->y)) {
+    ng_show(g_start_menu, 0);
+  }
   if (g_demo_ready) {
     ng_dispatch(ev);
   }

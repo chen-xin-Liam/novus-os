@@ -18,6 +18,7 @@
 #include "heap.h"
 #include "nd.h"
 #include "nd_internal.h"
+#include "nd_font_cjk.h"
 
 #define ND_ALPHA_CHANNEL 0xFF000000u
 
@@ -480,10 +481,72 @@ void nd_blit_alpha(nd_surface_t *dst, INT32 x, INT32 y,
 
 /* ---- text ------------------------------------------------------------- */
 
+/* Draw one ASCII glyph from the 5x7 table at (x,y), scaled. */
+static void draw_ascii(nd_surface_t *s, INT32 x, INT32 y, UINT8 ch,
+                       nd_color_t c, UINT32 scale) {
+  const UINT8 *rows = nd_font_rows(ch);
+  UINT32       gy;
+
+  for (gy = 0; gy < ND_GLYPH_H; gy++) {
+    UINT8  bits = rows[gy];
+    UINT32 gx = 0;
+
+    /* One fill per run of set bits, not one per pixel: a glyph row is
+     * usually a single run, so a line of text costs tens of fills. */
+    while (gx < ND_GLYPH_W) {
+      UINT32 start;
+
+      while (gx < ND_GLYPH_W && (bits & (1u << (4u - gx))) == 0u) {
+        gx++;
+      }
+      start = gx;
+      while (gx < ND_GLYPH_W && (bits & (1u << (4u - gx))) != 0u) {
+        gx++;
+      }
+      if (gx > start) {
+        nd_fill_rect(s, nd_rect(x + (INT32)start * (INT32)scale,
+                                y + (INT32)gy * (INT32)scale,
+                                (INT32)(gx - start) * (INT32)scale,
+                                (INT32)scale),
+                     c);
+      }
+    }
+  }
+}
+
+/* Draw one 16x16 CJK glyph, MSB leftmost, one fill per run. */
+static void draw_cjk_bits(nd_surface_t *s, INT32 x, INT32 y,
+                          const UINT16 *rows, nd_color_t c) {
+  UINT32 gy;
+
+  for (gy = 0; gy < ND_CJK_H; gy++) {
+    UINT16 bits = rows[gy];
+    UINT32 gx = 0;
+
+    while (gx < ND_CJK_W) {
+      UINT32 start;
+
+      while (gx < ND_CJK_W && (bits & (1u << (15u - gx))) == 0u) {
+        gx++;
+      }
+      start = gx;
+      while (gx < ND_CJK_W && (bits & (1u << (15u - gx))) != 0u) {
+        gx++;
+      }
+      if (gx > start) {
+        nd_fill_rect(s, nd_rect(x + (INT32)start, y + (INT32)gy,
+                                (INT32)(gx - start), 1),
+                     c);
+      }
+    }
+  }
+}
+
 void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
-                   UINT32 max_chars, nd_color_t c, UINT32 scale) {
-  UINT32 consumed = 0;
-  INT32  cx = x;
+                   UINT32 max_px, nd_color_t c, UINT32 scale) {
+  const char *p;
+  INT32       cx = x;
+  UINT32      cell;
 
   if (text == 0 || s->px == 0) {
     return;
@@ -491,41 +554,35 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
   if (scale == 0u) {
     scale = 1u;
   }
-  while (text[consumed] != '\0') {
-    const UINT8 *rows;
-    UINT32       gy;
+  /* One cell height for the whole line, so ASCII glyphs and CJK glyphs
+   * share a bottom edge even though their ink boxes differ. */
+  cell = nd_text_height(text, scale);
 
-    if (max_chars != 0u && consumed >= max_chars) {
-      break;
+  p = text;
+  while (*p != '\0') {
+    UINT32 cp = nd_utf8_next(&p);
+    UINT32 adv = nd_char_adv(cp, scale);
+
+    if (max_px != 0u && (UINT32)(cx - x) + adv > max_px + 1u) {
+      break; /* clip at a character boundary, never mid-glyph */
     }
-    rows = nd_font_rows((UINT8)text[consumed]);
-    for (gy = 0; gy < ND_GLYPH_H; gy++) {
-      UINT8 bits = rows[gy];
-      UINT32 gx = 0;
+    if (cp < 0x80u) {
+      draw_ascii(s, cx, y + (INT32)(cell - ND_GLYPH_H * scale), (UINT8)cp, c,
+                 scale);
+    } else {
+      const UINT16 *rows = nd_cjk_find(cp);
 
-      /* One fill per run of set bits, not one per pixel: a glyph row is
-       * usually a single run, so a line of text costs tens of fills. */
-      while (gx < ND_GLYPH_W) {
-        UINT32 start;
-
-        while (gx < ND_GLYPH_W && (bits & (1u << (4u - gx))) == 0u) {
-          gx++;
-        }
-        start = gx;
-        while (gx < ND_GLYPH_W && (bits & (1u << (4u - gx))) != 0u) {
-          gx++;
-        }
-        if (gx > start) {
-          nd_fill_rect(s, nd_rect(cx + (INT32)start * (INT32)scale,
-                                  y + (INT32)gy * (INT32)scale,
-                                  (INT32)(gx - start) * (INT32)scale,
-                                  (INT32)scale),
-                       c);
-        }
+      if (rows == 0) {
+        /* Missing glyph: a hollow box keeps the layout honest and makes
+         * the gap in the glyph set obvious instead of invisible. */
+        nd_frame(s, nd_rect(cx + 1, y + (INT32)(cell - ND_CJK_H) + 1,
+                            ND_CJK_W - 2, ND_CJK_H - 2),
+                 1, c);
+      } else {
+        draw_cjk_bits(s, cx, y + (INT32)(cell - ND_CJK_H), rows, c);
       }
     }
-    cx += (INT32)ND_FONT_ADV * (INT32)scale;
-    consumed++;
+    cx += (INT32)adv;
   }
 }
 

@@ -34,11 +34,11 @@ impl Row {
 
 fn state_name(s: u8) -> &'static str {
     match s {
-        1 => "ready",
-        2 => "run",
-        3 => "exit",
-        4 => "wait",
-        _ => "free",
+        1 => "就绪",
+        2 => "运行",
+        3 => "退出",
+        4 => "等待",
+        _ => "空闲",
     }
 }
 
@@ -53,10 +53,10 @@ fn state_color(s: u8) -> u32 {
 
 fn draw(w: &wm::Win, rows: &[Row; MAX_ROWS], n: usize, total: u16, accent: u32) {
     w.clear();
-    ui::shell(w, CW, CH, "scheduler", accent);
+    ui::shell(w, CW, CH, "调度器", accent);
 
     if n == 0 {
-        w.text(12, 40, ui::DIM, "(no tasks)");
+        w.text(12, 40, ui::DIM, "（无任务）");
     }
     for i in 0..n {
         let r = &rows[i];
@@ -79,9 +79,9 @@ fn draw(w: &wm::Win, rows: &[Row; MAX_ROWS], n: usize, total: u16, accent: u32) 
     w.fill(10, CH - 44, (CW - 20) * filled / 100, 10, accent);
     let mut line = ui::Buf::new();
 
-    line.num(n as u32).s(" of ").num(total as u32).s(" slots in use");
+    line.num(n as u32).s(" / ").num(total as u32).s(" 个任务槽在用");
     w.text(10, CH - 28, ui::DIM, line.str());
-    ui::button(w, CW - 84, CH - 30, 74, 22, "Refresh", accent);
+    ui::button(w, CW - 84, CH - 30, 74, 22, "刷新", accent);
 }
 
 fn load(port: u64, out: &mut [Row; MAX_ROWS]) -> (usize, u16) {
@@ -125,7 +125,7 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 470, 430, CW as i32 + 2, CH as i32 + 25, "Tasks")
+    let Some(win) = wm::Win::create(wm_port, 470, 402, CW as i32 + 2, CH as i32 + 25, "任务管理器")
     else {
         sys::exit(3);
     };
