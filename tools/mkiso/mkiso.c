@@ -555,9 +555,18 @@ int main(int argc, char **argv) {
     fclose(out);
   }
 
+  /* Report the parts that decide whether the result boots, not just its
+   * size: where the catalog is, what the boot entry names, and where the
+   * isohybrid table says the ESP lives once the image is on a stick. */
   printf("mkiso: %s  %llu sectors, ESP at LBA %u (%llu bytes)\n", argv[1],
          (unsigned long long)total_sectors, FILE_LBA,
          (unsigned long long)esp_bytes);
+  printf("mkiso:   boot catalog LBA %u, boot entry: no emulation, "
+         "LBA %u, %u x 512B\n",
+         catalog_lba, FILE_LBA, units);
+  printf("mkiso:   isohybrid MBR: partition 1 type 0xEF at LBA %u, %u "
+         "sectors (USB stick boot)\n",
+         FILE_LBA * (ISO_SECTOR / 512u), units);
   free(image);
   return 0;
 }

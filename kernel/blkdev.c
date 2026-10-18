@@ -496,18 +496,49 @@ static int uefi_write(void *ctx, UINT64 sector, UINTN count,
   return uefi_xfer((uefi_ctx_t *)ctx, sector, count, (void *)buf, 1);
 }
 
-int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st) {
+static int uefi_boot_dev = -1;
+
+int blkdev_uefi_boot_device(void) {
+  return uefi_boot_dev;
+}
+
+/* The handle Novus was loaded from, so the probe can tell which device
+ * is the boot medium. A firmware is free to answer with the volume the
+ * loader came from rather than the whole disk, and either is fine: the
+ * answer is only used to label a device in the log and to keep the
+ * installer from writing over the medium it is running from. */
+static EFI_HANDLE uefi_image_device(EFI_SYSTEM_TABLE *st, EFI_HANDLE image) {
+  EFI_GUID                 lip_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
+  EFI_LOADED_IMAGE_PROTOCOL *li = NULL;
+
+  if (st == NULL || st->BootServices == NULL || image == NULL ||
+      st->BootServices->OpenProtocol == NULL) {
+    return NULL;
+  }
+  if (EFI_ERROR(st->BootServices->OpenProtocol(
+          image, &lip_guid, (VOID **)&li, image, NULL,
+          EFI_OPEN_PROTOCOL_GET_PROTOCOL)) ||
+      li == NULL) {
+    return NULL;
+  }
+  return li->DeviceHandle;
+}
+
+int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st, EFI_HANDLE image) {
   EFI_GUID        guid = EFI_BLOCK_IO_PROTOCOL_GUID;
   EFI_HANDLE     *handles = NULL;
+  EFI_HANDLE      boot_handle;
   EFI_STATUS      status;
   UINTN           count = 0;
   UINTN           i;
   UINTN           registered = 0;
 
+  uefi_boot_dev = -1;
   if (st == NULL || st->BootServices == NULL ||
       st->BootServices->LocateHandleBuffer == NULL) {
     return 0;
   }
+  boot_handle = uefi_image_device(st, image);
 
   /* Force the firmware to enumerate and connect every driver it can find
    * before we ask for handles. Without this, OVMF started from a CD-ROM
@@ -581,15 +612,8 @@ int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st) {
     d->read = uefi_read;
     d->write = uefi_write;
 
-    /* Say so when a device is not 512-byte: it used to be skipped
-     * outright, and "my NVMe is 4Kn" is the kind of fact that decides
-     * whether the disk appears at all. */
-    if (d->block_size != BLKDEV_SECTOR_SIZE) {
-      kputs("[BLK] ");
-      kputs(d->name);
-      kputs(": ");
-      kputs_hex((UINT64)d->block_size);
-      kputs("-byte blocks\n");
+    if (boot_handle != NULL && handles[i] == boot_handle) {
+      uefi_boot_dev = (int)registered;
     }
 
     if (blkdev_register(d) < 0) {

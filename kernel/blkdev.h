@@ -193,7 +193,18 @@ blkdev_t *blkdev_memimg_init(const char *name, UINT64 phys_base,
  * and the installer could never offer it as a target.
  *
  * Returns the number of devices registered (0 on failure), which is
- * also 0 when boot services are gone. */
-int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st);
+ * also 0 when boot services are gone.
+ *
+ * `image` is this loader's own image handle. It is optional but worth
+ * passing: it is how the probe works out which of the devices Novus
+ * actually booted from, which the boot stage reports and the installer
+ * uses to avoid offering the medium it is running from as a target. */
+int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st, EFI_HANDLE image);
+
+/* Index of the device Novus was started from, or -1 when it could not be
+ * determined (no image handle was passed, or the firmware did not give
+ * the boot device a Block I/O protocol of its own). Block devices only,
+ * so it is a blkdev_get_at() index, not a device name. */
+int blkdev_uefi_boot_device(void);
 
 #endif /* NOVUS_BLKDEV_H */

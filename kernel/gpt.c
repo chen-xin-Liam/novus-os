@@ -109,18 +109,36 @@ int gpt_read(blkdev_t *dev, gpt_table_t *out) {
   memset(out, 0, sizeof(*out));
   out->sector_count = dev->sector_count;
 
+  /* Why a disk has no usable table is worth one line: the caller is
+   * otherwise left with "no partitions found", which says nothing about
+   * whether the disk is blank, corrupt, or read at the wrong offset.
+   * gpt_read() is called on every device at boot, so these are
+   * diagnostic - a blank install target legitimately reports the first
+   * one and is not an error. */
+#define GPT_SAY(why)                                                          \
+  do {                                                                        \
+    kputs("[GPT ] ");                                                         \
+    kputs(dev->name);                                                         \
+    kputs(": ");                                                              \
+    kputs(why);                                                               \
+    kputs("\n");                                                              \
+  } while (0)
+
   /* The header lives at LBA 1, which is one *disk block* past the MBR -
    * sector 8 rather than sector 1 when the block is 4096 bytes. */
   if (blkdev_read(dev, blkdev_lba_to_sector(dev, GPT_HEADER_LBA),
                   (UINTN)spb, hdr) != 0) {
+    GPT_SAY("cannot read the header block");
     return -1;
   }
   if (memcmp(hdr, GPT_SIGNATURE, GPT_SIGNATURE_LEN) != 0) {
-    return -1; /* not a GPT disk (or a protective MBR only) */
+    GPT_SAY("no GPT signature (blank or not partitioned)");
+    return -1;
   }
   header_size = le32(hdr + 12);
   if (header_size < GPT_HEADER_MIN_SIZE ||
       header_size > (UINT32)BLKDEV_BLOCK_MAX) {
+    GPT_SAY("header size out of range");
     return -1;
   }
 
@@ -129,7 +147,7 @@ int gpt_read(blkdev_t *dev, gpt_table_t *out) {
   memset(hdr + 16, 0, 4);
   crc = novus_rs_crc32(0, hdr, header_size);
   if (crc != stored_crc) {
-    kputs("[GPT ] header CRC mismatch\n");
+    GPT_SAY("header CRC mismatch");
     return -1;
   }
 
@@ -139,6 +157,7 @@ int gpt_read(blkdev_t *dev, gpt_table_t *out) {
   blocks = dev->sector_count / (UINT64)spb; /* the device in its own blocks */
   if (entry_size != GPT_ENTRY_SIZE || entry_count == 0 ||
       entry_lba == 0 || entry_lba >= blocks) {
+    GPT_SAY("entry array does not fit the device");
     return -1;
   }
 

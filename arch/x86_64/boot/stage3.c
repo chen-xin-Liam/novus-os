@@ -143,6 +143,14 @@ static EFI_STATUS open_by_guid(EFI_HANDLE handle, EFI_GUID *guid,
  * loaded-image DeviceHandle rather than the first SimpleFileSystem
  * instance is what makes the choice correct on a machine with several
  * FAT volumes - an internal disk and a USB stick, say. */
+/* Which of the two ways of reaching the ESP was used. It is reported
+ * because the difference is not academic: a firmware that offers no
+ * SimpleFileSystem for the boot image is not broken, it just means every
+ * file the loader needs has to come through the built-in FAT reader, and
+ * on a machine that then cannot read something, this line says which
+ * half of the pair is missing. */
+static const char *g_esp_via = "none";
+
 static int esp_open(void) {
   EFI_GUID lip_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
   EFI_GUID sfs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
@@ -156,6 +164,7 @@ static int esp_open(void) {
         sfs != NULL) {
       if (sfs->OpenVolume(sfs, &g_esp_root) == EFI_SUCCESS &&
           g_esp_root != NULL) {
+        g_esp_via = "firmware FS on the boot device";
         return 0;
       }
     }
@@ -166,9 +175,11 @@ static int esp_open(void) {
   if (g_bs->LocateProtocol(&sfs_guid, NULL, (VOID **)&sfs) == EFI_SUCCESS &&
       sfs != NULL && sfs->OpenVolume(sfs, &g_esp_root) == EFI_SUCCESS &&
       g_esp_root != NULL) {
+    g_esp_via = "firmware FS, first volume offered";
     return 0;
   }
   g_esp_root = NULL;
+  g_esp_via = "none";
   return -1;
 }
 
@@ -181,6 +192,10 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
  * firmware's SimpleFileSystem when it is available; otherwise falls
  * back to the built-in FAT32 reader, which is needed on firmwares that
  * only expose Block I/O for the boot device. */
+/* Forward: the console helpers live further down, below the FAT reader
+ * this file already declares ahead of its own definition. */
+static void esp_report_route(const char *via, blkdev_t *dev);
+
 static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   EFI_GUID           info_guid = EFI_FILE_INFO_ID;
   UINT8              info_buf[512];
@@ -221,6 +236,7 @@ static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   f->Close(f);
   *out_buf = buf;
   *out_len = size;
+  esp_report_route(g_esp_via, NULL);
   return 0;
 }
 
@@ -589,6 +605,7 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
   if (fat32_init(&ctx) != 0) {
     return -1;
   }
+  esp_report_route("built-in FAT reader", ctx.dev);
   if (fat32_find_root(&ctx, path, &clus, &size) != 0 || size == 0 ||
       size > (64u * 1024u * 1024u)) {
     fat32_close(&ctx);
@@ -634,6 +651,7 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
   fat32_close(&ctx);
   *out_buf = buf;
   *out_len = size;
+  esp_report_route("built-in FAT reader", ctx.dev);
   return 0;
 }
 
@@ -677,9 +695,45 @@ static void say(const CHAR16 *s) {
   boot_puts((CHAR16 *)s);
 }
 
+/* Device names and the like are plain ASCII; the console speaks UTF-16.
+ * Wide enough for the longest thing passed to it, which is a sentence
+ * describing how the ESP is being reached. */
+static void say_ascii(const char *s) {
+  CHAR16 buf[64];
+  UINTN  i = 0;
+
+  if (s == NULL) {
+    return;
+  }
+  while (s[i] != '\0' && i + 1u < (UINTN)(sizeof(buf) / sizeof(buf[0]))) {
+    buf[i] = (CHAR16)s[i];
+    i++;
+  }
+  buf[i] = 0;
+  boot_puts(buf);
+}
+
 static void say_line(const CHAR16 *s) {
   boot_puts((CHAR16 *)s);
   boot_puts(L"\r\n");
+}
+
+/* Report the ESP path once, the first time either route is used, so the
+ * log says how the loader is reaching its files on this machine. */
+static void esp_report_route(const char *via, blkdev_t *dev) {
+  static int said = 0;
+
+  if (said != 0) {
+    return;
+  }
+  said = 1;
+  say(L"[BOOT] reading the ESP via ");
+  say_ascii(via);
+  if (dev != NULL) {
+    say(L" on ");
+    say_ascii(dev->name);
+  }
+  say_line(L"");
 }
 
 /* Render the first `n` bytes as upper-case hex. Truncated on purpose:
@@ -722,7 +776,16 @@ static int syspart_verify(void) {
     if (gpt_read(disk, &gpt) != 0) {
       continue; /* not a GPT disk: possibly an untouched install target */
     }
+    /* A disk with a table but no NovusFS partition on it is worth one
+     * line: it is the case where the system is installed and the boot
+     * still falls through to live, and "nothing found" would send anyone
+     * looking at the wrong disk. */
     if (gpt_find_novusfs(&gpt, &part) != 0) {
+      say(L"[MRKL] ");
+      say_ascii(disk->name);
+      say(L": ");
+      boot_put_dec(gpt.count);
+      say_line(L" partitions, none holds NovusFS");
       continue;
     }
     {
@@ -870,6 +933,20 @@ static int install_disk_is_foreign(blkdev_t *d) {
 /* Pick a plausible target: a whole disk (not a partition), writable, not
  * removable and not already somebody's system. Returns NULL when there is
  * none. */
+/* Say why a device was not offered. "No writable whole disk found" is
+ * true and useless on a machine with two disks in it: what is needed is
+ * which disk, and what about it ruled it out - because the usual answer
+ * is that the target is fine and the rule is what needs looking at. */
+static void install_skip(blkdev_t *d, const char *why) {
+  say(L"[INST]   skip ");
+  say_ascii(d->name);
+  say(L" (");
+  boot_put_dec(d->sector_count / 2048u);
+  say(L" MiB): ");
+  say_ascii(why);
+  say_line(L"");
+}
+
 static blkdev_t *install_pick_target(void) {
   UINTN i;
 
@@ -879,16 +956,26 @@ static blkdev_t *install_pick_target(void) {
     if (d == NULL) {
       continue;
     }
-    if ((d->flags & (BLKDEV_FLAG_READONLY | BLKDEV_FLAG_REMOVABLE |
-                     BLKDEV_FLAG_PARTITION)) != 0) {
+    if ((d->flags & BLKDEV_FLAG_PARTITION) != 0) {
+      install_skip(d, "it is a partition, not a whole disk");
+      continue;
+    }
+    if ((d->flags & BLKDEV_FLAG_READONLY) != 0) {
+      install_skip(d, "read-only");
+      continue;
+    }
+    if ((d->flags & BLKDEV_FLAG_REMOVABLE) != 0) {
+      install_skip(d, "removable media");
       continue;
     }
     /* A device too small to hold a GPT and both partitions is not a
      * usable target however willing it looks. */
     if (d->sector_count < 4096u) {
+      install_skip(d, "too small");
       continue;
     }
     if (install_disk_is_foreign(d)) {
+      install_skip(d, "holds a filesystem Novus does not own");
       continue;
     }
     return d;
@@ -1205,16 +1292,63 @@ void stage3_init(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   novusfs_set_allocator(efi_alloc, efi_free);
 }
 
+/* One line per device, with the two facts that decide whether the rest
+ * of the boot can work at all: the block size, and whether this is the
+ * device we were started from.
+ *
+ * This list is the answer to nearly every "it does not boot on my
+ * machine" report. A machine that shows no disk here has no disk as far
+ * as Novus is concerned - the firmware did not give us one, or it was
+ * refused for a block size we cannot address - and no amount of work
+ * further up the boot path will change that. */
+static void report_block_devices(UINTN ndev) {
+  UINTN i;
+  int   boot = blkdev_uefi_boot_device();
+
+  say(L"[BOOT] block devices: ");
+  boot_put_dec(ndev);
+  say_line(L"");
+
+  for (i = 0; i < ndev; i++) {
+    blkdev_t *d = blkdev_get_at(i);
+
+    if (d == NULL) {
+      continue;
+    }
+    say(L"[BOOT]   ");
+    say_ascii(d->name);
+    say(L"  ");
+    boot_put_dec(blkdev_block_size(d));
+    say(L"B blocks, ");
+    boot_put_dec((UINT64)(d->sector_count / 2048u));
+    say(L" MiB");
+    if ((d->flags & BLKDEV_FLAG_READONLY) != 0) {
+      say(L", read-only");
+    }
+    if ((d->flags & BLKDEV_FLAG_REMOVABLE) != 0) {
+      say(L", removable");
+    }
+    if ((d->flags & BLKDEV_FLAG_PARTITION) != 0) {
+      say(L", partition");
+    }
+    if (boot >= 0 && i == (UINTN)boot) {
+      say(L"  <- booted from this");
+    }
+    say_line(L"");
+  }
+  if (ndev == 0u) {
+    say_line(L"[BOOT]   none: the firmware offered no block device at all");
+  }
+}
+
 /* Probe devices, open the ESP, verify a system partition if one exists,
  * and load the live root. Safe to call when any of those are missing. */
 void stage3_prepare(void) {
   shared_mem_t *shm = shared_mem_get();
   UINTN         ndev;
 
-  ndev = (UINTN)blkdev_uefi_probe(g_st);
-  say(L"[BOOT] block devices: ");
-  boot_put_dec(ndev);
-  say_line(L"");
+  ndev = (UINTN)blkdev_uefi_probe(g_st, g_image);
+  report_block_devices(ndev);
 
   if (esp_open() == 0) {
     say_line(L"[BOOT] EFI system partition opened");
