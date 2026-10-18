@@ -50,6 +50,12 @@ NUC（Novus Universal Code）是 Novus OS 原生可执行文件格式，扩展�
 
 固定长度 **48 字节**，位于文件偏移 `0x0000`，按 4 字节对齐。
 
+> 修订说明（2026-10-18）：本节原文的 `reserved` 写作 `uint64_t[4]`（32 字节），
+> 与「总大小 48 字节」、§3.2 的偏移表、§2 的布局图以及 §9.2 的「读取前 48 字节」
+> 互相矛盾。现按**偏移表与既有实现**统一为 48 字节：`reserved` 取 16 字节，
+> 字段偏移与 ABI 主版本均不变。内核加载器（`kernel/nuc.c`）与 mochi 的
+> builder/parser 原本就按 48 字节布局读写，因此这是文档勘误，不是 ABI 变更。
+
 ### 3.1 结构体定义
 
 ```c
@@ -64,7 +70,7 @@ typedef struct __attribute__((packed)) {
     uint32_t rel_offset;        // 0x14  重定位表在文件中的偏移
     uint32_t stack_size;        // 0x18  用户栈大小（字节）
     uint32_t rel_count;         // 0x1C  重定位条目数量
-    uint64_t reserved[4];        // 0x20  预留，必须为 0
+    uint32_t reserved[4];       // 0x20  预留 16 字节，必须为 0
 } nuc_hdr_t;                     // 总大小 0x30 = 48 字节
 ```
 
@@ -82,7 +88,7 @@ typedef struct __attribute__((packed)) {
 | 0x14 | 4 | rel_offset | 重定位表文件偏移，对齐到 4 字节 |
 | 0x18 | 4 | stack_size | 用户栈字节数，默认 8MiB（`0x800000`），LowMem 4MiB |
 | 0x1C | 4 | rel_count | 重定位条目数，0 表示无需重定位（纯静态可直接运行） |
-| 0x20 | 32 | reserved | 必须全 0，未来扩展用 |
+| 0x20 | 16 | reserved | 必须全 0，未来扩展用；头部到 `0x30` 结束 |
 
 ### 3.3 compile_flag 位定义
 
@@ -132,17 +138,20 @@ typedef struct __attribute__((packed)) {
 | bit2 | 可执行（`VM_EXEC`） |
 | bit3 | 用户态可见（`VM_USER`，必置） |
 
-典型组合：
-- TEXT：`0b0101`（R+X）
-- DATA：`0b0011`（R+W）
-- RODATA：`0b0001`（R）
-- BSS：`0b0011`（R+W，文件无数据）
+典型组合（均已包含必置的 bit3）：
+- TEXT：`0b1101`（`0x0D`，R+X+USER）
+- DATA：`0b1011`（`0x0B`，R+W+USER）
+- RODATA：`0b1001`（`0x09`，R+USER）
+- BSS：`0b1011`（`0x0B`，R+W+USER，文件无数据）
+
+> 注意：旧稿的 `0b0101` / `0b0011` / `0b0001` 没有置 bit3，与「`VM_USER` 必置」
+> 冲突，不能直接用作段 flags。加载器应按 bit3 校验，缺位即 `NOVUS_EINVAL`。
 
 ### 4.4 加载规则
 
 1. 加载器按 `file_offset` 把段数据读入内存 `vaddr`；
 2. BSS 段：不读文件，按 `size` 清零；
-3. 段大小必须向上对齐到 4KiB 页边界（页表映射粒度）；
+3. 映射时按 4KiB 页边界向上取整（`size` 字段本身可以是任意字节数）；
 4. TEXT 段必须可读可执行；DATA 段不可执行（W^X 原则）。
 
 ---
@@ -293,42 +302,64 @@ entry_rip = text_segment.vaddr + nuc_hdr.entry_point
 
 ## 11. 完整示例：一个最小 .nuc 文件
 
-下面是一个打印 "Hello" 的最小程序，头部 + 段表 + 符号表 + 重定位的 hex dump 示例（小端序）。
+下面是一个打印 "Hello" 的最小程序。所有偏移都按 §2 的顺序和 48 字节头重新推导，
+可以直接用 §9 的公式验算（小端序）。
 
-### 11.1 Header（48 字节）
+### 11.1 布局推导
+
+| 区域 | 起始偏移 | 大小 | 结束偏移 |
+|---|---|---|---|
+| Header | `0x0000` | `0x30` | `0x0030` |
+| Segment Table（2 条） | `0x0030` | `2 × 32 = 0x40` | `0x0070` |
+| Symbol Table（1 条） | `0x0070` | `1 × 24 = 0x18` | `0x0088` |
+| Relocation Table（1 条） | `0x0088` | `1 × 16 = 0x10` | `0x0098` |
+| String Table | `0x0098` | `6` | `0x009E` |
+| 填充到段数据 | `0x009E` | — | `0x0100` |
+| `.text` | `0x0100` | `0x200` | `0x0300` |
+| 页对齐填充 | `0x0300` | — | `0x1000` |
+| `.data` | `0x1000` | `0x100` | `0x1100` |
+
+因此 `rel_offset = 0x88`、`strtab_offset = 0x98`，且重定位表位于字符串表**之前**，
+满足 §2 的布局铁律。
+
+### 11.2 Header（48 字节）
 
 ```
 偏移  00 01 02 03 04 05 06 07 08 09 0A 0B 0C 0D 0E 0F
-0000: 4E 55 43 21 00 01 05 00 00 00 00 00 02 00 01 00   ; magic, abi=1.0, flag=0b101(stackprot+64bit+static)
-0010: 80 00 00 00 C0 00 00 00 00 00 80 00 01 00 00 00   ; strtab=0x80, rel=0xC0, stack=8MiB, rel_count=1
-0020: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
-0030: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0000: 4E 55 43 21 00 01 05 00 10 00 00 00 02 00 01 00   ; magic, abi=0x0100(1.0), flag=0x0005(64bit+static), entry=0x10, seg=2, sym=1
+0010: 98 00 00 00 88 00 00 00 00 00 80 00 01 00 00 00   ; strtab=0x98, rel=0x88, stack=8MiB, rel_count=1
+0020: 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00   ; reserved[16]，必须全 0
 ```
 
-### 11.2 Segment Table（2 段 × 32B）
+注意：`compile_flag = 0x0005` 只置了 bit0（64 位）和 bit2（静态），
+bit3（栈保护）未置；旧稿注释里的 "stackprot" 是错的。示例程序不含栈金丝雀，
+所以这里保持 `0x0005`。
+
+### 11.3 Segment Table（2 段 × 32B）
 
 ```
 .text 段:
-  type=0, file_offset=0x100, vaddr=0x400000, size=0x200, flags=R+X(0x5)
+  type=0, file_offset=0x100, vaddr=0x400000, size=0x200, flags=0x0D (R+X+USER)
 .data 段:
-  type=1, file_offset=0x1000, vaddr=0x600000, size=0x100, flags=R+W(0x3)
+  type=1, file_offset=0x1000, vaddr=0x600000, size=0x100, flags=0x0B (R+W+USER)
 ```
 
-### 11.3 Symbol Table（1 条）
+### 11.4 Symbol Table（1 条）
 
 ```
-  name_off=0x01, type=1(FUNC), bind=0(LOCAL), shndx=0, value=0x10, size=0x20
-  ; 对应字符串 "main"
+  name_off=0x01, type=1(FUNC), bind=0(LOCAL), shndx=0, value=0x20, size=0x20
+  ; 对应字符串 "main"；value 是 .text 段内偏移，实际地址 = 0x400000 + 0x20 = 0x400020
 ```
 
-### 11.4 Relocation Table（1 条）
+### 11.5 Relocation Table（1 条）
 
 ```
   r_offset=0x400010, r_type=2(PC32), sym_idx=0
-  ; call main 指令需要重定位到 main 函数地址
+  ; 入口 _start（text+0x10）处的 call 指令，目标为 main（text+0x20）
+  ; PC32 写入值 = 0x400020 - 0x400010 - 4 = 0x0C
 ```
 
-### 11.5 字符串表
+### 11.6 字符串表
 
 ```
   0x00: 00
@@ -337,7 +368,8 @@ entry_rip = text_segment.vaddr + nuc_hdr.entry_point
 
 加载后：
 - text 段映射到 `0x400000`
-- `entry_rip = 0x400000 + 0x10 = 0x400010`（即 main 函数入口）
+- `entry_rip = 0x400000 + 0x10 = 0x400010`（入口 `_start`）
+- `_start` 的 `call` 经 PC32 重定位指向 `0x400020`（`main`）
 
 ---
 
@@ -380,5 +412,16 @@ NUC 与 NKM 都是可重定位二进制，但**两者格式不同**，不可混�
 - ABI 主版本 = 1。
 
 任何字段偏移、大小、语义变更必须提交 ABI 变更 RFC，并升版本号。
+
+### 14.1 修订记录
+
+| 日期 | 修订 | ABI 影响 |
+|---|---|---|
+| 2026-10-18 | §3.1 的 `reserved` 由 `uint64_t[4]` 更正为 `uint32_t[4]`（16 字节），与 48 字节头、§3.2 偏移表、§9.2 及内核/mochi 实现统一；§4.3 典型 flags 补上必置的 `VM_USER`；§11 示例按 48 字节头重算全部偏移 | 无：字段偏移和二进制布局不变，仅修正文档自相矛盾 |
+
+> 决策记录：Header 长度以 **48 字节**为准（`0x30`）。依据是 §2 布局图、§3.2
+> 偏移表、§9.2「读取前 48 字节」、§14 冻结声明，以及 `kernel/nuc.c` 和 mochi
+> 现有 builder/parser/产物。`reserved` 固定 16 字节，不得再改回 32 字节；
+> 未来若确需扩展，必须走 ABI 变更 RFC 并升主版本。
 
 文档状态：✅ **冻结，可作为 M4（NUC 加载器）与 M7（cppcc 编译器）的实现基准。**

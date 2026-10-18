@@ -24,7 +24,13 @@
 
 static UINT64 *table(UINT64 phys) { return (UINT64 *)phys_to_virt(phys); }
 
-/* Allocate a zeroed table page and remember it in `sp`. */
+/* Allocate a zeroed table page and remember it in `sp`.
+ *
+ * The record is what makes the page freeable later, so running out of
+ * slots has to be an error: handing back a page nobody tracks leaks it,
+ * and the parent PTE that the caller is about to write would keep
+ * pointing at it after the space is gone - the next owner of that page
+ * would then be reachable from a dead process. */
 static UINT64 alloc_table(vm_space_t *sp) {
   UINT64 phys = (UINT64)(UINTN)pmm_alloc_page();
 
@@ -32,12 +38,27 @@ static UINT64 alloc_table(vm_space_t *sp) {
     return 0;
   }
   memset(phys_to_virt(phys), 0, 4096);
-  if (sp->npages < VM_MAX_TABLE_PAGES) {
-    sp->pages[sp->npages++] = phys;
-  } else {
-    kputs("[VM] WARN: table page not tracked, space will leak it\n");
+  if (sp->npages >= VM_MAX_TABLE_PAGES) {
+    kputs("[VM] ERROR: table page budget exhausted, refusing to map\n");
+    pmm_free_page((void *)(UINTN)phys);
+    return 0;
   }
+  sp->pages[sp->npages++] = phys;
   return phys;
+}
+
+/* True when `phys` is a table page this space allocated (and therefore
+ * owns). A table inherited from the template is not: writing through it
+ * would change the kernel's map, or another process's. */
+static int table_own(vm_space_t *sp, UINT64 phys) {
+  UINT32 i;
+
+  for (i = 0; i < sp->npages; i++) {
+    if (sp->pages[i] == phys) {
+      return 1;
+    }
+  }
+  return 0;
 }
 
 /* Copy a table so the process can change it without changing the kernel's
@@ -54,7 +75,11 @@ static UINT64 clone_table(vm_space_t *sp, UINT64 old_phys) {
 }
 
 int vm_space_create(vm_space_t *out) {
-  UINT64  kern_cr3 = mm_get_cr3() & ~0xFFFULL;
+  /* The template is the kernel's own PML4, never "the CR3 that happens to
+   * be loaded": a space created from a syscall or the timer tick runs on
+   * somebody's CR3, and copying that would inherit that task's private
+   * tables and hand the new process its mappings. */
+  UINT64  kern_cr3 = mm_kernel_cr3();
   UINT64 *kpml4 = table(kern_cr3);
   UINT64  pml4_phys;
   UINT64 *pml4;
@@ -104,6 +129,13 @@ int vm_space_create(vm_space_t *out) {
   return 0;
 }
 
+/* Install one 4 KiB page, copying any table that is still shared with the
+ * template before writing through it.
+ *
+ * The kernel maps the low 4 GiB with 2 MiB leaves; vm_space_create() only
+ * clones down to the PD level, so every entry below a PD can still point
+ * at the kernel's own table. Cloning on first write is what keeps the
+ * promise in vm.h: after this call the path belongs to `sp` alone. */
 int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot) {
   UINT64 *pml4 = table(sp->pml4_phys);
   UINT32  i4 = (UINT32)((va >> 39) & 0x1FFu);
@@ -113,6 +145,13 @@ int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot) {
   UINT64 *pdpt, *pd, *pt;
 
   if ((va & 0xFFFULL) != 0 || (phys & 0xFFFULL) != 0) {
+    return -1;
+  }
+  /* A process lives in the lower half. Refusing the rest keeps the kernel
+   * half - in particular the physmap at PML4[256] - out of reach of a
+   * caller that passes the wrong address. */
+  if (va >= 0x0000800000000000ULL) {
+    kputs("[VM] ERROR: refusing user mapping in the kernel half\n");
     return -1;
   }
 
@@ -127,6 +166,13 @@ int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot) {
       return -1;
     }
     pml4[i4] = t | PTE_P | PTE_W | PTE_U;
+  } else if (!table_own(sp, pml4[i4] & PTE_ADDR4K)) {
+    UINT64 c = clone_table(sp, pml4[i4] & PTE_ADDR4K);
+
+    if (c == 0) {
+      return -1;
+    }
+    pml4[i4] = c | (pml4[i4] & PTE_FLAGS) | PTE_U;
   } else {
     pml4[i4] |= PTE_U;
   }
@@ -138,6 +184,13 @@ int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot) {
       return -1;
     }
     pdpt[i3] = t | PTE_P | PTE_W | PTE_U;
+  } else if (!table_own(sp, pdpt[i3] & PTE_ADDR4K)) {
+    UINT64 c = clone_table(sp, pdpt[i3] & PTE_ADDR4K);
+
+    if (c == 0) {
+      return -1;
+    }
+    pdpt[i3] = c | (pdpt[i3] & PTE_FLAGS) | PTE_U;
   } else {
     pdpt[i3] |= PTE_U;
   }
@@ -167,6 +220,16 @@ int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot) {
       return -1;
     }
     pd[i2] = t | PTE_P | PTE_W | PTE_U;
+  } else if (!table_own(sp, pd[i2] & PTE_ADDR4K)) {
+    /* A 4 KiB table inherited from the template: copy it before adding a
+     * user page to it, or the page would appear in every other process's
+     * map as well. */
+    UINT64 c = clone_table(sp, pd[i2] & PTE_ADDR4K);
+
+    if (c == 0) {
+      return -1;
+    }
+    pd[i2] = c | (pd[i2] & PTE_FLAGS) | PTE_U;
   } else {
     pd[i2] |= PTE_U;
   }
@@ -226,6 +289,12 @@ void vm_switch_cr3(UINT64 cr3) {
  * US=0, and a split's inherited leaves keep it too, so the walk cannot
  * mistake a kernel page for a process page. PML4[256] (the physmap) is not
  * walked at all - it is shared and ring-0 only. */
+/* Walk the space and hand back the pages it mapped for itself.
+ *
+ * Only tables this space allocated are descended into. Everything else is
+ * either the kernel's own map or another process's table, and a leaf with
+ * US=1 found there is not ours to free - that shortcut is exactly what
+ * used to release an unrelated process's code page and zero its PTE. */
 static UINT32 free_user_leafs(vm_space_t *sp) {
   UINT64 *pml4;
   UINT32  i4, i3, i2, i1, n = 0;
@@ -240,6 +309,9 @@ static UINT32 free_user_leafs(vm_space_t *sp) {
     if ((pml4[i4] & PTE_P) == 0) {
       continue;
     }
+    if (!table_own(sp, pml4[i4] & PTE_ADDR4K)) {
+      continue; /* shared with the template: not ours to walk */
+    }
     pdpt = table(pml4[i4] & PTE_ADDR4K);
     for (i3 = 0; i3 < 512u; i3++) {
       UINT64 *pd;
@@ -247,12 +319,18 @@ static UINT32 free_user_leafs(vm_space_t *sp) {
       if ((pdpt[i3] & PTE_P) == 0 || (pdpt[i3] & PTE_PS) != 0) {
         continue; /* no table behind it: a 1 GiB leaf, not ours */
       }
+      if (!table_own(sp, pdpt[i3] & PTE_ADDR4K)) {
+        continue;
+      }
       pd = table(pdpt[i3] & PTE_ADDR4K);
       for (i2 = 0; i2 < 512u; i2++) {
         UINT64 *pt;
 
         if ((pd[i2] & PTE_P) == 0 || (pd[i2] & PTE_PS) != 0) {
           continue; /* kernel huge page, US=0 in any case */
+        }
+        if (!table_own(sp, pd[i2] & PTE_ADDR4K)) {
+          continue;
         }
         pt = table(pd[i2] & PTE_ADDR4K);
         for (i1 = 0; i1 < 512u; i1++) {

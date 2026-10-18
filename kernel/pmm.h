@@ -43,6 +43,10 @@ void pmm_free_page(void *phys);
 /* Current free page count. */
 UINT64 pmm_free_count(void);
 
+/* Number of free() calls on a page that was already free: 0 in a healthy
+ * kernel, and a caller bug otherwise. */
+UINT32 pmm_double_free_count(void);
+
 /* Total pages covered by the manager: ram_top / 4096. */
 UINT64 pmm_total_pages(void);
 

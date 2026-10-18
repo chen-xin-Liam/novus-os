@@ -57,6 +57,20 @@ UINT64 mm_get_cr3(void) {
   return v;
 }
 
+/* The hierarchy mm_init() built, captured before any process space exists.
+ * Every process space is cloned from *this* one. Cloning "whatever CR3 is
+ * loaded right now" instead inherits the running task's private tables -
+ * a spawned program would then share its parent's page tables, the parent
+ * would see the child's mappings, and whichever of them exited first would
+ * free the other's code pages (M8 "closing a window kills the desktop"). */
+static UINT64 g_kernel_cr3;
+
+void mm_capture_kernel_cr3(void) { g_kernel_cr3 = mm_get_cr3() & ~0xFFFULL; }
+
+UINT64 mm_kernel_cr3(void) {
+  return (g_kernel_cr3 != 0) ? g_kernel_cr3 : (mm_get_cr3() & ~0xFFFULL);
+}
+
 void *phys_to_virt(UINT64 phys) {
   return (void *)(PHYSMAP_BASE + phys);
 }
@@ -148,6 +162,7 @@ void mm_init(UINT64 ram_top_bytes) {
    * function's code and the kernel stack stay reachable on both the
    * identity path and the new physmap path. */
   mm_write_cr3(pml4_phys);
+  mm_capture_kernel_cr3();
 
   kputs("[MM] paging enabled, CR3=");
   kputs_hex(mm_get_cr3());

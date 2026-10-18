@@ -19,6 +19,7 @@
 #include "nd.h"
 #include "nwm.h"
 #include "sysinfo.h"
+#include "nuc.h"
 
 /* Written by trap.S: the stack the syscall gate switches to, and the
  * gate itself. */
@@ -52,48 +53,36 @@ static UINT32  g_logged_switches;
  * the next trap, which by then runs on another task's stack. */
 static task_t *g_reap;
 
+/* Kernel idle context (M8). When no task is READY the kernel must not
+ * stop: the timer is what drives the desktop, and the taskbar has to stay
+ * able to start a process again. This little stack and the loop below are
+ * all that runs in that state - ring 0, no address space of its own. */
+static UINT8 g_kidle_stack[8192] __attribute__((aligned(16)));
+static int   g_kidle_reported;
+
+/* Rotating start index for the round-robin scan. Kept separate from the
+ * task ring so a link mistake can never hide a runnable task. */
+static UINT32 g_pick_hint;
+
 /* ---- helpers ----------------------------------------------------------- */
 
-/* Contiguous physical pages, addressed through the physmap: a kernel stack
- * has to be contiguous in virtual memory and the VMM hands out single
- * pages, so this asks the PMM until it gets a run. First-fit makes that
- * the normal case; the loop is for when it is not. */
-static void *alloc_pages_contig(UINT32 count) {
-  UINT32 attempt;
+/* Kernel stacks live in a static pool, one slot per task slot.
+ *
+ * Asking the PMM for 16 contiguous pages at run time works exactly once:
+ * the bitmap's first-fit hands out the same run every attempt, so as soon
+ * as a spawn/exit cycle leaves a hole at the bottom of the heap the search
+ * can never succeed again - start-up was fine, the first relaunch was not.
+ * A fixed pool has no such failure mode and costs 64 KiB of BSS per slot. */
+static UINT8 g_kstacks[SCHED_MAX_TASKS][SCHED_KSTACK_PAGES * 4096u]
+    __attribute__((aligned(16)));
 
-  for (attempt = 0; attempt < 64u; attempt++) {
-    UINT64 first = (UINT64)(UINTN)pmm_alloc_page();
-    UINT32 i;
-    int    ok = 1;
+static void *kstack_for(task_t *t) {
+  UINT32 slot = (UINT32)(t - &g_tasks[0]);
 
-    if (first == 0) {
-      return NULL;
-    }
-    for (i = 1; i < count; i++) {
-      UINT64 next = (UINT64)(UINTN)pmm_alloc_page();
-
-      if (next != first + (UINT64)i * 4096u) {
-        if (next != 0) {
-          pmm_free_page((void *)(UINTN)next);
-        }
-        ok = 0;
-        break;
-      }
-    }
-    if (ok) {
-      UINT8 *p = (UINT8 *)phys_to_virt(first);
-      memset(p, 0, (UINT64)count * 4096u);
-      return p;
-    }
-    /* Release the partial run and try again. */
-    {
-      UINT32 j;
-      for (j = 0; j < i; j++) {
-        pmm_free_page((void *)(UINTN)(first + (UINT64)j * 4096u));
-      }
-    }
+  if (slot >= SCHED_MAX_TASKS) {
+    return NULL;
   }
-  return NULL;
+  return g_kstacks[slot];
 }
 
 static void task_build_frame(task_t *t, UINT64 entry, UINT64 user_rsp) {
@@ -144,23 +133,24 @@ static void task_unlink(task_t *t) {
  * guarantees. */
 static void task_reap(task_t *t) {
   UINT32 freed;
-  UINT32 i;
+  UINT64 pml4;
 
   if (t == NULL || t == g_current) {
     return;
   }
+  /* vm_space_free() clears the space, so remember what it was for the log
+   * - it is the one number that says "this task's tables are gone". */
+  pml4 = t->space.pml4_phys;
   freed = vm_space_free(&t->space);
-  if (t->kstack_phys != 0) {
-    for (i = 0; i < SCHED_KSTACK_PAGES; i++) {
-      pmm_free_page((void *)(UINTN)(t->kstack_phys + (UINT64)i * 4096u));
-      freed++;
-    }
-  }
+  /* The kernel stack belongs to the static pool, not to the PMM: nothing
+   * to release, and the next task in this slot reuses it. */
   kputs("[REAP] ");
   kputs(t->name);
   kputs(": ");
   kputs_hex((UINT64)freed);
-  kputs(" pages back, free=");
+  kputs(" pages back, pml4=");
+  kputs_hex(pml4);
+  kputs(", free=");
   kputs_hex(pmm_free_count());
   kputs("\n");
 
@@ -186,19 +176,98 @@ static task_t *task_find_free(void) {
 }
 
 static task_t *task_pick_next(void) {
-  task_t *t = (g_current != NULL) ? g_current->next : g_first;
-  task_t *start = t;
+  UINT32 i;
 
-  if (t == NULL) {
-    return NULL;
-  }
-  do {
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    UINT32  idx = (g_pick_hint + i) % SCHED_MAX_TASKS;
+    task_t *t = &g_tasks[idx];
+
     if (t->state == TASK_READY) {
+      g_pick_hint = (idx + 1u) % SCHED_MAX_TASKS;
       return t;
     }
-    t = (t->next != NULL) ? t->next : &g_tasks[0];
-  } while (t != start);
+  }
   return NULL;
+}
+
+static int task_name_alive(const char *name) {
+  UINT32 i;
+  UINT32 k;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    const task_t *t = &g_tasks[i];
+
+    if (t->state == TASK_FREE || t->state == TASK_EXITED) {
+      continue;
+    }
+    for (k = 0; k < sizeof(t->name) && t->name[k] == name[k]; k++) {
+      if (name[k] == '\0') {
+        return 1;
+      }
+    }
+  }
+  return 0;
+}
+
+/* One line per idle task left in the table, so "the machine looks frozen"
+ * comes with the reason attached. */
+static void sched_dump_tasks(void) {
+  UINT32 i;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    const task_t *t = &g_tasks[i];
+
+    if (t->state == TASK_FREE) {
+      continue;
+    }
+    kputs("[SCHED]   task ");
+    kputs(t->name);
+    kputs(" pid=");
+    kputs_hex(t->pid);
+    kputs(" state=");
+    kputs_hex(t->state);
+    kputs("\n");
+  }
+}
+
+static void sched_kernel_idle(void) {
+  for (;;) {
+    __asm__ volatile("sti; hlt");
+  }
+}
+
+/* A ring-0 frame that iretq's into sched_kernel_idle(). Built fresh each
+ * time: the loop never returns, so its stack is only ever used by the
+ * interrupt that will bring a task back. */
+static UINT64 sched_kidle_frame(void) {
+  UINT64        top = (UINT64)(UINTN)g_kidle_stack + sizeof(g_kidle_stack);
+  trap_frame_t *f = (trap_frame_t *)(UINTN)(top - sizeof(trap_frame_t));
+
+  memset(f, 0, sizeof(*f));
+  f->rip = (UINT64)(UINTN)sched_kernel_idle;
+  f->cs = GDT_SEL_KCODE;
+  f->rflags = 0x202u; /* IF: the timer has to keep firing */
+  f->rsp = (UINT64)(UINTN)g_kidle_stack + 16u;
+  f->ss = GDT_SEL_KDATA;
+  tss_set_rsp0(top);
+  sys_kernel_rsp = top;
+  return (UINT64)(UINTN)f;
+}
+
+/* Enter the kernel idle context: drop the dead task, give the kernel its
+ * own page tables back, and return the frame to iretq into. */
+static UINT64 sched_enter_kidle(void) {
+  if (!g_kidle_reported) {
+    g_kidle_reported = 1;
+    kputs("[SCHED] no runnable task: kernel idle, desktop keeps running\n");
+    sched_dump_tasks();
+  }
+  if (g_current != NULL && g_current->state == TASK_EXITED) {
+    g_reap = g_current;
+  }
+  g_current = NULL;
+  vm_switch_cr3(mm_kernel_cr3());
+  return sched_kidle_frame();
 }
 
 /* ---- public ------------------------------------------------------------ */
@@ -266,11 +335,15 @@ task_t *sched_create_user(const char *name, const vm_space_t *space,
   UINT32  i;
 
   if (t == NULL) {
+    kputs("[SCHED] no free task slot for ");
+    kputs(name);
+    kputs("\n");
+    sched_dump_tasks();
     return NULL;
   }
-  kstack = (UINT8 *)alloc_pages_contig(SCHED_KSTACK_PAGES);
+  kstack = (UINT8 *)kstack_for(t);
   if (kstack == NULL) {
-    kputs("[SCHED] ERROR: no contiguous pages for a kernel stack\n");
+    kputs("[SCHED] ERROR: no kernel stack slot\n");
     return NULL;
   }
 
@@ -338,12 +411,11 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
   next = task_pick_next();
   if (next == NULL) {
     if (g_current != NULL && g_current->state == TASK_EXITED) {
-      /* Every task is gone. There is no frame left that could make
-       * progress, so stop rather than iretq into a dead context. */
-      kputs("[SCHED] no runnable task, halting\n");
-      for (;;) {
-        cpu_halt();
-      }
+      /* The last runnable task just exited. Halting here would stop the
+       * timer and with it the desktop; park in the kernel idle context
+       * instead, where the tick keeps compositing and can start a new
+       * process from the taskbar. */
+      return sched_enter_kidle();
     }
     return current_frame; /* nothing else runnable: keep this frame */
   }
@@ -357,6 +429,7 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
   g_current = next;
   next->state = TASK_RUNNING;
   next->slice = SCHED_SLICE_TICKS;
+  g_kidle_reported = 0; /* the next idle entry is a new event */
 
   /* A dozen lines is enough to see whether the timer is switching tasks
    * or the tasks are only switching themselves. */
@@ -395,22 +468,39 @@ static void sched_expire_waiters(void) {
 void sched_tick(void) {
   g_ticks++;
   sched_expire_waiters();
-  if (g_current == NULL) {
-    return;
-  }
-  g_current->ticks++;
-  if (g_current->slice > 0u) {
-    g_current->slice--;
-  }
-  if (g_current->slice == 0u) {
+
+  if (g_current != NULL) {
+    g_current->ticks++;
+    if (g_current->slice > 0u) {
+      g_current->slice--;
+    }
+    if (g_current->slice == 0u) {
+      g_need_resched = 1;
+    }
+    if ((g_ticks % 40u) == 0u) {
+      kputs("[SCHED] ticks=");
+      kputs_hex(g_ticks);
+      kputs(" current=");
+      kputs(g_current->name);
+      kputs("\n");
+    }
+  } else {
+    /* Kernel idle: ask for a switch every tick so the first process that
+     * becomes runnable (a taskbar click forks one) is entered promptly. */
     g_need_resched = 1;
+    if ((g_ticks % 40u) == 0u) {
+      kputs("[SCHED] ticks=");
+      kputs_hex(g_ticks);
+      kputs(" current=(kernel idle)\n");
+    }
   }
-  if ((g_ticks % 40u) == 0u) {
-    kputs("[SCHED] ticks=");
-    kputs_hex(g_ticks);
-    kputs(" current=");
-    kputs(g_current->name);
-    kputs("\n");
+
+  /* M8: if the fallback task ever dies, bring it back. It is the safety
+   * net behind the safety net - the kernel idle context covers the case
+   * where this fails as well. */
+  if ((g_ticks % 200u) == 0u && !task_name_alive("idle")) {
+    kputs("[SCHED] idle task missing, recreating\n");
+    (void)nuc_create_idle();
   }
 
 #if CONFIG_NOVUS_WM

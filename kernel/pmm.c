@@ -43,6 +43,7 @@ static UINT64 pmm_total; /* pages: pmm_top / 4096 */
 static UINT64 pmm_bits;  /* pages actually tracked by the bitmap */
 static UINT64 pmm_free;
 static UINT64 pmm_resv;
+static UINT32 pmm_double_free;
 static int    pmm_ready;
 
 /* ------------------------------------------------------------------ */
@@ -194,6 +195,9 @@ void *pmm_alloc_page(void) {
   return (void *)addr;
 }
 
+/* Counted so the health line and the self test can see a caller bug. */
+UINT32 pmm_double_free_count(void) { return pmm_double_free; }
+
 void pmm_free_page(void *phys) {
   UINT64 idx;
 
@@ -208,7 +212,18 @@ void pmm_free_page(void *phys) {
     return; /* outside bitmap-managed range */
   }
   if (novus_rs_bitmap_test(pmm_bitmap, idx) == 0) {
-    return; /* double free: ignore */
+    /* Freeing a page twice is harmless to the bitmap but always a bug in
+     * the caller - usually a page table or code page released by the
+     * wrong address space. Say so instead of swallowing it. */
+    pmm_double_free++;
+    if (pmm_double_free <= 8u) {
+      kputs("[PMM] WARN double free of ");
+      kputs_hex((UINT64)(UINTN)phys);
+      kputs("\n");
+    } else if (pmm_double_free == 9u) {
+      kputs("[PMM] WARN further double frees suppressed\n");
+    }
+    return;
   }
   novus_rs_bitmap_clear(pmm_bitmap, idx);
   pmm_free++;

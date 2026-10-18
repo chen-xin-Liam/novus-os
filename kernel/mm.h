@@ -23,6 +23,10 @@ void mm_init(UINT64 ram_top_bytes);
 /* Current CR3 value, read with inline assembly. */
 UINT64 mm_get_cr3(void);
 
+/* The kernel's own PML4, saved by mm_init(): the template every process
+ * space is cloned from. Callers must not use mm_get_cr3() for that. */
+UINT64 mm_kernel_cr3(void);
+
 /* Direct-map conversions. phys_to_virt maps into the physmap window;
  * virt_to_phys reverses it and passes identity-mapped low addresses
  * (kernel image) through unchanged. */
