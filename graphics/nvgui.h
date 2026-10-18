@@ -40,6 +40,9 @@
 
 /* Theme metrics, in pixels at text scale 2. */
 #define NG_TITLE_H  30
+/* Drop shadow falloff around a window, in pixels. Damage for a window has
+ * to cover this ring as well as the window rectangle. */
+#define NG_SHADOW_SPREAD 10
 #define NG_BORDER   1
 #define NG_PAD      10
 #define NG_ROW_H    24

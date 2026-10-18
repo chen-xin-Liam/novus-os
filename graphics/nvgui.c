@@ -91,9 +91,19 @@ void ng_damage(nd_rect_t r) {
   g_ctx.damage = nd_rect_union(g_ctx.damage, r);
 }
 
+/* A window's drop shadow is painted *outside* its rectangle (nd_shadow
+ * spreads it by NG_SHADOW_SPREAD), so the pixels a window occupies are
+ * not the pixels it has to repaint. Damaging the rectangle alone leaves
+ * the shadow ring behind: unused by the next repaint, it survives every
+ * move and darkens into a trail after a title-bar drag. */
+static nd_rect_t window_visual(nd_rect_t r) {
+  return nd_rect(r.x - NG_SHADOW_SPREAD, r.y - NG_SHADOW_SPREAD + 2,
+                 r.w + NG_SHADOW_SPREAD * 2, r.h + NG_SHADOW_SPREAD * 2);
+}
+
 void ng_damage_widget(ng_widget_t *w) {
   if (w != 0) {
-    ng_damage(w->abs);
+    ng_damage(w->type == NG_WINDOW ? window_visual(w->abs) : w->abs);
   }
 }
 
@@ -775,7 +785,7 @@ static void draw_window(ng_widget_t *w) {
   nd_color_t        title_bg;
   INT32             i;
 
-  nd_shadow(s, w->abs, 10, 90);
+  nd_shadow(s, w->abs, NG_SHADOW_SPREAD, 90);
   nd_round_rect(s, w->abs, 8, t->win_bg);
 
   /* Title band: follows the window's own top curve row by row, so the
@@ -1089,7 +1099,7 @@ static void window_drag_to(ng_widget_t *win, INT32 x, INT32 y) {
   win->rect.x = nx;
   win->rect.y = ny;
   ng_layout();
-  ng_damage(old);
+  ng_damage(window_visual(old));
   ng_damage_widget(win);
 }
 

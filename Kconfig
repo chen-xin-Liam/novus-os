@@ -132,3 +132,24 @@ config NOVUS_GUI
 	  Build the NovusGUI widget library: window, panel, label, button,
 	  checkbox, text box, slider, progress bar, list and tree. Requires
 	  NOVUS_DISPLAY.
+
+config NOVUS_IPC
+	bool
+	default y
+	depends on NOVUS_SCHED
+	help
+	  Build the M6 message IPC: bounded per-port queues, the stamped
+	  message header with its checksum, blocking receive that parks the
+	  caller, and the ipc_* syscalls. Every task gets an inbox port named
+	  by its pid. Requires NOVUS_SCHED.
+
+config NOVUS_WM
+	bool
+	default y
+	depends on NOVUS_GUI && NOVUS_IPC
+	help
+	  Build Novus-WM (README part 10): window objects with decorations,
+	  z-order, focus, input routing, clipped compositing and the server
+	  side of the GUI protocol on the well-known port "nwm". The timer
+	  tick drives it instead of the M5 demo tick; the demo desktop stays
+	  as the shell scene underneath. Requires NOVUS_GUI and NOVUS_IPC.

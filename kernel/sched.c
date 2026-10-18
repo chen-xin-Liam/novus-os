@@ -15,7 +15,9 @@
 #include "mm.h"
 #include "pmm.h"
 #include "vm.h"
+#include "ipc.h"
 #include "nd.h"
+#include "nwm.h"
 
 /* Written by trap.S: the stack the syscall gate switches to, and the
  * gate itself. */
@@ -273,6 +275,7 @@ task_t *sched_create_user(const char *name, const vm_space_t *space,
 
   memset(t, 0, sizeof(*t));
   t->id = (int)g_next_id++;
+  t->pid = (UINT64)t->id;
   t->state = TASK_READY;
   t->cr3 = space->pml4_phys;
   t->space = *space;
@@ -283,6 +286,9 @@ task_t *sched_create_user(const char *name, const vm_space_t *space,
   for (i = 0; i < sizeof(t->name) - 1u && name[i] != '\0'; i++) {
     t->name[i] = name[i];
   }
+  /* Every task gets an inbox port named by its pid (M6): that is the
+   * address a server replies to, and the reason hdr.sender is enough. */
+  (void)ipc_task_attach(t->pid);
   task_build_frame(t, entry, user_rsp);
 
   /* Ring the task into the round-robin list behind the current head. */
@@ -316,6 +322,11 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
        * which is how a scheduled-out idle task disappears. */
       g_current->rsp = current_frame;
       g_current->state = TASK_READY;
+    } else if (g_current->state == TASK_BLOCKED) {
+      /* A parked task still needs its frame saved - that frame holds the
+       * rewound RIP a blocked syscall left behind, and it is the only way
+       * back into the task when a message wakes it. */
+      g_current->rsp = current_frame;
     }
     if (!g_need_resched && g_current->state != TASK_EXITED) {
       return current_frame;
@@ -361,8 +372,28 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
   return next->rsp;
 }
 
+/* A parked task whose deadline passed runs again with an error, so a
+ * blocking receive can never wedge a process forever. */
+static void sched_expire_waiters(void) {
+  UINT32 i;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    task_t *t = &g_tasks[i];
+
+    if (t->state == TASK_BLOCKED && t->wait_deadline != 0 &&
+        g_ticks >= t->wait_deadline) {
+      t->wait_err = IPC_ETIMEDOUT;
+      t->wait_deadline = 0;
+      t->wait_port = 0;
+      t->state = TASK_READY;
+      g_need_resched = 1;
+    }
+  }
+}
+
 void sched_tick(void) {
   g_ticks++;
+  sched_expire_waiters();
   if (g_current == NULL) {
     return;
   }
@@ -381,7 +412,12 @@ void sched_tick(void) {
     kputs("\n");
   }
 
-#if CONFIG_NOVUS_DISPLAY
+#if CONFIG_NOVUS_WM
+  /* M6: Novus-WM drives the whole desktop from the tick - input routing,
+   * the IPC server queue and the compositor. M5's nd_demo_tick() is what
+   * runs instead when the window manager is configured out. */
+  nwm_tick();
+#elif CONFIG_NOVUS_DISPLAY
   /* M5: NovusDisplay shares the tick. Input is polled (no new IRQ lines)
    * and at most one damage rectangle is repainted per event, so the cost
    * stays bounded and the scheduler's own work is unaffected. */
@@ -397,6 +433,9 @@ void sched_exit_current(int code) {
   g_current->exit_code = code;
   g_exit_count++;
   g_need_resched = 1;
+  /* Its inbox and any named port it owned go with it; a window whose
+   * owner is gone is closed by the WM on the next tick. */
+  ipc_owner_exit(g_current->pid);
 
   kputs("[SCHED] task ");
   kputs(g_current->name);
@@ -410,6 +449,45 @@ void sched_yield(void) {
     g_current->slice = 0;
   }
   g_need_resched = 1;
+}
+
+void sched_park(UINT64 port, UINT32 timeout_ticks) {
+  if (g_current == NULL) {
+    return;
+  }
+  g_current->wait_port = port;
+  g_current->wait_deadline = (timeout_ticks != 0u) ? g_ticks + timeout_ticks : 0;
+  g_current->wait_err = 0;
+  g_current->state = TASK_BLOCKED;
+  g_need_resched = 1;
+}
+
+void sched_wake_port(UINT64 port) {
+  UINT32 i;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    task_t *t = &g_tasks[i];
+
+    if (t->state == TASK_BLOCKED && t->wait_port == port) {
+      t->wait_port = 0;
+      t->wait_deadline = 0;
+      t->state = TASK_READY;
+      g_need_resched = 1;
+    }
+  }
+}
+
+UINT64 sched_ticks(void) { return g_ticks; }
+
+task_t *sched_find_pid(UINT64 pid) {
+  UINT32 i;
+
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    if (g_tasks[i].state != TASK_FREE && g_tasks[i].pid == pid) {
+      return &g_tasks[i];
+    }
+  }
+  return NULL;
 }
 
 task_t *sched_current(void) { return g_current; }

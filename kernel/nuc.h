@@ -41,4 +41,11 @@ int nuc_nx_probe(void);
  * the medium, so M4 is verifiable on any image. */
 int nuc_selftest(void);
 
+/* Wrap a flat segment blob in a one-segment NUC image (text at 0x400000,
+ * readable/writable/executable, NUC_STACK_MIN of stack) and start it as a
+ * ring-3 task. `entry` is the byte offset of the first instruction inside
+ * the blob. Used by M6 for hand-assembled clients that have no compiler. */
+int nuc_spawn_blob(const char *name, const UINT8 *blob, UINT32 size,
+                   UINT32 entry);
+
 #endif /* NOVUS_NUC_H */

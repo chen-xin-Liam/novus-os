@@ -35,9 +35,11 @@
 #define TASK_READY   1
 #define TASK_RUNNING 2
 #define TASK_EXITED  3
+#define TASK_BLOCKED 4 /* parked on an IPC port (M6) */
 
 typedef struct task {
   int      id;
+  UINT64   pid;   /* equals id, but 64-bit like ipc_hdr_t::sender */
   int      state;
   char     name[16];
   UINT64   kstack_top; /* top of the ring-0 stack: TSS.RSP0 and the
@@ -51,6 +53,9 @@ typedef struct task {
   UINT32   ticks;
   UINT32   slice;
   int      exit_code;
+  UINT64   wait_port;     /* IPC port a blocked task is parked on */
+  UINT64   wait_deadline; /* tick at which the park expires, 0 = forever */
+  int      wait_err;      /* error to hand back when the task resumes */
   struct task *next;
 } task_t;
 
@@ -81,7 +86,21 @@ void sched_exit_current(int code);
 /* Give up the rest of the slice (SYS_YIELD). */
 void sched_yield(void);
 
+/* Park the running task on `port` until a message arrives (or the timeout
+ * expires). The switch happens on the way out of the trap, so the caller
+ * must also rewind the frame it wants re-executed. */
+void sched_park(UINT64 port, UINT32 timeout_ticks);
+
+/* Make every task parked on `port` runnable again. */
+void sched_wake_port(UINT64 port);
+
+/* Timer tick count, used for park deadlines. */
+UINT64 sched_ticks(void);
+
 task_t *sched_current(void);
+
+/* Task by pid, or NULL. */
+task_t *sched_find_pid(UINT64 pid);
 
 /* Count of tasks that have exited, for the boot log. */
 UINT32 sched_exit_count(void);

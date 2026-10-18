@@ -22,6 +22,7 @@
 #define NOVUS_ND_H
 
 #include "uefi.h"
+#include "nd_input.h"
 
 /* ---- colours ---------------------------------------------------------- */
 
@@ -191,7 +192,23 @@ void nd_selftest(void);
 /* Builds the demo desktop and paints it once. */
 void nd_demo_init(void);
 
-/* Called from the timer tick: poll input, dispatch, repaint damage. */
+/* Called from the timer tick: poll input, dispatch, repaint damage. The
+ * M6 window manager replaces this with its own tick and drives the shell
+ * through the four hooks below. */
 void nd_demo_tick(void);
+
+/* 1 once the shell scene is built and drawable. */
+int nd_demo_ready(void);
+
+/* Hand one input event to the shell's widget tree (absolute screen
+ * coordinates, as nd_input produced them). */
+void nd_demo_dispatch(const nd_event_t *ev);
+
+/* Take the shell's pending damage rectangle, 1 when there is one. */
+int nd_demo_take_damage(nd_rect_t *out);
+
+/* Repaint the shell scene clipped to `clip` (the WM composites windows
+ * on top of this). */
+void nd_demo_paint(nd_rect_t clip);
 
 #endif /* NOVUS_ND_H */

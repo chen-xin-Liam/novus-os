@@ -64,3 +64,11 @@ CONFIG_NOVUS_DISPLAY=y
 # M5: NovusGUI widget library (window/button/textbox/slider/list/tree).
 # Requires CONFIG_NOVUS_DISPLAY.
 CONFIG_NOVUS_GUI=y
+
+# M6: message IPC between processes (ports, checksums, blocking receive).
+# Requires CONFIG_NOVUS_SCHED.
+CONFIG_NOVUS_IPC=y
+
+# M6: Novus-WM window manager and the GUI protocol server. Requires
+# CONFIG_NOVUS_GUI and CONFIG_NOVUS_IPC.
+CONFIG_NOVUS_WM=y

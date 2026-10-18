@@ -33,6 +33,9 @@
 #include "nkm.h"
 /* M5: NovusDisplay and the GUI widget library. */
 #include "nd.h"
+/* M6: kernel-assisted IPC and the Novus-WM window manager. */
+#include "ipc.h"
+#include "nwm.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
@@ -84,6 +87,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 #if CONFIG_NOVUS_DISPLAY
   nd_init();
   nd_selftest();
+#endif
+
+  /* M6: the IPC layer every task inbox comes from. It has to be up
+   * before the scheduler builds any task (sched_create_user attaches an
+   * inbox per pid), and before the WM opens its port. */
+#if CONFIG_NOVUS_IPC
+  ipc_init();
+  ipc_selftest();
 #endif
 
   /* M2: NovusFS on the ramdisk. It runs here because the filesystem
@@ -251,6 +262,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * tick drives input and partial repaints once ring 3 is running. */
 #if CONFIG_NOVUS_DISPLAY
   nd_demo_init();
+#endif
+
+  /* M6: the window manager takes over the tick from here (it drives the
+   * shell through nd_demo_dispatch/nd_demo_paint), then a ring-3 client
+   * is started that asks it for a window over IPC. */
+#if CONFIG_NOVUS_WM && CONFIG_NOVUS_DISPLAY
+  nwm_init();
+  (void)nwm_spawn_client();
 #endif
 
   kputs("[HALT] entering the scheduler (the A core stays parked)\n");

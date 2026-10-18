@@ -489,6 +489,27 @@ void nd_demo_init(void) {
   kputs("[ND] demo desktop painted\n");
 }
 
+int nd_demo_ready(void) { return g_demo_ready; }
+
+void nd_demo_dispatch(const nd_event_t *ev) {
+  if (g_demo_ready) {
+    ng_dispatch(ev);
+  }
+}
+
+int nd_demo_take_damage(nd_rect_t *out) {
+  if (!g_demo_ready) {
+    return 0;
+  }
+  return ng_take_damage(out);
+}
+
+void nd_demo_paint(nd_rect_t clip) {
+  if (g_demo_ready) {
+    ng_render(clip);
+  }
+}
+
 void nd_demo_tick(void) {
   nd_rect_t  d;
   nd_event_t ev;
@@ -501,11 +522,11 @@ void nd_demo_tick(void) {
     if (ev.type == ND_EV_MOUSE_MOVE) {
       nd_cursor_set(ev.x, ev.y); /* restores the pixels under the old one */
     }
-    ng_dispatch(&ev);
+    nd_demo_dispatch(&ev);
   }
-  if (ng_take_damage(&d)) {
+  if (nd_demo_take_damage(&d)) {
     nd_cursor_hide();
-    ng_render(d);
+    nd_demo_paint(d);
   }
   /* Idempotent: draws only when the pointer was hidden by a move or by
    * the repaint above. */
@@ -521,5 +542,16 @@ void nd_selftest(void) {
 void nd_demo_init(void) {}
 
 void nd_demo_tick(void) {}
+
+int nd_demo_ready(void) { return 0; }
+
+void nd_demo_dispatch(const nd_event_t *ev) { (void)ev; }
+
+int nd_demo_take_damage(nd_rect_t *out) {
+  (void)out;
+  return 0;
+}
+
+void nd_demo_paint(nd_rect_t clip) { (void)clip; }
 
 #endif /* CONFIG_NOVUS_GUI */

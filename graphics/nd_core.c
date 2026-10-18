@@ -393,11 +393,28 @@ void nd_shadow(nd_surface_t *s, nd_rect_t r, INT32 spread, UINT8 alpha) {
     return;
   }
   /* Outermost first: each ring is thinner in alpha than the one below it,
-   * which is enough to read as a soft edge without a blur pass. */
+   * which is enough to read as a soft edge without a blur pass.
+   *
+   * Only the one-pixel band of each ring is blended. Blending the whole
+   * rectangle per ring - which is what this did in M5 - costs `spread`
+   * times the window area on every repaint, and since the interior is
+   * covered by the window itself the work was invisible: a compositor
+   * pass over two windows spent ~20 ms there and the screen showed the
+   * scene half-painted while it did. */
   for (i = spread; i > 0; i--) {
-    UINT32 a = ((UINT32)alpha * (UINT32)(spread - i + 1)) /
-               ((UINT32)spread * 2u);
-    nd_blend_rect(s, nd_rect(r.x - i, r.y - i + 2, r.w + i * 2, r.h + i * 2),
+    UINT32     a = ((UINT32)alpha * (UINT32)(spread - i + 1)) /
+                   ((UINT32)spread * 2u);
+    nd_rect_t  o = nd_rect(r.x - i, r.y - i + 2, r.w + i * 2, r.h + i * 2);
+
+    if (a == 0u) {
+      continue;
+    }
+    nd_blend_rect(s, nd_rect(o.x, o.y, o.w, 1), ND_RGB(0, 0, 0), (UINT8)a);
+    nd_blend_rect(s, nd_rect(o.x, o.y + o.h - 1, o.w, 1), ND_RGB(0, 0, 0),
+                  (UINT8)a);
+    nd_blend_rect(s, nd_rect(o.x, o.y + 1, 1, o.h - 2), ND_RGB(0, 0, 0),
+                  (UINT8)a);
+    nd_blend_rect(s, nd_rect(o.x + o.w - 1, o.y + 1, 1, o.h - 2),
                   ND_RGB(0, 0, 0), (UINT8)a);
   }
 }

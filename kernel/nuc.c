@@ -435,6 +435,40 @@ static void put64(UINT8 *p, UINT64 v) {
   put32(p + 4, (UINT32)(v >> 32));
 }
 
+int nuc_spawn_blob(const char *name, const UINT8 *blob, UINT32 size,
+                   UINT32 entry) {
+  /* Header + one segment entry + the blob. The image is built in a
+   * static buffer: the loader copies it into the new address space
+   * before returning, so nothing has to outlive this call. */
+  static UINT8 img[NUC_HDR_SIZE + NUC_SEG_SIZE + 1024u];
+  UINT32       strtab = NUC_HDR_SIZE + NUC_SEG_SIZE;
+
+  if (blob == 0 || size == 0u || entry >= size ||
+      strtab + size > (UINT32)sizeof(img)) {
+    return NUC_EINVAL;
+  }
+  memset(img, 0, sizeof(img));
+  memcpy(img, "NUC!", 4);
+  img[4] = 0x00; /* abi_version 1.0 */
+  img[5] = 0x01;
+  img[6] = 0x05; /* 64-bit + static */
+  put32(img + 8, entry);
+  img[12] = 1; /* one segment */
+  put32(img + 16, strtab);
+  put32(img + 20, strtab);
+  put32(img + 24, NUC_STACK_MIN);
+  put32(img + 28, 0);
+
+  put32(img + NUC_HDR_SIZE + 0, NUC_SEG_TEXT);
+  put32(img + NUC_HDR_SIZE + 4, strtab);
+  put64(img + NUC_HDR_SIZE + 8, 0x400000); /* where mochi links too */
+  put64(img + NUC_HDR_SIZE + 16, size);
+  put32(img + NUC_HDR_SIZE + 24, 0x0D); /* R + W + X: clients patch data */
+
+  memcpy(img + strtab, blob, size);
+  return nuc_load(img, strtab + size, name);
+}
+
 int nuc_selftest(void) {
   /* A hand-built program that exercises the whole path: write a string
    * through the syscall gate (which forces the kernel to read user memory
