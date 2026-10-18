@@ -47,4 +47,10 @@ void nd_ime_draw(nd_surface_t *s);
 int  nd_ime_active(void);
 void nd_ime_bounds(INT32 *x, INT32 *y, INT32 *w, INT32 *h);
 
+/* Chinese/Latin input mode. With the IME in Latin mode (en=1) every
+ * printable key is passed straight to the text box, so typing English
+ * does not start a pinyin composition. Default is Chinese (en=0). */
+void nd_ime_set_en(int en);
+int  nd_ime_en(void);
+
 #endif /* NOVUS_ND_IME_H */

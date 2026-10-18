@@ -26,6 +26,7 @@ typedef struct {
 } nd_ime_t;
 
 static nd_ime_t g_ime;
+static int      g_en; /* 0 = Chinese (pinyin), 1 = Latin passthrough */
 
 static int str_equal(const char *a, const char *b) {
   while (*a != '\0' && *a == *b) {
@@ -138,12 +139,30 @@ static void commit(ng_widget_t *edit) {
 
 void nd_ime_init(void) {
   memset(&g_ime, 0, sizeof(g_ime));
+  g_en = 0;
   kputs("[IME] pinyin up: ");
   kputs_hex(g_ime_count);
   kputs(" syllables, ");
   kputs_hex(g_ime_start[g_ime_count - 1u] + g_ime_len[g_ime_count - 1u]);
   kputs(" characters\n");
 }
+
+void nd_ime_set_en(int en) {
+  if (g_en == (en != 0)) {
+    return;
+  }
+  /* Switching away from Chinese ends any open composition; the text box
+   * keeps whatever was already committed. */
+  if (g_ime.active) {
+    damage_popup();
+    g_ime.active = 0;
+    g_ime.n = 0;
+    g_ime.py[0] = '\0';
+  }
+  g_en = (en != 0);
+}
+
+int nd_ime_en(void) { return g_en; }
 
 int nd_ime_active(void) { return g_ime.active; }
 
@@ -175,7 +194,7 @@ int nd_ime_key(void *editw, UINT32 key) {
   }
 
   if (!g_ime.active) {
-    if (key >= 'a' && key <= 'z' && len + 1u < sizeof(g_ime.py)) {
+    if (!g_en && key >= 'a' && key <= 'z' && len + 1u < sizeof(g_ime.py)) {
       g_ime.py[len] = (char)key;
       g_ime.py[len + 1u] = '\0';
       if (!syllable_prefix(g_ime.py)) {
@@ -187,7 +206,7 @@ int nd_ime_key(void *editw, UINT32 key) {
       damage_popup();
       return 1;
     }
-    return 0;
+    return 0; /* Latin mode, or a non-letter key: hand it to the text box */
   }
 
   /* Composing. */
@@ -341,5 +360,7 @@ void nd_ime_bounds(INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
   (void)w;
   (void)h;
 }
+void nd_ime_set_en(int en) { (void)en; }
+int  nd_ime_en(void) { return 1; } /* no IME: everything passes through */
 
 #endif

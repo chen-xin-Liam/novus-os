@@ -164,7 +164,9 @@ UINT32 nd_char_adv(UINT32 cp, UINT32 scale) {
   if (scale == 0u) {
     scale = 1u;
   }
-  return (cp < 0x80u) ? ND_FONT_ADV * scale : ND_CJK_ADV;
+  /* Both cell widths scale; ASCII advances by its 6-column cell, CJK by
+   * its 16-column cell, so a line stays proportional at 1x and 2x. */
+  return (cp < 0x80u) ? ND_FONT_ADV * scale : ND_CJK_ADV * scale;
 }
 
 UINT32 nd_text_width(const char *text, UINT32 scale) {
@@ -182,8 +184,9 @@ UINT32 nd_text_width(const char *text, UINT32 scale) {
     n++;
   }
   /* The last cell carries no advance: a glyph is 5 columns wide and the
-   * 6th is the inter-character gap (CJK the same, one column of padding). */
-  return (n == 0u) ? 0u : (w - 1u);
+   * 6th is the inter-character gap (CJK the same, one column of padding).
+   * At scale s the gap is s pixels wide. */
+  return (n == 0u) ? 0u : (w - scale);
 }
 
 UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
@@ -204,12 +207,13 @@ UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
     w += nd_char_adv(cp, scale);
     n++;
   }
-  return (n == 0u) ? 0u : (w - 1u);
+  return (n == 0u) ? 0u : (w - scale);
 }
 
 UINT32 nd_text_height(const char *text, UINT32 scale) {
   const char *p = text;
   UINT32      h = (scale != 0u) ? ND_GLYPH_H * scale : ND_GLYPH_H;
+  UINT32      cjk = (scale != 0u) ? ND_CJK_H * scale : ND_CJK_H;
 
   if (text == 0) {
     return h;
@@ -218,7 +222,7 @@ UINT32 nd_text_height(const char *text, UINT32 scale) {
     UINT32 cp = nd_utf8_next(&p);
 
     if (cp >= 0x80u) {
-      return (h > ND_CJK_H) ? h : ND_CJK_H;
+      return (h > cjk) ? h : cjk;
     }
   }
   return h;
