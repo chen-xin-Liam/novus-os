@@ -28,8 +28,13 @@ void kputs_hex(UINT64 v);
 #define NOVUS_KERNEL_VERSION 0x0000000100000000ULL
 
 /* Freestanding memory helpers; the compiler may emit calls to these. */
-void *memcpy(void *dst, const void *src, UINT64 n);
-void *memset(void *dst, int c, UINT64 n);
-int memcmp(const void *a, const void *b, UINT64 n);
+#if CONFIG_BIOS_BOOT
+#define NOVUS_MEMORY_ABI __attribute__((sysv_abi))
+#else
+#define NOVUS_MEMORY_ABI
+#endif
+void *NOVUS_MEMORY_ABI memcpy(void *dst, const void *src, UINT64 n);
+void *NOVUS_MEMORY_ABI memset(void *dst, int c, UINT64 n);
+int NOVUS_MEMORY_ABI memcmp(const void *a, const void *b, UINT64 n);
 
 #endif /* NOVUS_KERNEL_H */

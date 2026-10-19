@@ -1,11 +1,8 @@
 /**
- * Novus OS - PS/2 keyboard and mouse polling (M5).
+ * Novus OS - PS/2 keyboard and mouse IRQ input.
  *
- * The 8042 controller is programmed for polled operation: both interrupt
- * bits are cleared in the config byte, keyboard translation is left on so
- * scancodes arrive as set 1, and then every timer tick drains whatever
- * bytes are waiting. No IRQ lines, no IOAPIC changes, no surprises for the
- * M4 scheduler.
+ * IRQ1/12 capture raw bytes; the existing tick consumer decodes the queue.
+ * Hardware reads during initialization only exchange controller commands.
  *
  * Absolute mouse position is kept here rather than in the widget layer:
  * the WM in M6 will need the same value, and clamping it to the screen is
@@ -16,6 +13,7 @@
 #include "cpu.h"
 #include "nd.h"
 #include "nd_input.h"
+#include "irq.h"
 
 #define PS2_DATA   0x60
 #define PS2_STATUS 0x64
@@ -35,6 +33,40 @@
 
 #define ND_EVENT_QUEUE 64
 #define ND_SCAN_LIMIT  64
+#define ND_RAW_QUEUE 256u
+
+static struct {
+  UINT8 data;
+  UINT8 aux;
+} g_raw[ND_RAW_QUEUE];
+static UINT32 g_raw_head;
+static UINT32 g_raw_tail;
+static UINT32 g_raw_dropped;
+static UINT8 g_irq_logged;
+
+static void ps2_irq(void *ctx) {
+  UINT32 guard = ND_SCAN_LIMIT;
+
+  (void)ctx;
+  while (guard-- != 0u) {
+    UINT8 status = io_in8(PS2_STATUS);
+    UINT8 data;
+    UINT32 next;
+
+    if ((status & PS2_ST_OUT_FULL) == 0u) {
+      break;
+    }
+    data = io_in8(PS2_DATA);
+    next = (g_raw_head + 1u) % ND_RAW_QUEUE;
+    if ((status & 0xC0u) != 0u || next == g_raw_tail) {
+      g_raw_dropped++;
+      continue;
+    }
+    g_raw[g_raw_head].data = data;
+    g_raw[g_raw_head].aux = (UINT8)(status & PS2_ST_AUX);
+    g_raw_head = next;
+  }
+}
 
 static nd_event_t g_queue[ND_EVENT_QUEUE];
 static UINT32     g_head;
@@ -131,11 +163,16 @@ static void ps2_flush(void) {
 
 void nd_input_init(void) {
   UINT8 cfg = 0;
+  int cfg_valid = 0;
   INT32 w = 1024;
   INT32 h = 768;
 
   g_head = 0;
   g_tail = 0;
+  g_raw_head = 0;
+  g_raw_tail = 0;
+  g_raw_dropped = 0;
+  g_irq_logged = 0;
   g_mouse_bytes = 0;
   g_extended = 0;
   g_shift = 0;
@@ -155,15 +192,15 @@ void nd_input_init(void) {
   g_mx = w / 2;
   g_my = h / 3;
 
-  /* Controller self-configuration: interrupts off (we poll), translation
-   * on so the keyboard speaks set 1. */
+  /* Keep IRQs off until device command replies have been consumed. */
   ps2_cmd(PS2_CMD_DISABLE_K);
   ps2_cmd(PS2_CMD_DISABLE_M);
   ps2_flush();
   ps2_cmd(PS2_CMD_READ_CFG);
   if (ps2_wait_out()) {
     cfg = io_in8(PS2_DATA);
-    cfg = (UINT8)((cfg | 0x40u) & (UINT8)~0x03u); /* XLAT on, IRQ1/12 off */
+    cfg = (UINT8)((cfg | 0x40u) & (UINT8)~0x03u);
+    cfg_valid = 1;
     ps2_cmd(PS2_CMD_WRITE_CFG);
     ps2_write(cfg);
   }
@@ -183,7 +220,16 @@ void nd_input_init(void) {
     (void)io_in8(PS2_DATA);
   }
   ps2_flush();
-  kputs("[ND] PS/2 keyboard + mouse polling enabled\n");
+  if (cfg_valid && irq_register(1u, 0u, ps2_irq, NULL, "ps2-keyboard") >= 0 &&
+      irq_register(12u, 0u, ps2_irq, NULL, "ps2-mouse") >= 0) {
+    ps2_cmd(PS2_CMD_WRITE_CFG);
+    ps2_write((UINT8)((cfg | 0x43u) & (UINT8)~0x30u));
+    kputs("[ND] PS/2 keyboard + mouse IRQ enabled (no hardware polling)\n");
+  } else {
+    (void)irq_unregister(1u, ps2_irq, NULL);
+    (void)irq_unregister(12u, ps2_irq, NULL);
+    kputs("[ND] WARN PS/2 IRQ unavailable: input disabled\n");
+  }
 }
 
 /* ---- scancode set 1 --------------------------------------------------- */
@@ -405,19 +451,27 @@ void nd_input_poll(void) {
   UINT32 guard = ND_SCAN_LIMIT;
 
   while (guard-- > 0) {
-    UINT8 status = io_in8(PS2_STATUS);
+    UINT64 saved = irq_save();
+    UINT8 data;
+    UINT8 aux;
 
-    if ((status & PS2_ST_OUT_FULL) == 0u) {
+    if (g_raw_tail == g_raw_head) {
+      irq_restore(saved);
       break;
     }
-    {
-      UINT8 data = io_in8(PS2_DATA);
-
-      if ((status & PS2_ST_AUX) != 0u) {
-        mouse_byte(data);
-      } else {
-        kbd_byte(data);
-      }
+    data = g_raw[g_raw_tail].data;
+    aux = g_raw[g_raw_tail].aux;
+    g_raw_tail = (g_raw_tail + 1u) % ND_RAW_QUEUE;
+    irq_restore(saved);
+    if ((g_irq_logged & (aux ? 2u : 1u)) == 0u) {
+      g_irq_logged |= aux ? 2u : 1u;
+      kputs(aux ? "[ND] mouse byte from IRQ queue\n"
+                 : "[ND] keyboard byte from IRQ queue\n");
+    }
+    if (aux != 0u) {
+      mouse_byte(data);
+    } else {
+      kbd_byte(data);
     }
   }
 }

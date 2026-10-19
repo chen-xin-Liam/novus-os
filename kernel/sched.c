@@ -67,6 +67,20 @@ static UINT32 g_pick_hint;
 
 /* ---- helpers ----------------------------------------------------------- */
 
+static UINT32 task_slice(const task_t *t) {
+  return SCHED_SLICE_TICKS * (t->foreground ? 2u : 1u);
+}
+
+static void task_charge_tick(task_t *t) {
+  t->ticks++;
+  if (t->slice > 0u) {
+    t->slice--;
+  }
+  if (t->slice == 0u) {
+    g_need_resched = 1;
+  }
+}
+
 /* Kernel stacks live in a static pool, one slot per task slot.
  *
  * Asking the PMM for 16 contiguous pages at run time works exactly once:
@@ -287,6 +301,7 @@ void sched_init(void) {
   g_exit_count = 0;
   g_ticks = 0;
   g_reap = NULL;
+  (void)sched_selftest();
 
   gdt_init();
   idt_init();
@@ -359,7 +374,7 @@ task_t *sched_create_user(const char *name, const vm_space_t *space,
   t->space = *space;
   t->kstack_top = (UINT64)(UINTN)(kstack + SCHED_KSTACK_PAGES * 4096u);
   t->kstack_phys = virt_to_phys(kstack);
-  t->slice = SCHED_SLICE_TICKS;
+  t->slice = task_slice(t);
   t->started = (UINT32)g_ticks;
   t->exit_code = -1;
   for (i = 0; i < sizeof(t->name) - 1u && name[i] != '\0'; i++) {
@@ -433,7 +448,7 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
 
   g_current = next;
   next->state = TASK_RUNNING;
-  next->slice = SCHED_SLICE_TICKS;
+  next->slice = task_slice(next);
   g_kidle_reported = 0; /* the next idle entry is a new event */
 
   /* A dozen lines is enough to see whether the timer is switching tasks
@@ -489,13 +504,7 @@ void sched_tick(void) {
   }
 
   if (g_current != NULL) {
-    g_current->ticks++;
-    if (g_current->slice > 0u) {
-      g_current->slice--;
-    }
-    if (g_current->slice == 0u) {
-      g_need_resched = 1;
-    }
+    task_charge_tick(g_current);
     if ((g_ticks % 40u) == 0u) {
       kputs("[SCHED] ticks=");
       kputs_hex(g_ticks);
@@ -529,11 +538,11 @@ void sched_tick(void) {
   nwm_tick();
   /* M8: the sysinfo service shares the tick with the WM. */
   sysinfo_tick();
-  /* M10: poll the network card and run DHCP/ICMP/TCP timers. Bounded work
+  /* M10: drain network receive queues and run DHCP/ICMP/TCP timers. Bounded work
    * per tick - eight frames and a handful of timers. */
   net_tick();
 #elif CONFIG_NOVUS_DISPLAY
-  /* M5: NovusDisplay shares the tick. Input is polled (no new IRQ lines)
+  /* M5: NovusDisplay shares the tick. Input is decoded from the IRQ queue
    * and at most one damage rectangle is repainted per event, so the cost
    * stays bounded and the scheduler's own work is unaffected. */
   nd_demo_tick();
@@ -545,6 +554,7 @@ void sched_exit_current(int code) {
     return;
   }
   g_current->state = TASK_EXITED;
+  g_current->foreground = 0;
   g_current->exit_code = code;
   g_exit_count++;
   g_need_resched = 1;
@@ -646,6 +656,7 @@ int sched_kill(UINT64 pid) {
     return -3;
   }
   t->state = TASK_EXITED;
+  t->foreground = 0;
   t->exit_code = -1;
   g_exit_count++;
   g_need_resched = 1;
@@ -709,6 +720,81 @@ task_t *sched_find_pid(UINT64 pid) {
 
 task_t *sched_current(void) { return g_current; }
 
+int sched_set_foreground(UINT64 pid) {
+  task_t *target = NULL;
+  UINT32 index;
+
+  if (pid != SCHED_FOREGROUND_NONE) {
+    target = sched_find_pid(pid);
+    if (target == NULL) {
+      return -1;
+    }
+  }
+  for (index = 0; index < SCHED_MAX_TASKS; index++) {
+    task_t *task = &g_tasks[index];
+    UINT8 foreground = (UINT8)(task == target);
+
+    if (task->state != TASK_FREE && task->state != TASK_EXITED &&
+        task->foreground != foreground) {
+      task->foreground = foreground;
+      task->slice = task_slice(task);
+    }
+  }
+  return 0;
+}
+
+int sched_selftest(void) {
+  task_t *front = &g_tasks[0];
+  task_t *back = &g_tasks[1];
+  UINT32 elapsed;
+  UINT32 saved_hint = g_pick_hint;
+  int saved_resched = g_need_resched;
+  int pass = 1;
+
+  for (elapsed = 0; elapsed < SCHED_MAX_TASKS; elapsed++) {
+    if (g_tasks[elapsed].state != TASK_FREE) {
+      return 0;
+    }
+  }
+  front->pid = 100u;
+  back->pid = 101u;
+  front->state = back->state = TASK_READY;
+  front->slice = back->slice = SCHED_SLICE_TICKS;
+  pass &= sched_set_foreground(front->pid) == 0;
+  pass &= front->slice == 8u && back->slice == 4u;
+  task_charge_tick(front);
+  pass &= sched_set_foreground(front->pid) == 0 && front->slice == 7u;
+  pass &= sched_set_foreground(102u) == -1 && front->foreground;
+  pass &= sched_set_foreground(back->pid) == 0;
+  pass &= front->slice == 4u && !front->foreground && back->slice == 8u;
+  pass &= sched_set_foreground(SCHED_FOREGROUND_NONE) == 0;
+  pass &= front->slice == 4u && back->slice == 4u;
+  (void)sched_set_foreground(front->pid);
+  front->ticks = back->ticks = 0;
+  g_pick_hint = 0;
+  for (elapsed = 0; elapsed < 120u;) {
+    task_t *next = task_pick_next();
+
+    if (next == NULL) {
+      pass = 0;
+      break;
+    }
+    next->slice = task_slice(next);
+    while (next->slice != 0u && elapsed < 120u) {
+      task_charge_tick(next);
+      elapsed++;
+    }
+  }
+  pass &= front->ticks == 80u && back->ticks == 40u;
+  memset(front, 0, sizeof(*front));
+  memset(back, 0, sizeof(*back));
+  g_pick_hint = saved_hint;
+  g_need_resched = saved_resched;
+  kputs(pass ? "[SCHED] foreground selftest: PASS (80:40 ticks)\n"
+             : "[SCHED] foreground selftest: FAIL\n");
+  return pass;
+}
+
 UINT32 sched_exit_count(void) { return g_exit_count; }
 
 void sched_start(void) {
@@ -722,6 +808,7 @@ void sched_start(void) {
   }
   g_current = first;
   first->state = TASK_RUNNING;
+  first->slice = task_slice(first);
   tss_set_rsp0(first->kstack_top);
   sys_kernel_rsp = first->kstack_top;
   vm_switch_cr3(first->cr3);
@@ -792,7 +879,7 @@ int sched_resume(UINT64 pid) {
 
     if (t->state == TASK_SUSPENDED && t->pid == pid) {
       t->state = TASK_READY;
-      t->slice = SCHED_SLICE_TICKS;
+      t->slice = task_slice(t);
       g_need_resched = 1;
       return 0;
     }

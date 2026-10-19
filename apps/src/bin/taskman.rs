@@ -18,6 +18,7 @@ struct Row {
     pid: u64,
     ticks: u32,
     state: u8,
+    slice: u8,
     name: [u8; 14],
 }
 
@@ -54,6 +55,7 @@ fn state_color(s: u8) -> u32 {
 fn draw(w: &wm::Win, rows: &[Row; MAX_ROWS], n: usize, total: u16, accent: u32) {
     w.clear();
     ui::shell(w, CW, CH, "调度器", accent);
+    w.text(372, 10, ui::DIM, "时间片");
 
     if n == 0 {
         w.text(12, 40, ui::DIM, "（无任务）");
@@ -71,6 +73,8 @@ fn draw(w: &wm::Win, rows: &[Row; MAX_ROWS], n: usize, total: u16, accent: u32) 
         w.text(210, y + 6, ui::DIM, p);
         let t = ui::fmt_u32(r.ticks, &mut b);
         w.text(300, y + 6, ui::DIM, t);
+        let slice = ui::fmt_u32(r.slice as u32, &mut b);
+        w.text(388, y + 6, if r.slice > 4 { ui::GOOD } else { ui::DIM }, slice);
     }
 
     /* Task-table occupancy. */
@@ -103,6 +107,7 @@ fn load(port: u64, out: &mut [Row; MAX_ROWS]) -> (usize, u16) {
                     pid: page.rec[i].pid,
                     ticks: page.rec[i].ticks,
                     state: page.rec[i].state,
+                    slice: page.rec[i].slice,
                     name: page.rec[i].name,
                 };
                 n += 1;
@@ -134,6 +139,7 @@ pub extern "C" fn _start() -> ! {
         pid: 0,
         ticks: 0,
         state: 0,
+        slice: 0,
         name: [0; 14],
     }; MAX_ROWS];
     let (mut n, mut total) = load(sys_port, &mut rows);

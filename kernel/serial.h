@@ -6,6 +6,8 @@
 #define NOVUS_SERIAL_H
 
 void serial_init(void);
+void serial_irq_init(void);
+int serial_getc(void);
 void serial_putc(char c);
 void serial_puts(const char *s);
 

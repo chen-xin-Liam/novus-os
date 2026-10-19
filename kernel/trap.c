@@ -20,6 +20,7 @@
 #include "mm.h"
 #include "msr.h"
 #include "ipc.h"
+#include "irq.h"
 
 /* Syscall numbers (README part 8: one table, one ABI). */
 #define SYS_YIELD       1u
@@ -372,6 +373,9 @@ UINT64 trap_dispatch(trap_frame_t *f) {
   } else if (f->vector == IDT_TIMER_VECTOR) {
     lapic_write(lapic_base(), LAPIC_EOI, 0);
     sched_tick();
+  } else if (f->vector >= IRQ_FIRST_VECTOR && f->vector <= IRQ_SPURIOUS_VECTOR) {
+    irq_dispatch((UINT32)f->vector);
+    return (UINT64)(UINTN)f;
   } else {
     trap_exception(f);
   }

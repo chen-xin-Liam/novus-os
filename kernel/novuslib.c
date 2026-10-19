@@ -7,7 +7,7 @@
 
 #include "kernel.h"
 
-void *memcpy(void *dst, const void *src, UINT64 n) {
+void *NOVUS_MEMORY_ABI memcpy(void *dst, const void *src, UINT64 n) {
   UINT8 *d = (UINT8 *)dst;
   const UINT8 *s = (const UINT8 *)src;
   while (n--) {
@@ -16,7 +16,7 @@ void *memcpy(void *dst, const void *src, UINT64 n) {
   return dst;
 }
 
-void *memset(void *dst, int c, UINT64 n) {
+void *NOVUS_MEMORY_ABI memset(void *dst, int c, UINT64 n) {
   UINT8 *d = (UINT8 *)dst;
   while (n--) {
     *d++ = (UINT8)c;
@@ -24,7 +24,7 @@ void *memset(void *dst, int c, UINT64 n) {
   return dst;
 }
 
-int memcmp(const void *a, const void *b, UINT64 n) {
+int NOVUS_MEMORY_ABI memcmp(const void *a, const void *b, UINT64 n) {
   const UINT8 *x = (const UINT8 *)a;
   const UINT8 *y = (const UINT8 *)b;
   while (n--) {

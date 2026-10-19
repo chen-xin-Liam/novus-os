@@ -96,6 +96,77 @@ isr_stub_table:
     .quad   isr24, isr25, isr26, isr27, isr28, isr29, isr30, isr31
     .quad   isr32
 
+.altmacro
+.macro DEVICE_ISR num
+    .globl isr\()\num
+isr\()\num:
+    pushq $0
+    pushq $\num
+    jmp irq_common
+.endm
+.set irq_vector, 33
+.rept 223
+    DEVICE_ISR %irq_vector
+    .set irq_vector, irq_vector + 1
+.endr
+
+.macro IRQ_TABLE_ENTRY num
+    .quad isr\()\num
+.endm
+
+    .globl irq_stub_table
+    .align 8
+irq_stub_table:
+.set irq_vector, 33
+.rept 223
+    IRQ_TABLE_ENTRY %irq_vector
+    .set irq_vector, irq_vector + 1
+.endr
+.noaltmacro
+
+irq_common:
+    pushq %rax
+    pushq %rbx
+    pushq %rcx
+    pushq %rdx
+    pushq %rsi
+    pushq %rdi
+    pushq %rbp
+    pushq %r8
+    pushq %r9
+    pushq %r10
+    pushq %r11
+    pushq %r12
+    pushq %r13
+    pushq %r14
+    pushq %r15
+    cld
+    movq %rsp, %rbx
+    movq %rsp, %rcx
+    andq $-16, %rsp
+    subq $544, %rsp
+    fxsave64 32(%rsp)
+    call trap_dispatch
+    fxrstor64 32(%rsp)
+    movq %rbx, %rsp
+    popq %r15
+    popq %r14
+    popq %r13
+    popq %r12
+    popq %r11
+    popq %r10
+    popq %r9
+    popq %r8
+    popq %rbp
+    popq %rdi
+    popq %rsi
+    popq %rdx
+    popq %rcx
+    popq %rbx
+    popq %rax
+    addq $16, %rsp
+    iretq
+
 /* ---- common entry ------------------------------------------------------ */
     .globl  isr_common
 isr_common:
