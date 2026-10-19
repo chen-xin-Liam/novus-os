@@ -514,11 +514,15 @@ static void draw_ascii(nd_surface_t *s, INT32 x, INT32 y, UINT8 ch,
   }
 }
 
-/* Draw one 16x16 CJK glyph, MSB leftmost, one fill per run. */
+/* Draw one 16x16 CJK glyph, MSB leftmost, one fill per run, scaled the
+ * same way as draw_ascii so Chinese and Latin stay proportional at 2x. */
 static void draw_cjk_bits(nd_surface_t *s, INT32 x, INT32 y,
-                          const UINT16 *rows, nd_color_t c) {
+                          const UINT16 *rows, nd_color_t c, UINT32 scale) {
   UINT32 gy;
 
+  if (scale == 0u) {
+    scale = 1u;
+  }
   for (gy = 0; gy < ND_CJK_H; gy++) {
     UINT16 bits = rows[gy];
     UINT32 gx = 0;
@@ -534,8 +538,10 @@ static void draw_cjk_bits(nd_surface_t *s, INT32 x, INT32 y,
         gx++;
       }
       if (gx > start) {
-        nd_fill_rect(s, nd_rect(x + (INT32)start, y + (INT32)gy,
-                                (INT32)(gx - start), 1),
+        nd_fill_rect(s, nd_rect(x + (INT32)start * (INT32)scale,
+                                y + (INT32)gy * (INT32)scale,
+                                (INT32)(gx - start) * (INT32)scale,
+                                (INT32)scale),
                      c);
       }
     }
@@ -575,11 +581,14 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
       if (rows == 0) {
         /* Missing glyph: a hollow box keeps the layout honest and makes
          * the gap in the glyph set obvious instead of invisible. */
-        nd_frame(s, nd_rect(cx + 1, y + (INT32)(cell - ND_CJK_H) + 1,
-                            ND_CJK_W - 2, ND_CJK_H - 2),
+        nd_frame(s, nd_rect(cx + (INT32)scale,
+                            y + (INT32)(cell - ND_CJK_H * scale) + (INT32)scale,
+                            ND_CJK_W * scale - 2u * scale,
+                            ND_CJK_H * scale - 2u * scale),
                  1, c);
       } else {
-        draw_cjk_bits(s, cx, y + (INT32)(cell - ND_CJK_H), rows, c);
+        draw_cjk_bits(s, cx, y + (INT32)(cell - ND_CJK_H * scale), rows, c,
+                      scale);
       }
     }
     cx += (INT32)adv;

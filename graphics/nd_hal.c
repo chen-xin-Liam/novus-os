@@ -135,6 +135,49 @@ int nd_capture_boot(void *system_table) {
   return 1;
 }
 
+int nd_capture_bios(UINT64 fb_base, UINT64 fb_size, UINT32 width,
+                    UINT32 height, UINT32 pitch_bytes, UINT16 bpp,
+                    UINT8 red_size, UINT8 red_pos, UINT8 green_size,
+                    UINT8 green_pos, UINT8 blue_size, UINT8 blue_pos) {
+  UINT8 bgr;
+  UINT64 required_size;
+
+  memset(&g_disp, 0, sizeof(g_disp));
+  g_disp.backend = "none";
+  if (fb_base == 0 || fb_size == 0 || width == 0 || height == 0 ||
+      width > ND_FB_MAX_WIDTH || height > ND_FB_MAX_HEIGHT || bpp != 32 ||
+      pitch_bytes == 0 || (pitch_bytes & 3u) != 0 ||
+      pitch_bytes / 4u < width || fb_base >= ND_LOW_4G ||
+      fb_size > ND_LOW_4G - fb_base) {
+    return 0;
+  }
+
+  required_size = (UINT64)pitch_bytes * height;
+  if (fb_size < required_size) {
+    return 0;
+  }
+  if (red_size == 8 && red_pos == 16 && green_size == 8 &&
+      green_pos == 8 && blue_size == 8 && blue_pos == 0) {
+    bgr = 1;
+  } else if (red_size == 8 && red_pos == 0 && green_size == 8 &&
+             green_pos == 8 && blue_size == 8 && blue_pos == 16) {
+    bgr = 0;
+  } else {
+    return 0;
+  }
+
+  g_disp.available = 1;
+  g_disp.bgr = bgr;
+  g_disp.width = width;
+  g_disp.height = height;
+  g_disp.pitch = pitch_bytes / 4u;
+  g_disp.bpp = bpp;
+  g_disp.fb_phys = fb_base;
+  g_disp.fb_size = fb_size;
+  g_disp.backend = "VBE framebuffer";
+  return 1;
+}
+
 /* ---- kernel stage ----------------------------------------------------- */
 
 int nd_init(void) {

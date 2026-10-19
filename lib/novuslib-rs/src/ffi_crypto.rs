@@ -2,7 +2,7 @@
 //! NKM signature check, README 4.2.2 for the Merkle tree hash).
 //!
 //! Every export follows the boundary contract documented at the top of
-//! lib.rs: `#[no_mangle] extern "C"`, scalar/pointer arguments only, no
+//! lib.rs: target C ABI by default or Win64 with the BIOS feature; scalar/pointer arguments only, no
 //! panicking paths that depend on `core::fmt`. The Rust implementations
 //! live in crypto/ and are reused verbatim by the host build tools.
 //!
@@ -15,9 +15,22 @@ use crate::crypto::sha256;
 use crate::crypto::sha512;
 use core::slice;
 
+macro_rules! ffi_export {
+    ($(#[$meta:meta])* pub fn $name:ident($($args:tt)*) $(-> $ret:ty)? $body:block) => {
+        #[cfg(feature = "bios-ms-abi")]
+        $(#[$meta])*
+        pub extern "win64" fn $name($($args)*) $(-> $ret)? $body
+
+        #[cfg(not(feature = "bios-ms-abi"))]
+        $(#[$meta])*
+        pub extern "C" fn $name($($args)*) $(-> $ret)? $body
+    };
+}
+
 /// SHA-256 of `len` bytes at `data` into `out[0..32]`.
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_sha256(data: *const u8, len: usize, out: *mut u8) {
+pub fn novus_rs_sha256(data: *const u8, len: usize, out: *mut u8) {
     let input: &[u8] = if len == 0 {
         &[]
     } else {
@@ -33,14 +46,16 @@ pub extern "C" fn novus_rs_sha256(data: *const u8, len: usize, out: *mut u8) {
         }
     }
 }
+}
 
 /// SHA-512 of `len` bytes at `data` into `out[0..64]`.
 ///
 /// The kernel itself only needs SHA-256; SHA-512 is exposed because it is
 /// the hash Ed25519 is defined over and the selftest asserts both against
 /// known digests.
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_sha512(data: *const u8, len: usize, out: *mut u8) {
+pub fn novus_rs_sha512(data: *const u8, len: usize, out: *mut u8) {
     let input: &[u8] = if len == 0 {
         &[]
     } else {
@@ -56,6 +71,7 @@ pub extern "C" fn novus_rs_sha512(data: *const u8, len: usize, out: *mut u8) {
         }
     }
 }
+}
 
 /// Ed25519 verification: 1 when `sig` is a valid signature over `msg`
 /// under `pubkey`, 0 otherwise.
@@ -63,8 +79,9 @@ pub extern "C" fn novus_rs_sha512(data: *const u8, len: usize, out: *mut u8) {
 /// Novus signs the 32-byte SHA-256 digest of a module rather than the
 /// module bytes, so `msg_len` is 32 in the NKM path; the wrapper stays
 /// length-generic because Ed25519 itself is.
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_ed25519_verify(
+pub fn novus_rs_ed25519_verify(
     sig: *const u8,
     msg: *const u8,
     msg_len: usize,
@@ -87,4 +104,5 @@ pub extern "C" fn novus_rs_ed25519_verify(
     } else {
         0
     }
+}
 }

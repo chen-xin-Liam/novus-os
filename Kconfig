@@ -12,6 +12,13 @@ config NOVUS_ARCH
 	  Target architecture Novus OS is built for.
 	  M0 supports x86_64 only.
 
+config BIOS_BOOT
+	bool
+	default n
+	help
+	  Build the independent legacy BIOS raw image with `make bios-img`.
+	  The default UEFI target and `make run` remain unchanged.
+
 config NOVUS_MIN_MEMORY_MB
 	int
 	default 2048

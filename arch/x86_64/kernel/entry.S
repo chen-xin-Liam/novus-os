@@ -6,8 +6,8 @@
  * order:
  *
  *   1. Install the 64 KiB BSP kernel stack. kstack lives in .bss and is
- *      64-byte aligned; its top is therefore 16-byte aligned, which is
- *      what the MS x64 ABI requires at a call site.
+ *      64-byte aligned; its top is therefore 16-byte aligned. Reserve
+ *      the 32-byte home area required by the MS x64 ABI before calling C.
  *   2. Zero the .bss section. The mingw ld default PE linker script
  *      defines __bss_start__ / __bss_end__ around the .bss output
  *      section (verified with x86_64-w64-mingw32-nm on the linked
@@ -22,8 +22,10 @@
  */
 
     /* 64 KiB BSP kernel stack, 64-byte aligned, in .bss. */
-    .lcomm  kstack, 65536, 64
-
+    .section .bss
+    .balign 64
+kstack:
+    .skip 65536
     .section .text
     .code64
     .globl  kernel_entry
@@ -49,6 +51,7 @@ kernel_entry:
     movq    %rbx, %rcx
     movq    %r12, %rdx
     movq    %r13, %r8
+    subq    $32, %rsp             /* MS x64 shadow space for kmain() */
     call    kmain
 
     /* kmain must never return; park the BSP if it does. */

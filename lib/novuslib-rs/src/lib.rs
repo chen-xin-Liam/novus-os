@@ -4,8 +4,8 @@
 //! kernel/pmm.c) owns all hardware and platform state.
 //!
 //! FFI boundary contract:
-//! - Every export is `#[no_mangle] pub extern "C"` with C-ABI scalar
-//!   types only (pointers, usize/u32/i64), matching lib/novuslib_rs.h.
+//! - C-facing exports use the target C ABI by default; the BIOS feature
+//!   selects Win64. All interfaces use scalar types only.
 //! - The crate is `#![no_std]` with zero dependencies.
 //! - All exports are pure arithmetic loops; they never call
 //!   memcpy/memset or any formatter, so `core::fmt` is never pulled into
@@ -15,16 +15,36 @@
 
 #![no_std]
 
+macro_rules! ffi_export {
+    ($(#[$meta:meta])* pub fn $name:ident($($args:tt)*) $(-> $ret:ty)? $body:block) => {
+        #[cfg(feature = "bios-ms-abi")]
+        $(#[$meta])*
+        pub extern "win64" fn $name($($args)*) $(-> $ret)? $body
+
+        #[cfg(not(feature = "bios-ms-abi"))]
+        $(#[$meta])*
+        pub extern "C" fn $name($($args)*) $(-> $ret)? $body
+    };
+}
+
 // M3: the crypto primitives needed by the Merkle tree (SHA-256) and by
 // the NKM signature check (SHA-256 + Ed25519, which internally needs
 // SHA-512). crypto/ holds the algorithms, ffi_crypto/ the #[no_mangle]
-// C-ABI wrappers; the host build tools under tools/ include the crypto/
+// FFI wrappers; the host build tools under tools/ include the crypto/
 // sources directly so kernel and host cannot drift apart.
 mod crypto;
 mod ffi_crypto;
 // Compiler-intrinsic support the PE link needs; see the module header.
 mod rt;
 
+#[cfg(feature = "bios-ms-abi")]
+extern "win64" {
+    /// Provided by the C side (kernel/pmm.c): prints the raw panic message
+    /// and halts. Must never return.
+    fn novus_rs_panic_hook(msg: *const u8, len: usize) -> !;
+}
+
+#[cfg(not(feature = "bios-ms-abi"))]
 extern "C" {
     /// Provided by the C side (kernel/pmm.c): prints "RUST PANIC" plus
     /// the message bytes, then cli/hlt in a loop. Must never return, so
@@ -42,9 +62,11 @@ fn novus_rs_panic(_info: &core::panic::PanicInfo) -> ! {
 }
 
 /// ABI version of this library: 0x00010000 == v0.1.
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_version() -> u32 {
+pub fn novus_rs_version() -> u32 {
     0x0001_0000
+}
 }
 
 // ----------------------------------------------------------------------
@@ -58,37 +80,44 @@ pub extern "C" fn novus_rs_version() -> u32 {
 // ----------------------------------------------------------------------
 
 /// Read bit `idx`: returns 1 if set, 0 if clear.
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_bitmap_test(bitmap: *const u8, idx: usize) -> u32 {
+pub fn novus_rs_bitmap_test(bitmap: *const u8, idx: usize) -> u32 {
     unsafe {
         let byte = *bitmap.add(idx >> 3);
         ((byte >> (idx & 7)) & 1) as u32
     }
 }
+}
 
 /// Set bit `idx` (mark used).
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_bitmap_set(bitmap: *mut u8, idx: usize) {
+pub fn novus_rs_bitmap_set(bitmap: *mut u8, idx: usize) {
     unsafe {
         let p = bitmap.add(idx >> 3);
         *p |= 1u8 << (idx & 7);
     }
 }
+}
 
 /// Clear bit `idx` (mark free).
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_bitmap_clear(bitmap: *mut u8, idx: usize) {
+pub fn novus_rs_bitmap_clear(bitmap: *mut u8, idx: usize) {
     unsafe {
         let p = bitmap.add(idx >> 3);
         *p &= !(1u8 << (idx & 7));
     }
 }
+}
 
 /// Find the first position where `run_len` consecutive clear (0) bits
 /// start. Returns the bit index, or -1 if no such run fits within
 /// `bits`. Pure single-pass bit scan; O(bits), no helper calls.
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_bitmap_find_first_clear_run(
+pub fn novus_rs_bitmap_find_first_clear_run(
     bitmap: *const u8,
     bits: usize,
     run_len: usize,
@@ -117,6 +146,7 @@ pub extern "C" fn novus_rs_bitmap_find_first_clear_run(
         }
     }
     -1
+}
 }
 
 // ----------------------------------------------------------------------
@@ -159,8 +189,9 @@ const CRC32_TABLE: [u32; 256] = {
 /// `seed == 0`. The `seed` argument only keeps the FFI shape stable for
 /// a possible future streaming variant. The caller guarantees `data`
 /// points at `len` readable bytes.
+ffi_export! {
 #[no_mangle]
-pub extern "C" fn novus_rs_crc32(seed: u32, data: *const u8, len: usize) -> u32 {
+pub fn novus_rs_crc32(seed: u32, data: *const u8, len: usize) -> u32 {
     let mut crc = seed ^ 0xFFFF_FFFF;
     unsafe {
         let mut p = data;
@@ -173,4 +204,5 @@ pub extern "C" fn novus_rs_crc32(seed: u32, data: *const u8, len: usize) -> u32 
         }
     }
     crc ^ 0xFFFF_FFFF
+}
 }

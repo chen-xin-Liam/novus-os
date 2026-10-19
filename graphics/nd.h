@@ -123,6 +123,13 @@ typedef struct {
  * the numbers. Returns 1 when a usable linear framebuffer was found. */
 int nd_capture_boot(void *system_table);
 
+/* BIOS stage: capture a VBE linear framebuffer before entering kmain.
+ * Pitch is in bytes; channel positions describe the VBE direct-color masks. */
+int nd_capture_bios(UINT64 fb_base, UINT64 fb_size, UINT32 width,
+                    UINT32 height, UINT32 pitch_bytes, UINT16 bpp,
+                    UINT8 red_size, UINT8 red_pos, UINT8 green_size,
+                    UINT8 green_pos, UINT8 blue_size, UINT8 blue_pos);
+
 /* Kernel stage, after mm_init()/heap_init(): bind a surface to the
  * captured framebuffer and log the mode. Returns 1 when the screen is
  * drawable. */

@@ -41,7 +41,9 @@ OBJCOPY := $(CROSS)objcopy
 
 # Fail early with a clear message when the cross compiler is missing.
 ifeq ($(shell command -v $(CC) 2>/dev/null),)
+ifeq ($(filter bios-img run-bios,$(MAKECMDGOALS)),)
 $(error $(CC) not found in PATH. Install the mingw-w64 x86-64 cross toolchain (e.g. package gcc-mingw-w64-x86-64) or set CROSS=<toolchain-prefix>.)
+endif
 endif
 
 # ---------------------------------------------------------------------------
@@ -325,6 +327,112 @@ run: all
 # Remove all build artifacts.
 clean:
 	rm -rf build out esp
+
+# ---------------------------------------------------------------------------
+# Legacy BIOS image (independent ELF objects; UEFI remains the default)
+# ---------------------------------------------------------------------------
+BIOS_CC       ?= gcc
+BIOS_OBJCOPY  ?= objcopy
+BIOS_HOSTCC   ?= gcc
+BIOS_RUST_TARGET := x86_64-unknown-none
+BIOS_RUST_TARGET_DIR := $(CURDIR)/build/rust-bios
+BIOS_RUST_LIB := $(BIOS_RUST_TARGET_DIR)/$(BIOS_RUST_TARGET)/release/libnovuslib_rs.a
+BIOS_MKBOOT   := build/tools/mkboot
+BIOS_BOOTSECT_OBJ := build/bios/bootsect.o
+BIOS_BOOTSECT_BIN := build/bios/bootsect.bin
+BIOS_STAGE2_OBJ := build/bios/stage2.o
+BIOS_STAGE2_BIN := build/bios/stage2.bin
+BIOS_TRAMP_OBJ := build/bios/ap_trampoline.o
+BIOS_TRAMP_BIN := build/bios/ap_trampoline.bin
+BIOS_TRAMP_BLOB_S := build/bios/tramp_blob.S
+BIOS_TRAMP_BLOB_OBJ := build/bios/tramp_blob.o
+BIOS_KERNEL_ELF := out/novus-kernel.elf
+BIOS_KERNEL_BIN := out/novus-kernel.bin
+BIOS_IMAGE := out/bios.img
+
+BIOS_SRC := $(filter-out arch/x86_64/boot/main.c \
+                         arch/x86_64/boot/stage3.c,$(SRC)) \
+            arch/x86_64/boot/bios/legacy.c
+BIOS_ASM_SRC := arch/x86_64/kernel/entry.S \
+                arch/x86_64/kernel/trap.S \
+                arch/x86_64/boot/bios/legacy_entry.S
+BIOS_OBJS := $(foreach src,$(BIOS_SRC) $(BIOS_ASM_SRC),build/bios/$(subst /,_,$(basename $(src))).o)
+BIOS_CFLAGS := $(CFLAGS) -Iarch/x86_64/boot/bios -mabi=ms \
+               -DCONFIG_BIOS_BOOT=1
+BIOS_LDS := arch/x86_64/boot/bios/bios.lds
+
+.PHONY: bios-img run-bios
+
+build/bios:
+	mkdir -p $@
+
+define BIOS_COMPILE_rule
+build/bios/$(subst /,_,$(basename $(1))).o: $(1) | build/bios
+	$$(BIOS_CC) $$(BIOS_CFLAGS) -c $$< -o $$@
+endef
+$(foreach src,$(BIOS_SRC) $(BIOS_ASM_SRC),$(eval $(call BIOS_COMPILE_rule,$(src))))
+
+$(BIOS_BOOTSECT_OBJ): arch/x86_64/boot/bios/bootsect.S \
+                      arch/x86_64/boot/bios/boot_layout.h | build/bios
+	$(BIOS_CC) -Iarch/x86_64/boot/bios -ffreestanding -c $< -o $@
+
+$(BIOS_STAGE2_OBJ): arch/x86_64/boot/bios/stage2.S \
+                    arch/x86_64/boot/bios/boot_layout.h | build/bios
+	$(BIOS_CC) -Iarch/x86_64/boot/bios -ffreestanding -c $< -o $@
+
+$(BIOS_BOOTSECT_BIN): $(BIOS_BOOTSECT_OBJ)
+	$(BIOS_OBJCOPY) -O binary $< $@
+
+$(BIOS_STAGE2_BIN): $(BIOS_STAGE2_OBJ)
+	$(BIOS_OBJCOPY) -O binary $< $@
+
+$(BIOS_TRAMP_OBJ): arch/x86_64/kernel/ap_trampoline.S | build/bios
+	$(BIOS_CC) -ffreestanding -fno-asynchronous-unwind-tables \
+        -fno-stack-protector -c $< -o $@
+
+$(BIOS_TRAMP_BIN): $(BIOS_TRAMP_OBJ)
+	$(BIOS_OBJCOPY) -O binary $< $@
+
+$(BIOS_TRAMP_BLOB_S): $(BIOS_TRAMP_BIN)
+	@printf '\t.globl ap_trampoline_bin\nap_trampoline_bin:\n\t.incbin "%s"\n\t.globl ap_trampoline_bin_end\nap_trampoline_bin_end:\n' '$(abspath $<)' > $@
+
+$(BIOS_TRAMP_BLOB_OBJ): $(BIOS_TRAMP_BLOB_S) | build/bios
+	$(BIOS_CC) $(BIOS_CFLAGS) -c $< -o $@
+
+build/bios/kernel_apps.o: $(APPS_BLOB_H)
+
+-include $(BIOS_OBJS:.o=.d)
+
+$(BIOS_RUST_LIB): $(RUST_DEPS)
+	@test -n "$(CARGO)" || { echo "ERROR: cargo not found in PATH." >&2; exit 1; }
+	cd $(RUST_DIR) && CARGO_TARGET_DIR=$(BIOS_RUST_TARGET_DIR) \
+        $(CARGO) build --release --target $(BIOS_RUST_TARGET) \
+        --features bios-ms-abi
+
+$(BIOS_KERNEL_ELF): $(BIOS_OBJS) $(BIOS_TRAMP_BLOB_OBJ) \
+                    $(BIOS_RUST_LIB) $(BIOS_LDS) | out
+	$(BIOS_CC) -mabi=ms -nostdlib -no-pie -Wl,--build-id=none \
+        -Wl,-T,$(BIOS_LDS) $(BIOS_OBJS) $(BIOS_TRAMP_BLOB_OBJ) \
+        $(BIOS_RUST_LIB) -lgcc -o $@
+
+$(BIOS_KERNEL_BIN): $(BIOS_KERNEL_ELF)
+	$(BIOS_OBJCOPY) -O binary $< $@
+
+$(BIOS_MKBOOT): tools/mkboot/mkboot.c \
+                arch/x86_64/boot/bios/boot_layout.h | build
+	mkdir -p $(@D)
+	$(BIOS_HOSTCC) -O2 -std=c11 -Wall -Wextra \
+        -Iarch/x86_64/boot/bios -o $@ $<
+
+$(BIOS_IMAGE): $(BIOS_BOOTSECT_BIN) $(BIOS_STAGE2_BIN) \
+               $(BIOS_KERNEL_BIN) $(BIOS_MKBOOT) | out
+	$(BIOS_MKBOOT) $(BIOS_BOOTSECT_BIN) $(BIOS_STAGE2_BIN) \
+        $(BIOS_KERNEL_BIN) $@
+
+bios-img: $(BIOS_IMAGE)
+
+run-bios: bios-img
+	bash scripts/run-bios.sh
 
 # ---------------------------------------------------------------------------
 # Host image toolchain (tools/, see tools/tools.mk)

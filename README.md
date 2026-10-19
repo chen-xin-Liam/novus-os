@@ -391,9 +391,21 @@ novus-os/
 3. make开始编译，仅编译启用模块
 4. 输出：UEFI引导镜像 + 内核 + 内置应用 + NKM模块
 
-### 16.4 语言混合编译规则
+### 16.4 Legacy BIOS 镜像
+默认 `make` / `make run` 仍构建并通过 OVMF 启动 `out/NOVUS.EFI`。独立 legacy BIOS 路径使用：
+
+```sh
+make bios-img
+make run-bios
+```
+
+该目标生成 superfloppy raw 镜像 `out/bios.img`，由 SeaBIOS 从 LBA 0 启动；`scripts/run-bios.sh 8G` 可指定来宾内存。BIOS 内核使用独立 ELF 对象目录和 Rust `x86_64-unknown-none` 静态库，不改变 UEFI PE/COFF 构建。stage2 以 E820 构造 40-byte EFI memory descriptors，尝试 VBE 1280×800×32 LFB；模式不匹配时保持 VGA 文本输出。
+
+BIOS MVP 尚不具备 UEFI stage3 的 ESP/live-root 读取、Merkle 启动验证、NKM/NUC 暂存、菜单和安装器。详细布局、限制与故障排查见 `docs/BIOS 引导.md` 和 `docs/BIOS 引导方案.md`。本仓库当前源码已加入该目标，但 BIOS 镜像及 QEMU 启动仍待 Linux 工具链验证。
+
+### 16.5 语言混合编译规则
 C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在图形、驱动、编译器模块。
-编译产出物统一打包到系统镜像。
+BIOS ELF 路径使用明确的 Win64 FFI ABI；编译产出物由对应启动目标打包。
 
 ---
 

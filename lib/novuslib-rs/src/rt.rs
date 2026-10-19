@@ -1,4 +1,4 @@
-//! Freestanding runtime support for the x86_64 UEFI image.
+//! Freestanding runtime support for the x86_64 UEFI and BIOS images.
 //!
 //! out/NOVUS.EFI links against no libc and no compiler-rt, so anything
 //! `core` references that no member of the Rust static library supplies
@@ -20,6 +20,12 @@
 //! would turn any future panic message into garbage, and would silently
 //! corrupt any genuine 128-bit division added to the kernel later.
 
+#[cfg(feature = "bios-ms-abi")]
+extern "win64" {
+    fn novus_rs_panic_hook(msg: *const u8, len: usize) -> !;
+}
+
+#[cfg(not(feature = "bios-ms-abi"))]
 extern "C" {
     fn novus_rs_panic_hook(msg: *const u8, len: usize) -> !;
 }

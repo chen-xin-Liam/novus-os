@@ -2,13 +2,14 @@
  * Novus OS - C-side FFI declarations for novuslib-rs (lib/novuslib-rs).
  *
  * README 16.4: C and Rust code are compiled separately and interact
- * across this explicit FFI boundary. Rust is built for the
+ * across this explicit Win64 FFI boundary. Rust is built for the
  * x86_64-pc-windows-msvc target, producing COFF objects with the
  * Microsoft x64 ABI that link directly into the mingw-built PE kernel
  * (see lib/novuslib-rs/Cargo.toml for the rationale).
  *
- * Every declaration here mirrors a `#[no_mangle] pub extern "C"` export
- * of the Rust crate; keep the two files in lockstep.
+ * Every declaration here mirrors a `#[no_mangle]` export of the Rust
+ * crate. Default UEFI/host builds use target C ABI; BIOS enables the
+ * crate's bios-ms-abi feature and uses Win64. Keep the signatures in lockstep.
  */
 
 #ifndef NOVUSLIB_RS_H
