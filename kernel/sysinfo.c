@@ -15,6 +15,7 @@
 #include "sched.h"
 #include "sysinfo.h"
 #include "net.h"
+#include "blkdev.h"
 
 #if CONFIG_NOVUS_IPC && CONFIG_NOVUS_WM
 
@@ -35,6 +36,11 @@ static const sysinfo_entry_t g_dev[] = {
     {"serial", SYSINFO_KIND_DEV, "com1"},
 };
 
+static UINT32 dev_count(void) {
+  return (UINT32)(sizeof(g_dev) / sizeof(g_dev[0])) +
+         (UINT32)blkdev_count();
+}
+
 static const sysinfo_entry_t g_proc[] = {
     {"tasks", SYSINFO_KIND_VIRT, "scheduler"},
     {"ipc", SYSINFO_KIND_VIRT, "ports"},
@@ -46,7 +52,7 @@ static UINT32 dir_count(UINT8 dir) {
   case SYSINFO_DIR_APPS:
     return apps_count();
   case SYSINFO_DIR_DEV:
-    return (UINT32)(sizeof(g_dev) / sizeof(g_dev[0]));
+    return dev_count();
   case SYSINFO_DIR_PROC:
     return (UINT32)(sizeof(g_proc) / sizeof(g_proc[0]));
   default:
@@ -153,8 +159,17 @@ static void req_files(const ipc_msg_t *m) {
       r.rec[k].kind = SYSINFO_KIND_APP;
       break;
     case SYSINFO_DIR_DEV:
-      copy_str(r.rec[k].name, sizeof(r.rec[k].name), g_dev[i].name);
-      r.rec[k].kind = g_dev[i].kind;
+      if (i < sizeof(g_dev) / sizeof(g_dev[0])) {
+        copy_str(r.rec[k].name, sizeof(r.rec[k].name), g_dev[i].name);
+        r.rec[k].kind = g_dev[i].kind;
+      } else {
+        blkdev_t *dev = blkdev_get_at(i -
+                         (UINT32)(sizeof(g_dev) / sizeof(g_dev[0])));
+        if (dev != 0) {
+          copy_str(r.rec[k].name, sizeof(r.rec[k].name), dev->name);
+          r.rec[k].kind = SYSINFO_KIND_DEV;
+        }
+      }
       break;
     case SYSINFO_DIR_PROC:
       copy_str(r.rec[k].name, sizeof(r.rec[k].name), g_proc[i].name);

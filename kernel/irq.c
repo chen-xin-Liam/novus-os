@@ -1,6 +1,7 @@
 #include "kernel.h"
 #include "cpu.h"
 #include "irq.h"
+#include "acpi.h"
 #include "lapic.h"
 
 #define IOAPIC_MAX 4u
@@ -27,25 +28,6 @@ typedef struct {
   irq_action_t action[IRQ_SHARED_MAX];
 } irq_line_t;
 
-typedef struct {
-  char signature[4];
-  UINT32 length;
-  UINT8 revision;
-  UINT8 checksum;
-  UINT8 rest[26];
-} __attribute__((packed)) acpi_header_t;
-
-typedef struct {
-  char signature[8];
-  UINT8 checksum;
-  UINT8 oem[6];
-  UINT8 revision;
-  UINT32 rsdt;
-  UINT32 length;
-  UINT64 xsdt;
-  UINT8 extra[4];
-} __attribute__((packed)) rsdp_t;
-
 static ioapic_t g_ioapic[IOAPIC_MAX];
 static UINT32 g_ioapic_count;
 static irq_line_t g_lines[IRQ_MAX_LINES];
@@ -56,121 +38,7 @@ static UINT32 g_next_vector;
 static UINT32 g_destination;
 static int g_ready;
 
-static int phys_range(UINT64 address, UINT64 bytes) {
-  return address >= 0x400u && address < 0x100000000ULL &&
-         bytes <= 0x100000000ULL - address;
-}
-
-static int checksum_ok(const void *ptr, UINT32 bytes) {
-  const UINT8 *data = (const UINT8 *)ptr;
-  UINT8 sum = 0;
-  UINT32 index;
-
-  for (index = 0; index < bytes; index++) {
-    sum = (UINT8)(sum + data[index]);
-  }
-  return sum == 0u;
-}
-
-static const acpi_header_t *acpi_table(UINT64 address) {
-  const acpi_header_t *table;
-
-  if (!phys_range(address, sizeof(*table))) {
-    return NULL;
-  }
-  table = (const acpi_header_t *)(UINTN)address;
-  if (table->length < sizeof(*table) || table->length > 0x100000u ||
-      !phys_range(address, table->length) ||
-      !checksum_ok(table, table->length)) {
-    return NULL;
-  }
-  return table;
-}
-
-static const acpi_header_t *root_madt(UINT64 address, int extended) {
-  const acpi_header_t *root = acpi_table(address);
-  UINT32 step = extended ? 8u : 4u;
-  UINT32 offset;
-
-  if (root == NULL || memcmp(root->signature, extended ? "XSDT" : "RSDT", 4)) {
-    return NULL;
-  }
-  for (offset = sizeof(*root); offset + step <= root->length; offset += step) {
-    UINT64 child = 0;
-    const acpi_header_t *table;
-
-    memcpy(&child, (const UINT8 *)root + offset, step);
-    table = acpi_table(child);
-    if (table != NULL && memcmp(table->signature, "APIC", 4) == 0 &&
-        table->length >= 44u) {
-      return table;
-    }
-  }
-  return NULL;
-}
-
-static const acpi_header_t *scan_rsdp(UINT64 start, UINT64 bytes) {
-  UINT64 address;
-  UINT64 end;
-
-  if (!phys_range(start, bytes)) {
-    return NULL;
-  }
-  end = start + bytes;
-  for (address = (start + 15u) & ~15ULL; address + 20u <= end; address += 16u) {
-    const rsdp_t *rsdp = (const rsdp_t *)(UINTN)address;
-    const acpi_header_t *madt;
-
-    if (memcmp(rsdp->signature, "RSD PTR ", 8) != 0 || !checksum_ok(rsdp, 20)) {
-      continue;
-    }
-    if (rsdp->revision >= 2u && address + sizeof(*rsdp) <= end &&
-        rsdp->length >= sizeof(*rsdp) && rsdp->length <= 4096u &&
-        rsdp->length <= end - address && checksum_ok(rsdp, rsdp->length)) {
-      madt = root_madt(rsdp->xsdt, 1);
-      if (madt != NULL) {
-        return madt;
-      }
-    }
-    madt = root_madt(rsdp->rsdt, 0);
-    if (madt != NULL) {
-      return madt;
-    }
-  }
-  return NULL;
-}
-
-static const acpi_header_t *find_madt(UINT64 mmap, UINT64 size, UINT64 stride) {
-  UINT64 offset;
-  const acpi_header_t *madt;
-  UINT16 ebda;
-
-  if (stride >= sizeof(EFI_MEMORY_DESCRIPTOR) && size >= stride &&
-      phys_range(mmap, size)) {
-    for (offset = 0; offset <= size - stride; offset += stride) {
-      const EFI_MEMORY_DESCRIPTOR *desc =
-          (const EFI_MEMORY_DESCRIPTOR *)(UINTN)(mmap + offset);
-
-      if ((desc->Type == EfiACPIReclaimMemory || desc->Type == EfiACPIMemoryNVS) &&
-          desc->Pages <= 4096u) {
-        madt = scan_rsdp(desc->PhysicalStart, desc->Pages * 4096u);
-        if (madt != NULL) {
-          return madt;
-        }
-      }
-    }
-  }
-  memcpy(&ebda, (const void *)(UINTN)0x40Eu, sizeof(ebda));
-  if (ebda >= 0x8000u && ebda < 0xA000u) {
-    madt = scan_rsdp((UINT64)ebda << 4, 1024u);
-    if (madt != NULL) {
-      return madt;
-    }
-  }
-  return scan_rsdp(0xE0000u, 0x20000u);
-}
-
-static int parse_madt(const acpi_header_t *madt) {
+static int parse_madt(const acpi_table_t *madt) {
   UINT32 offset;
   ioapic_t controllers[IOAPIC_MAX];
   UINT32 count = 0;
@@ -292,7 +160,7 @@ static void route(UINT32 gsi, int masked) {
 
 void irq_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   UINT64 saved = irq_save();
-  const acpi_header_t *madt;
+  const acpi_table_t *madt;
   UINT32 index;
 
   g_ready = 0;
@@ -314,8 +182,8 @@ void irq_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   }
   lapic_write(lapic_base(), 0x350u, 1u << 16);
   g_destination = lapic_read(lapic_base(), 0x20u) >> 24;
-  madt = find_madt(mmap, size, stride);
-  if (madt != NULL && parse_madt(madt)) {
+  madt = acpi_find_table(mmap, size, stride, "APIC");
+  if (madt != NULL && madt->length >= 44u && parse_madt(madt)) {
     kputs("[IRQ] ACPI MADT: IOAPIC + ISA overrides\n");
   } else {
     g_ioapic_count = 1;

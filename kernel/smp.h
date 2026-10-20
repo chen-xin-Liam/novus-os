@@ -15,11 +15,11 @@
 #define SMP_TRAMPOLINE_PHYS 0x8000ULL
 #define SMP_SIPI_VECTOR     8
 
-/* BSP-side wake-up: copy + patch the trampoline, run INIT-SIPI-SIPI
- * through the local APIC and wait (bounded) for the AP to publish
- * itself in shared memory. Never panics: every failure path prints a
- * warning and leaves the system running uniprocessor (spec 3.4). */
-void smp_wake_ap(UINT64 kernel_cr3);
+/* BSP-side wake-up: enumerate MADT processor IDs, then copy + patch the
+ * trampoline and run INIT-SIPI-SIPI for every enabled AP. Each AP gets
+ * its own stack and a bounded wait; failures degrade to fewer CPUs. */
+void smp_wake_ap(UINT64 kernel_cr3, UINT64 mmap, UINT64 map_size,
+				 UINT64 desc_size);
 
 /* AP-side C entry, called by the trampoline in long mode on the AP's
  * own stack with the kernel CR3 already loaded. Publishes the serial

@@ -58,6 +58,7 @@ int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot);
 
 /* Physical page backing `va`, or 0 when unmapped. */
 UINT64 vm_translate(vm_space_t *sp, UINT64 va);
+int vm_user_access(vm_space_t *sp, UINT64 va, int write);
 
 /* Pages this space owns: its private tables plus the user leaves in them.
  * Used by the task manager to show per-task memory. */

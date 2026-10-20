@@ -14,6 +14,7 @@
 #![no_std]
 
 pub mod ipc;
+pub mod fs;
 pub mod sinfo;
 pub mod sys;
 pub mod ui;

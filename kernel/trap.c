@@ -21,6 +21,9 @@
 #include "msr.h"
 #include "ipc.h"
 #include "irq.h"
+#include "../fs/novusfs/novusfs.h"
+#include "power.h"
+#include "session.h"
 
 /* Syscall numbers (README part 8: one table, one ABI). */
 #define SYS_YIELD       1u
@@ -30,7 +33,44 @@
 #define SYS_IPC_RECV    5u
 #define SYS_IPC_LOOKUP  6u
 #define SYS_IPC_STATS   7u
+#define SYS_OPEN        8u
+#define SYS_READ        9u
+#define SYS_FWRITE      10u
+#define SYS_CLOSE       11u
+#define SYS_STAT        12u
+#define SYS_OPENDIR     13u
+#define SYS_READDIR     14u
+#define SYS_MKDIR       15u
+#define SYS_POWEROFF    16u
+#define SYS_REBOOT      17u
+#define SYS_SESSION     18u
 #define SYS_EXIT        60u
+
+#define FS_PATH_MAX 256u
+#define FS_IO_MAX 4096u
+#define FS_FD_BASE 3u
+
+typedef struct {
+  UINT64 size;
+  UINT16 mode;
+  UINT8  pad[6];
+} user_stat_t;
+
+typedef struct {
+  UINT32 ino;
+  UINT16 mode;
+  UINT16 name_len;
+  char   name[NOVUSFS_NAME_MAX + 1u];
+} user_dirent_t;
+
+_Static_assert(sizeof(user_stat_t) == 16u, "user stat ABI drift");
+_Static_assert(sizeof(user_dirent_t) == 68u, "user dirent ABI drift");
+
+static UINTN bounded_strlen(const char *s, UINTN cap) {
+  UINTN n = 0;
+  while (n < cap && s[n] != '\0') n++;
+  return n;
+}
 
 /* x86_64 `syscall` is two bytes (0F 05). A blocking syscall parks its
  * task and rewinds RIP by this much so the call re-executes when a
@@ -68,6 +108,9 @@ static int user_read_byte(UINT64 cr3, UINT64 va, UINT8 *out) {
    * the accounting fields stay empty. */
   memset(&sp, 0, sizeof(sp));
   sp.pml4_phys = cr3 & ~0xFFFULL;
+  if (va > 0x00007FFFFFFFFFFFULL || !vm_user_access(&sp, va, 0)) {
+    return -1;
+  }
   phys = vm_translate(&sp, va);
   if (phys == 0) {
     return -1;
@@ -117,7 +160,9 @@ static int user_copy(UINT64 cr3, UINT64 va, void *buf, UINT64 len, int to_user) 
   UINT8 *p = (UINT8 *)buf;
   UINT64 done = 0;
 
-  if (cr3 == 0 || (len != 0 && buf == 0)) {
+  if (cr3 == 0 || (len != 0 && buf == 0) ||
+      (len != 0 && (va > 0x00007FFFFFFFFFFFULL ||
+                    len - 1u > 0x00007FFFFFFFFFFFULL - va))) {
     return -1;
   }
   while (done < len) {
@@ -133,6 +178,9 @@ static int user_copy(UINT64 cr3, UINT64 va, void *buf, UINT64 len, int to_user) 
     }
     memset(&sp, 0, sizeof(sp));
     sp.pml4_phys = cr3 & ~0xFFFULL;
+    if (!vm_user_access(&sp, va + done, to_user)) {
+      return -1;
+    }
     phys = vm_translate(&sp, page);
     if (phys == 0) {
       return -1;
@@ -146,6 +194,228 @@ static int user_copy(UINT64 cr3, UINT64 va, void *buf, UINT64 len, int to_user) 
     done += chunk;
   }
   return 0;
+}
+
+static int user_path(task_t *t, UINT64 va, char path[FS_PATH_MAX]) {
+  UINTN i;
+  memset(path, 0, FS_PATH_MAX);
+  for (i = 0; i < FS_PATH_MAX - 1u; i++) {
+    if (user_copy(t->cr3, va + i, &path[i], 1u, 0) != 0) {
+      return -1;
+    }
+    if (path[i] == '\0') {
+      return i == 0 ? -1 : 0;
+    }
+  }
+  return -1;
+}
+
+static int fs_parent_path(novusfs_fs_t *fs, char path[FS_PATH_MAX],
+                          UINT32 *parent, char **leaf) {
+  UINTN len = 0;
+  UINTN split = 0;
+  while (path[len] != '\0') len++;
+  while (len > 0 && path[len - 1u] == '/') path[--len] = '\0';
+  if (len == 0) return -1;
+  split = len;
+  while (split > 0 && path[split - 1u] != '/') split--;
+  *leaf = path + split;
+  if ((*leaf)[0] == '\0' || bounded_strlen(*leaf, NOVUSFS_NAME_MAX + 1u) > NOVUSFS_NAME_MAX) return -1;
+  if (split == 0) {
+    *parent = fs->sb.root_inode;
+  } else {
+    path[split - 1u] = '\0';
+    *parent = novusfs_lookup_path(fs, fs->sb.root_inode, path);
+  }
+  return *parent == 0 ? -1 : 0;
+}
+
+static int fs_fd_index(task_t *t, UINT64 fd) {
+  UINT64 index;
+  if (fd < FS_FD_BASE) return -1;
+  index = fd - FS_FD_BASE;
+  if (index >= TASK_FD_MAX || !t->fd[index].used) return -1;
+  return (int)index;
+}
+
+static void sys_fs_open(trap_frame_t *f) {
+  task_t *t = sched_current();
+  novusfs_fs_t *fs = novusfs_root();
+  char path[FS_PATH_MAX];
+  UINT32 ino;
+  UINT32 parent;
+  char *leaf;
+  UINT32 i;
+  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0) { f->rax = (UINT64)-1; return; }
+  ino = novusfs_lookup_path(fs, fs->sb.root_inode, path);
+  if (ino == 0 && (f->rsi & 1u) != 0u && fs_parent_path(fs, path, &parent, &leaf) == 0) {
+    ino = novusfs_creat(fs, parent, leaf);
+  }
+  if (ino == 0) { f->rax = (UINT64)-1; return; }
+  for (i = 0; i < TASK_FD_MAX; i++) {
+    if (!t->fd[i].used) {
+      t->fd[i].ino = ino;
+      t->fd[i].offset = 0;
+      t->fd[i].dir_index = 0;
+      t->fd[i].is_dir = 0;
+      t->fd[i].used = 1;
+      f->rax = FS_FD_BASE + i;
+      return;
+    }
+  }
+  f->rax = (UINT64)-1;
+}
+
+static void sys_fs_read(trap_frame_t *f) {
+  task_t *t = sched_current();
+  novusfs_fs_t *fs = novusfs_root();
+  UINT8 buf[FS_IO_MAX];
+  INT64 n;
+  int index;
+  UINT64 len = f->rdx > FS_IO_MAX ? FS_IO_MAX : f->rdx;
+  if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 ||
+      t->fd[index].is_dir) { f->rax = (UINT64)-1; return; }
+  n = novusfs_read(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
+  if (n < 0 || user_copy(t->cr3, f->rsi, buf, (UINT64)n, 1) != 0) { f->rax = (UINT64)-1; return; }
+  t->fd[index].offset += (UINT64)n;
+  f->rax = (UINT64)n;
+}
+
+static void sys_fs_write(trap_frame_t *f) {
+  task_t *t = sched_current();
+  novusfs_fs_t *fs = novusfs_root();
+  UINT8 buf[FS_IO_MAX];
+  int index;
+  UINT64 len = f->rdx > FS_IO_MAX ? FS_IO_MAX : f->rdx;
+  INT64 n;
+  if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 ||
+      t->fd[index].is_dir || user_copy(t->cr3, f->rsi, buf, len, 0) != 0) { f->rax = (UINT64)-1; return; }
+  n = novusfs_write(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
+  if (n < 0) { f->rax = (UINT64)-1; return; }
+  t->fd[index].offset += (UINT64)n;
+  f->rax = (UINT64)n;
+}
+
+static void sys_fs_close(trap_frame_t *f) {
+  task_t *t = sched_current();
+  int index = (t == NULL || !session_logged_in()) ? -1 : fs_fd_index(t, f->rdi);
+  if (index < 0) { f->rax = (UINT64)-1; return; }
+  memset(&t->fd[index], 0, sizeof(t->fd[index]));
+  f->rax = 0;
+}
+
+static void sys_fs_stat(trap_frame_t *f) {
+  task_t *t = sched_current();
+  novusfs_fs_t *fs = novusfs_root();
+  char path[FS_PATH_MAX];
+  user_stat_t out;
+  UINT32 ino;
+  UINT64 size;
+  UINT16 mode;
+  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
+      (ino = novusfs_lookup_path(fs, fs->sb.root_inode, path)) == 0 ||
+      novusfs_stat(fs, ino, &size, &mode) != 0) { f->rax = (UINT64)-1; return; }
+  memset(&out, 0, sizeof(out));
+  out.size = size;
+  out.mode = mode;
+  f->rax = user_copy(t->cr3, f->rsi, &out, sizeof(out), 1) == 0 ? 0 : (UINT64)-1;
+}
+
+static void sys_fs_opendir(trap_frame_t *f) {
+  task_t *t = sched_current();
+  novusfs_fs_t *fs = novusfs_root();
+  char path[FS_PATH_MAX];
+  UINT32 ino;
+  UINT64 size;
+  UINT16 mode;
+  UINT32 i;
+  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
+      (ino = novusfs_lookup_path(fs, fs->sb.root_inode, path)) == 0 ||
+      novusfs_stat(fs, ino, &size, &mode) != 0 || mode != NOVUSFS_IDIR) { f->rax = (UINT64)-1; return; }
+  for (i = 0; i < TASK_FD_MAX; i++) {
+    if (!t->fd[i].used) {
+      t->fd[i].ino = ino;
+      t->fd[i].offset = 0;
+      t->fd[i].dir_index = 0;
+      t->fd[i].is_dir = 1;
+      t->fd[i].used = 1;
+      f->rax = FS_FD_BASE + i;
+      return;
+    }
+  }
+  f->rax = (UINT64)-1;
+}
+
+typedef struct { UINT32 skip; UINT32 seen; user_dirent_t *entry; novusfs_fs_t *fs; } readdir_ctx_t;
+static void fs_readdir_pick(void *arg, UINT32 ino, const char *name) {
+  readdir_ctx_t *ctx = (readdir_ctx_t *)arg;
+  if (ctx->seen++ != ctx->skip) return;
+  ctx->entry->ino = ino;
+  ctx->entry->name_len = (UINT16)bounded_strlen(name, NOVUSFS_NAME_MAX);
+  memcpy(ctx->entry->name, name, ctx->entry->name_len + 1u);
+  (void)novusfs_stat(ctx->fs, ino, NULL, &ctx->entry->mode);
+}
+
+static void sys_fs_readdir(trap_frame_t *f) {
+  task_t *t = sched_current();
+  novusfs_fs_t *fs = novusfs_root();
+  user_dirent_t out;
+  readdir_ctx_t ctx;
+  int index;
+  if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 || !t->fd[index].is_dir) { f->rax = (UINT64)-1; return; }
+  memset(&out, 0, sizeof(out));
+  ctx.skip = t->fd[index].dir_index;
+  ctx.seen = 0;
+  ctx.entry = &out;
+  ctx.fs = fs;
+  if (novusfs_dir_readdir(fs, t->fd[index].ino, fs_readdir_pick, &ctx) != 0) { f->rax = (UINT64)-1; return; }
+  if (ctx.seen <= ctx.skip) { f->rax = 0; return; }
+  if (user_copy(t->cr3, f->rsi, &out, sizeof(out), 1) != 0) { f->rax = (UINT64)-1; return; }
+  t->fd[index].dir_index++;
+  f->rax = 1;
+}
+
+static void sys_fs_mkdir(trap_frame_t *f) {
+  task_t *t = sched_current();
+  novusfs_fs_t *fs = novusfs_root();
+  char path[FS_PATH_MAX];
+  UINT32 parent;
+  UINT32 existing;
+  char *leaf;
+  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
+      fs_parent_path(fs, path, &parent, &leaf) != 0) { f->rax = (UINT64)-1; return; }
+  existing = novusfs_dir_lookup(fs, parent, leaf);
+  if (existing != 0) { f->rax = (UINT64)-1; return; }
+  f->rax = novusfs_mkdir(fs, parent, leaf) == 0 ? (UINT64)-1 : 0;
+}
+
+static void sys_power_off(trap_frame_t *f) {
+  task_t *t = sched_current();
+  if (t == NULL || !session_power_allowed(t->pid)) { f->rax = (UINT64)-1; return; }
+  kputs("[POWER] user requested shutdown\n");
+  power_off();
+  f->rax = (UINT64)-1;
+}
+
+static void sys_power_reboot(trap_frame_t *f) {
+  task_t *t = sched_current();
+  if (t == NULL || !session_power_allowed(t->pid)) { f->rax = (UINT64)-1; return; }
+  kputs("[POWER] user requested reboot\n");
+  power_reboot();
+  f->rax = (UINT64)-1;
+}
+
+static void sys_session(trap_frame_t *f) {
+  task_t *t = sched_current();
+  session_req_t req;
+  INT32 rc;
+  if (t == NULL || user_copy(t->cr3, f->rdi, &req, sizeof(req), 0) != 0) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  rc = session_handle(&req, t->pid);
+  memset(&req, 0, sizeof(req));
+  f->rax = (UINT64)(INT64)rc;
 }
 
 static void sys_getpid(trap_frame_t *f) {
@@ -318,6 +588,17 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_IPC_RECV, "ipc_recv", sys_ipc_recv},
     {SYS_IPC_LOOKUP, "ipc_lookup", sys_ipc_lookup},
     {SYS_IPC_STATS, "ipc_stats", sys_ipc_stats},
+    {SYS_OPEN, "open", sys_fs_open},
+    {SYS_READ, "read", sys_fs_read},
+    {SYS_FWRITE, "fs_write", sys_fs_write},
+    {SYS_CLOSE, "close", sys_fs_close},
+    {SYS_STAT, "stat", sys_fs_stat},
+    {SYS_OPENDIR, "opendir", sys_fs_opendir},
+    {SYS_READDIR, "readdir", sys_fs_readdir},
+    {SYS_MKDIR, "mkdir", sys_fs_mkdir},
+    {SYS_POWEROFF, "power_off", sys_power_off},
+    {SYS_REBOOT, "power_reboot", sys_power_reboot},
+    {SYS_SESSION, "session", sys_session},
     {SYS_EXIT, "exit", sys_exit_call},
 };
 

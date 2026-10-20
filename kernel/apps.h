@@ -15,7 +15,8 @@
 
 #include "uefi.h"
 
-#define APPS_MAX 4
+#define APPS_MAX 5
+#define APPS_EAUTH (-101)
 
 /* Number of embedded applications. */
 UINT32 apps_count(void);

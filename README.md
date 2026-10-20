@@ -233,6 +233,12 @@ shared memory，再由 `kernel/kmain.c` 调用 NUC loader。端到端说明见
 错误码统一定义，所有子系统复用同一套错误码枚举。
 系统调用权限前置校验，调用前执行CAP检查。
 
+当前实现保留既有编号 1-7 与 60；文件、目录、电源和会话调用只追加新编号：
+8 `open`、9 `read`、10 `fs_write`、11 `close`、12 `stat`、13 `opendir`、
+14 `readdir`、15 `mkdir`、16 `power_off`、17 `reboot`、18 `session`。
+编号 2 `write` 仍是串口日志输出，不改变旧语义。详细参数和结构见
+[`docs/用户会话与文件API.md`](docs/用户会话与文件API.md)。
+
 ---
 
 ## 第9部分 进程、线程与调度器
@@ -441,8 +447,8 @@ C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在�
 > `tools/fontgen` / `tools/imegen` 离线生成并提交为 C 源码，构建不依赖宿主
 > 字体。说明见 `docs/中文支持与 Win11 桌面.md`。
 >
-> M8 已实现：三个应用是 Rust 程序（`apps/`），编译成扁平 NUC 镜像内嵌
-> 进内核，启动即运行、任务栏可再拉起；数据来自内核 sysinfo 服务
+> M8 已实现：内置应用为 Rust 程序（`apps/`），编译成扁平 NUC 镜像内嵌
+> 进内核；会话管理器先启动，登录后再启动桌面应用，任务栏可再拉起；数据来自内核 sysinfo 服务
 > （端口 `"sys"`），窗口内容走 Novus-WM 协议 1.1 的显示列表
 > （CLEAR/SHAPE/TEXT）。说明见 `docs/M8 内置系统应用.md`。M7 编译器在 M8 开发当时暂缓，现已补齐 cppcc。
 - M9：Win32兼容层原型，MicroPython集成

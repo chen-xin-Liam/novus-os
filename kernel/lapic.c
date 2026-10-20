@@ -18,7 +18,10 @@
 
 #include "kernel.h"
 #include "cpu.h"
+#include "acpi.h"
 #include "lapic.h"
+#include "idt.h"
+#include <stddef.h>
 
 /* IA32_APIC_BASE MSR (SDM Vol.4): base [35:12], global enable bit 11. */
 #define LAPIC_MSR_APIC_BASE 0x1B
@@ -29,8 +32,98 @@
 #define LAPIC_REG_SPURIOUS  0x0F0
 #define LAPIC_SPUR_VECTOR   0xFF
 #define LAPIC_SPUR_ENABLE   (1u << 8)
+#define LAPIC_REG_LVT_TIMER 0x320u
+#define LAPIC_REG_TIMER_INIT 0x380u
+#define LAPIC_REG_TIMER_CURRENT 0x390u
+#define LAPIC_REG_TIMER_DIV 0x3E0u
+#define LAPIC_TIMER_MASKED (1u << 16)
+#define ACPI_FADT_PM_TMR 76u
+#define ACPI_FADT_PM_TMR_LEN 91u
+#define ACPI_FADT_FLAGS 112u
+#define ACPI_FADT_X_PM_TMR 208u
+#define ACPI_PM_TMR_EXT (1u << 8)
+#define PM_TIMER_HZ 3579545u
+#define PM_TIMER_TARGET_TICKS ((PM_TIMER_HZ * 10u) / 1000u)
+#define PM_TIMER_SPIN_LIMIT 100000000u
 
 static UINT64 g_lapic_base;
+
+static UINT32 lapic_read_le32(const UINT8 *p) {
+  return (UINT32)p[0] | ((UINT32)p[1] << 8) |
+         ((UINT32)p[2] << 16) | ((UINT32)p[3] << 24);
+}
+
+static int pm_timer_port(const acpi_table_t *fadt, UINT16 *port,
+                         UINT32 *mask) {
+  const UINT8 *raw = (const UINT8 *)fadt;
+  UINT32 flags;
+  UINT32 address = 0;
+  UINT8 width = 0;
+
+  if (fadt->length < ACPI_FADT_FLAGS + 4u) {
+    return 0;
+  }
+  flags = lapic_read_le32(raw + ACPI_FADT_FLAGS);
+  if (fadt->length >= ACPI_FADT_X_PM_TMR + 12u) {
+    const UINT8 *gas = raw + ACPI_FADT_X_PM_TMR;
+    UINT64 extended_address = 0;
+    memcpy(&extended_address, gas + 4, sizeof(extended_address));
+    if (gas[0] == 1u && gas[2] == 0u && extended_address <= 0xFFFFu) {
+      address = (UINT32)extended_address;
+      width = gas[1];
+    }
+  }
+  if (address == 0 && fadt->length > ACPI_FADT_PM_TMR_LEN) {
+    address = lapic_read_le32(raw + ACPI_FADT_PM_TMR);
+    width = (flags & ACPI_PM_TMR_EXT) != 0u ? 32u : 24u;
+    if (raw[ACPI_FADT_PM_TMR_LEN] < 4u) {
+      address = 0;
+    }
+  }
+  if (address == 0 || address > 0xFFFCu || width < 24u) {
+    return 0;
+  }
+  *port = (UINT16)address;
+  *mask = width >= 32u || (flags & ACPI_PM_TMR_EXT) != 0u
+              ? 0xFFFFFFFFu
+              : 0x00FFFFFFu;
+  return 1;
+}
+
+UINT32 lapic_timer_calibrate(UINT64 mmap, UINT64 size, UINT64 stride) {
+  const acpi_table_t *fadt = acpi_find_table(mmap, size, stride, "FACP");
+  UINT16 port;
+  UINT32 mask;
+  UINT32 start;
+  UINT32 now = 0;
+  UINT32 current;
+  UINT32 elapsed;
+  UINT32 spins;
+
+  if (g_lapic_base == 0 || fadt == NULL ||
+      !pm_timer_port(fadt, &port, &mask)) {
+    return 0;
+  }
+  lapic_write(g_lapic_base, LAPIC_REG_TIMER_DIV, 0x3u);
+  lapic_write(g_lapic_base, LAPIC_REG_LVT_TIMER,
+              LAPIC_TIMER_MASKED | IDT_TIMER_VECTOR);
+  lapic_write(g_lapic_base, LAPIC_REG_TIMER_INIT, 0xFFFFFFFFu);
+  start = io_in32(port) & mask;
+  for (spins = 0; spins < PM_TIMER_SPIN_LIMIT; spins++) {
+    now = io_in32(port) & mask;
+    if (((now - start) & mask) >= PM_TIMER_TARGET_TICKS) {
+      break;
+    }
+    __asm__ volatile("pause");
+  }
+  current = lapic_read(g_lapic_base, LAPIC_REG_TIMER_CURRENT);
+  lapic_write(g_lapic_base, LAPIC_REG_TIMER_INIT, 0u);
+  if (spins == PM_TIMER_SPIN_LIMIT || current == 0xFFFFFFFFu) {
+    return 0;
+  }
+  elapsed = 0xFFFFFFFFu - current;
+  return elapsed > 0u ? elapsed : 0u;
+}
 
 /* RDMSR/WRMSR: ECX selects the MSR, the value travels in EDX:EAX. */
 static UINT64 lapic_rdmsr(UINT32 msr) {

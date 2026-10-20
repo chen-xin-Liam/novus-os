@@ -35,7 +35,7 @@ extern void sched_enter(UINT64 frame) __attribute__((noreturn));
 #define LAPIC_TIMER_INIT  0x380u
 #define LAPIC_EOI         0xB0u
 
-#define LAPIC_TIMER_COUNT 200000u /* ~10 ms on QEMU's bus clock / 16 */
+#define LAPIC_TIMER_FALLBACK_COUNT 200000u
 
 static task_t g_tasks[SCHED_MAX_TASKS];
 static task_t *g_current;
@@ -290,8 +290,9 @@ static UINT64 sched_enter_kidle(void) {
 
 /* ---- public ------------------------------------------------------------ */
 
-void sched_init(void) {
+void sched_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   UINT64 base;
+  UINT32 timer_count;
 
   memset(g_tasks, 0, sizeof(g_tasks));
   g_current = NULL;
@@ -338,12 +339,19 @@ void sched_init(void) {
     kputs("[SCHED] WARN no LAPIC: no timer, no preemption\n");
     return;
   }
+  timer_count = lapic_timer_calibrate(mmap, size, stride);
+  if (timer_count == 0u) {
+    timer_count = LAPIC_TIMER_FALLBACK_COUNT;
+    kputs("[SCHED] WARN LAPIC calibration unavailable; fallback count ");
+  } else {
+    kputs("[SCHED] LAPIC calibrated count ");
+  }
   lapic_write(base, LAPIC_TIMER_DIV, 0x3u); /* divide by 16 */
   lapic_write(base, LAPIC_LVT_TIMER,
               IDT_TIMER_VECTOR | (1u << 17)); /* periodic */
-  lapic_write(base, LAPIC_TIMER_INIT, LAPIC_TIMER_COUNT);
+  lapic_write(base, LAPIC_TIMER_INIT, timer_count);
   kputs("[SCHED] timer armed: vector 32, initial count ");
-  kputs_hex(LAPIC_TIMER_COUNT);
+  kputs_hex(timer_count);
   kputs("\n");
 }
 
@@ -613,6 +621,15 @@ static int task_is_vital(const task_t *t) {
   const char *a = t->name;
   const char *b = "idle";
 
+  while (*a != '\0' && *a == *b) {
+    a++;
+    b++;
+  }
+  if (*a == '\0' && *b == '\0') {
+    return 1;
+  }
+  a = t->name;
+  b = "session";
   while (*a != '\0' && *a == *b) {
     a++;
     b++;
