@@ -37,6 +37,11 @@ static UINT32 g_deadline;
 static UINT8  g_tries;
 static UINT32 g_bytes;
 
+/*
+ * This is a single global client transaction, not a socket table. The state
+ * path is ARP wait -> SYN wait -> established -> success/failure; incoming
+ * segments must match the one configured peer address and port pair.
+ */
 int net_tcp_status(void) { return g_state; }
 UINT32 net_tcp_bytes(void) { return g_bytes; }
 
@@ -98,6 +103,12 @@ static void tcp_send_flags(UINT8 flags, const UINT8 *data, UINT32 len) {
   }
 }
 
+/*
+ * Sequence space advances only after net_send_ip reports successful output;
+ * SYN and FIN each consume one sequence number in addition to payload bytes.
+ * The advertised receive window is fixed at 4 KiB, with no negotiated window
+ * scaling, congestion control, or saved outstanding-segment queue.
+ */
 int net_tcp_test(UINT32 ip, UINT16 port) {
   if (net_active() == 0 || net_cfg()->ip == 0u) {
     return -1;
@@ -145,6 +156,12 @@ void net_tcp_tick(void) {
   }
 }
 
+/*
+ * The timer retries the action associated with the current coarse state and
+ * fails after three expirations. It does not retain a retransmission window
+ * or restore an earlier sequence number, so this is a bounded echo probe,
+ * not general TCP recovery.
+ */
 void net_tcp_input(const UINT8 *p, UINT32 len, UINT32 src) {
   UINT16 sport;
   UINT16 dport;

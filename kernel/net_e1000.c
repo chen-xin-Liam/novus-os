@@ -99,6 +99,12 @@ typedef struct {
 
 static e1000_t g_card;
 
+/*
+ * INTx is the sole receive notification path here: the ISR acknowledges the
+ * cause, copies completed descriptors into a separate bounded software FIFO,
+ * and advances the hardware receive tail. The poll callback drains that FIFO
+ * later, keeping protocol parsing outside interrupt context.
+ */
 static UINT32 rd(e1000_t *c, UINT32 reg) {
   return *(volatile UINT32 *)(void *)(c->base + reg);
 }
@@ -146,6 +152,12 @@ static void e1000_irq(void *ctx) {
   }
 }
 
+/*
+ * The FIFO uses head == tail for empty and reserves one slot to distinguish
+ * full from empty. On full or malformed descriptors the frame is dropped,
+ * but the descriptor is still cleared and returned to the NIC so RX can
+ * continue without waiting for the consumer.
+ */
 static void eeprom_mac(e1000_t *c, UINT8 *mac) {
   UINT32 i;
 
@@ -183,6 +195,12 @@ static int e1000_send(netdev_t *d, const UINT8 *frame, UINT32 len) {
   return 0;
 }
 
+/*
+ * TX is a single producer ring: a descriptor is eligible only after hardware
+ * sets its completion bit, and TDT publishes the next slot after its fields
+ * and payload are filled. A busy slot fails immediately; there is no TX wait
+ * queue or completion interrupt-driven reclamation.
+ */
 static int e1000_poll(netdev_t *d, UINT8 *buf, UINT32 cap, UINT32 *out_len) {
   e1000_t      *c = (e1000_t *)d->priv;
   UINT64        saved = irq_save();
