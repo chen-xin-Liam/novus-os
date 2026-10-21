@@ -68,6 +68,9 @@ static int name_eq(const char *a, const char *b) {
 int blkdev_register(blkdev_t *dev) {
   UINTN i;
 
+  /* The table stores caller-owned device objects by pointer, so hardware
+   * backends keep their descriptors in static storage for the registered
+   * device's lifetime. */
   if (dev == NULL || dev->name == NULL) {
     return -1;
   }
@@ -222,6 +225,9 @@ blkdev_t *blkdev_partition_init(const char *name, blkdev_t *parent,
   blkpart_ctx_t *ctx;
   blkdev_t *dev;
 
+  /* Partition offsets use the public 512-byte sector unit, but a view
+   * must begin and end on parent-block boundaries for whole-block devices.
+   * Otherwise a partition edge could split a parent's physical block. */
   if (name == NULL || parent == NULL || sector_count == 0 ||
       first_sector > parent->sector_count ||
       sector_count > parent->sector_count - first_sector ||
@@ -252,6 +258,9 @@ blkdev_t *blkdev_partition_init(const char *name, blkdev_t *parent,
                (parent->flags & (BLKDEV_FLAG_READONLY |
                                  BLKDEV_FLAG_REMOVABLE |
                                  BLKDEV_FLAG_BOOT_ONLY));
+  /* Carry these parent restrictions into the view so detach/lookup policy
+   * sees the same lifetime and write constraints as the parent device.
+   * The partition view must not weaken the owner's hardware policy. */
   dev->ctx = ctx;
   dev->read = blkpart_read;
   dev->write = blkpart_write;

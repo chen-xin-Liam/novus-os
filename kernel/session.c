@@ -72,6 +72,9 @@ static void derive(const UINT8 salt[16], const char *username,
   UINT8 first[16 + SESSION_NAME_MAX + SESSION_PASS_MAX + 2u];
   UINTN n = 0;
   UINT32 i;
+  /* Bind the initial digest to both the salt and username, then repeatedly
+   * hash the prior digest with that same salt for the configured rounds.
+   * Setup and login must use the same stored salt to derive matching digests. */
   memcpy(first + n, salt, 16); n += 16;
   while (*username != '\0') first[n++] = (UINT8)*username++;
   first[n++] = 0;
@@ -92,6 +95,9 @@ static void make_salt(UINT64 pid, UINT8 salt[16]) {
   UINT32 hi;
   UINT8 seed[32];
   UINT8 digest[32];
+  /* Mix the local clock, caller, counter, and scheduler ticks into a
+   * 16-byte salt derived from SHA-256. These inputs add variation but do
+   * not provide a hardware-backed entropy guarantee. */
   __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
   tsc = ((UINT64)hi << 32) | lo;
   memset(seed, 0, sizeof(seed));
@@ -169,6 +175,9 @@ int session_handle(const session_req_t *req, UINT64 caller_pid) {
   task_t *manager;
   if (req == NULL) return -1;
   if (req->op == SESSION_OP_STATUS) return g_record_ready ? 1 : 0;
+  /* Mutating session operations are accepted only from the named session
+   * manager task; STATUS is intentionally handled before this gate.
+   * That leaves status reads available without granting state changes. */
   manager = sched_find_name("session");
   if (manager == NULL || manager->pid != caller_pid) return -5;
   if (req->op == SESSION_OP_LOGOUT) {
@@ -204,6 +213,9 @@ int session_handle(const session_req_t *req, UINT64 caller_pid) {
   if (!text_equal(req->username, g_record.username)) goto failed;
   derive(g_record.salt, req->username, req->password, digest);
   {
+    /* Accumulate every byte difference before branching, avoiding an
+     * early-exit comparison of the stored and freshly derived digests.
+     * The mismatch decision is made only after the full digest is examined. */
     UINT8 diff = 0;
     UINTN i;
     for (i = 0; i < sizeof(digest); i++) diff |= digest[i] ^ g_record.digest[i];

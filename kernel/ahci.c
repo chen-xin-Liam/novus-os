@@ -110,6 +110,9 @@ static int ahci_wait_clear(volatile UINT32 *reg, UINT32 mask) {
 }
 
 static int ahci_dma_addr_ok(UINT64 phys, UINT64 bytes) {
+  /* This driver deliberately keeps every DMA range below 4 GiB.
+   * The check covers the entire buffer, not just its first address,
+   * so none of the programmed command structures can cross the limit. */
   return phys != 0 && phys < 0x100000000ULL &&
          bytes <= 0x100000000ULL - phys;
 }
@@ -152,6 +155,9 @@ static int ahci_alloc_port(ahci_port_t *p) {
 }
 
 static int ahci_stop_engine(volatile UINT32 *regs) {
+  /* Stop command issue first, then wait until hardware has left the
+   * command-list engine before disabling FIS reception. Callers can
+   * replace the DMA base registers only after both engines have stopped. */
   UINT32 cmd = ahci_read(regs, AHCI_PXCMD);
   cmd &= ~AHCI_CMD_ST;
   ahci_write(regs, AHCI_PXCMD, cmd);
@@ -197,6 +203,9 @@ static int ahci_issue(ahci_port_t *p, UINT8 command, UINT64 lba,
   p->table->prdt[0].dbau = (UINT32)(p->data_phys >> 32);
   p->table->prdt[0].dbc = (bytes - 1u) & 0x003FFFFFu;
 
+  /* The single command slot and shared data page are reused for every
+   * request, so callers serialize access to this port. Publish the filled
+   * command before setting PxCI, which hands it to the controller. */
   fis[0] = 0x27;
   fis[1] = 1u << 7;
   fis[2] = command;
@@ -390,6 +399,9 @@ static int ahci_port_init(volatile UINT32 *hba, UINT32 index,
     ahci_release_port(p);
     return -1;
   }
+  /* Install command-list and received-FIS DMA addresses with the port
+   * engine quiescent; IDENTIFY is issued only after those buffers are
+   * visible and the engine has been restarted. */
   ahci_write(p->regs, AHCI_PXCLB, (UINT32)p->cl_phys);
   ahci_write(p->regs, AHCI_PXCLBU, (UINT32)(p->cl_phys >> 32));
   ahci_write(p->regs, AHCI_PXFB, (UINT32)p->fis_phys);
