@@ -340,6 +340,9 @@ UINT32 novusfs_merkle_verify(novusfs_fs_t *fs, UINT8 *out_root) {
   if (fs->sb.merkle_blocks == 0 || fs->sb.merkle_valid == 0) {
     return NOVUSFS_MERKLE_NOT_BUILT;
   }
+  /* The flag is a prerequisite, not evidence by itself: only a successful
+   * rebuild whose root matches the superblock returns MERKLE_OK below.
+   * The flag alone cannot show that protected data stayed unchanged. */
   /* persist == 0: the rebuild only rewrites the Merkle region, so the
    * superblock - and with it the authoritative root and merkle_valid -
    * is untouched and can be compared against afterwards. */
@@ -359,6 +362,9 @@ void novusfs_merkle_invalidate(novusfs_fs_t *fs) {
   if (fs == NULL || !fs->mounted) {
     return;
   }
+  /* Any protected-block mutation makes the saved digest stale; validity
+   * is cleared rather than attempting an incremental path update here.
+   * Later verification must rebuild and compare the complete tree. */
   /* Persisting is the caller's job - wal_commit already flushes the
    * superblock right after this, and flushing twice per transaction
    * would double the metadata writes. */

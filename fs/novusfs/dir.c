@@ -75,6 +75,9 @@ static int dir_write_block(novusfs_fs_t *fs, UINT64 txid, UINT64 blk,
  * the caller grow the directory. Returns 0 when the slot is absent. */
 static UINT64 dir_slot_block(novusfs_fs_t *fs, novusfs_inode_t *din,
                              UINT64 i, UINT64 *off, int alloc) {
+  /* Slot indices are byte offsets in the flat record array; inode_bmap
+   * supplies the direct-to-indirect transition when this crosses a block.
+   * Directory traversal therefore does not duplicate pointer-depth logic. */
   UINT64 byte_off = i * NOVUSFS_DIRENT_SIZE;
   UINT64 lblk = byte_off / NOVUSFS_BLOCK_SIZE;
 
@@ -171,6 +174,9 @@ int novusfs_dir_add(novusfs_fs_t *fs, novusfs_inode_t *din,
   }
 
   /* Second pass: append one slot, growing the directory as needed. */
+  /* size advances only after the block image is staged successfully;
+   * removed trailing slots remain part of the array and can be reused.
+   * A failed block write returns before publishing the larger size. */
   i = slots;
   blk = dir_slot_block(fs, din, i, &off, 1);
   if (blk == 0) {
@@ -217,6 +223,9 @@ int novusfs_dir_remove(novusfs_fs_t *fs, novusfs_inode_t *din,
     }
     memcpy(&de, fs->blkbuf + off, sizeof(de));
     if (de.ino != 0 && dir_name_eq(&de, name)) {
+      /* Clearing only ino preserves the slot's place and keeps size (and
+       * every later record index) unchanged for readers and future reuse.
+       * Later inserts can reuse the hole without renumbering other entries. */
       de.ino = 0;
       memcpy(fs->blkbuf + off, &de, sizeof(de));
       if (dir_write_block(fs, txid, blk, fs->blkbuf) != 0) {

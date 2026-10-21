@@ -111,6 +111,9 @@ int novusfs_inode_write_batch(novusfs_fs_t *fs, const novusfs_inode_t *ins,
     if (ino_block_of(fs, ins[i].ino, &blk) != 0) {
       return -1;
     }
+    /* Reload the on-disk table block once per group, then emit one full
+     * block image so distinct inodes sharing a block cannot overwrite
+     * one another's staged updates during redo. */
     if (novusfs_read_block(fs, blk, fs->scratch) != 0) {
       return -1;
     }
@@ -213,6 +216,9 @@ UINT64 novusfs_inode_bmap(novusfs_fs_t *fs, novusfs_inode_t *in,
     if (res == 0) {
       return 0;
     }
+    /* The inode pointer is only changed in this caller-owned copy; the
+     * allocator has already written its bitmap bit directly to disk.
+     * A separate inode write is still needed to persist the new pointer. */
     in->dblock[lblk] = res;
     in->blocks++;
     return res;
@@ -237,6 +243,9 @@ UINT64 novusfs_inode_bmap(novusfs_fs_t *fs, novusfs_inode_t *in,
       if (zero_block(fs, in->iblk) != 0) {
         return 0;
       }
+      /* The indirect block is initialized eagerly, before its eventual
+       * inode-table update; later pointer edits also write this block directly.
+       * Zeroing makes absent entries read as holes, not stale block numbers. */
       in->blocks++;
     }
     if (novusfs_read_block(fs, in->iblk, fs->scratch) != 0) {

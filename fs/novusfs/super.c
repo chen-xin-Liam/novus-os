@@ -145,6 +145,9 @@ static int super_valid(const novusfs_super_t *sb) {
 
 /* Derive the values that are pure functions of the geometry. */
 static void super_derive(novusfs_fs_t *fs) {
+  /* The data area is the suffix after the inode table; the bitmap and
+   * inode-table starts are stored geometry, while its end is total_blocks.
+   * WAL sizing is independent and is used for ring offsets, not sectors. */
   fs->data_start = fs->sb.inode_tbl_start + fs->sb.inode_tbl_blocks;
   fs->data_blocks = fs->sb.total_blocks - fs->data_start;
   fs->wal_bytes = fs->sb.wal_blocks * (UINT64)NOVUSFS_BLOCK_SIZE;
@@ -160,6 +163,9 @@ int novusfs_super_flush(novusfs_fs_t *fs) {
   fs->sb.sb_version++;
   fs->sb.checksum = super_crc(&fs->sb);
 
+  /* This is an ordered pair of block writes, not an atomic pair: a failure
+   * after the primary write can leave the backup carrying older bytes.
+   * Mount currently tries the primary first rather than selecting by version. */
   /* Both copies carry identical bytes; the version counter is what
    * later milestones use to tell them apart after a torn write. */
   memset(fs->blkbuf, 0, NOVUSFS_BLOCK_SIZE);
@@ -256,6 +262,9 @@ int novusfs_format_layout(novusfs_fs_t *fs, blkdev_t *dev) {
     merkle = 0; /* no room to reserve anything: M3 will notice */
   }
 
+  /* Regions are contiguous and each start is the prior region's end:
+   * the reserved tree sits between WAL and bitmap, while the data suffix
+   * begins only after the fixed-size bitmap and inode table. */
   fs->sb.magic = NOVUSFS_MAGIC;
   fs->sb.version = NOVUSFS_VERSION;
   fs->sb.block_size = NOVUSFS_BLOCK_SIZE;

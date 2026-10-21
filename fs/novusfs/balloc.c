@@ -81,6 +81,9 @@ UINT64 novusfs_balloc_alloc(novusfs_fs_t *fs) {
     idx = novus_rs_bitmap_find_first_clear_run(fs->scratch, nbits, 1);
     if (idx >= 0) {
       UINT64 bit = base_bit + (UINT64)idx;
+      /* Persist the allocation bit before returning the corresponding
+       * absolute data block; callers must not treat this as WAL-staged
+       * metadata, since this bitmap update is written directly here. */
       novus_rs_bitmap_set(fs->scratch, (UINT64)idx);
       if (novusfs_write_block(fs, fs->sb.free_bmap_start + b, fs->scratch) != 0) {
         return 0;
@@ -119,6 +122,9 @@ UINT64 novusfs_balloc_free_count(novusfs_fs_t *fs) {
     if (bmap_locate(fs, bit, &bblk, &boff) != 0) {
       break; /* data area larger than the bitmap: stop counting */
     }
+    /* A bitmap block is loaded only at its first byte; subsequent bits
+     * in that block are counted from the same scratch-buffer image.
+     * This bounds reads by bitmap blocks instead of individual bits. */
     if (boff == 0) {
       if (novusfs_read_block(fs, bblk, fs->scratch) != 0) {
         break;
