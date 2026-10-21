@@ -41,6 +41,11 @@
 /* Packed on-disk structures: no compiler-inserted padding. */
 #define NOVUS_NKM_PACKED __attribute__((packed))
 
+/* These records are serialized ABI, not native in-memory structs: their
+ * packed sizes and selected field offsets are asserted by nkm.c. Keep any
+ * layout change coordinated with the host module signer and its format
+ * version, or existing signed images will no longer match this parser. */
+
 /* ------------------------------------------------------------------ */
 /* Frozen on-disk format (spec V1.0)                                   */
 /* ------------------------------------------------------------------ */
@@ -253,6 +258,10 @@ int nkm_find(const char *name);
 UINTN nkm_loaded_count(void);
 
 /* Read-only view of a slot, or NULL when the slot is empty. */
+/* The returned record and its region/image pointers are owned by the
+ * loader; they remain usable only while that slot stays loaded. Unload
+ * may run the registered exit hook and then releases both allocations,
+ * so clients must not retain these pointers across unload. */
 const nkm_module_t *nkm_get(UINTN slot);
 
 /* Human-readable text for an error code, for the log. */
