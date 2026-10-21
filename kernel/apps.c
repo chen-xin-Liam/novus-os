@@ -27,6 +27,9 @@ static const app_t g_apps[] = {
     {"session", k_app_session, &k_app_session_len},
 };
 
+/* These positions are also the IDs sent by sysinfo's spawn request and the
+ * ordering shown in /apps. Keep the table order aligned with those clients;
+ * names, image bytes, and generated lengths must remain one row per image. */
 UINT32 apps_count(void) { return (UINT32)(sizeof(g_apps) / sizeof(g_apps[0])); }
 
 const char *apps_name(UINT32 i) {
@@ -74,6 +77,9 @@ int apps_launch(UINT32 i) {
   if (i >= apps_count()) {
     return -1;
   }
+  /* The session manager is the bootstrap path; every other built-in app
+   * requires an authenticated session and a single live instance by name.
+   * This exception keeps the login prompt available before authentication. */
   if (i != 4u && !session_logged_in()) {
     return APPS_EAUTH;
   }

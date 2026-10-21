@@ -88,6 +88,9 @@ fn sample_cpu(rows: &[Row; MAX_ROWS], n: usize, previous: &[Row; MAX_ROWS], elap
     ((active_delta.saturating_mul(100) / elapsed_ticks).min(100)) as u32
 }
 
+/* CPU usage is derived from per-task tick deltas between snapshots rather
+ * than a hardware counter. Matching by PID avoids attributing a recycled
+ * scheduler slot to the task that occupied it in the previous sample. */
 fn draw_processes(
     w: &wm::Win,
     rows: &[Row; MAX_ROWS],
@@ -187,6 +190,9 @@ fn draw(
     }
 }
 
+/* Task records arrive three at a time because each response must fit the
+ * bounded IPC payload. The total comes from the service; the returned count
+ * controls advancement so this snapshot follows the exact paging contract. */
 fn load(port: u64, out: &mut [Row; MAX_ROWS]) -> (usize, u16) {
     let mut n = 0;
     let mut total = 0u16;

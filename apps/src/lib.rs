@@ -10,6 +10,10 @@
 //! `_start` at 0x400000 and emits a flat image; `nuc_spawn_blob()` maps it
 //! at exactly that address, so absolute references in the code are valid
 //! without relocations.
+//!
+//! Each binary exports its own `#[no_mangle] extern "C" _start`; there is
+//! no Rust runtime or `main` shim to initialize a stack, allocator, or
+//! process environment before that entry point runs.
 
 #![no_std]
 

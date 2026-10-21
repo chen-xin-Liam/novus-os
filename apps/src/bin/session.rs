@@ -54,6 +54,9 @@ fn erase(buf: &mut [u8], len: &mut usize) {
     }
 }
 
+/* The session operation travels as a fixed-size syscall request, while the
+ * username/password buffers stay owned by this process. The syscall copies
+ * the request before returning, so these stack buffers need no shared memory. */
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] session manager up\n");
@@ -69,6 +72,9 @@ pub extern "C" fn _start() -> ! {
     let mut logged = false;
     let mut note = if setup { "创建首个账户，用户名仅支持 ASCII" } else { "输入用户名和密码" };
     draw(&win, &username, user_len, pass_len, focus, setup, logged, note);
+    /* The login window deliberately remains the session bootstrap service:
+     * dismissing its close button cannot strand the desktop without a way to
+     * authenticate, log out, or request a power transition. */
     loop {
         while let Some(ev) = win.next_event() {
             match ev {

@@ -50,6 +50,9 @@ impl State {
         unsafe { core::str::from_utf8_unchecked(&self.path[..self.path_len]) }
     }
 
+    /* The sysinfo tree is paged in fixed-size IPC replies; the index advances
+     * by the returned count so the final short page is not skipped or read
+     * again as if it were a full page. */
     fn reload(&mut self, port: u64) {
         self.n = 0;
         self.total = 0;
@@ -86,6 +89,9 @@ impl State {
         }
     }
 
+    /* Directory iteration is stateful in the task-local descriptor. Close
+     * it after the bounded listing even when a read reports an error, so a
+     * refresh does not consume another slot in the process descriptor table. */
     fn reload_disk(&mut self) {
         self.n = 0;
         self.total = 0;
