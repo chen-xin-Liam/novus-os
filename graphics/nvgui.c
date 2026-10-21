@@ -1422,8 +1422,14 @@ static void key_dispatch(const nd_event_t *ev) {
     }
     break;
   case NG_TEXTBOX:
-    /* Latin letters start (or continue) pinyin composition; the IME only
-     * hands the key back when it is idle and the key is not a letter. */
+    /* Ctrl+Space toggles Chinese (pinyin) / Latin passthrough. The IME
+     * hands a key back only when it is idle and the key is not a Latin
+     * letter in Chinese mode, or when Latin mode is active. */
+    if (ev->key == ' ' && (ev->mods & ND_MOD_CTRL) != 0u) {
+      nd_ime_set_en(!nd_ime_en());
+      ng_damage_widget(w);
+      return;
+    }
     if (!nd_ime_key(w, ev->key)) {
       textbox_key(w, ev->key);
     }

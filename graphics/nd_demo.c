@@ -200,6 +200,9 @@ void nd_selftest(void) {
   send_mouse(ND_EV_MOUSE_DOWN, ND_BUTTON_LEFT, 40, 40 + 90 + 10);
   send_mouse(ND_EV_MOUSE_UP, ND_BUTTON_LEFT, 40, 40 + 90 + 10);
   CHECK(ng_focus_get() == edit, "textbox focus");
+  /* The edit tests exercise plain Latin input; run them in Latin
+   * passthrough mode so the pinyin IME does not start a composition. */
+  nd_ime_set_en(1);
   send_key('h');
   send_key('i');
   CHECK(g_probe_buf[0] == 'h' && g_probe_buf[1] == 'i' &&
@@ -212,6 +215,7 @@ void nd_selftest(void) {
   CHECK(g_probe_buf[0] == 'X' && g_probe_buf[1] == 'h' &&
             g_probe_buf[2] == '\0',
         "textbox insert at caret");
+  nd_ime_set_en(0); /* restore the default Chinese mode for the desktop */
 
   g_probe_value = -1;
   slider = ng_create(win, NG_SLIDER, 20, 130, 160, 30);
