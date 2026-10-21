@@ -222,6 +222,8 @@ static void focus_set(int idx) {
     damage(g_wins[old].rect);
   }
   g_focus = idx;
+  (void)sched_set_foreground(idx >= 0 && g_wins[idx].owner != NWM_PID_SHELL
+                                 ? g_wins[idx].owner : SCHED_FOREGROUND_NONE);
   if (idx >= 0) {
     memset(&ev, 0, sizeof(ev));
     ev.win = g_wins[idx].id;
@@ -646,6 +648,10 @@ static void req_focus(const ipc_msg_t *m) {
     return;
   }
   z_raise((int)(w - g_wins));
+  if (w->state == 1u) {
+    w->state = 0;
+    damage_frame(w->rect);
+  }
   focus_set((int)(w - g_wins));
   ack(m, id, NWM_OK);
 }
@@ -1360,6 +1366,42 @@ int nwm_selftest(void) {
   pass &= expect(g_zcount == 2u, "z-order depth");
   pass &= expect(g_z[1] == (UINT8)win_index(b), "newest is on top");
   pass &= expect(hit_test(250, 200) == win_index(b), "hit test picks top");
+
+  {
+    task_t *front = sched_find_name("spin");
+    task_t *back = sched_find_name("selftest");
+
+    if (front != 0 && back != 0) {
+      win_get(a)->owner = front->pid;
+      win_get(b)->owner = front->pid;
+      fake_msg(&m, NWM_REQ_FOCUS, front->pid, &a, 4);
+      handle_request(&m);
+      pass &= expect(front->foreground && front->slice == 8u, "focus boosts owner");
+      front->slice = 7u;
+      fake_msg(&m, NWM_REQ_FOCUS, front->pid, &b, 4);
+      handle_request(&m);
+      pass &= expect(front->slice == 7u, "same owner keeps remaining slice");
+      win_get(b)->owner = back->pid;
+      fake_msg(&m, NWM_REQ_FOCUS, front->pid, &a, 4);
+      handle_request(&m);
+      fake_msg(&m, NWM_REQ_FOCUS, back->pid, &b, 4);
+      handle_request(&m);
+      pass &= expect(!front->foreground && front->slice == 4u &&
+                         back->foreground && back->slice == 8u,
+                     "focus transfers weight");
+      fake_msg(&m, NWM_REQ_MINIMIZE, back->pid, &b, 4);
+      handle_request(&m);
+      pass &= expect(!back->foreground && back->slice == 4u && g_focus == -1,
+                     "minimize restores background slice");
+      fake_msg(&m, NWM_REQ_FOCUS, back->pid, &b, 4);
+      handle_request(&m);
+      pass &= expect(win_get(b)->state == 0u && back->foreground,
+                     "focus restores minimized window");
+      focus_set(-1);
+      win_get(a)->owner = 0xF001ull;
+      win_get(b)->owner = 0xF002ull;
+    }
+  }
 
   /* Move, draw, effect. */
   memset(&mv, 0, sizeof(mv));

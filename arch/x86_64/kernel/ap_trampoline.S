@@ -64,7 +64,7 @@ ap_trampoline_entry:
     movl  %cr0, %eax
     orl   $1, %eax                 /* CR0.PE: protected mode */
     movl  %eax, %cr0
-    ljmp  $0x08, $prot_entry       /* 32-bit code segment, base 0x8000 */
+    ljmp  $0x08, $(prot_entry - ap_trampoline_entry)
 
     .code32
 prot_entry:
@@ -74,7 +74,7 @@ prot_entry:
     movw  %ax, %ss
 
     movl  %cr4, %eax
-    orl   $0x20, %eax              /* CR4.PAE: prerequisite for long mode */
+    orl   $0x620, %eax
     movl  %eax, %cr4
 
     /* CR3 from the BSP-patched slot (kernel page tables; the identity
@@ -89,7 +89,8 @@ prot_entry:
     wrmsr
 
     movl  %cr0, %eax
-    orl   $0x80000000, %eax        /* CR0.PG: paging on, long mode arms */
+    andl  $0xFFFFFFF3, %eax
+    orl   $0x80000002, %eax
     movl  %eax, %cr0
 
     /* Enter the 64-bit segment. Its base is forced to 0 in long mode,
@@ -105,9 +106,10 @@ long_entry:
     movw  %ax, %ss
 
     xorl  %ebp, %ebp
-    movq  tramp_stack_top(%rip), %rsp   /* AP stack top from the BSP */
+    movq  .Ltramp_stack_top(%rip), %rsp
+    subq  $32, %rsp
 
-    movq  tramp_ap_main(%rip), %rax
+    movq  .Ltramp_ap_main(%rip), %rax
     call  *%rax                    /* ap_main(), MS x64 ABI, never returns */
 
     /* Park the AP if ap_main ever returns (M4 scheduler hook). */
@@ -130,13 +132,16 @@ tramp_gdt_desc:
 
     /* --- BSP-patched slots: MUST remain the last 24 bytes of the
      * flat binary (kernel/smp.c computes them from the blob end) --- */
-    .balign 8
+    .balign 16
+    .space 8
     .globl tramp_cr3
 tramp_cr3:
     .quad 0
     .globl tramp_stack_top
 tramp_stack_top:
+.Ltramp_stack_top:
     .quad 0
     .globl tramp_ap_main
 tramp_ap_main:
+.Ltramp_ap_main:
     .quad 0

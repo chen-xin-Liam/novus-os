@@ -30,6 +30,7 @@
 #define SCHED_MAX_TASKS   8
 #define SCHED_KSTACK_PAGES 16u /* 64 KiB ring-0 stack per task */
 #define SCHED_SLICE_TICKS 4u   /* timer ticks per time slice */
+#define SCHED_FOREGROUND_NONE (~0ULL)
 
 #define TASK_FREE    0
 #define TASK_READY   1
@@ -53,6 +54,7 @@ typedef struct task {
                         * freed only after the task has been switched away */
   UINT32   ticks;
   UINT32   slice;
+  UINT8    foreground;
   UINT32   started; /* tick when the task was created */
   int      exit_code;
   UINT64   wait_port;     /* IPC port a blocked task is parked on */
@@ -80,6 +82,10 @@ UINT64 sched_switch_frame(UINT64 current_frame);
 
 /* Timer tick: charge the slice, ask for a switch when it runs out. */
 void sched_tick(void);
+
+/* Kernel WM only, with interrupts disabled; NONE selects the kernel shell. */
+int sched_set_foreground(UINT64 pid);
+int sched_selftest(void);
 
 /* Mark the running task as finished. The switch happens on the way out of
  * the trap. */

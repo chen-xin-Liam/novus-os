@@ -39,6 +39,7 @@
 #include "apps.h"
 #include "sysinfo.h"
 #include "net.h"
+#include "irq.h"
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
@@ -232,6 +233,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * system - the README asks for a bug to cost the process, not the
    * machine. */
   sched_init();
+#if CONFIG_NOVUS_IRQ
+  irq_init(mmap_addr, map_size, desc_size);
+  serial_irq_init();
+#endif
 
   if (nuc_create_idle() != 0) {
     kputs("[SCHED] ERROR: idle task could not be created\n");

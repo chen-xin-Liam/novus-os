@@ -32,6 +32,7 @@ static idtr_t      g_idtr;
 /* Defined in arch/x86_64/kernel/trap.S: 32 exception stubs, then the
  * timer stub. */
 extern UINT64 isr_stub_table[33];
+extern UINT64 irq_stub_table[223];
 
 static void idt_set(UINT32 vector, UINT64 handler) {
   g_idt[vector].off_lo = (UINT16)(handler & 0xFFFFu);
@@ -50,11 +51,14 @@ void idt_init(void) {
   for (i = 0; i < 33u; i++) {
     idt_set(i, isr_stub_table[i]);
   }
+  for (i = 33u; i < 256u; i++) {
+    idt_set(i, irq_stub_table[i - 33u]);
+  }
 
   g_idtr.limit = (UINT16)(sizeof(g_idt) - 1u);
   g_idtr.base = (UINT64)(UINTN)g_idt;
 
   __asm__ volatile("lidt %0" : : "m"(g_idtr) : "memory");
 
-  kputs("[IDT] installed, 33 vectors (0-31 exceptions, 32 timer)\n");
+  kputs("[IDT] installed: exceptions 0-31, timer 32, IRQ 33-254, spurious 255\n");
 }

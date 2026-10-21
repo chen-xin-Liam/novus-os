@@ -83,6 +83,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/smp.c \
        kernel/gdt.c \
        kernel/idt.c \
+        kernel/irq.c \
        kernel/trap.c \
        kernel/sched.c \
        kernel/vm.c \
@@ -145,6 +146,7 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_NKM=$(if $(filter y,$(CONFIG_NOVUS_NKM)),1,0) \
           -DCONFIG_NOVUS_INSTALLER=$(if $(filter y,$(CONFIG_NOVUS_INSTALLER)),1,0) \
           -DCONFIG_NOVUS_SCHED=$(if $(filter y,$(CONFIG_NOVUS_SCHED)),1,0) \
+          -DCONFIG_NOVUS_IRQ=$(if $(filter y,$(CONFIG_NOVUS_IRQ)),1,0) \
           -DCONFIG_NOVUS_DISPLAY=$(if $(filter y,$(CONFIG_NOVUS_DISPLAY)),1,0) \
           -DCONFIG_NOVUS_GUI=$(if $(filter y,$(CONFIG_NOVUS_GUI)),1,0) \
           -DCONFIG_NOVUS_WM=$(if $(filter y,$(CONFIG_NOVUS_WM)),1,0) \

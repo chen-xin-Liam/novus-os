@@ -60,9 +60,10 @@ CONFIG_USER_CPPCC=y
 
 # M4: scheduler, ring 3, syscalls and the NUC loader.
 CONFIG_NOVUS_SCHED=y
+CONFIG_NOVUS_IRQ=y
 
 # M5: NovusDisplay (README part 11): the linear-framebuffer HAL, the 2D
-# renderer, the built-in font, PS/2 input polling and the demo desktop.
+# renderer, the built-in font, PS/2 IRQ input and the demo desktop.
 CONFIG_NOVUS_DISPLAY=y
 
 # M5: NovusGUI widget library (window/button/textbox/slider/list/tree).

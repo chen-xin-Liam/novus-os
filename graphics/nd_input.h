@@ -1,11 +1,8 @@
 /**
  * Novus OS - input events for NovusDisplay/GUI (M5).
  *
- * One event type for mouse, wheel and keyboard, one queue. The events are
- * polled, not interrupt driven: the PS/2 controller is drained from the
- * timer tick, which already runs in interrupt context and therefore never
- * interleaves with a redraw. That keeps M5 free of IRQ routing changes and
- * still gives ~100 Hz input latency.
+ * One event type for mouse, wheel and keyboard, one queue. IRQ1/12 capture
+ * raw bytes, and the timer consumer decodes them before routing events.
  *
  * The same queue accepts synthetic events (`nd_input_push`), which is how
  * the self test drives buttons, text boxes and sliders without needing a
@@ -58,8 +55,7 @@ typedef struct {
 
 void nd_input_init(void);
 
-/* Drain the PS/2 controller and turn bytes into events. Safe to call from
- * the timer tick; bounded work per call. */
+/* Decode the ISR byte queue, without reading hardware. Bounded per call. */
 void nd_input_poll(void);
 
 int nd_input_pop(nd_event_t *out);
