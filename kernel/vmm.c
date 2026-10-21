@@ -20,6 +20,9 @@ void *vmm_alloc_page(void) {
     return 0;
   }
   v = phys_to_virt((UINT64)phys);
+  /* Clear the page before exposing it so callers never observe data left
+   * by its previous owner; page tables and heap buffers rely on this.
+   * Fresh page tables therefore begin with all entries non-present. */
   memset(v, 0, MM_PAGE_SIZE);
   return v;
 }
@@ -28,5 +31,8 @@ void vmm_free_page(void *vaddr) {
   if (vaddr == 0) {
     return;
   }
+  /* The PMM bitmap is indexed by physical page number, not by the
+   * physmap address returned to callers, so undo the direct-map offset.
+   * This recovers the physical page number that the allocator tracks. */
   pmm_free_page((void *)virt_to_phys(vaddr));
 }
