@@ -232,6 +232,9 @@ static int fs_parent_path(novusfs_fs_t *fs, char path[FS_PATH_MAX],
 
 static int fs_fd_index(task_t *t, UINT64 fd) {
   UINT64 index;
+  /* Filesystem handles are task-local slots, not global kernel objects:
+   * subtracting the public base selects only the current task's table.
+   * Reusing another task's numeric descriptor therefore cannot grant access. */
   if (fd < FS_FD_BASE) return -1;
   index = fd - FS_FD_BASE;
   if (index >= TASK_FD_MAX || !t->fd[index].used) return -1;
@@ -566,6 +569,9 @@ static void sys_yield_call(trap_frame_t *f) {
 }
 
 static void sys_exit_call(trap_frame_t *f) {
+  /* Exit is routed through the scheduler so task-owned state is retired in
+   * one place, including the inbox and named IPC ports; the syscall does not
+   * return to user code after the scheduler switches away. */
   sched_exit_current((int)(UINT32)f->rdi);
   f->rax = 0;
 }
@@ -652,9 +658,15 @@ UINT64 trap_dispatch(trap_frame_t *f) {
   if (f->vector == IDT_SYSCALL_MARK) {
     syscall_dispatch(f);
   } else if (f->vector == IDT_TIMER_VECTOR) {
+    /* Retire the LAPIC timer interrupt before running tick work; the
+     * timer branch then shares the ordinary frame-return scheduler path.
+     * The saved frame remains the continuation selected for interrupt return. */
     lapic_write(lapic_base(), LAPIC_EOI, 0);
     sched_tick();
   } else if (f->vector >= IRQ_FIRST_VECTOR && f->vector <= IRQ_SPURIOUS_VECTOR) {
+    /* Device IRQ dispatch performs its own EOI and preserves this frame.
+     * A scheduling decision is therefore left to a later timer or syscall
+     * path rather than switching directly from this branch. */
     irq_dispatch((UINT32)f->vector);
     return (UINT64)(UINTN)f;
   } else {

@@ -48,6 +48,9 @@ void idt_init(void) {
   UINT32 i;
 
   memset(g_idt, 0, sizeof(g_idt));
+  /* Keep the assembly table boundary aligned with the vector split:
+   * entries 0..32 use exception/timer stubs, and the remaining vectors
+   * index the device-stub table starting at vector 33. */
   for (i = 0; i < 33u; i++) {
     idt_set(i, isr_stub_table[i]);
   }
@@ -58,6 +61,9 @@ void idt_init(void) {
   g_idtr.limit = (UINT16)(sizeof(g_idt) - 1u);
   g_idtr.base = (UINT64)(UINTN)g_idt;
 
+  /* Install only after every descriptor has been populated. The IDTR
+   * limit is the last valid byte, not the entry count, so it covers the
+   * full 256-entry table without exposing bytes beyond it. */
   __asm__ volatile("lidt %0" : : "m"(g_idtr) : "memory");
 
   kputs("[IDT] installed: exceptions 0-31, timer 32, IRQ 33-254, spurious 255\n");

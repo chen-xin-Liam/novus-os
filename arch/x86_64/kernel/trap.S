@@ -124,6 +124,9 @@ irq_stub_table:
 .endr
 .noaltmacro
 
+/* External interrupts do not push an error code, so each generated device
+ * stub adds the same zero-error/vector pair used by the common frame.
+ * This keeps trap_dispatch's vector and error-code offsets uniform. */
 irq_common:
     pushq %rax
     pushq %rbx
@@ -141,6 +144,9 @@ irq_common:
     pushq %r14
     pushq %r15
     cld
+    /* Keep the original frame pointer while aligning a separate C-call
+     * stack; the reserved area also gives FXSAVE an aligned 512-byte slot.
+     * Restore FP/SIMD state before returning to the interrupted context. */
     movq %rsp, %rbx
     movq %rsp, %rcx
     andq $-16, %rsp

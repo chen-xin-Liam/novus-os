@@ -221,6 +221,9 @@ void smp_wake_ap(UINT64 kernel_cr3, UINT64 mmap, UINT64 map_size,
     if (apic_ids[index] == bsp_id) {
       continue;
     }
+    /* The AP stack is addressed as one contiguous range from its first
+     * allocated page, so reject a fragmented run and return its pages
+     * before trying the next processor. */
     for (n = 0; n < 4u; n++) {
       void *page = pmm_alloc_page();
       if (page == NULL) {
@@ -255,6 +258,9 @@ void smp_wake_ap(UINT64 kernel_cr3, UINT64 mmap, UINT64 map_size,
     kputs("[SMP] Waking AP ID ");
     kputs_hex(apic_ids[index]);
     kputs("\n");
+    /* INIT resets the target before two startup IPIs name the trampoline
+     * page; the later bounded loop may resend SIPI while waiting for the
+     * AP's online counter to reach this attempt's expected value. */
     lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH,
                 (UINT32)apic_ids[index] << 24);
     lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW, ICR_DM_INIT | ICR_LEVEL);
