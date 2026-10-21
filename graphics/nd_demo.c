@@ -82,6 +82,10 @@ static void send_key(UINT32 key) {
   ng_dispatch(&ev);
 }
 
+/* The self-test deliberately uses a heap-backed surface and synthetic input,
+ * so its pixel and widget assertions do not depend on firmware graphics or
+ * a physical keyboard. It exercises the same renderer and dispatcher used
+ * by the visible desktop. */
 void nd_selftest(void) {
   nd_surface_t s;
   ng_ctx_t    *ctx;
@@ -706,6 +710,10 @@ void nd_demo_paint(nd_rect_t clip) {
   }
 }
 
+/* Input bytes are decoded into events before this loop; damage is painted
+ * only after queued events have updated widget state. Hiding the save-under
+ * pointer first prevents its saved pixels from being restored over the new
+ * scene, and the final draw puts it back above that scene. */
 void nd_demo_tick(void) {
   nd_rect_t  d;
   nd_event_t ev;

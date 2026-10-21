@@ -110,6 +110,9 @@ static int syllable_prefix(const char *py) {
   return 0;
 }
 
+/* The dictionary's sorted syllables make prefix existence searchable
+ * without building a second trie. Rejecting a non-prefix keystroke leaves
+ * the composition buffer valid, even when the exact syllable has no result. */
 static void refresh(void) {
   if (g_ime.py[0] == '\0') {
     g_ime.active = 0;
@@ -126,6 +129,9 @@ static void damage_popup(void) {
   }
 }
 
+/* A selection is a Unicode codepoint, not a byte from the candidate table.
+ * The widget encoder inserts it at a UTF-8 boundary; the uncommitted pinyin
+ * and popup state are then cleared without disturbing earlier text. */
 static void commit(ng_widget_t *edit) {
   if (edit != 0 && g_ime.n != 0u && g_ime.sel < g_ime.n) {
     (void)ng_edit_insert_cp(edit, g_ime.cand[g_ime.sel]);

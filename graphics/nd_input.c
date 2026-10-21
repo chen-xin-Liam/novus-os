@@ -44,6 +44,9 @@ static UINT32 g_raw_tail;
 static UINT32 g_raw_dropped;
 static UINT8 g_irq_logged;
 
+/* The IRQ handler only transfers controller bytes plus the AUX-source bit
+ * into this ring; key mapping and packet assembly happen later in poll
+ * context. One ring slot stays unused to distinguish full from empty. */
 static void ps2_irq(void *ctx) {
   UINT32 guard = ND_SCAN_LIMIT;
 
@@ -447,6 +450,9 @@ static void mouse_byte(UINT8 b) {
   }
 }
 
+/* Copy and release each raw slot with interrupts briefly masked, then
+ * restore them before decoding or publishing higher-level events. This keeps
+ * the IRQ producer's critical path independent of keyboard/mouse handling. */
 void nd_input_poll(void) {
   UINT32 guard = ND_SCAN_LIMIT;
 

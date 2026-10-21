@@ -543,6 +543,9 @@ static void draw_checkbox(ng_widget_t *w) {
 }
 
 /* Byte offset one codepoint after `off`. */
+/* Edit positions are byte offsets into the UTF-8 buffer, not character
+ * counts. Moving via the decoder preserves boundaries so backspace, caret
+ * scrolling, and CJK hit placement never split a multibyte glyph. */
 static UINT32 edit_skip(ng_widget_t *w, UINT32 off, int steps) {
   while (steps-- > 0 && off < w->u.edit.len) {
     const char *p = w->u.edit.buf + off;
@@ -1396,6 +1399,9 @@ static ng_widget_t *focus_step(ng_widget_t *cur, int forward) {
   return g_order[(start + step) % g_order_n];
 }
 
+/* Keyboard routing starts from the stored focus rather than a pointer hit.
+ * For textboxes the IME gets first refusal; only keys it leaves unconsumed
+ * reach the editor's ordinary caret and deletion handling. */
 static void key_dispatch(const nd_event_t *ev) {
   ng_widget_t *w = g_ctx.focus;
 
