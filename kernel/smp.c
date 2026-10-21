@@ -25,6 +25,8 @@
 #include "smp.h"
 #include "shared_mem.h"
 #include "pmm.h"
+#include "mm.h"
+#include "acpi.h"
 #include "lapic.h"
 #include "cpu.h"
 #include "serial.h"
@@ -54,10 +56,6 @@ extern UINT8 ap_trampoline_bin_end[];
 #define ICR_DM_INIT (5u << 8)
 #define ICR_DM_SIPI (6u << 8)
 #define ICR_LEVEL   (1u << 14)
-
-/* Destination: physical APIC ID of the B core (BSP id 0, AP id 1 under
- * QEMU -smp 2; x2APIC is out of M1 scope, the MMIO xAPIC ICR is used). */
-#define SMP_AP_APIC_ID 1
 
 /* Bounded wait for the AP (spec 3.4: degrade, never deadlock). */
 #define SMP_WAIT_SPINS        500000000ULL
@@ -157,22 +155,27 @@ void ap_main(void) {
 
 #if !CONFIG_NOVUS_SMP
 
-void smp_wake_ap(UINT64 kernel_cr3) {
+void smp_wake_ap(UINT64 kernel_cr3, UINT64 mmap, UINT64 map_size,
+                 UINT64 desc_size) {
   (void)kernel_cr3;
+  (void)mmap;
+  (void)map_size;
+  (void)desc_size;
   kputs("[SMP] disabled by config\n");
 }
 
 #else /* CONFIG_NOVUS_SMP */
 
-void smp_wake_ap(UINT64 kernel_cr3) {
+void smp_wake_ap(UINT64 kernel_cr3, UINT64 mmap, UINT64 map_size,
+                 UINT64 desc_size) {
   shared_mem_t *shm = shared_mem_get();
   UINT64 lapic_mmio;
   UINT64 blob_size;
-  void *stack_pages[4];
-  UINT64 stack_top = 0;
-  UINT64 spins;
-  UINTN n, i;
-  int online = 0;
+  UINT8 apic_ids[ACPI_MAX_XAPIC_IDS];
+  UINTN apic_count;
+  UINTN index;
+  UINT8 bsp_id;
+  UINTN online = 0;
 
   /* The blob must fit the single trampoline page at 0x8000 and leave
    * room for the 24-byte slot tail. */
@@ -190,87 +193,113 @@ void smp_wake_ap(UINT64 kernel_cr3) {
     return;
   }
 
-  /* 16 KiB AP stack: 4 consecutive pages from the PMM (allocations are
-   * handed out ascending; verified below so rsp = base + 16 KiB is
-   * sound even though each page would be identity-mapped anyway). */
-  for (n = 0; n < 4; n++) {
-    void *p = pmm_alloc_page();
-    if (p == 0) {
-      break;
-    }
-    if (n > 0 && (UINT64)p != (UINT64)stack_pages[n - 1] + 4096) {
-      pmm_free_page(p);
-      break;
-    }
-    stack_pages[n] = p;
+  apic_count = acpi_xapic_ids(mmap, map_size, desc_size, apic_ids,
+                              ACPI_MAX_XAPIC_IDS);
+  if (apic_count == 0) {
+    apic_ids[0] = 1u;
+    apic_count = 1;
+    kputs("[SMP] WARN no MADT CPUs; trying legacy APIC ID 1\n");
   }
-  if (n < 4) {
-    for (i = 0; i < n; i++) {
-      pmm_free_page(stack_pages[i]);
-    }
-    kputs("[SMP] WARNING: no contiguous AP stack, continuing "
-          "uniprocessor (spec 3.4)\n");
-    return;
-  }
-  stack_top = (UINT64)stack_pages[0] + 4 * 4096;
+  bsp_id = (UINT8)(lapic_read(lapic_mmio, 0x20u) >> 24);
 
-  /* Copy the trampoline into identity-mapped low memory and patch the
-   * three slots at the blob end. */
+  /* The trampoline is reused only after each AP has entered ap_main(). */
   memcpy((void *)(UINTN)SMP_TRAMPOLINE_PHYS, ap_trampoline_bin,
          (UINTN)blob_size);
-  {
-    volatile UINT64 *slots = (volatile UINT64 *)(UINTN)(
-        SMP_TRAMPOLINE_PHYS + blob_size - TRAMP_SLOT_BYTES);
-    slots[TRAMP_SLOT_CR3 / 8]   = kernel_cr3;
-    slots[TRAMP_SLOT_STACK / 8] = stack_top;
-    slots[TRAMP_SLOT_MAIN / 8]  = (UINT64)(UINTN)&ap_main;
-  }
+  kputs("[SMP] MADT enabled xAPIC IDs: ");
+  kputs_hex(apic_count);
+  kputs("\n");
 
-  kputs("[SMP] Waking AP (B-core)...\n");
+  for (index = 0; index < apic_count; index++) {
+    void *stack_pages[4];
+    UINT64 stack_top;
+    UINT64 spins;
+    UINT32 n;
+    UINT32 i;
+    UINT32 expected;
+    int is_online = 0;
 
-  /* INIT (delivery mode 5, level assert, physical destination = AP id).
-   * In xAPIC mode the destination field is bits [31:24] of the ICR high
-   * register (= ICR[63:56]); the low-half write triggers the send. */
-  lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH, SMP_AP_APIC_ID << 24);
-  lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW, ICR_DM_INIT | ICR_LEVEL);
-  smp_delay_ms(10); /* INIT settle time (SDM Vol.3 9.4; QEMU is loose) */
-
-  /* SIPI vector 8 twice, ~200 us apart. */
-  lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH, SMP_AP_APIC_ID << 24);
-  lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW,
-              ICR_DM_SIPI | ICR_LEVEL | SMP_SIPI_VECTOR);
-  smp_delay(400); /* ~200 us */
-  lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH, SMP_AP_APIC_ID << 24);
-  lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW,
-              ICR_DM_SIPI | ICR_LEVEL | SMP_SIPI_VECTOR);
-
-  /* Bounded wait for the AP to publish itself. ap_command == SLEEP is
-   * an equivalent early-success signal from the AP side. A SIPI aimed
-   * at an already-running AP is architecturally ignored, so the few
-   * re-sends below are safe under tight TCG timing. */
-  for (spins = 0; spins < SMP_WAIT_SPINS; spins++) {
-    if ((spins & 0x3FULL) == 0) {
-      if (shm->ap_online_count >= 2 ||
-          shm->ap_command == SHARED_MEM_CMD_SLEEP) {
-        online = 1;
+    if (apic_ids[index] == bsp_id) {
+      continue;
+    }
+    for (n = 0; n < 4u; n++) {
+      void *page = pmm_alloc_page();
+      if (page == NULL) {
         break;
       }
-      if (spins != 0 && (spins % SMP_SIPI_RESEND_SPINS) == 0 &&
-          spins <= SMP_SIPI_RESEND * SMP_SIPI_RESEND_SPINS) {
-        lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH, SMP_AP_APIC_ID << 24);
-        lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW,
-                    ICR_DM_SIPI | ICR_LEVEL | SMP_SIPI_VECTOR);
+      if (n > 0 && (UINT64)page !=
+                       (UINT64)stack_pages[n - 1] + 4096u) {
+        pmm_free_page(page);
+        break;
       }
+      stack_pages[n] = page;
     }
-    __asm__ volatile("pause");
-  }
+    if (n < 4u) {
+      for (i = 0; i < n; i++) {
+        pmm_free_page(stack_pages[i]);
+      }
+      kputs("[SMP] WARN no contiguous stack for AP ID ");
+      kputs_hex(apic_ids[index]);
+      kputs("\n");
+      continue;
+    }
+    stack_top = (UINT64)phys_to_virt((UINT64)stack_pages[0] + 4u * 4096u);
+    {
+      volatile UINT64 *slots = (volatile UINT64 *)(UINTN)(
+          SMP_TRAMPOLINE_PHYS + blob_size - TRAMP_SLOT_BYTES);
+      slots[TRAMP_SLOT_CR3 / 8] = kernel_cr3;
+      slots[TRAMP_SLOT_STACK / 8] = stack_top;
+      slots[TRAMP_SLOT_MAIN / 8] = (UINT64)(UINTN)&ap_main;
+    }
 
-  if (online) {
-    kputs("[SMP] AP online, cpu_count=2\n");
-    kputs("[SMP] A-core entering sleep (B-core in charge)\n");
-  } else {
-    kputs("[WARN] AP wake timeout, continuing degraded (spec 3.4)\n");
+    expected = shm->ap_online_count + 1u;
+    kputs("[SMP] Waking AP ID ");
+    kputs_hex(apic_ids[index]);
+    kputs("\n");
+    lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH,
+                (UINT32)apic_ids[index] << 24);
+    lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW, ICR_DM_INIT | ICR_LEVEL);
+    smp_delay_ms(10);
+    lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH,
+                (UINT32)apic_ids[index] << 24);
+    lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW,
+                ICR_DM_SIPI | ICR_LEVEL | SMP_SIPI_VECTOR);
+    smp_delay(400);
+    lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH,
+                (UINT32)apic_ids[index] << 24);
+    lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW,
+                ICR_DM_SIPI | ICR_LEVEL | SMP_SIPI_VECTOR);
+
+    for (spins = 0; spins < SMP_WAIT_SPINS; spins++) {
+      if ((spins & 0x3FULL) == 0) {
+        if (shm->ap_online_count >= expected) {
+          is_online = 1;
+          break;
+        }
+        if (spins != 0 && (spins % SMP_SIPI_RESEND_SPINS) == 0 &&
+            spins <= SMP_SIPI_RESEND * SMP_SIPI_RESEND_SPINS) {
+          lapic_write(lapic_mmio, LAPIC_REG_ICR_HIGH,
+                      (UINT32)apic_ids[index] << 24);
+          lapic_write(lapic_mmio, LAPIC_REG_ICR_LOW,
+                      ICR_DM_SIPI | ICR_LEVEL | SMP_SIPI_VECTOR);
+        }
+      }
+      __asm__ volatile("pause");
+    }
+    if (is_online) {
+      online++;
+      kputs("[SMP] AP online, ID ");
+      kputs_hex(apic_ids[index]);
+      kputs("\n");
+    } else {
+      kputs("[SMP] WARN AP wake timeout, ID ");
+      kputs_hex(apic_ids[index]);
+      kputs("\n");
+      break;
+    }
   }
+  kputs("[SMP] online AP count ");
+  kputs_hex(online);
+  kputs("\n");
 }
 
 #endif /* CONFIG_NOVUS_SMP */

@@ -11,6 +11,7 @@
 #include "nuc.h"
 #include "sched.h"
 #include "kernel.h"
+#include "session.h"
 
 typedef struct {
   const char          *name;
@@ -23,6 +24,7 @@ static const app_t g_apps[] = {
     {"taskman", k_app_taskman, &k_app_taskman_len},
     {"settings", k_app_settings, &k_app_settings_len},
     {"netman", k_app_netman, &k_app_netman_len},
+    {"session", k_app_session, &k_app_session_len},
 };
 
 UINT32 apps_count(void) { return (UINT32)(sizeof(g_apps) / sizeof(g_apps[0])); }
@@ -71,6 +73,9 @@ int apps_launch(UINT32 i) {
 
   if (i >= apps_count()) {
     return -1;
+  }
+  if (i != 4u && !session_logged_in()) {
+    return APPS_EAUTH;
   }
   if (sched_find_name(g_apps[i].name) != 0) {
     return APPS_ERUNNING;

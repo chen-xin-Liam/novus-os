@@ -31,6 +31,7 @@
 #define SCHED_KSTACK_PAGES 16u /* 64 KiB ring-0 stack per task */
 #define SCHED_SLICE_TICKS 4u   /* timer ticks per time slice */
 #define SCHED_FOREGROUND_NONE (~0ULL)
+#define TASK_FD_MAX 16u
 
 #define TASK_FREE    0
 #define TASK_READY   1
@@ -60,11 +61,19 @@ typedef struct task {
   UINT64   wait_port;     /* IPC port a blocked task is parked on */
   UINT64   wait_deadline; /* tick at which the park expires, 0 = forever */
   int      wait_err;      /* error to hand back when the task resumes */
+  struct {
+    UINT32 ino;
+    UINT32 dir_index;
+    UINT64 offset;
+    UINT8  used;
+    UINT8  is_dir;
+    UINT8  pad[6];
+  } fd[TASK_FD_MAX];
   struct task *next;
 } task_t;
 
 /* GDT, TSS, IDT, the timer and the idle task. Interrupts stay off. */
-void sched_init(void);
+void sched_init(UINT64 mmap, UINT64 size, UINT64 stride);
 
 /* Build a ready task for a ring-3 entry point. The space is copied into
  * the task, which then owns it: on success the caller must not free it.

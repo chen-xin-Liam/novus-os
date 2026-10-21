@@ -84,11 +84,16 @@ SRC := arch/x86_64/boot/main.c \
        kernel/gdt.c \
        kernel/idt.c \
         kernel/irq.c \
-       kernel/trap.c \
+        kernel/acpi.c \
+        kernel/power.c \
+    kernel/trap.c \
+    kernel/session.c \
        kernel/sched.c \
        kernel/vm.c \
        kernel/nuc.c \
        kernel/blkdev.c \
+         kernel/ahci.c \
+    kernel/nvme.c \
        kernel/gpt.c \
        kernel/nksym.c \
        graphics/nd_font.c \
@@ -124,7 +129,7 @@ SRC := arch/x86_64/boot/main.c \
 
 # Assembly sources. Uppercase .S (case-sensitive) makes gcc run the C
 # preprocessor over the file first; gcc invokes the assembler itself.
-ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S
+ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S arch/x86_64/kernel/chkstk.S
 
 INC := -Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs \
        -Isecurity/nkm -Ibuild
@@ -255,7 +260,7 @@ $(RUST_LIB): $(RUST_DEPS)
 APPS_DIR    := apps
 APPS_TARGET := $(CURDIR)/build/rust-apps
 APPS_STAMP  := build/apps.stamp
-APPS_NAMES  := fileman taskman settings netman
+APPS_NAMES  := fileman taskman settings netman session
 APPS_BINS   := $(addprefix out/apps/,$(addsuffix .bin,$(APPS_NAMES)))
 APPS_BLOB_H := build/apps_blobs.h
 APPS_DEPS   := $(shell find $(APPS_DIR)/src -type f 2>/dev/null) \

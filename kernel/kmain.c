@@ -29,6 +29,11 @@
 /* M3: block device table (to adopt the live root) and the signed module
  * loader, both new this milestone. */
 #include "blkdev.h"
+#include "ahci.h"
+#include "nvme.h"
+#include "gpt.h"
+#include "power.h"
+#include "session.h"
 #include "nksym.h"
 #include "nkm.h"
 /* M5: NovusDisplay and the GUI widget library. */
@@ -60,6 +65,100 @@ void kputs_hex(UINT64 v) {
   kputs(buf);
 }
 
+typedef struct {
+  novusfs_fs_t *fs;
+  UINTN shown;
+  UINTN read_ok;
+} storage_list_ctx_t;
+
+static novusfs_fs_t storage_fs[BLKDEV_MAX_DEVICES];
+static UINTN storage_fs_count;
+
+static void storage_list_entry(void *ctx, UINT32 ino, const char *name) {
+  storage_list_ctx_t *list = (storage_list_ctx_t *)ctx;
+  novusfs_inode_t inode;
+  UINT8 sample[32];
+
+  if (list->shown < 8u) {
+    kputs("[AHCI] NovusFS entry: ");
+    kputs(name);
+    kputs("\n");
+    list->shown++;
+  }
+  if (list->read_ok || novusfs_inode_read(list->fs, ino, &inode) != 0 ||
+      inode.mode != NOVUSFS_IFILE) {
+    return;
+  }
+  if (novusfs_read(list->fs, ino, 0, sample, sizeof(sample)) >= 0) {
+    kputs("[AHCI] NovusFS file read PASS: ");
+    kputs(name);
+    kputs("\n");
+    list->read_ok = 1;
+  }
+}
+
+static void storage_mount_ahci_novusfs(void) {
+  UINTN disks = blkdev_count();
+  UINTN i;
+
+  for (i = 0; i < disks && storage_fs_count < BLKDEV_MAX_DEVICES; i++) {
+    blkdev_t *disk = blkdev_get_at(i);
+    gpt_table_t table;
+    gpt_part_t part;
+    char part_name[16];
+    UINTN n = 0;
+    blkdev_t *part_dev;
+    novusfs_fs_t *fs;
+    storage_list_ctx_t list;
+
+    if (disk == NULL || (disk->flags & BLKDEV_FLAG_PARTITION) != 0 ||
+      !((disk->name[0] == 'a' && disk->name[1] == 'h' &&
+         disk->name[2] == 'c' && disk->name[3] == 'i') ||
+        (disk->name[0] == 'n' && disk->name[1] == 'v' &&
+         disk->name[2] == 'm' && disk->name[3] == 'e'))) {
+      continue;
+    }
+    if (gpt_read(disk, &table) != 0 ||
+        gpt_find_novusfs(&table, &part) != 0) {
+      continue;
+    }
+    while (disk->name[n] != '\0' && n < sizeof(part_name) - 3u) {
+      part_name[n] = disk->name[n];
+      n++;
+    }
+    part_name[n++] = 'f';
+    part_name[n++] = 's';
+    part_name[n] = '\0';
+    part_dev = blkdev_partition_init(part_name, disk, part.first_sector,
+                                     part.sector_count);
+    if (part_dev == NULL) {
+      kputs("[AHCI] NovusFS partition registration failed\n");
+      continue;
+    }
+    fs = &storage_fs[storage_fs_count];
+    if (novusfs_mount(fs, part_dev) != 0) {
+      kputs("[AHCI] NovusFS mount failed: ");
+      kputs(part_dev->name);
+      kputs("\n");
+      continue;
+    }
+    storage_fs_count++;
+    novusfs_set_root(fs);
+    kputs("[AHCI] NovusFS mounted: ");
+    kputs(part_dev->name);
+    kputs("\n");
+    list.fs = fs;
+    list.shown = 0;
+    list.read_ok = 0;
+    if (novusfs_dir_readdir(fs, fs->sb.root_inode, storage_list_entry,
+                            &list) != 0) {
+      kputs("[AHCI] NovusFS root listing failed\n");
+    } else if (!list.read_ok) {
+      kputs("[AHCI] NovusFS has no readable regular file in root\n");
+    }
+  }
+}
+
 void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   serial_init();
   vga_init();
@@ -85,6 +184,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   heap_init();
   heap_selftest();
 
+  power_init(mmap_addr, map_size, desc_size);
+  (void)ahci_init();
+  (void)nvme_init();
+
   /* M5: NovusDisplay. Bind a surface to the framebuffer the boot stage
    * captured, then run the renderer/widget self test on an off-screen
    * surface. Both need the heap, neither needs the scheduler. */
@@ -109,6 +212,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   if (novusfs_selftest() != 0) {
     kputs("[WARN] NovusFS selftest failed, continuing degraded\n");
   }
+  storage_mount_ahci_novusfs();
 
   /* M3: report what the boot stage found. The verification itself had to
    * happen before ExitBootServices - only the boot stage can still read
@@ -217,7 +321,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 
   /* LAPIC bring-up, then wake the B core (AP) with the kernel CR3. */
   lapic_init();
-  smp_wake_ap(mm_get_cr3());
+  smp_wake_ap(mm_get_cr3(), mmap_addr, map_size, desc_size);
 
   /* A core rests: last shared-memory log entry, then park (README 2.2
    * step 6). */
@@ -232,7 +336,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * returns. A failed application is reported and does not stop the
    * system - the README asks for a bug to cost the process, not the
    * machine. */
-  sched_init();
+  sched_init(mmap_addr, map_size, desc_size);
 #if CONFIG_NOVUS_IRQ
   irq_init(mmap_addr, map_size, desc_size);
   serial_irq_init();
@@ -249,22 +353,6 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * so the log can show NX refusing it. */
   (void)nuc_create_spin();
   (void)nuc_nx_probe();
-  {
-    shared_mem_t *shm_a = shared_mem_get();
-
-    if (shm_a->app_img_base != 0 && shm_a->app_img_size != 0) {
-      int rc = nuc_load((const void *)(UINTN)shm_a->app_img_base,
-                        shm_a->app_img_size, "demo");
-      if (rc != 0) {
-        kputs("[NUC] application refused: error ");
-        kputs_hex((UINT64)(UINT32)rc);
-        kputs("\n");
-      }
-    } else {
-      kputs("[NUC] no application staged, running idle only\n");
-    }
-  }
-
   /* M5: paint the demo desktop last, so the display shows the finished
    * scene instead of being overwritten by later boot output. The timer
    * tick drives input and partial repaints once ring 3 is running. */
@@ -282,12 +370,11 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * launcher buttons on the shell's taskbar start the same three later,
    * which is why apps_launch() refuses a second copy. */
   sysinfo_init();
+  session_init();
   /* M10: bring up PCI and the network stack before the applications, so
    * the network app has a link to show and DHCP is already running. */
   (void)net_init();
-  (void)apps_launch(0); /* fileman */
-  (void)apps_launch(1); /* taskman */
-  (void)apps_launch(2); /* settings */
+  (void)apps_launch(4); /* session manager */
 #endif
 
   kputs("[HALT] entering the scheduler (the A core stays parked)\n");

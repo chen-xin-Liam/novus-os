@@ -19,6 +19,11 @@
  * clear). Must run before any lapic_read/lapic_write/lapic_base call. */
 UINT64 lapic_init(void);
 
+/* Measure the LAPIC timer against the ACPI PM timer for a 10 ms period.
+ * Returns the calibrated initial count, or 0 when no safe reference is
+ * available. */
+UINT32 lapic_timer_calibrate(UINT64 mmap, UINT64 size, UINT64 stride);
+
 /* LAPIC MMIO base cached by lapic_init(); 0 before init / no APIC. */
 UINT64 lapic_base(void);
 

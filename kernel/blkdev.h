@@ -153,6 +153,12 @@ int blkdev_read(blkdev_t *dev, UINT64 sector, UINTN count, void *buf);
 int blkdev_write(blkdev_t *dev, UINT64 sector, UINTN count,
                  const void *buf);
 
+/* Register a bounded view of a parent device. Offsets and lengths use
+ * the same 512-byte sectors as blkdev_read(); the range must fit the
+ * parent and align to its logical block size. */
+blkdev_t *blkdev_partition_init(const char *name, blkdev_t *parent,
+                                UINT64 first_sector, UINT64 sector_count);
+
 /* Ramdisk backend.
  *
  * Allocates `bytes` of backing storage one 4096-byte page at a time via

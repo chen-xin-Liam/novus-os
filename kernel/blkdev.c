@@ -184,6 +184,87 @@ int blkdev_write(blkdev_t *dev, UINT64 sector, UINTN count,
   return dev->write(dev->ctx, sector, count, buf);
 }
 
+typedef struct {
+  blkdev_t *parent;
+  UINT64 first_sector;
+  UINT64 sector_count;
+} blkpart_ctx_t;
+
+static blkpart_ctx_t blkpart_ctx[BLKDEV_MAX_DEVICES];
+static blkdev_t blkpart_dev[BLKDEV_MAX_DEVICES];
+static char blkpart_name[BLKDEV_MAX_DEVICES][16];
+static UINTN blkpart_used;
+
+static int blkpart_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
+  blkpart_ctx_t *part = (blkpart_ctx_t *)ctx;
+  if (part == NULL || sector > part->sector_count ||
+      (UINT64)count > part->sector_count - sector) {
+    return -1;
+  }
+  return blkdev_read(part->parent, part->first_sector + sector, count, buf);
+}
+
+static int blkpart_write(void *ctx, UINT64 sector, UINTN count,
+                         const void *buf) {
+  blkpart_ctx_t *part = (blkpart_ctx_t *)ctx;
+  if (part == NULL || sector > part->sector_count ||
+      (UINT64)count > part->sector_count - sector) {
+    return -1;
+  }
+  return blkdev_write(part->parent, part->first_sector + sector, count, buf);
+}
+
+blkdev_t *blkdev_partition_init(const char *name, blkdev_t *parent,
+                                UINT64 first_sector, UINT64 sector_count) {
+  UINTN i;
+  UINTN name_len = 0;
+  UINT32 spb;
+  blkpart_ctx_t *ctx;
+  blkdev_t *dev;
+
+  if (name == NULL || parent == NULL || sector_count == 0 ||
+      first_sector > parent->sector_count ||
+      sector_count > parent->sector_count - first_sector ||
+      blkpart_used >= BLKDEV_MAX_DEVICES) {
+    return NULL;
+  }
+  spb = blkdev_sectors_per_block(parent);
+  if (spb == 0 || first_sector % spb != 0 || sector_count % spb != 0) {
+    return NULL;
+  }
+  while (name[name_len] != '\0' && name_len < sizeof(blkpart_name[0]) - 1u) {
+    blkpart_name[blkpart_used][name_len] = name[name_len];
+    name_len++;
+  }
+  if (name[name_len] != '\0') {
+    return NULL;
+  }
+  blkpart_name[blkpart_used][name_len] = '\0';
+  ctx = &blkpart_ctx[blkpart_used];
+  dev = &blkpart_dev[blkpart_used];
+  ctx->parent = parent;
+  ctx->first_sector = first_sector;
+  ctx->sector_count = sector_count;
+  dev->name = blkpart_name[blkpart_used];
+  dev->sector_count = sector_count;
+  dev->block_size = blkdev_block_size(parent);
+  dev->flags = BLKDEV_FLAG_PARTITION |
+               (parent->flags & (BLKDEV_FLAG_READONLY |
+                                 BLKDEV_FLAG_REMOVABLE |
+                                 BLKDEV_FLAG_BOOT_ONLY));
+  dev->ctx = ctx;
+  dev->read = blkpart_read;
+  dev->write = blkpart_write;
+  if (blkdev_register(dev) < 0) {
+    memset(ctx, 0, sizeof(*ctx));
+    memset(dev, 0, sizeof(*dev));
+    memset(blkpart_name[blkpart_used], 0, sizeof(blkpart_name[0]));
+    return NULL;
+  }
+  blkpart_used++;
+  return dev;
+}
+
 /* ------------------------------------------------------------------ */
 /* Ramdisk backend                                                     */
 /* ------------------------------------------------------------------ */

@@ -277,6 +277,26 @@ UINT64 vm_translate(vm_space_t *sp, UINT64 va) {
   return (pt[i1] & PTE_ADDR4K) + (va & 0xFFFULL);
 }
 
+int vm_user_access(vm_space_t *sp, UINT64 va, int write) {
+  UINT64 *pml4 = table(sp->pml4_phys);
+  UINT64 e = pml4[(va >> 39) & 0x1FFu];
+  UINT64 *pdpt;
+  UINT64 *pd;
+  UINT64 *pt;
+  if ((e & (PTE_P | PTE_U)) != (PTE_P | PTE_U) || (write && !(e & PTE_W))) return 0;
+  pdpt = table(e & PTE_ADDR4K);
+  e = pdpt[(va >> 30) & 0x1FFu];
+  if ((e & (PTE_P | PTE_U)) != (PTE_P | PTE_U) || (write && !(e & PTE_W))) return 0;
+  pd = table(e & PTE_ADDR4K);
+  e = pd[(va >> 21) & 0x1FFu];
+  if ((e & (PTE_P | PTE_U)) != (PTE_P | PTE_U) || (write && !(e & PTE_W))) return 0;
+  if ((e & PTE_PS) != 0) return 1;
+  pt = table(e & PTE_ADDR4K);
+  e = pt[(va >> 12) & 0x1FFu];
+  if ((e & (PTE_P | PTE_U)) != (PTE_P | PTE_U) || (write && !(e & PTE_W))) return 0;
+  return 1;
+}
+
 void vm_switch_cr3(UINT64 cr3) {
   if ((mm_get_cr3() & ~0xFFFULL) == (cr3 & ~0xFFFULL)) {
     return;

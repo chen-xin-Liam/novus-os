@@ -229,6 +229,9 @@ typedef struct novusfs_fs {
 /* The single mounted instance. Returns NULL while nothing is mounted,
  * so no layer can touch disk state before mount succeeds. */
 novusfs_fs_t *novusfs_get(void);
+novusfs_fs_t *novusfs_root(void);
+int novusfs_root_persistent(void);
+void novusfs_set_root(novusfs_fs_t *fs);
 
 /* ------------------------------------------------------------------ */
 /* super.c - layout, superblock, raw block IO                          */

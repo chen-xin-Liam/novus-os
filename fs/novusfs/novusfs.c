@@ -28,12 +28,28 @@
 
 /* The single mounted instance. */
 static novusfs_fs_t g_novusfs;
+static novusfs_fs_t *g_root_fs;
 
 novusfs_fs_t *novusfs_get(void) {
   if (!g_novusfs.mounted) {
     return NULL;
   }
   return &g_novusfs;
+}
+
+novusfs_fs_t *novusfs_root(void) {
+  if (g_root_fs != NULL && g_root_fs->mounted) {
+    return g_root_fs;
+  }
+  return novusfs_get();
+}
+
+int novusfs_root_persistent(void) { return g_root_fs != NULL && g_root_fs->mounted; }
+
+void novusfs_set_root(novusfs_fs_t *fs) {
+  if (g_root_fs == NULL && fs != NULL && fs->mounted) {
+    g_root_fs = fs;
+  }
 }
 
 /* ------------------------------------------------------------------ */
