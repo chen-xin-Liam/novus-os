@@ -6,7 +6,7 @@
 > 编译体系：借鉴Linux Kbuild/Makefile，模块化可选编译
 > 开发语言：内核主体C，部分模块Rust；用户态C++98、MicroPython
 > 约束：**不依赖任何外部开源项目**，全部自研
-> 可执行原生格式：`.nuc`，内核原生支持，无独立nucvm；内核内置Nuc字节码引擎
+> 可执行原生格式：`.nuc`，内核原生支持；M4 NUC loader 将 x86_64 原生机器码映射到 ring 3 执行，无独立 nucvm
 > 图形：自研NovusDisplay图形栈，VGA兜底 + DP高清输出；Novus-WM窗口管理器，配套IPC协议
 > 文件系统：NovusFS，带WAL事务日志、Merkle树完整性校验、fsck工具
 > 安全：NKM内核模块签名（Ed25519），CAP权限模型
@@ -40,7 +40,8 @@
 - 应用工具链（Mochi → NUC）：`user/mochi`子模块提供Lisp风格语言Mochi与其NUC原生
   格式工具链，由`CONFIG_USER_MOCHI`控制；构建期把`.mochi`源码编译为NUC应用并即时
   校验，产物随live ESP打包为`APPS/DEMO.NUC`。格式见
-  `docs/NUC 可执行二进制格式规范 V1.0.md`；内核侧的NUC加载器尚未实现
+  `docs/NUC 可执行二进制格式规范 V1.0.md`。M4内核NUC加载器已实现；M7的
+  `user/cppcc` 可由 `CONFIG_USER_CPPCC` 启用并构建 C++98 smoke 程序。
 
 - 调度器与进程（M4）：GDT/TSS + IDT（0-31异常向量，32=LAPIC定时器），每任务独立
   页表与64 KiB内核栈；时钟中断驱动的时间片轮转（默认4 tick/片），不主动让出的纯计算
@@ -54,7 +55,7 @@
 3. NovusFS自研文件系统（WAL日志、Merkle完整性校验、fsck）
 4. NKM内核模块机制，Ed25519签名校验
 5. CAP细粒度权限模型（128位权限掩码）
-6. `.nuc`原生可执行格式，内核内置字节码引擎
+6. `.nuc`原生可执行格式，内核加载器映射并运行 x86_64 原生机器码
 7. 系统调用ABI，用户态/内核态隔离
 8. Novus-WM窗口管理器 + 自研IPC通信协议
 9. NovusDisplay图形栈，GUI渲染、窗口特效
@@ -191,11 +192,17 @@ CAP为128位权限掩码。前32位作为标准基础权限定义，剩余96位�
 ---
 
 ## 第7部分 NUC原生可执行文件格式
-`.nuc`是Novus OS原生可执行，内核原生识别，类似Windows EXE / Linux ELF。
-> 编译链路：C++98源码（可引入`nucui.hh`）→ cppcc（用户态Rust编写编译器）→ 输出app.nuc
-> cppcc流程：预处理 → 词法分析 → 语法分析 → 语义检查 → AST → IR → nucgen生成nuc二进制
-> 内核内置Nuc字节码执行引擎，无独立用户态nucvm。
-> 执行命令：`./app.nuc`，novus shell调用exec，内核解析nuc文件，分配VM内存，启动字节码执行。
+`.nuc`是 Novus OS 的原生可执行文件格式，内核按冻结规范解析并加载其中的 x86_64 原生机器码。
+> 编译链路：受限 C++98 源码（可包含 cppcc 内置 `<novus/syscall.h>`）→ Rust 主机工具 cppcc → `app.nuc`
+> cppcc 流程：预处理 → 词法分析 → 语法分析 → 语义检查 → 带类型 AST → x86_64 codegen → nucgen
+> NUC loader 在用户地址空间映射段、应用镜像内重定位后进入 ring 3；没有独立用户态 nucvm 或字节码解释器。
+> 当前集成执行路径：boot-stage 从 ESP 固定路径 `APPS/DEMO.NUC` 暂存程序，内核 `kmain` 调用 `nuc_load`。通用 shell `./app.nuc` 执行路径尚未实现。
+
+M7 cppcc 主机工具由 `CONFIG_USER_CPPCC` 控制：`make cppcc` 构建编译器，
+`make cppcc-demo` 生成 `out/cppcc/hello.nuc`。`make run` 会将 smoke 程序
+复制到 vvfat ESP 的 `APPS/DEMO.NUC` 后启动 QEMU；boot-stage 会把它暂存到
+shared memory，再由 `kernel/kmain.c` 调用 NUC loader。端到端说明见
+`docs/cppcc 构建与端到端验证.md`。
 
 ### 7.1 NUC头部冻结字段
 - 魔数标识
@@ -209,12 +216,14 @@ CAP为128位权限掩码。前32位作为标准基础权限定义，剩余96位�
 - compile_flag 枚举标记
 
 ### 7.2 NUC执行流程
-1. 用户态shell调用exec系统调用，传入nuc文件路径
-2. 内核VFS读取nuc文件
-3. 内核校验nuc头部合法性、版本、段边界
-4. 分配虚拟内存，加载各段到对应虚拟地址
-5. 内核内置字节码引擎初始化
-6. 跳转entry_point，启动程序执行
+1. UEFI boot-stage 在 ExitBootServices 前读取 ESP 固定路径 `APPS/DEMO.NUC`
+2. boot-stage 将镜像复制到 reserved pages，并把地址/大小写入 shared memory
+3. `kernel/kmain.c` 在 scheduler 初始化后读取 shared memory 并调用 `nuc_load`
+4. loader 校验 `NUC!`、ABI 主版本、表边界、段与重定位
+5. 建立用户地址空间，映射 x86_64 原生机器码/数据段并应用镜像内 relocation
+6. 按 `entry_rip = text.vaddr + entry_point` 进入 ring 3；Hello `_start` 最终以 `SYS_EXIT` 退出
+
+通用 shell `exec` 任意 NUC 文件的路径尚未实现；当前自动加载点是 boot-stage 的固定 demo 文件。
 
 ---
 
@@ -375,7 +384,7 @@ novus-os/
 ├── tools/              # 主机端镜像工具（mkfat/mkiso/mkfsnovus/mkdisk/nkmgen）
 ├── user/
 │   ├── shell/          # novus shell
-│   ├── cppcc/          # C++98编译器（Rust编写）
+│   ├── cppcc/          # C++98编译器（Rust编写，主机端工具）
 │   ├── micropython/    # MicroPython用户态运行时
 │   ├── win32compat/    # Win32兼容层
 │   └── system/         # 系统内置应用（任务管理器/设置等）
@@ -424,7 +433,7 @@ C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在�
 - M4：基础调度器、进程创建、基础系统调用🆗
 - M5：NovusDisplay基础2D图形，GUI控件基础库🆗
 - M6：Novus-WM窗口管理器，IPC协议完整实现🆗
-- M7：cppcc最小编译器，支持生成最简.nuc程序
+- M7：cppcc C++98 子集前端与 x86_64/NUC 后端已实现；构建入口和 Hello 样例见 `docs/cppcc 构建与端到端验证.md`
 - M8：内置系统应用（文件管理器、任务管理器、设置面板）🆗
 
 > M9 已实现：桌面改为 Windows 11 风格（圆角窗口、居中悬浮任务栏、开始菜单、
@@ -435,8 +444,7 @@ C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在�
 > M8 已实现：三个应用是 Rust 程序（`apps/`），编译成扁平 NUC 镜像内嵌
 > 进内核，启动即运行、任务栏可再拉起；数据来自内核 sysinfo 服务
 > （端口 `"sys"`），窗口内容走 Novus-WM 协议 1.1 的显示列表
-> （CLEAR/SHAPE/TEXT）。说明见 `docs/M8 内置系统应用.md`。M7 的 C++
-> 最小编译器暂缓。
+> （CLEAR/SHAPE/TEXT）。说明见 `docs/M8 内置系统应用.md`。M7 编译器在 M8 开发当时暂缓，现已补齐 cppcc。
 - M9：Win32兼容层原型，MicroPython集成
 - M10：全系统整合，镜像打包，系统稳定性测试
 

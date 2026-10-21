@@ -152,6 +152,38 @@ $(RUST_HOST_LIB): $(RUST_DEPS)
 	    RUSTFLAGS="-C debuginfo=0" $(CARGO) build --release
 
 # ---------------------------------------------------------------------------
+# cppcc: C++98 subset -> NUC (host-side Rust tool)
+# ---------------------------------------------------------------------------
+
+CPPCC_DIR        := user/cppcc
+CPPCC_TARGET_DIR := $(CURDIR)/build/rust-cppcc
+CPPCC_HOST_SUFFIX := $(if $(filter Windows_NT,$(OS)),.exe,)
+CPPCC_HOST_BIN   := $(CPPCC_TARGET_DIR)/release/cppcc$(CPPCC_HOST_SUFFIX)
+CPPCC            := $(TOOLS_OUT)/cppcc$(CPPCC_HOST_SUFFIX)
+CPPCC_HELLO_SRC  := $(CPPCC_DIR)/examples/hello.cc
+CPPCC_HELLO_NUC  := out/cppcc/hello.nuc
+CPPCC_DEPS       := $(shell find $(CPPCC_DIR) -type f -not -path '$(CPPCC_DIR)/target/*' 2>/dev/null)
+
+.PHONY: cppcc cppcc-demo
+cppcc: $(CPPCC)
+cppcc-demo: $(CPPCC_HELLO_NUC)
+
+ifeq ($(CONFIG_USER_CPPCC),y)
+all: $(CPPCC)
+tools: $(CPPCC)
+
+$(CPPCC): $(CPPCC_DEPS) | $(TOOLS_OUT)
+	@test -n "$(CARGO)" || { echo "ERROR: cargo not found in PATH; cannot build cppcc." >&2; exit 1; }
+	cd $(CPPCC_DIR) && CARGO_TARGET_DIR=$(CPPCC_TARGET_DIR) $(CARGO) build --release
+	cp $(CPPCC_HOST_BIN) $@
+
+$(CPPCC_HELLO_NUC): $(CPPCC_HELLO_SRC) $(CPPCC) | out
+	mkdir -p $(@D)
+	$(CPPCC) $< -o $@
+
+endif # CONFIG_USER_CPPCC
+
+# ---------------------------------------------------------------------------
 # Mochi -> NUC: the toolchain that turns a .mochi source into a NUC
 # application
 # ---------------------------------------------------------------------------
@@ -195,8 +227,15 @@ NUC_APP     := out/demo.nuc
 # application with, so the ESP carries none - the kernel's own NUC self
 # test still exercises the loader, so M4 does not depend on a checkout.
 MOCHI_PRESENT := $(wildcard $(MOCHI_DIR)/src/codegen.c)
-NUC_ESP_DEPS := $(if $(and $(filter y,$(CONFIG_USER_MOCHI)),$(MOCHI_PRESENT)),$(NUC_APP))
-NUC_ESP_ARGS := $(if $(and $(filter y,$(CONFIG_USER_MOCHI)),$(MOCHI_PRESENT)),$(NUC_APP):APPS/DEMO.NUC)
+
+# There is one boot-stage demo slot: stage3.c reads APPS/DEMO.NUC. When
+# cppcc is enabled it owns that slot; Mochi remains buildable explicitly
+# with CONFIG_USER_CPPCC=n.
+MOCHI_PACK_ENABLED := $(if $(and $(filter y,$(CONFIG_USER_MOCHI)),$(MOCHI_PRESENT),$(if $(filter y,$(CONFIG_USER_CPPCC)),,y)),y,)
+NUC_ESP_DEPS := $(if $(filter y,$(MOCHI_PACK_ENABLED)),$(NUC_APP))
+NUC_ESP_ARGS := $(if $(filter y,$(MOCHI_PACK_ENABLED)),$(NUC_APP):APPS/DEMO.NUC)
+CPPCC_ESP_DEPS := $(if $(filter y,$(CONFIG_USER_CPPCC)),$(CPPCC_HELLO_NUC))
+CPPCC_ESP_ARGS := $(if $(filter y,$(CONFIG_USER_CPPCC)),$(CPPCC_HELLO_NUC):DEMO.NUC)
 
 .PHONY: mochi-tools nuc-apps
 mochi-tools: $(MOCHI) $(NUCUTIL)
@@ -254,16 +293,15 @@ $(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) | out
 # The live ESP. BOOTX64.EFI is the firmware's default fallback path;
 # NOVUS/SYSTEM.IMG is the live root; NOVUS/ESP.IMG is the install
 # template; NOVUS/TEST.NKM is the signed module the loader verifies;
-# APPS/DEMO.NUC is a NUC application built from a .mochi source, sitting
-# on the ESP because that is where a loader looks for one.
+# APPS/DEMO.NUC is staged for the boot-stage NUC loader.
 $(ESP_IMG): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) $(NKM_MOD) \
-            $(NUC_ESP_DEPS) | out
+			$(NUC_ESP_DEPS) $(CPPCC_ESP_DEPS) | out
 	$(MKFAT) $@ $(ESP_SIZE_MB) \
 	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
 	    $(NOVUS_IMG):SYSTEM.IMG \
 	    $(ESP_TPL):ESP.IMG \
 	    $(NKM_MOD):TEST.NKM \
-	    $(NUC_ESP_ARGS)
+	    $(NUC_ESP_ARGS) $(CPPCC_ESP_ARGS)
 
 # A signed test module, produced by the same Ed25519 code the kernel
 # verifies with. One nkmgen run writes both outputs - the C array the
