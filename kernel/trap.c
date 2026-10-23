@@ -24,6 +24,7 @@
 #include "../fs/novusfs/novusfs.h"
 #include "power.h"
 #include "session.h"
+#include "install.h"
 
 /* Syscall numbers (README part 8: one table, one ABI). */
 #define SYS_YIELD       1u
@@ -44,6 +45,7 @@
 #define SYS_POWEROFF    16u
 #define SYS_REBOOT      17u
 #define SYS_SESSION     18u
+#define SYS_SETUP       19u
 #define SYS_EXIT        60u
 
 #define FS_PATH_MAX 256u
@@ -392,6 +394,78 @@ static void sys_fs_mkdir(trap_frame_t *f) {
   f->rax = novusfs_mkdir(fs, parent, leaf) == 0 ? (UINT64)-1 : 0;
 }
 
+/* Installer control. The pid check is the capability: only the process
+ * apps_launch() started as "setup" can ask for a disk to be written, and
+ * no other app can inherit it because the value is set at spawn time. */
+static void sys_setup(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT64  op = f->rdi;
+  UINT64  arg = f->rsi;
+  UINT64  ptr = f->rdx;
+
+  if (t == NULL || !install_owner(t->pid)) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  switch (op) {
+  case INSTALL_OP_COUNT:
+    f->rax = (UINT64)install_count();
+    return;
+
+  case INSTALL_OP_GET: {
+    install_disk_t d;
+
+    if (install_disk((UINT8)arg, &d) != 0 ||
+        user_copy(t->cr3, ptr, &d, sizeof(d), 1) != 0) {
+      f->rax = (UINT64)-1;
+      return;
+    }
+    f->rax = 0;
+    return;
+  }
+
+  case INSTALL_OP_BEGIN:
+    f->rax = (UINT64)(INT64)install_begin((UINT8)arg);
+    return;
+
+  case INSTALL_OP_STEP: {
+    install_progress_t p;
+    int phase = install_step(&p);
+
+    if (ptr != 0 && user_copy(t->cr3, ptr, &p, sizeof(p), 1) != 0) {
+      f->rax = (UINT64)-1;
+      return;
+    }
+    f->rax = (UINT64)(INT64)phase;
+    return;
+  }
+
+  case INSTALL_OP_ABORT:
+    f->rax = (UINT64)(INT64)install_abort();
+    return;
+
+  case INSTALL_OP_STAT: {
+    install_progress_t p;
+
+    if (install_progress(&p) != 0 ||
+        user_copy(t->cr3, ptr, &p, sizeof(p), 1) != 0) {
+      f->rax = (UINT64)-1;
+      return;
+    }
+    f->rax = 0;
+    return;
+  }
+
+  case INSTALL_OP_RESET:
+    f->rax = (UINT64)(INT64)install_reset();
+    return;
+
+  default:
+    f->rax = (UINT64)-1;
+    return;
+  }
+}
+
 static void sys_power_off(trap_frame_t *f) {
   task_t *t = sched_current();
   if (t == NULL || !session_power_allowed(t->pid)) { f->rax = (UINT64)-1; return; }
@@ -605,6 +679,7 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_POWEROFF, "power_off", sys_power_off},
     {SYS_REBOOT, "power_reboot", sys_power_reboot},
     {SYS_SESSION, "session", sys_session},
+    {SYS_SETUP, "setup", sys_setup},
     {SYS_EXIT, "exit", sys_exit_call},
 };
 

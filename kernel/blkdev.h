@@ -159,6 +159,12 @@ int blkdev_write(blkdev_t *dev, UINT64 sector, UINTN count,
 blkdev_t *blkdev_partition_init(const char *name, blkdev_t *parent,
                                 UINT64 first_sector, UINT64 sector_count);
 
+/* Remove a device from the table and, when it is the newest partition
+ * view, return its backing slot for reuse. The installer creates one view
+ * per attempt; without this, retrying a failed install would exhaust the
+ * sixteen fixed slots. Returns 0 on success. */
+int blkdev_release(blkdev_t *dev);
+
 /* Ramdisk backend.
  *
  * Allocates `bytes` of backing storage one 4096-byte page at a time via

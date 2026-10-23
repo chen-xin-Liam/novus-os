@@ -44,10 +44,10 @@ fn state_name(s: u8) -> &'static str {
 
 fn state_color(s: u8) -> u32 {
     match s {
-        2 => ui::GOOD,
-        3 => ui::DIM,
-        4 => ui::WARN,
-        _ => ui::TEXT,
+        2 => ui::good(),
+        3 => ui::dim(),
+        4 => ui::warn(),
+        _ => ui::text(),
     }
 }
 
@@ -92,7 +92,7 @@ fn sample_cpu(rows: &[Row; MAX_ROWS], n: usize, previous: &[Row; MAX_ROWS], elap
  * than a hardware counter. Matching by PID avoids attributing a recycled
  * scheduler slot to the task that occupied it in the previous sample. */
 fn draw_processes(
-    w: &wm::Win,
+    w: &mut wm::Win,
     rows: &[Row; MAX_ROWS],
     n: usize,
     page: usize,
@@ -102,8 +102,8 @@ fn draw_processes(
     accent: u32,
     message: &str,
 ) {
-    w.text(12, 89, ui::DIM, "名称");
-    w.text(216, 89, ui::DIM, "状态      PID       CPU ticks    时间片");
+    w.text(12, 89, ui::dim(), "名称");
+    w.text(216, 89, ui::dim(), "状态      PID       CPU ticks    时间片");
     let start = page * VISIBLE_ROWS;
     let end = (start + VISIBLE_ROWS).min(n);
     for i in start..end {
@@ -111,35 +111,35 @@ fn draw_processes(
         let y = 108 + (i - start) as i16 * ui::ROW_H;
         let mut b = [0u8; 12];
         let mut details = ui::Buf::new();
-        w.fill(6, y, CW - 12, ui::ROW_H - 1, if i == selected { ui::ROW_SEL } else { ui::ROW });
+        w.fill(6, y, CW - 12, ui::ROW_H - 1, if i == selected { ui::row_sel() } else { ui::row_bg() });
         w.text(14, y + 5, state_color(r.state), r.name());
         details.s(state_name(r.state)).s("  #").s(ui::fmt_u32(r.pid as u32, &mut b))
             .s("  ").s(ui::fmt_u32(r.ticks, &mut b)).s(" ticks  ").s(ui::fmt_u32(r.slice as u32, &mut b));
         w.text(216, y + 5, state_color(r.state), details.str());
     }
     if n == 0 {
-        w.text(14, 116, ui::DIM, "当前没有可显示的任务");
+        w.text(14, 116, ui::dim(), "当前没有可显示的任务");
     }
     ui::button(w, 10, 370, 92, 26, "结束任务", accent);
     ui::button(w, 110, 370, 74, 26, "刷新", accent);
     ui::button(w, CW - 166, 370, 66, 26, "上页", accent);
     ui::button(w, CW - 92, 370, 66, 26, "下页", accent);
-    w.text(10, 405, ui::DIM, message);
+    w.text(10, 405, ui::dim(), message);
     let mut status = ui::Buf::new();
     status.s("进程: ").num(n as u32).s(" / ").num(total as u32).s("    CPU: ").num(cpu).s("%");
-    w.text(390, 405, ui::DIM, status.str());
+    w.text(390, 405, ui::dim(), status.str());
 }
 
-fn draw_performance(w: &wm::Win, history: &[u8; GRAPH_SAMPLES], count: usize, head: usize, cpu: u32, tasks: usize, total: u16, accent: u32) {
-    w.text(18, 92, ui::TEXT, "CPU 使用率");
+fn draw_performance(w: &mut wm::Win, history: &[u8; GRAPH_SAMPLES], count: usize, head: usize, cpu: u32, tasks: usize, total: u16, accent: u32) {
+    w.text(18, 92, ui::text(), "CPU 使用率");
     let x = 130i16;
     let y = 112i16;
     let width = CW - 154;
     let height = 230i16;
-    w.fill(x, y, width, height, ui::ROW);
+    w.fill(x, y, width, height, ui::row_bg());
     for i in 0..=4 {
         let gy = y + (height - 1) * i / 4;
-        w.shape(wm::OP_HLINE, x, gy, width, 1, ui::LINE);
+        w.shape(wm::OP_HLINE, x, gy, width, 1, ui::line());
     }
     let visible = count.min(27);
     for i in 0..visible {
@@ -154,15 +154,15 @@ fn draw_performance(w: &wm::Win, history: &[u8; GRAPH_SAMPLES], count: usize, he
     }
     let mut line = ui::Buf::new();
     line.s("当前 ").num(cpu).s("%     历史采样");
-    w.text(18, 365, ui::TEXT, line.str());
-    w.text(18, 396, ui::DIM, "CPU 占用按采样周期内非 idle 任务 tick 计算");
+    w.text(18, 365, ui::text(), line.str());
+    w.text(18, 396, ui::dim(), "CPU 占用按采样周期内非 idle 任务 tick 计算");
     let mut status = ui::Buf::new();
     status.s("进程: ").num(tasks as u32).s(" / ").num(total as u32).s("    CPU: ").num(cpu).s("%");
-    w.text(390, 405, ui::DIM, status.str());
+    w.text(390, 405, ui::dim(), status.str());
 }
 
 fn draw(
-    w: &wm::Win,
+    w: &mut wm::Win,
     rows: &[Row; MAX_ROWS],
     n: usize,
     total: u16,
@@ -178,11 +178,11 @@ fn draw(
 ) {
     w.clear();
     ui::shell(w, CW, CH, "任务管理器", accent);
-    w.text(10, 38, ui::DIM, "文件    选项    查看");
-    w.fill(0, 60, CW, 26, ui::PANEL);
+    w.text(10, 38, ui::dim(), "文件    选项    查看");
+    w.fill(0, 60, CW, 26, ui::card_bg());
     w.fill(if tab == 0 { 10 } else { 104 }, 84, 82, 2, accent);
-    w.text(18, 69, if tab == 0 { ui::TEXT } else { ui::DIM }, "进程");
-    w.text(112, 69, if tab == 1 { ui::TEXT } else { ui::DIM }, "性能");
+    w.text(18, 69, if tab == 0 { ui::text() } else { ui::dim() }, "进程");
+    w.text(112, 69, if tab == 1 { ui::text() } else { ui::dim() }, "性能");
     if tab == 0 {
         draw_processes(w, rows, n, page, selected, cpu, total, accent, message);
     } else {
@@ -235,11 +235,12 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 320, 190, CW as i32 + 2, CH as i32 + wm::TITLE_H, "任务管理器")
+    let Some(mut win) = wm::Win::create(wm_port, 320, 190, CW as i32 + 2, CH as i32 + wm::TITLE_H, "任务管理器")
     else {
         sys::exit(3);
     };
-    let accent = sinfo::accent(sys_port).unwrap_or(ui::ACCENT);
+    ui::init(sys_port);
+    let mut accent = ui::accent();
     let mut rows = [Row {
         pid: 0,
         ticks: 0,
@@ -258,7 +259,7 @@ pub extern "C" fn _start() -> ! {
     let mut page = 0usize;
     let mut tab = 0u8;
     let mut message = "选择一个进程以结束任务";
-    draw(&win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message);
+    draw(&mut win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message);
 
     let mut idle = 0u32;
     let mut redraw = false;
@@ -332,8 +333,12 @@ pub extern "C" fn _start() -> ! {
             page = if n == 0 { 0 } else { (selected / VISIBLE_ROWS).min((n - 1) / VISIBLE_ROWS) };
             redraw = true;
         }
+        if ui::poll(sys_port) {
+            accent = ui::accent();
+            redraw = true;
+        }
         if redraw {
-            draw(&win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message);
+            draw(&mut win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message);
             redraw = false;
         }
         sys::yield_now();

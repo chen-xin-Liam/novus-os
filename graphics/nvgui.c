@@ -15,6 +15,7 @@
 
 #include "kernel.h"
 #include "nvgui.h"
+#include "nd_theme.h"
 #include "nd_ime.h"
 
 static ng_ctx_t    g_ctx;
@@ -36,6 +37,8 @@ static UINT32 default_flags(ng_type_t t) {
   case NG_SLIDER:
   case NG_LIST:
   case NG_TREE:
+  case NG_ICON:
+  case NG_SWATCH:
     return NG_WF_VISIBLE | NG_WF_ENABLED | NG_WF_FOCUSABLE;
   case NG_LABEL:
   case NG_PROGRESS:
@@ -67,23 +70,31 @@ static void fmt_int(char *buf, INT32 value) {
   buf[i] = '\0';
 }
 
-/* Windows 11 Fluent, light: a mica-blue desktop, white cards, one blue
- * accent. Every colour here is used by the shell, the window manager and
- * the applications through one theme, so a change lands everywhere. */
+/* One palette, two resolutions: the same semantic roles map into the
+ * widget theme in light and dark. Nothing here invents a colour - the
+ * token file is the only place a literal lives, and the apps read the
+ * same table through apps/src/theme.rs. */
+static void theme_from_tokens(ng_theme_t *t) {
+  const nd_tokens_t *tok = nd_tokens();
+
+  t->desktop_top = tok->canvas_top;
+  t->desktop_bottom = tok->canvas_bottom;
+  t->win_bg = tok->surface;
+  t->win_title = tok->card;
+  t->win_title_dim = tok->card;
+  t->win_border = tok->stroke;
+  t->text = tok->text;
+  t->text_dim = tok->dim;
+  t->accent = tok->accent;
+  t->accent_text = tok->on_accent;
+  t->ctrl_bg = tok->card;
+  t->ctrl_hover = tok->subtle;
+  t->ctrl_border = tok->stroke;
+}
+
 static void theme_init(ng_theme_t *t) {
-  t->desktop_top = ND_RGB(0xEE, 0xF2, 0xF8);
-  t->desktop_bottom = ND_RGB(0xE3, 0xEA, 0xF3);
-  t->win_bg = ND_RGB(0xFF, 0xFF, 0xFF);
-  t->win_title = ND_RGB(0xF3, 0xF3, 0xF3);
-  t->win_title_dim = ND_RGB(0xF8, 0xF8, 0xF8);
-  t->win_border = ND_RGB(0xE1, 0xE5, 0xEA);
-  t->text = ND_RGB(0x1B, 0x1B, 0x1B);
-  t->text_dim = ND_RGB(0x5F, 0x63, 0x68);
-  t->accent = ND_RGB(0x00, 0x67, 0xC0);
-  t->accent_text = ND_RGB(0xFF, 0xFF, 0xFF);
-  t->ctrl_bg = ND_RGB(0xFB, 0xFB, 0xFB);
-  t->ctrl_hover = ND_RGB(0xF0, 0xF0, 0xF0);
-  t->ctrl_border = ND_RGB(0xE1, 0xE5, 0xEA);
+  (void)nd_theme_resolve();
+  theme_from_tokens(t);
 }
 
 /* ---- damage ----------------------------------------------------------- */
@@ -126,6 +137,14 @@ int ng_take_damage(nd_rect_t *out) {
     *out = d;
   }
   return 1;
+}
+
+void ng_theme_apply(void) {
+  if (!g_ready) {
+    return;
+  }
+  theme_from_tokens(&g_ctx.theme);
+  ng_damage(nd_rect(0, 0, g_ctx.surf->w, g_ctx.surf->h));
 }
 
 /* ---- layout ----------------------------------------------------------- */
@@ -241,6 +260,23 @@ ng_widget_t *ng_label(ng_widget_t *w, const char *text, nd_color_t color,
 
 ng_widget_t *ng_button(ng_widget_t *w, const char *text, ng_action_fn fn) {
   w->u.button.text = text;
+  w->u.button.icon = 0;
+  w->on_action = fn;
+  return w;
+}
+
+ng_widget_t *ng_button_icon(ng_widget_t *w, const char *text,
+                            ng_icon_kind_t kind, ng_action_fn fn) {
+  w->u.button.text = text;
+  w->u.button.icon = (UINT8)kind;
+  w->on_action = fn;
+  return w;
+}
+
+ng_widget_t *ng_swatch(ng_widget_t *w, nd_color_t color, int selected,
+                       ng_action_fn fn) {
+  w->u.swatch.color = color;
+  w->u.swatch.selected = (UINT8)(selected != 0);
   w->on_action = fn;
   return w;
 }
@@ -318,6 +354,14 @@ ng_widget_t *ng_panel(ng_widget_t *w, nd_color_t color) {
   w->u.panel.color = color;
   w->u.panel.frame = 0;
   w->u.panel.radius = 0;
+  return w;
+}
+
+ng_widget_t *ng_icon(ng_widget_t *w, ng_icon_kind_t kind, UINT32 size,
+                     ng_action_fn fn) {
+  w->u.icon.kind = (UINT8)kind;
+  w->u.icon.size = (UINT8)((size != 0u) ? size : 20u);
+  w->on_action = fn;
   return w;
 }
 
@@ -463,6 +507,9 @@ static ng_widget_t *hit_test(INT32 x, INT32 y) {
 
 /* ---- drawing ---------------------------------------------------------- */
 
+static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
+                       UINT8 kind, nd_color_t c);
+
 static void draw_label(ng_widget_t *w) {
   const ng_ctx_t *c = &g_ctx;
   nd_surface_t   *s = c->surf;
@@ -487,6 +534,33 @@ static void draw_button(ng_widget_t *w) {
   nd_color_t     fg;
   UINT32         tw;
   INT32          ty;
+
+  /* Tile style: icon above a caption, chrome only under the pointer. */
+  if (w->u.button.icon != 0u) {
+    UINT8 hot = (UINT8)((w->state & (NG_ST_HOVER | NG_ST_PRESSED)) != 0u);
+    /* One caption size for every tile: a CJK glyph is 32 px at 2x, so a
+     * five-character name would need 160 px and still be clipped at 1280.
+     * Small captions under a 24 px icon also keep the column uniform. */
+    UINT32 scale = 1u;
+    INT32 icon_y = (w->abs.h >= 64) ? w->abs.y + 22 : w->abs.y + w->abs.h / 2;
+
+    if (hot) {
+      nd_round_rect(s, nd_rect(w->abs.x + 2, w->abs.y + 2, w->abs.w - 4,
+                               w->abs.h - 4), 8,
+                    (w->state & NG_ST_PRESSED) != 0u ? t->ctrl_border
+                                                     : t->ctrl_hover);
+    }
+    icon_glyph(s, w->abs.x + w->abs.w / 2, icon_y, 24, w->u.button.icon,
+               hot ? t->accent : t->text);
+    if (w->u.button.text != 0 && w->u.button.text[0] != '\0') {
+      tw = nd_text_width(w->u.button.text, scale);
+      ty = (w->abs.h >= 64) ? w->abs.y + w->abs.h - 24
+                            : w->abs.y + w->abs.h - 16;
+      nd_text(s, w->abs.x + (w->abs.w - (INT32)tw) / 2, ty,
+              w->u.button.text, t->text, scale);
+    }
+    return;
+  }
 
   if ((w->state & NG_ST_PRESSED) != 0u) {
     bg = t->accent;
@@ -979,6 +1053,174 @@ static void draw_window(ng_widget_t *w) {
 }
 
 
+/* ---- icons ------------------------------------------------------------ */
+/* Monochrome glyphs built from the same primitives a client can send.
+ * `box` is the square the glyph is drawn in; the stroke weight is 2 px at
+ * the 20 px default so it stays legible on the 16 px CJK grid. */
+static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
+                       UINT8 kind, nd_color_t c) {
+  INT32 h = b / 2;
+
+  switch (kind) {
+  case NG_ICON_START: {
+    INT32 q = (b * 9) / 20;
+    INT32 g = (b * 3) / 20;
+
+    nd_round_rect(s, nd_rect(cx - q - g / 2, cy - q - g / 2, q, q), 1, c);
+    nd_round_rect(s, nd_rect(cx + g / 2, cy - q - g / 2, q, q), 1, c);
+    nd_round_rect(s, nd_rect(cx - q - g / 2, cy + g / 2, q, q), 1, c);
+    nd_round_rect(s, nd_rect(cx + g / 2, cy + g / 2, q, q), 1, c);
+    break;
+  }
+  case NG_ICON_FILES:
+    nd_round_rect(s, nd_rect(cx - h, cy - h + 3, h, 5), 2, c);
+    nd_round_rect(s, nd_rect(cx - h, cy - h + 6, b, b - 8), 2, c);
+    break;
+  case NG_ICON_TASKS: {
+    INT32 i;
+
+    for (i = 0; i < 3; i++) {
+      INT32 y = cy - h + 4 + i * (b / 3);
+
+      nd_fill_circle(s, cx - h + 2, y + 1, 2, c);
+      nd_fill_rect(s, nd_rect(cx - h + 7, y, b - 9, 2), c);
+    }
+    break;
+  }
+  case NG_ICON_SETTINGS: {
+    INT32 i;
+
+    nd_circle(s, cx, cy, h - 3, c);
+    nd_fill_circle(s, cx, cy, 3, c);
+    for (i = 0; i < 4; i++) {
+      static const INT32 dx[4] = {0, 1, 0, -1};
+      static const INT32 dy[4] = {-1, 0, 1, 0};
+
+      nd_line(s, cx + dx[i] * (h - 2), cy + dy[i] * (h - 2),
+              cx + dx[i] * (h - 5), cy + dy[i] * (h - 5), c);
+    }
+    break;
+  }
+  case NG_ICON_NET: {
+    INT32 i;
+
+    for (i = 0; i < 3; i++) {
+      INT32 w = h - i * (b / 7);
+
+      nd_hline(s, cx - w, cx + w, cy - h + 4 + i * 4, c);
+    }
+    nd_fill_circle(s, cx, cy + h - 2, 2, c);
+    break;
+  }
+  case NG_ICON_SEARCH:
+    nd_circle(s, cx - 1, cy - 1, h - 3, c);
+    nd_line(s, cx + 3, cy + 3, cx + h - 1, cy + h - 1, c);
+    break;
+  case NG_ICON_POWER:
+    nd_circle(s, cx, cy + 1, h - 3, c);
+    nd_fill_rect(s, nd_rect(cx - 1, cy - h, 3, h + 2), c);
+    break;
+  case NG_ICON_SUN: {
+    INT32 i;
+
+    nd_fill_circle(s, cx, cy, 4, c);
+    for (i = 0; i < 8; i++) {
+      static const INT32 dx[8] = {0, 1, 1, 1, 0, -1, -1, -1};
+      static const INT32 dy[8] = {-1, -1, 0, 1, 1, 1, 0, -1};
+
+      nd_line(s, cx + dx[i] * 6, cy + dy[i] * 6, cx + dx[i] * (h - 1),
+              cy + dy[i] * (h - 1), c);
+    }
+    break;
+  }
+  case NG_ICON_MOON:
+    /* A crescent: a filled disc with a second disc punched out in the
+     * surface colour. Both colours come from the theme, so it works on a
+     * card in light and dark alike. */
+    nd_fill_circle(s, cx - 1, cy, h - 2, c);
+    nd_fill_circle(s, cx + 5, cy - 3, h - 3, g_ctx.theme.ctrl_bg);
+    break;
+  case NG_ICON_AUTO: {
+    INT32 i;
+
+    nd_circle(s, cx, cy, h - 2, c);
+    for (i = -h + 3; i <= 0; i++) {
+      INT32 w = 0;
+      INT32 r = h - 2;
+
+      while (w * w + i * i <= r * r && cx - w > cx - r) {
+        w++;
+      }
+      nd_hline(s, cx - w + 1, cx - 1, cy + i, c);
+    }
+    break;
+  }
+  case NG_ICON_INSTALL:
+    nd_fill_rect(s, nd_rect(cx - 1, cy - h, 3, h + 2), c);
+    nd_line(s, cx - 5, cy + 2, cx, cy + h - 3, c);
+    nd_line(s, cx + 5, cy + 2, cx, cy + h - 3, c);
+    nd_fill_rect(s, nd_rect(cx - h, cy + h - 1, b, 2), c);
+    break;
+  case NG_ICON_CHECK:
+    nd_line(s, cx - h + 2, cy, cx - 2, cy + h - 3, c);
+    nd_line(s, cx - 2, cy + h - 3, cx + h - 1, cy - h + 2, c);
+    break;
+  case NG_ICON_CHEVRON:
+    nd_line(s, cx - 2, cy - 4, cx + 2, cy, c);
+    nd_line(s, cx + 2, cy, cx - 2, cy + 4, c);
+    break;
+  case NG_ICON_DISK:
+    nd_round_rect(s, nd_rect(cx - h, cy - h + 1, b, b - 3), 3, c);
+    nd_hline(s, cx - h + 3, cx + h - 3, cy + h - 4, g_ctx.theme.ctrl_bg);
+    break;
+  default:
+    break;
+  }
+}
+
+static void draw_icon(ng_widget_t *w) {
+  nd_surface_t     *s = g_ctx.surf;
+  const ng_theme_t *t = &g_ctx.theme;
+  UINT8             b = (w->u.icon.size != 0u) ? w->u.icon.size : 20u;
+  UINT8             hot = (UINT8)((w->state & (NG_ST_HOVER | NG_ST_PRESSED)) != 0u);
+  nd_color_t        fg = hot ? t->accent : t->text;
+  INT32             cx = w->abs.x + w->abs.w / 2;
+  INT32             cy = w->abs.y + w->abs.h / 2;
+
+  if ((w->state & NG_ST_HOVER) != 0u) {
+    nd_round_rect(s, nd_rect(w->abs.x + 2, w->abs.y + 2, w->abs.w - 4,
+                             w->abs.h - 4), 6, t->ctrl_hover);
+  }
+  if ((w->state & NG_ST_PRESSED) != 0u) {
+    nd_round_rect(s, nd_rect(w->abs.x + 3, w->abs.y + 3, w->abs.w - 6,
+                             w->abs.h - 6), 5, t->ctrl_border);
+  }
+  if ((w->flags & NG_WF_ENABLED) == 0u) {
+    fg = t->text_dim;
+  }
+  icon_glyph(s, cx, cy, (INT32)b, w->u.icon.kind, fg);
+}
+
+static void draw_swatch(ng_widget_t *w) {
+  nd_surface_t     *s = g_ctx.surf;
+  const ng_theme_t *t = &g_ctx.theme;
+  INT32             r = (w->abs.w < w->abs.h ? w->abs.w : w->abs.h) / 2 - 5;
+  INT32             cx = w->abs.x + w->abs.w / 2;
+  INT32             cy = w->abs.y + w->abs.h / 2;
+
+  if (r < 3) {
+    r = 3;
+  }
+  if ((w->state & (NG_ST_HOVER | NG_ST_PRESSED)) != 0u) {
+    nd_circle(s, cx, cy, r + 3, t->text_dim);
+  }
+  nd_fill_circle(s, cx, cy, r, w->u.swatch.color);
+  if (w->u.swatch.selected != 0u) {
+    nd_circle(s, cx, cy, r + 3, t->accent);
+    nd_circle(s, cx, cy, r + 4, t->accent);
+  }
+}
+
 static void draw_self(ng_widget_t *w) {
   switch (w->type) {
   case NG_DESKTOP:
@@ -1023,6 +1265,12 @@ static void draw_self(ng_widget_t *w) {
     break;
   case NG_TREE:
     draw_tree(w);
+    break;
+  case NG_ICON:
+    draw_icon(w);
+    break;
+  case NG_SWATCH:
+    draw_swatch(w);
     break;
   default:
     break;
@@ -1414,6 +1662,8 @@ static void key_dispatch(const nd_event_t *ev) {
   }
   switch (w->type) {
   case NG_BUTTON:
+  case NG_ICON:
+  case NG_SWATCH:
     if (ev->key == ND_KEY_ENTER || ev->key == ' ') {
       w->state |= NG_ST_PRESSED;
       ng_damage_widget(w);
@@ -1571,6 +1821,8 @@ void ng_dispatch(const nd_event_t *ev) {
     }
     switch (w->type) {
     case NG_BUTTON:
+    case NG_ICON:
+    case NG_SWATCH:
       w->state |= NG_ST_PRESSED;
       /* Capture the press: the release must be judged against the same
        * button even if the pointer drifts a pixel or two, which is what
@@ -1642,7 +1894,8 @@ void ng_dispatch(const nd_event_t *ev) {
     if (w == 0) {
       break;
     }
-    if (w->type == NG_BUTTON && (w->state & NG_ST_PRESSED) != 0u) {
+    if ((w->type == NG_BUTTON || w->type == NG_ICON ||
+         w->type == NG_SWATCH) && (w->state & NG_ST_PRESSED) != 0u) {
       w->state &= ~NG_ST_PRESSED;
       ng_damage_widget(w);
       if (nd_rect_contains(w->abs, ev->x, ev->y)) {

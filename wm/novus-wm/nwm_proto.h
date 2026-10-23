@@ -124,12 +124,19 @@ typedef struct {
 } nwm_cmd_t;
 
 #define NWM_OP_FILL   1u /* filled rectangle */
-#define NWM_OP_FRAME  2u /* rectangle outline, `w` = thickness */
+#define NWM_OP_FRAME  2u /* rectangle outline, `h` = thickness */
 #define NWM_OP_HLINE  3u
 #define NWM_OP_VLINE  4u
 #define NWM_OP_CIRCLE 5u /* outline, radius = w */
+/* v1.2: rounded rectangles. `pad` carries the corner radius for both;
+ * ROUND_FRAME keeps `h` as the stroke thickness. Cards, pill buttons and
+ * the installer's step badges need them, and four 1-px lines per corner
+ * would blow the 40-shape budget. */
+#define NWM_OP_ROUND_FILL  6u
+#define NWM_OP_ROUND_FRAME 7u
 
-/* One shape in the v1.1 display list. */
+/* One shape in the v1.1 display list. `pad` is the corner radius for the
+ * v1.2 rounded ops and zero otherwise. */
 typedef struct {
   UINT32 win;
   UINT8  op; /* NWM_OP_* */

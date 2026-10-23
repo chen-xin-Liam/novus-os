@@ -3,7 +3,7 @@
 #![no_std]
 #![no_main]
 
-use novus_apps::{ipc, sys, ui, wm};
+use novus_apps::{ipc, sinfo, sys, ui, wm};
 
 const CW: i16 = 420;
 const CH: i16 = 252;
@@ -14,30 +14,30 @@ fn as_str(bytes: &[u8], len: usize) -> &str {
     core::str::from_utf8(&bytes[..len]).unwrap_or("")
 }
 
-fn draw(w: &wm::Win, username: &[u8; 32], user_len: usize,
+fn draw(w: &mut wm::Win, username: &[u8; 32], user_len: usize,
         password_len: usize, focus: u8, setup: bool, logged: bool, note: &str) {
     w.clear();
-    ui::shell(w, CW, CH, "用户会话", ui::ACCENT);
-    w.text(18, 38, ui::DIM, if setup { "首次启动：创建本地账户" } else { "Novus OS 登录" });
-    w.text(22, 72, ui::TEXT, "用户名");
-    w.fill(112, 64, 278, 28, ui::BG);
-    w.frame(112, 64, 278, 28, if focus == 0 { ui::ACCENT } else { ui::LINE });
-    w.text(120, 72, ui::TEXT, as_str(username, user_len));
-    w.text(22, 112, ui::TEXT, "密码");
-    w.fill(112, 104, 278, 28, ui::BG);
-    w.frame(112, 104, 278, 28, if focus == 1 { ui::ACCENT } else { ui::LINE });
+    ui::shell(w, CW, CH, "本地账户", ui::accent());
+    w.text(18, 38, ui::dim(), if setup { "首次启动：创建本地账户" } else { "Novus OS 登录" });
+    w.text(22, 72, ui::text(), "用户名");
+    w.fill(112, 64, 278, 28, ui::bg());
+    w.frame(112, 64, 278, 28, if focus == 0 { ui::accent() } else { ui::line() });
+    w.text(120, 72, ui::text(), as_str(username, user_len));
+    w.text(22, 112, ui::text(), "密码");
+    w.fill(112, 104, 278, 28, ui::bg());
+    w.frame(112, 104, 278, 28, if focus == 1 { ui::accent() } else { ui::line() });
     let mut masked = [b' '; 64];
     for ch in masked.iter_mut().take(password_len) { *ch = b'*'; }
-    w.text(120, 112, ui::TEXT, core::str::from_utf8(&masked[..password_len]).unwrap_or(""));
+    w.text(120, 112, ui::text(), core::str::from_utf8(&masked[..password_len]).unwrap_or(""));
     if !logged {
-        ui::button(w, 112, 150, 112, 28, if setup { "创建账户" } else { "登录" }, ui::ACCENT);
+        ui::button(w, 112, 150, 112, 28, if setup { "创建账户" } else { "登录" }, ui::accent());
     } else {
-        w.text(114, 158, ui::GOOD, "会话已登录");
-        ui::button(w, 240, 150, 76, 28, "注销", ui::ACCENT);
+        w.text(114, 158, ui::good(), "会话已登录");
+        ui::button(w, 240, 150, 76, 28, "注销", ui::accent());
     }
-    ui::button(w, 112, 192, 96, 26, "关机", ui::WARN);
-    ui::button(w, 218, 192, 96, 26, "重启", ui::ACCENT);
-    w.text(18, 232, ui::DIM, note);
+    ui::button(w, 112, 192, 96, 26, "关机", ui::warn());
+    ui::button(w, 218, 192, 96, 26, "重启", ui::accent());
+    w.text(18, 232, ui::dim(), note);
 }
 
 fn add_char(buf: &mut [u8], len: &mut usize, key: u32, cap: usize) {
@@ -61,7 +61,7 @@ fn erase(buf: &mut [u8], len: &mut usize) {
 pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] session manager up\n");
     let Some(wm_port) = ipc::lookup(wm::PORT_NAME) else { sys::exit(1) };
-    let Some(win) = wm::Win::create(wm_port, 302, 210, CW as i32 + 2,
+    let Some(mut win) = wm::Win::create(wm_port, 302, 210, CW as i32 + 2,
                                     CH as i32 + wm::TITLE_H, "用户会话") else { sys::exit(2) };
     let mut username = [0u8; 32];
     let mut password = [0u8; 64];
@@ -70,8 +70,12 @@ pub extern "C" fn _start() -> ! {
     let mut focus = 0u8;
     let mut setup = sys::session(0, &username, 0, &password, 0) == 0;
     let mut logged = false;
+    let sys_port = ipc::lookup(sinfo::PORT_NAME).unwrap_or(0);
+    if sys_port != 0 {
+        ui::init(sys_port);
+    }
     let mut note = if setup { "创建首个账户，用户名仅支持 ASCII" } else { "输入用户名和密码" };
-    draw(&win, &username, user_len, pass_len, focus, setup, logged, note);
+    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
     /* The login window deliberately remains the session bootstrap service:
      * dismissing its close button cannot strand the desktop without a way to
      * authenticate, log out, or request a power transition. */
@@ -80,7 +84,7 @@ pub extern "C" fn _start() -> ! {
             match ev {
                 wm::Ev::Close => {
                     note = "登录窗口保持运行；请登录、注销或关机";
-                    draw(&win, &username, user_len, pass_len, focus, setup, logged, note);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
                 }
                 wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
                     if m.y >= 64 && m.y < 94 { focus = 0; }
@@ -116,7 +120,7 @@ pub extern "C" fn _start() -> ! {
                         if m.x >= 112 && m.x < 208 { let _ = sys::power_off(); }
                         else if m.x >= 218 && m.x < 314 { let _ = sys::reboot(); }
                     }
-                    draw(&win, &username, user_len, pass_len, focus, setup, logged, note);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
                 }
                 wm::Ev::Key(key) => {
                     if key == KEY_ENTER {
@@ -129,10 +133,13 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         add_char(&mut password, &mut pass_len, key, 63);
                     }
-                    draw(&win, &username, user_len, pass_len, focus, setup, logged, note);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
                 }
                 _ => {}
             }
+        }
+        if sys_port != 0 && ui::poll(sys_port) {
+            draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
         }
         sys::yield_now();
     }

@@ -104,9 +104,11 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_hal.c \
        graphics/nd_input.c \
        graphics/nvgui.c \
+       graphics/nd_theme.c \
        graphics/nd_demo.c \
        kernel/ipc.c \
        kernel/apps.c \
+       kernel/install.c \
        kernel/sysinfo.c \
        kernel/rtc.c \
        kernel/pci.c \
@@ -260,7 +262,7 @@ $(RUST_LIB): $(RUST_DEPS)
 APPS_DIR    := apps
 APPS_TARGET := $(CURDIR)/build/rust-apps
 APPS_STAMP  := build/apps.stamp
-APPS_NAMES  := fileman taskman settings netman session
+APPS_NAMES  := fileman taskman settings netman session setup
 APPS_BINS   := $(addprefix out/apps/,$(addsuffix .bin,$(APPS_NAMES)))
 APPS_BLOB_H := build/apps_blobs.h
 APPS_DEPS   := $(shell find $(APPS_DIR)/src -type f 2>/dev/null) \
@@ -335,6 +337,11 @@ out build:
 	mkdir -p $@
 
 # Build, then boot the image in QEMU.
+# Regenerate the design tokens (graphics/nd_theme.[ch], apps/src/theme.rs).
+# The generated files are committed, so a normal build needs no Python.
+theme:
+	python3 tools/themegen/themegen.py
+
 run: all $(CPPCC_RUN_DEP)
 	@if [ "$(CONFIG_USER_CPPCC)" = "y" ]; then \
         mkdir -p esp; \

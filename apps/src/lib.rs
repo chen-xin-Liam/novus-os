@@ -21,8 +21,10 @@ pub mod ipc;
 pub mod fs;
 pub mod sinfo;
 pub mod sys;
+pub mod theme;
 pub mod ui;
 pub mod wm;
+pub mod install;
 
 use core::panic::PanicInfo;
 

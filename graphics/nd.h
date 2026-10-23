@@ -241,4 +241,9 @@ int nd_demo_take_damage(nd_rect_t *out);
  * on top of this). */
 void nd_demo_paint(nd_rect_t clip);
 
+/* Rebuild the shell widget tree after a theme change. Client windows are
+ * owned by the WM and survive; the shell's own demo windows are recreated
+ * hidden, which is the price of a static widget pool. */
+void nd_demo_theme_sync(void);
+
 #endif /* NOVUS_ND_H */

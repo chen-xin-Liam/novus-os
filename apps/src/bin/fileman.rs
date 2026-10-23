@@ -146,7 +146,7 @@ impl State {
     }
 }
 
-fn draw(w: &wm::Win, st: &State, accent: u32) {
+fn draw(w: &mut wm::Win, st: &State, accent: u32) {
     w.clear();
     ui::shell(w, CW, CH, "内置目录", accent);
 
@@ -156,28 +156,28 @@ fn draw(w: &wm::Win, st: &State, accent: u32) {
         let x = 110 + i as i16 * 66;
         let on = if i == 3 { st.disk } else { !st.disk && st.dir == i as u8 };
 
-        w.fill(x, 5, 60, 17, if on { ui::ROW_SEL } else { ui::PANEL });
+        w.fill(x, 5, 60, 17, if on { ui::row_sel() } else { ui::card_bg() });
         if on {
             w.fill(x, 21, 60, 2, accent);
         }
-        w.text(x + 6, 10, if on { ui::TEXT } else { ui::DIM }, name);
+        w.text(x + 6, 10, if on { ui::text() } else { ui::dim() }, name);
     }
 
     if st.disk {
-        w.text(12, 31, ui::DIM, st.path());
+        w.text(12, 31, ui::dim(), st.path());
     }
     if st.n == 0 {
-        w.text(12, if st.disk { 62 } else { 40 }, ui::DIM, "（空）");
+        w.text(12, if st.disk { 62 } else { 40 }, ui::dim(), "（空）");
     }
     for i in 0..st.n {
         let r = &st.rows[i];
         let color = if st.disk && r.kind == fs::MODE_DIR as u8 {
-            ui::ACCENT
+            ui::accent()
         } else {
             match r.kind {
-                sinfo::KIND_APP => ui::ACCENT,
-                sinfo::KIND_DEV => ui::GOOD,
-                _ => ui::WARN,
+                sinfo::KIND_APP => ui::accent(),
+                sinfo::KIND_DEV => ui::good(),
+                _ => ui::warn(),
             }
         };
         let mut sb = [0u8; 16];
@@ -193,17 +193,17 @@ fn draw(w: &wm::Win, st: &State, accent: u32) {
         let y = if st.disk { 58 + i as i16 * ui::ROW_H } else { 34 + i as i16 * ui::ROW_H };
 
         if i == st.sel {
-            w.fill(4, y, CW - 8, ui::ROW_H - 2, ui::ROW_SEL);
+            w.fill(4, y, CW - 8, ui::ROW_H - 2, ui::row_sel());
         } else {
-            w.fill(4, y, CW - 8, ui::ROW_H - 2, ui::ROW);
+            w.fill(4, y, CW - 8, ui::ROW_H - 2, ui::row_bg());
         }
-        w.text(12, y + 6, if i == st.sel { ui::TEXT } else { color }, r.name());
-        w.text(CW - 12 - ui::width(value), y + 6, ui::DIM, value);
+        w.text(12, y + 6, if i == st.sel { ui::text() } else { color }, r.name());
+        w.text(CW - 12 - ui::width(value), y + 6, ui::dim(), value);
     }
 
-    w.fill(0, CH - 38, CW, 1, ui::LINE);
+    w.fill(0, CH - 38, CW, 1, ui::line());
     if st.disk {
-        w.text(12, CH - 44, ui::DIM, st.status);
+        w.text(12, CH - 44, ui::dim(), st.status);
         ui::button(w, 10, CH - 30, 62, 22, "打开", accent);
         ui::button(w, 78, CH - 30, 62, 22, "上级", accent);
         ui::button(w, 146, CH - 30, 96, 22, "建测试目录", accent);
@@ -211,13 +211,13 @@ fn draw(w: &wm::Win, st: &State, accent: u32) {
     } else {
         let can_run = st.n > 0 && st.rows[st.sel].kind == sinfo::KIND_APP;
         ui::button(w, 10, CH - 30, 66, 22, "运行",
-                   if can_run { accent } else { ui::LINE });
-        w.text(88, CH - 24, ui::DIM, st.status);
+                   if can_run { accent } else { ui::line() });
+        w.text(88, CH - 24, ui::dim(), st.status);
 
         let mut n = [0u8; 12];
         let shown = ui::fmt_u32(st.total as u32, &mut n);
-        w.text(CW - 12 - 28, CH - 24, ui::DIM, shown);
-        w.text(CW - 12 - ui::width("项"), CH - 24, ui::DIM, "项");
+        w.text(CW - 12 - 28, CH - 24, ui::dim(), shown);
+        w.text(CW - 12 - ui::width("项"), CH - 24, ui::dim(), "项");
     }
 }
 
@@ -230,11 +230,12 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 40, 396, CW as i32 + 2, CH as i32 + wm::TITLE_H, "文件管理器")
+    let Some(mut win) = wm::Win::create(wm_port, 40, 396, CW as i32 + 2, CH as i32 + wm::TITLE_H, "文件管理器")
     else {
         sys::exit(3);
     };
-    let accent = sinfo::accent(sys_port).unwrap_or(ui::ACCENT);
+    ui::init(sys_port);
+    let mut accent = ui::accent();
     let mut st = State {
         dir: sinfo::DIR_APPS,
         disk: false,
@@ -255,7 +256,7 @@ pub extern "C" fn _start() -> ! {
         status: "选中一行后点运行",
     };
     st.reload(sys_port);
-    draw(&win, &st, accent);
+    draw(&mut win, &st, accent);
 
     loop {
         while let Some(ev) = win.next_event() {
@@ -278,7 +279,7 @@ pub extern "C" fn _start() -> ! {
                                 st.path[0] = b'/';
                                 st.path_len = 1;
                                 st.reload_disk();
-                                draw(&win, &st, accent);
+                                draw(&mut win, &st, accent);
                                 continue;
                             }
                             st.dir = i as u8;
@@ -286,7 +287,7 @@ pub extern "C" fn _start() -> ! {
                             st.status = "读取中";
                             st.reload(sys_port);
                             st.status = "选中一行后点运行";
-                            draw(&win, &st, accent);
+                            draw(&mut win, &st, accent);
                         }
                     }
                     if st.disk && m.y >= (CH - 30) as i32 {
@@ -322,33 +323,36 @@ pub extern "C" fn _start() -> ! {
                             st.reload_disk();
                             st.status = if ok { "open/write/read 往返通过" } else { "文件读写失败" };
                         }
-                        draw(&win, &st, accent);
+                        draw(&mut win, &st, accent);
                         continue;
                     }
                     for i in 0..st.n {
                         let y = if st.disk { 58 + i as i16 * ui::ROW_H } else { 34 + i as i16 * ui::ROW_H };
                         if m.y >= y as i32 && m.y < (y + ui::ROW_H - 2) as i32 && m.x >= 4 {
                             st.sel = i;
-                            draw(&win, &st, accent);
+                            draw(&mut win, &st, accent);
                         }
                     }
                     if !st.disk && m.y >= (CH - 30) as i32 && m.x >= 10 && m.x < 76 {
                         if st.n > 0 && st.rows[st.sel].kind == sinfo::KIND_APP {
-                            /* The spawn request takes the index in the
-                             * kernel's app table, which is the order the
-                             * /apps listing is built in. */
-                            let which = st.sel as u8;
-                            st.status = match sinfo::spawn(sys_port, which) {
+                            /* By name: the table gained the installer, so
+                             * a row index is no longer a stable id. */
+                            let name = st.rows[st.sel].name();
+                            st.status = match sinfo::spawn_name(sys_port, name) {
                                 Some(0) => "已启动",
                                 Some(-100) => "已在运行",
                                 _ => "无法启动",
                             };
-                            draw(&win, &st, accent);
+                            draw(&mut win, &st, accent);
                         }
                     }
                 }
                 _ => {}
             }
+        }
+        if ui::poll(sys_port) {
+            accent = ui::accent();
+            draw(&mut win, &st, accent);
         }
         sys::yield_now();
     }

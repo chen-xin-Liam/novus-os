@@ -16,10 +16,15 @@
 
 #include "kernel.h"
 #include "nvgui.h"
+#include "nd_theme.h"
 #include "nd_input.h"
 #include "nd_ime.h"
 #include "rtc.h"
 #include "apps.h"
+#include "sched.h"
+#include "nwm.h"
+#include "power.h"
+#include "install.h"
 
 #if CONFIG_NOVUS_GUI
 
@@ -393,13 +398,23 @@ static ng_widget_t *add_label(ng_widget_t *p, INT32 x, INT32 y, const char *text
                   NG_TEXT_SCALE);
 }
 
-/* ---- Windows 11 style shell ------------------------------------------- */
+/* ---- Novus Fluent shell ----------------------------------------------- */
 
 static ng_widget_t *g_win_demo;
 static ng_widget_t *g_win_widgets;
 static ng_widget_t *g_start_menu;
+static ng_widget_t *g_quick;
 static ng_widget_t *g_clock_label;
+static ng_widget_t *g_run_dot[4];
+static UINT32       g_theme_seen;
 static char         g_clock[8] = "00:00";
+static char         g_search[48];
+
+/* Taskbar running indicators follow the scheduler, not a private list:
+ * an app started from the start menu lights its dot, one that exits
+ * clears it. Names, not table indices - the installer moved the table. */
+static const char *const g_app_names[4] = {"fileman", "taskman", "settings",
+                                           "netman"};
 
 /* The RTC is optional: without one the taskbar just keeps the placeholder. */
 static void clock_refresh(void) {
@@ -438,28 +453,65 @@ static void clock_refresh(void) {
   }
 }
 
+static void running_refresh(void) {
+  UINT32 i;
+
+  for (i = 0; i < 4u; i++) {
+    if (g_run_dot[i] != 0) {
+      ng_show(g_run_dot[i], sched_find_name(g_app_names[i]) != 0);
+    }
+  }
+}
+
 /* Called from the window manager's tick: the shell owns the clock, but the
  * WM owns the timer path once it is running. */
-void nd_demo_idle(void) { clock_refresh(); }
+void nd_demo_idle(void) {
+  clock_refresh();
+  running_refresh();
+  /* Auto mode flips at 19:00 and 07:00; a manual change bumps the version
+   * from the settings panel or the quick-settings card. Either way the
+   * static widget tree is rebuilt once, not repainted colour by colour. */
+  (void)nd_theme_resolve();
+  if (nd_theme_version() != g_theme_seen) {
+    nd_demo_theme_sync();
+  }
+}
 
-static void menu_close(void) {
+static void overlays_close(void) {
   if (g_start_menu != 0) {
     ng_show(g_start_menu, 0);
+  }
+  if (g_quick != 0) {
+    ng_show(g_quick, 0);
   }
 }
 
 static void on_start(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
+  if (g_quick != 0) {
+    ng_show(g_quick, 0);
+  }
   if (g_start_menu != 0) {
     ng_show(g_start_menu, (g_start_menu->flags & NG_WF_VISIBLE) == 0u);
+  }
+}
+
+static void on_quick(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  if (g_start_menu != 0) {
+    ng_show(g_start_menu, 0);
+  }
+  if (g_quick != 0) {
+    ng_show(g_quick, (g_quick->flags & NG_WF_VISIBLE) == 0u);
   }
 }
 
 static void on_open_demo(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  menu_close();
+  overlays_close();
   if (g_win_demo != 0) {
     ng_show(g_win_demo, 1);
     ng_raise(g_win_demo);
@@ -469,44 +521,101 @@ static void on_open_demo(ng_ctx_t *ctx, ng_widget_t *w) {
 static void on_open_widgets(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  menu_close();
+  overlays_close();
   if (g_win_widgets != 0) {
     ng_show(g_win_widgets, 1);
     ng_raise(g_win_widgets);
   }
 }
 
+static void launch(const char *name) {
+  overlays_close();
+  (void)apps_launch_name(name);
+}
+
 static void on_launch_files(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  menu_close();
-  (void)apps_launch(0);
+  launch("fileman");
 }
 
 static void on_launch_tasks(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  menu_close();
-  (void)apps_launch(1);
+  launch("taskman");
 }
 
-static void on_launch_setup(ng_ctx_t *ctx, ng_widget_t *w) {
+static void on_launch_settings(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  menu_close();
-  (void)apps_launch(2);
+  launch("settings");
 }
 
 static void on_launch_net(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
-  menu_close();
-  (void)apps_launch(3);
+  launch("netman");
+}
+
+static void on_launch_install(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  launch("setup");
 }
 
 static void on_about(ng_ctx_t *ctx, ng_widget_t *w) {
-  set_status("Novus OS：内核 C + 用户态 Rust，Windows 11 风格桌面");
+  set_status("Novus OS：内核 C + 用户态 Rust，Novus Fluent 桌面");
   on_open_demo(ctx, w);
+}
+
+static void on_mode_light(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  nwm_theme_set_mode(ND_THEME_LIGHT);
+}
+
+static void on_mode_dark(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  nwm_theme_set_mode(ND_THEME_DARK);
+}
+
+static void on_mode_auto(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  nwm_theme_set_mode(ND_THEME_AUTO);
+}
+
+/* One callback per preset: the widget id is a pool slot, not a colour
+ * index, so the mapping lives here where it is visible. */
+static const UINT32 g_accents[8] = {
+    0x000067C0u, 0x00107C10u, 0x00B45309u, 0x007C3AEDu,
+    0x00C42B1Cu, 0x000E7490u, 0x00BE185Du, 0x004B5563u,
+};
+
+static void on_accent0(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[0]); }
+static void on_accent1(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[1]); }
+static void on_accent2(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[2]); }
+static void on_accent3(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[3]); }
+static void on_accent4(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[4]); }
+static void on_accent5(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[5]); }
+static void on_accent6(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[6]); }
+static void on_accent7(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_accent_set(g_accents[7]); }
+
+static void on_paper0(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(0); }
+static void on_paper1(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(1); }
+static void on_paper2(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(2); }
+
+static void on_shutdown(ng_ctx_t *c, ng_widget_t *w) {
+  (void)c;
+  (void)w;
+  power_off();
+}
+
+static void on_reboot(ng_ctx_t *c, ng_widget_t *w) {
+  (void)c;
+  (void)w;
+  power_reboot();
 }
 
 static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
@@ -514,10 +623,24 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   static const char *items[5] = {"创建进程", "映射页面", "检查 NX 保护",
                                  "切换 CR3", "退出码 0"};
   static ng_tnode_t nodes[7];
-  INT32 tw = 560;
-  INT32 th = 48;
-  INT32 tx = (screen->w - tw) / 2;
-  INT32 ty = screen->h - th - 12;
+  INT32 W = screen->w;
+  INT32 H = screen->h;
+  INT32 tw = 660;
+  INT32 th = 56;
+  INT32 tx = (W - tw) / 2;
+  INT32 ty = H - th - 10;
+  INT32 mx = tx;
+  INT32 my = ty - 8 - 560;
+  INT32 qx = tx + tw - 340;
+  INT32 qy = ty - 8 - 330;
+  INT32 i;
+
+  if (my < 8) {
+    my = 8;
+  }
+  if (qy < 8) {
+    qy = 8;
+  }
 
   /* Window 1: renderer + settings. Hidden until the start menu opens it. */
   win = ng_create(ctx->root, NG_WINDOW, 40, 44, 520, 340);
@@ -586,76 +709,167 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   nodes[6].expanded = 0;
   ng_tree(ng_create(win, NG_TREE, 16, 268, 348, 156), nodes, 7, on_tree);
 
-  /* Desktop: watermark and the icon grid. */
-  ng_label(ng_create(ctx->root, NG_LABEL, 24, 16, 240, 20), "Novus OS",
-           ctx->theme.text_dim, 1);
-  ng_button(ng_create(ctx->root, NG_BUTTON, 24, 52, 108, 76), "文件管理器",
-            on_launch_files);
-  ng_button(ng_create(ctx->root, NG_BUTTON, 24, 140, 108, 76), "任务管理器",
-            on_launch_tasks);
-  ng_button(ng_create(ctx->root, NG_BUTTON, 144, 52, 108, 76), "设置",
-            on_launch_setup);
-  ng_button(ng_create(ctx->root, NG_BUTTON, 144, 140, 108, 76), "控件演示",
-            on_open_demo);
+  /* Desktop: quiet watermark bottom-left, tile column on the right. */
+  ng_label(ng_create(ctx->root, NG_LABEL, 28, H - 56, 260, 24), "Novus OS",
+           ctx->theme.text_dim, 2);
+  ng_label(ng_create(ctx->root, NG_LABEL, 30, H - 30, 260, 16),
+           "Novus Fluent", ctx->theme.text_dim, 1);
+
+  {
+    static const char *names[5] = {"文件管理器", "任务管理器", "设置",
+                                   "网络", "安装系统"};
+    static const ng_icon_kind_t kinds[5] = {
+        NG_ICON_FILES, NG_ICON_TASKS, NG_ICON_SETTINGS, NG_ICON_NET,
+        NG_ICON_INSTALL};
+    static ng_action_fn acts[5] = {on_launch_files, on_launch_tasks,
+                                   on_launch_settings, on_launch_net,
+                                   on_launch_install};
+    UINT32 n = install_available() ? 5u : 4u;
+
+    for (i = 0; i < (INT32)n; i++) {
+      ng_button_icon(ng_create(ctx->root, NG_BUTTON, W - 112,
+                               24 + i * 96, 96, 88),
+                     names[i], kinds[i], acts[i]);
+    }
+  }
 
   /* Start menu: a floating card above the taskbar, hidden until asked. */
-  g_start_menu = ng_panel(ng_create(ctx->root, NG_PANEL, tx + 24,
-                                    ty - 8 - 402, 360, 402),
-                          ND_RGB(0xFB, 0xFB, 0xFB));
+  g_start_menu = ng_panel(ng_create(ctx->root, NG_PANEL, mx, my, 480, 560),
+                          ctx->theme.win_bg);
   ng_panel_frame(g_start_menu, 1);
   ng_set_overlay(g_start_menu, 1);
-  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 14, 200, 20), "已固定",
+  ng_textbox(ng_create(g_start_menu, NG_TEXTBOX, 20, 18, 440, 34), g_search,
+             sizeof(g_search), "搜索应用、设置与文件");
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 64, 200, 20), "已固定",
            ctx->theme.text, NG_TEXT_SCALE);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 44, 100, 72), "文件管理器",
-            on_launch_files);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 132, 44, 100, 72),
-            "任务管理器", on_launch_tasks);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 244, 44, 100, 72), "设置",
-            on_launch_setup);
-  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 132, 200, 20), "推荐",
-           ctx->theme.text, NG_TEXT_SCALE);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 162, 320, 38), "控件演示",
-            on_open_demo);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 206, 320, 38), "控件与列表",
-            on_open_widgets);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 250, 320, 38), "网络",
-            on_launch_net);
-  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 294, 320, 38), "关于本系统",
-            on_about);
-  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 372, 320, 20), "Novus 用户",
-           ctx->theme.text_dim, 1);
+  ng_button_icon(ng_create(g_start_menu, NG_BUTTON, 20, 92, 136, 100),
+                 "文件管理器", NG_ICON_FILES, on_launch_files);
+  ng_button_icon(ng_create(g_start_menu, NG_BUTTON, 168, 92, 136, 100),
+                 "任务管理器", NG_ICON_TASKS, on_launch_tasks);
+  ng_button_icon(ng_create(g_start_menu, NG_BUTTON, 316, 92, 136, 100),
+                 "设置", NG_ICON_SETTINGS, on_launch_settings);
+  ng_button_icon(ng_create(g_start_menu, NG_BUTTON, 20, 202, 136, 100),
+                 "网络", NG_ICON_NET, on_launch_net);
+  ng_button_icon(ng_create(g_start_menu, NG_BUTTON, 168, 202, 136, 100),
+                 "控件演示", NG_ICON_AUTO, on_open_demo);
+  if (install_available()) {
+    ng_button_icon(ng_create(g_start_menu, NG_BUTTON, 316, 202, 136, 100),
+                   "安装系统", NG_ICON_INSTALL, on_launch_install);
+  }
 
-  /* Taskbar: centred, floating, launcher on the left, clock on the right. */
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 316, 200, 20), "推荐",
+           ctx->theme.text, NG_TEXT_SCALE);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 344, 440, 42), "控件与列表",
+            on_open_widgets);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 392, 440, 42), "控件演示",
+            on_open_demo);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 440, 440, 42), "关于本系统",
+            on_about);
+
+  {
+    ng_widget_t *line = ng_panel(
+        ng_create(g_start_menu, NG_PANEL, 20, 498, 440, 1), ctx->theme.win_border);
+    (void)line;
+  }
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 516, 220, 20), "Novus 用户",
+           ctx->theme.text_dim, 1);
+  ng_icon(ng_create(g_start_menu, NG_ICON, 372, 508, 36, 36), NG_ICON_SETTINGS,
+          18, on_launch_settings);
+  ng_icon(ng_create(g_start_menu, NG_ICON, 416, 508, 36, 36), NG_ICON_POWER, 18,
+          on_shutdown);
+
+  /* Quick settings: theme, accent, wallpaper, network, power. */
+  g_quick = ng_panel(ng_create(ctx->root, NG_PANEL, qx, qy, 340, 330),
+                     ctx->theme.win_bg);
+  ng_panel_frame(g_quick, 1);
+  ng_set_overlay(g_quick, 1);
+  ng_label(ng_create(g_quick, NG_LABEL, 20, 16, 240, 20), "快速设置",
+           ctx->theme.text, NG_TEXT_SCALE);
+  ng_label(ng_create(g_quick, NG_LABEL, 20, 54, 120, 16), "主题",
+           ctx->theme.text_dim, 1);
+  ng_button(ng_create(g_quick, NG_BUTTON, 20, 74, 92, 32), "浅色",
+            on_mode_light);
+  ng_button(ng_create(g_quick, NG_BUTTON, 120, 74, 92, 32), "深色",
+            on_mode_dark);
+  ng_button(ng_create(g_quick, NG_BUTTON, 220, 74, 100, 32), "跟随时间",
+            on_mode_auto);
+  ng_label(ng_create(g_quick, NG_LABEL, 20, 118, 120, 16), "强调色",
+           ctx->theme.text_dim, 1);
+  {
+    ng_action_fn accent_acts[8] = {on_accent0, on_accent1, on_accent2, on_accent3,
+                                   on_accent4, on_accent5, on_accent6, on_accent7};
+
+    for (i = 0; i < 8; i++) {
+      ng_swatch(ng_create(g_quick, NG_SWATCH, 20 + i * 38, 140, 32, 32),
+                g_accents[i], nd_theme_accent() == g_accents[i],
+                accent_acts[i]);
+    }
+  }
+  ng_label(ng_create(g_quick, NG_LABEL, 20, 182, 120, 16), "壁纸",
+           ctx->theme.text_dim, 1);
+  ng_swatch(ng_create(g_quick, NG_SWATCH, 20, 204, 32, 32),
+            nd_theme_paper_top(0), nd_theme_wallpaper() == 0u, on_paper0);
+  ng_swatch(ng_create(g_quick, NG_SWATCH, 58, 204, 32, 32),
+            nd_theme_paper_top(1), nd_theme_wallpaper() == 1u, on_paper1);
+  ng_swatch(ng_create(g_quick, NG_SWATCH, 96, 204, 32, 32),
+            nd_theme_paper_top(2), nd_theme_wallpaper() == 2u, on_paper2);
+  ng_label(ng_create(g_quick, NG_LABEL, 20, 252, 300, 16), "网络已连接",
+           ctx->theme.text_dim, 1);
+  ng_button(ng_create(g_quick, NG_BUTTON, 20, 282, 92, 32), "重启", on_reboot);
+  ng_button(ng_create(g_quick, NG_BUTTON, 120, 282, 92, 32), "关机",
+            on_shutdown);
+  ng_icon(ng_create(g_quick, NG_ICON, 272, 278, 36, 36), NG_ICON_POWER, 18,
+          on_shutdown);
+
+  /* Taskbar: one floating pill. Centre apps, clock and quick settings on
+   * the right, search on the left. Running dots sit under their app. */
   {
     ng_widget_t *bar = ng_panel(ng_create(ctx->root, NG_PANEL, tx, ty, tw, th),
-                                ND_RGB(0xF9, 0xF9, 0xF9));
+                                ctx->theme.win_bg);
 
     ng_panel_frame(bar, 1);
-    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 8, ty + 6, 48, 36), "开始",
-              on_start);
-    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 64, ty + 6, 104, 36),
-              "文件", on_launch_files);
-    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 176, ty + 6, 104, 36),
-              "任务", on_launch_tasks);
-    ng_button(ng_create(ctx->root, NG_BUTTON, tx + 288, ty + 6, 104, 36),
-              "设置", on_launch_setup);
+    ng_icon(ng_create(ctx->root, NG_ICON, tx + 8, ty + 6, 44, 44),
+            NG_ICON_START, 22, on_start);
+    ng_icon(ng_create(ctx->root, NG_ICON, tx + 56, ty + 6, 44, 44),
+            NG_ICON_SEARCH, 18, on_start);
+
+    {
+      static const ng_icon_kind_t kinds[4] = {
+          NG_ICON_FILES, NG_ICON_TASKS, NG_ICON_SETTINGS, NG_ICON_NET};
+      ng_action_fn acts[4] = {on_launch_files, on_launch_tasks,
+                              on_launch_settings, on_launch_net};
+
+      for (i = 0; i < 4; i++) {
+        ng_icon(ng_create(ctx->root, NG_ICON, tx + 116 + i * 46, ty + 6, 44, 44),
+                kinds[i], 20, acts[i]);
+        g_run_dot[i] = ng_panel(
+            ng_create(ctx->root, NG_PANEL, tx + 116 + i * 46 + 14, ty + th - 7,
+                      16, 3),
+            nd_theme_accent());
+      }
+    }
+
     g_clock_label = ng_label(
-        ng_create(ctx->root, NG_LABEL, tx + tw - 116, ty + 14, 108, 20), g_clock,
-        ctx->theme.text, 2);
+        ng_create(ctx->root, NG_LABEL, tx + tw - 178, ty + 10, 120, 36),
+        g_clock, ctx->theme.text, 2);
     g_clock_label->u.label.align = 2; /* right aligned */
+    ng_icon(ng_create(ctx->root, NG_ICON, tx + tw - 50, ty + 6, 44, 44),
+            NG_ICON_AUTO, 20, on_quick);
   }
 
   /* Status line, bottom left, small and quiet. */
   set_status("就绪");
   g_status_label = ng_label(
-      ng_create(ctx->root, NG_LABEL, 120, 16, 760, 20), g_status,
+      ng_create(ctx->root, NG_LABEL, 28, H - 92, 620, 20), g_status,
       ctx->theme.text_dim, 1);
 
   ng_layout();
   clock_refresh();
+  running_refresh();
   ng_show(g_win_demo, 0);
   ng_show(g_win_widgets, 0);
   ng_show(g_start_menu, 0);
+  ng_show(g_quick, 0);
 }
 
 void nd_demo_init(void) {
@@ -678,19 +892,58 @@ void nd_demo_init(void) {
   nd_cursor_set(screen->w / 2, screen->h / 3);
   nd_cursor_draw();
   g_demo_ready = 1;
+  g_theme_seen = nd_theme_version();
   kputs("[ND] demo desktop painted\n");
+}
+
+/* Rebuild the shell after a light/dark or accent change. Client windows
+ * belong to the WM and survive; the shell's demo windows are recreated
+ * hidden. The widget pool has no per-widget repaint hook, so rebuilding is
+ * both simpler and more predictable than walking 80 widgets to recolour
+ * them. */
+void nd_demo_theme_sync(void) {
+  nd_surface_t *screen = nd_screen();
+  ng_ctx_t     *ctx;
+
+  if (!g_demo_ready || screen == 0) {
+    return;
+  }
+  g_win_demo = 0;
+  g_win_widgets = 0;
+  g_start_menu = 0;
+  g_quick = 0;
+  g_clock_label = 0;
+  g_status_label = 0;
+  memset(g_run_dot, 0, sizeof(g_run_dot));
+
+  ctx = ng_init(screen);
+  if (ctx == 0) {
+    g_demo_ready = 0;
+    return;
+  }
+  nd_ime_init();
+  build_desktop(screen, ctx);
+  ng_render_all();
+  g_theme_seen = nd_theme_version();
+  kputs("[ND] theme applied: ");
+  kputs(nd_theme_is_dark() ? "dark\n" : "light\n");
 }
 
 int nd_demo_ready(void) { return g_demo_ready; }
 
 void nd_demo_dispatch(const nd_event_t *ev) {
-  /* A press anywhere outside the start menu closes it, the way it does on
-   * Windows - including a press on a window the menu was covering. */
-  if (g_start_menu != 0 &&
-      (g_start_menu->flags & NG_WF_VISIBLE) != 0u &&
-      ev->type == ND_EV_MOUSE_DOWN &&
-      !nd_rect_contains(g_start_menu->abs, ev->x, ev->y)) {
-    ng_show(g_start_menu, 0);
+  /* A press anywhere outside an open card closes it, the way it does on
+   * Windows - including a press on a window the card was covering. */
+  if (ev->type == ND_EV_MOUSE_DOWN) {
+    if (g_start_menu != 0 &&
+        (g_start_menu->flags & NG_WF_VISIBLE) != 0u &&
+        !nd_rect_contains(g_start_menu->abs, ev->x, ev->y)) {
+      ng_show(g_start_menu, 0);
+    }
+    if (g_quick != 0 && (g_quick->flags & NG_WF_VISIBLE) != 0u &&
+        !nd_rect_contains(g_quick->abs, ev->x, ev->y)) {
+      ng_show(g_quick, 0);
+    }
   }
   if (g_demo_ready) {
     ng_dispatch(ev);

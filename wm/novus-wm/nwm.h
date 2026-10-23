@@ -41,6 +41,11 @@ void   nwm_accent_set(UINT32 rgb);
 UINT32 nwm_wallpaper_get(void);
 void   nwm_wallpaper_set(UINT32 idx);
 
+/* Light / dark / auto (ND_THEME_*). One entry point so the settings panel
+ * and the shell's quick settings cannot drift apart. */
+UINT32 nwm_theme_mode(void);
+void   nwm_theme_set_mode(UINT32 mode);
+
 /* Windows currently held, for the sysinfo stats reply. */
 UINT32 nwm_window_count(void);
 

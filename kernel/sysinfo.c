@@ -16,6 +16,7 @@
 #include "sysinfo.h"
 #include "net.h"
 #include "blkdev.h"
+#include "nd_theme.h"
 
 #if CONFIG_NOVUS_IPC && CONFIG_NOVUS_WM
 
@@ -243,10 +244,16 @@ static void req_theme(const ipc_msg_t *m) {
       nwm_accent_set(q.value);
     } else if (q.id == 1u) {
       nwm_wallpaper_set(q.value);
+    } else if (q.id == 2u) {
+      nwm_theme_set_mode(q.value);
     }
   }
+  memset(&r, 0, sizeof(r));
   r.accent = nwm_accent_get();
   r.wallpaper = nwm_wallpaper_get();
+  r.mode = nwm_theme_mode();
+  r.resolved = (UINT32)(nd_theme_is_dark() ? 1 : 0);
+  r.version = nd_theme_version();
   answer(m, SYSINFO_RSP_THEME, &r, sizeof(r));
 }
 
@@ -449,6 +456,30 @@ static void req_spawn(const ipc_msg_t *m) {
   }
 }
 
+/* Name-based launch: the wire format is the task name, zero padded. Kept
+ * alongside the M8 index request so adding an app cannot change what an
+ * old caller meant. */
+static void req_spawn_name(const ipc_msg_t *m) {
+  char  name[16];
+  UINT32 i;
+  INT32 rc;
+
+  if (m->hdr.len == 0u) {
+    rsp_err(m);
+    return;
+  }
+  memset(name, 0, sizeof(name));
+  for (i = 0; i + 1u < sizeof(name) && i < m->hdr.len; i++) {
+    name[i] = (char)m->payload[i];
+  }
+  rc = apps_launch_name(name);
+  if (rc == 0 || rc == APPS_ERUNNING) {
+    answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
+  } else {
+    rsp_err(m);
+  }
+}
+
 static void handle(const ipc_msg_t *m) {
   switch (m->hdr.type) {
   case SYSINFO_REQ_TASKS:
@@ -483,6 +514,9 @@ static void handle(const ipc_msg_t *m) {
     break;
   case SYSINFO_REQ_SPAWN:
     req_spawn(m);
+    break;
+  case SYSINFO_REQ_SPAWN_NAME:
+    req_spawn_name(m);
     break;
   case SYSINFO_REQ_THEME:
     req_theme(m);

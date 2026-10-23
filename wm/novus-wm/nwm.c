@@ -22,6 +22,7 @@
 #include "ipc.h"
 #include "sched.h"
 #include "nd.h"
+#include "nd_theme.h"
 #include "nd_input.h"
 #include "nvgui.h"
 #include "nwm.h"
@@ -273,7 +274,7 @@ static void clamp_rect(nd_rect_t *r) {
  * array and the v1.1 shape list) end up here, so a client of either
  * version draws identically and there is one place to add an op. */
 static void paint_shape(nd_rect_t client, UINT8 op, INT32 x, INT32 y, INT32 w,
-                        INT32 h, UINT32 color, INT32 thickness) {
+                        INT32 h, UINT32 color, INT32 thickness, INT32 radius) {
   nd_surface_t *s = target();
   nd_rect_t     r = nd_rect(client.x + x, client.y + y, w, h);
 
@@ -293,6 +294,13 @@ static void paint_shape(nd_rect_t client, UINT8 op, INT32 x, INT32 y, INT32 w,
   case NWM_OP_CIRCLE:
     nd_circle(s, r.x, r.y, (w > 0) ? w : 1, color);
     break;
+  case NWM_OP_ROUND_FILL:
+    nd_round_rect(s, r, (radius > 0) ? radius : 1, color);
+    break;
+  case NWM_OP_ROUND_FRAME:
+    nd_round_frame(s, r, (radius > 0) ? radius : 1,
+                   (thickness > 0) ? thickness : 1, color);
+    break;
   default:
     break; /* forward compatible: unknown ops are ignored */
   }
@@ -305,7 +313,7 @@ static void paint_commands(nwm_window_t *w, nd_rect_t client) {
     const nwm_cmd_t *c = &w->draw[i];
 
     paint_shape(client, c->op, c->x, c->y, c->w, c->h, c->color,
-                (c->pad2 > 0u) ? (INT32)c->pad2 : 1);
+                (c->pad2 > 0u) ? (INT32)c->pad2 : 1, 0);
   }
 }
 
@@ -373,7 +381,8 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
     for (k = 0; k < w->shape_n; k++) {
       const nwm_shape_t *sh = &w->shape[k];
 
-      paint_shape(client, sh->op, sh->x, sh->y, sh->w, sh->h, sh->color, 1);
+      paint_shape(client, sh->op, sh->x, sh->y, sh->w, sh->h, sh->color,
+                  (sh->op == NWM_OP_ROUND_FRAME) ? 1 : 1, (INT32)sh->pad);
     }
     for (k = 0; k < w->text_n; k++) {
       const nwm_text_t *tx = &w->text[k];
@@ -472,6 +481,9 @@ static void req_create(const ipc_msg_t *m) {
   }
   w->title[i] = '\0';
   z_raise((int)(w - g_wins));
+  /* A new window takes focus: the client asked to be seen, and the shell
+   * keeping the keyboard would make the first keystroke disappear. */
+  focus_set((int)(w - g_wins));
   damage_frame(w->rect);
   log_request("create", w->id, m->hdr.sender);
   ack(m, w->id, NWM_OK);
@@ -1151,54 +1163,45 @@ static void sweep_owners(void) {
   }
 }
 
-/* The desktop accent lives in the widget theme, which the shell and the
- * WM both draw from, so one write here repaints title bars, focus rings
- * and the shell's progress bar together. M8's settings panel is the only
- * caller. */
-UINT32 nwm_accent_get(void) {
-  return ng_ctx_get()->theme.accent;
-}
+/* Accent and wallpaper live in the design-token layer now: both modes keep
+ * their own wallpapers, and the accent override picks a readable caption
+ * from its luminance. The settings panel is still the only caller. */
+UINT32 nwm_accent_get(void) { return nd_theme_accent(); }
 
 void nwm_accent_set(UINT32 rgb) {
-  ng_ctx_t *c = ng_ctx_get();
-  nd_surface_t *s = screen();
-
-  if (c == 0 || s == 0) {
+  if (ng_ctx_get() == 0) {
     return;
   }
-  c->theme.accent = rgb;
-  /* One full repaint: at 1280x800 the composite is a few milliseconds and
-   * it happens when a human clicks a colour, not per frame. */
-  ng_damage(nd_rect(0, 0, s->w, s->h));
+  nd_theme_set_accent(rgb);
+  ng_theme_apply();
 }
 
-/* Desktop wallpapers: the (top, bottom) pair of the mica gradient the
- * shell paints. Kept here so the shell and the settings panel share one
- * source of truth - the client only ever sends an index. */
-static const UINT32 g_papers[][2] = {
-    {0x00EEF2F8u, 0x00E3EAF3u}, /* 云母蓝 */
-    {0x00F2F2F2u, 0x00E2E2E2u}, /* 晨雾灰 */
-    {0x00EAF4F0u, 0x00DCEDE6u}, /* 青瓷 */
-};
-
-#define NWM_WALLPAPER_COUNT (sizeof(g_papers) / sizeof(g_papers[0]))
-
-static UINT32 g_paper;
-
-UINT32 nwm_wallpaper_get(void) { return g_paper; }
+UINT32 nwm_wallpaper_get(void) { return nd_theme_wallpaper(); }
 
 void nwm_wallpaper_set(UINT32 idx) {
-  ng_ctx_t     *c = ng_ctx_get();
-  nd_surface_t *s = screen();
-
-  if (c == 0 || s == 0 || idx >= NWM_WALLPAPER_COUNT) {
+  if (ng_ctx_get() == 0) {
     return;
   }
-  g_paper = idx;
-  c->theme.desktop_top = g_papers[idx][0];
-  c->theme.desktop_bottom = g_papers[idx][1];
-  ng_damage(nd_rect(0, 0, s->w, s->h));
+  nd_theme_set_wallpaper(idx);
+  ng_theme_apply();
 }
+
+/* Mode changes come from two places (the settings panel and the shell's
+ * quick settings). Both end here so the widget theme and the shell scene
+ * change in the same tick. */
+void nwm_theme_set_mode(UINT32 mode) {
+  nd_theme_mode_t m = (mode == ND_THEME_DARK) ? ND_THEME_DARK
+                     : (mode == ND_THEME_LIGHT) ? ND_THEME_LIGHT
+                                                : ND_THEME_AUTO;
+
+  nd_theme_set_mode(m);
+  ng_theme_apply();
+  /* The shell rebuilds on its next idle pass (theme version changed).
+   * Rebuilding from inside a widget callback would free the widget that
+   * is still unwinding its own press. */
+}
+
+UINT32 nwm_theme_mode(void) { return (UINT32)nd_theme_mode(); }
 
 UINT32 nwm_window_count(void) {
   UINT32 i;

@@ -274,6 +274,42 @@ blkdev_t *blkdev_partition_init(const char *name, blkdev_t *parent,
   return dev;
 }
 
+int blkdev_release(blkdev_t *dev) {
+  UINTN i;
+  UINTN j;
+
+  if (dev == NULL) {
+    return -1;
+  }
+  for (i = 0; i < blkdev_used; i++) {
+    if (blkdev_table[i] == dev) {
+      break;
+    }
+  }
+  if (i >= blkdev_used) {
+    return -1;
+  }
+  for (j = i; j + 1u < blkdev_used; j++) {
+    blkdev_table[j] = blkdev_table[j + 1u];
+  }
+  blkdev_table[--blkdev_used] = NULL;
+
+  /* Partition views live in a bump-allocated static pool. Freeing the
+   * newest one restores the bump pointer; older ones are detached and
+   * unusable until the next boot. */
+  if (dev >= &blkpart_dev[0] && dev < &blkpart_dev[BLKDEV_MAX_DEVICES]) {
+    UINTN idx = (UINTN)(dev - &blkpart_dev[0]);
+
+    memset(&blkpart_ctx[idx], 0, sizeof(blkpart_ctx[idx]));
+    memset(blkpart_name[idx], 0, sizeof(blkpart_name[idx]));
+    memset(&blkpart_dev[idx], 0, sizeof(blkpart_dev[idx]));
+    if (idx + 1u == blkpart_used) {
+      blkpart_used = idx;
+    }
+  }
+  return 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Ramdisk backend                                                     */
 /* ------------------------------------------------------------------ */

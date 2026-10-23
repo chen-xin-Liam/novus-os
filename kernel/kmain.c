@@ -42,6 +42,7 @@
 #include "ipc.h"
 #include "nwm.h"
 #include "apps.h"
+#include "install.h"
 #include "sysinfo.h"
 #include "net.h"
 #include "irq.h"
@@ -353,6 +354,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * so the log can show NX refusing it. */
   (void)nuc_create_spin();
   (void)nuc_nx_probe();
+  /* M10: adopt the installer payloads staged by the boot stage before the
+   * shell asks whether an install is possible. */
+  install_init();
+
   /* M5: paint the demo desktop last, so the display shows the finished
    * scene instead of being overwritten by later boot output. The timer
    * tick drives input and partial repaints once ring 3 is running. */
@@ -374,7 +379,16 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* M10: bring up PCI and the network stack before the applications, so
    * the network app has a link to show and DHCP is already running. */
   (void)net_init();
-  (void)apps_launch(4); /* session manager */
+  /* The live menu's install entry only sets boot_mode now; the wizard is
+   * a normal ring-3 app and needs the WM. A machine being installed has
+   * no account, so the login window is skipped entirely. */
+  if (shared_mem_get() != NULL &&
+      shared_mem_get()->boot_mode == SHM_BOOT_MODE_INSTALL) {
+    kputs("[BOOT] install mode: starting the graphical installer\n");
+    (void)apps_launch_name("setup");
+  } else {
+    (void)apps_launch_name("session");
+  }
 #endif
 
   kputs("[HALT] entering the scheduler (the A core stays parked)\n");

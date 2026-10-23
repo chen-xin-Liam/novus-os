@@ -35,6 +35,15 @@ pub const OP_FRAME: u8 = 2;
 pub const OP_HLINE: u8 = 3;
 pub const OP_VLINE: u8 = 4;
 pub const OP_CIRCLE: u8 = 5;
+/* v1.2: `pad` carries the corner radius. */
+pub const OP_ROUND_FILL: u8 = 6;
+pub const OP_ROUND_FRAME: u8 = 7;
+
+/* The WM's per-window display list. A client that sends more is cut off
+ * silently by the server, which looks like a rendering bug; counting here
+ * turns it into a log line naming the budget. */
+pub const MAX_SHAPES: u16 = 40;
+pub const MAX_TEXTS: u16 = 48;
 
 /// Height of the title bar the WM draws above the client area. A window's
 /// `h` passed to create() must be client height plus this, or the bottom
@@ -127,6 +136,8 @@ pub enum Ev {
 pub struct Win {
     pub id: u32,
     pub port: u64,
+    shapes: u16,
+    texts: u16,
 }
 
 /// Send, retrying while the WM's queue is full. A repaint is a burst of
@@ -182,6 +193,8 @@ impl Win {
                 return Some(Win {
                     id: u32::from_le_bytes(p[0..4].try_into().unwrap()),
                     port,
+                    shapes: 0,
+                    texts: 0,
                 });
             }
             if m.ty == RSP_ERR {
@@ -190,17 +203,24 @@ impl Win {
         }
     }
 
-    pub fn clear(&self) {
+    pub fn clear(&mut self) {
         let w = self.id.to_le_bytes();
 
+        self.shapes = 0;
+        self.texts = 0;
         send(self.port, REQ_CLEAR, 0, &w);
     }
 
-    pub fn shape(&self, op: u8, x: i16, y: i16, w: i16, h: i16, color: u32) {
+    pub fn shape(&mut self, op: u8, x: i16, y: i16, w: i16, h: i16, color: u32) {
+        self.shape_round(op, x, y, w, h, 0, color);
+    }
+
+    pub fn shape_round(&mut self, op: u8, x: i16, y: i16, w: i16, h: i16,
+                       radius: u8, color: u32) {
         let s = Shape {
             win: self.id,
             op,
-            pad: 0,
+            pad: radius,
             x,
             y,
             w,
@@ -208,40 +228,43 @@ impl Win {
             color,
         };
 
+        self.shapes = self.shapes.saturating_add(1);
+        if self.shapes == MAX_SHAPES + 1 {
+            crate::sys::write(b"[APP] display list over shape budget\n");
+        }
         send(self.port, REQ_SHAPE, 0, ipc::bytes_of(&s));
     }
 
-    pub fn fill(&self, x: i16, y: i16, w: i16, h: i16, color: u32) {
+    pub fn round_fill(&mut self, x: i16, y: i16, w: i16, h: i16, radius: u8, color: u32) {
+        self.shape_round(OP_ROUND_FILL, x, y, w, h, radius, color);
+    }
+
+    pub fn round_frame(&mut self, x: i16, y: i16, w: i16, h: i16, radius: u8, color: u32) {
+        self.shape_round(OP_ROUND_FRAME, x, y, w, h, radius, color);
+    }
+
+    pub fn fill(&mut self, x: i16, y: i16, w: i16, h: i16, color: u32) {
         self.shape(OP_FILL, x, y, w, h, color);
     }
 
-    pub fn frame(&self, x: i16, y: i16, w: i16, h: i16, color: u32) {
+    pub fn frame(&mut self, x: i16, y: i16, w: i16, h: i16, color: u32) {
         self.shape(OP_FRAME, x, y, w, h, color);
     }
 
-    pub fn text(&self, x: i16, y: i16, color: u32, s: &str) {
-        let mut t = Text {
-            win: self.id,
-            x,
-            y,
-            scale: 1,
-            len: 0,
-            color,
-            text: [0u8; TEXT_MAX],
-        };
-        let n = s.len().min(TEXT_MAX - 1);
-
-        t.text[..n].copy_from_slice(&s.as_bytes()[..n]);
-        t.len = n as u8;
-        send(self.port, REQ_TEXT, 0, ipc::bytes_of(&t));
+    pub fn text(&mut self, x: i16, y: i16, color: u32, s: &str) {
+        self.text_at(x, y, 1, color, s);
     }
 
-    pub fn text_big(&self, x: i16, y: i16, color: u32, s: &str) {
+    pub fn text_big(&mut self, x: i16, y: i16, color: u32, s: &str) {
+        self.text_at(x, y, 2, color, s);
+    }
+
+    fn text_at(&mut self, x: i16, y: i16, scale: u8, color: u32, s: &str) {
         let mut t = Text {
             win: self.id,
             x,
             y,
-            scale: 2,
+            scale,
             len: 0,
             color,
             text: [0u8; TEXT_MAX],
@@ -250,6 +273,10 @@ impl Win {
 
         t.text[..n].copy_from_slice(&s.as_bytes()[..n]);
         t.len = n as u8;
+        self.texts = self.texts.saturating_add(1);
+        if self.texts == MAX_TEXTS + 1 {
+            crate::sys::write(b"[APP] display list over text budget\n");
+        }
         send(self.port, REQ_TEXT, 0, ipc::bytes_of(&t));
     }
 

@@ -64,27 +64,27 @@ fn state_name(state: u8) -> &'static str {
     }
 }
 
-fn card(w: &wm::Win, y: i16, h: i16, title: &str) {
+fn card(w: &mut wm::Win, y: i16, h: i16, title: &str) {
     w.fill(10, y, CW - 20, h, CARD);
-    w.frame(10, y, CW - 20, h, ui::LINE);
-    w.text(24, y + 10, ui::TEXT, title);
+    w.frame(10, y, CW - 20, h, ui::line());
+    w.text(24, y + 10, ui::text(), title);
 }
 
-fn kv(w: &wm::Win, y: i16, key: &str, value: &str) {
-    w.text(24, y, ui::DIM, key);
-    w.text(110, y, ui::TEXT, value);
+fn kv(w: &mut wm::Win, y: i16, key: &str, value: &str) {
+    w.text(24, y, ui::dim(), key);
+    w.text(110, y, ui::text(), value);
 }
 
-fn draw(w: &wm::Win, n: &sinfo::Net, note: &str) {
+fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
     let mut b = [0u8; 16];
     let mut m = [0u8; 16];
     let mut g = [0u8; 16];
 
     w.clear();
-    w.fill(0, 0, CW, CH, ui::BG);
-    w.fill(0, 0, CW, 28, ui::PANEL);
-    w.shape(wm::OP_HLINE, 0, 28, CW, 1, ui::LINE);
-    w.text(12, 9, ui::TEXT, "网络");
+    w.fill(0, 0, CW, CH, ui::bg());
+    w.fill(0, 0, CW, 28, ui::card_bg());
+    w.shape(wm::OP_HLINE, 0, 28, CW, 1, ui::line());
+    w.text(12, 9, ui::text(), "网络");
 
     card(w, 40, 116, "链路");
     kv(w, 70, "类型", link_name(n.link));
@@ -114,7 +114,7 @@ fn draw(w: &wm::Win, n: &sinfo::Net, note: &str) {
 
         line.s("收 ").num(n.rx_pkts as u32).s("  发 ").num(n.tx_pkts as u32)
             .s("  错 ").num((n.rx_err + n.tx_err) as u32);
-        w.text(24, 306, ui::DIM, line.str());
+        w.text(24, 306, ui::dim(), line.str());
     }
     {
         let mut line = ui::Buf::new();
@@ -134,19 +134,19 @@ fn draw(w: &wm::Win, n: &sinfo::Net, note: &str) {
                 line.s("未测试");
             }
         }
-        w.text(24, 322, ui::DIM, line.str());
+        w.text(24, 322, ui::dim(), line.str());
     }
 
     /* Buttons. */
-    w.fill(24, 348, 110, 26, ui::ROW_SEL);
-    w.frame(24, 348, 110, 26, ui::ACCENT);
-    w.text(34, 354, ui::TEXT, "Ping 网关");
+    w.fill(24, 348, 110, 26, ui::row_sel());
+    w.frame(24, 348, 110, 26, ui::accent());
+    w.text(34, 354, ui::text(), "Ping 网关");
 
-    w.fill(146, 348, 130, 26, ui::ROW_SEL);
-    w.frame(146, 348, 130, 26, ui::ACCENT);
-    w.text(156, 354, ui::TEXT, "TCP 回显测试");
+    w.fill(146, 348, 130, 26, ui::row_sel());
+    w.frame(146, 348, 130, 26, ui::accent());
+    w.text(156, 354, ui::text(), "TCP 回显测试");
 
-    w.text(290, 354, ui::DIM, if note.is_empty() { "网关 10.0.2.2" } else { note });
+    w.text(290, 354, ui::dim(), if note.is_empty() { "网关 10.0.2.2" } else { note });
 }
 
 /* Network state and test requests go through the named sysinfo IPC service;
@@ -161,12 +161,13 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 380, 160, CW as i32 + 2,
+    let Some(mut win) = wm::Win::create(wm_port, 380, 160, CW as i32 + 2,
                                     CH as i32 + wm::TITLE_H, "网络")
     else {
         sys::exit(3);
     };
 
+    ui::init(sys_port);
     let mut note: &str = "";
     let mut n = sinfo::net(sys_port).unwrap_or(sinfo::Net {
         ndev: 0, dhcp: 0, ping_state: 0, tcp_state: 0,
@@ -175,7 +176,7 @@ pub extern "C" fn _start() -> ! {
         link: 0, state: 0, mac: [0; 6], speed_mbps: 0, pad: 0,
     });
 
-    draw(&win, &n, note);
+    draw(&mut win, &n, note);
 
     /* Test buttons enqueue work, then later snapshots reveal its completion.
      * Periodic refresh keeps counters and asynchronous results current without
@@ -199,16 +200,19 @@ pub extern "C" fn _start() -> ! {
                         note = "连接 10.0.2.2:9000";
                     }
                     n = sinfo::net(sys_port).unwrap_or(n);
-                    draw(&win, &n, note);
+                    draw(&mut win, &n, note);
                 }
                 _ => {}
             }
         }
         idle += 1;
+        if ui::poll(sys_port) {
+            draw(&mut win, &n, note);
+        }
         if idle >= 40 {
             idle = 0;
             n = sinfo::net(sys_port).unwrap_or(n);
-            draw(&win, &n, note);
+            draw(&mut win, &n, note);
         }
         sys::yield_now();
     }

@@ -12,6 +12,7 @@
 #include "sched.h"
 #include "kernel.h"
 #include "session.h"
+#include "install.h"
 
 typedef struct {
   const char          *name;
@@ -25,6 +26,7 @@ static const app_t g_apps[] = {
     {"settings", k_app_settings, &k_app_settings_len},
     {"netman", k_app_netman, &k_app_netman_len},
     {"session", k_app_session, &k_app_session_len},
+    {"setup", k_app_setup, &k_app_setup_len},
 };
 
 /* These positions are also the IDs sent by sysinfo's spawn request and the
@@ -71,17 +73,35 @@ int apps_find(const char *name) {
   return -1;
 }
 
+static int name_is(const char *a, const char *b) {
+  while (*a != '\0' && *a == *b) {
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+/* Two applications are allowed before a session exists, and both are
+ * bootstrap paths: the login window itself, and the installer (a machine
+ * being installed has no account yet). Names, not table positions - the
+ * setup app shifted every index once already. */
+static int app_is_bootstrap(const char *name) {
+  return name_is(name, "session") || name_is(name, "setup");
+}
+
 int apps_launch(UINT32 i) {
   int rc;
 
   if (i >= apps_count()) {
     return -1;
   }
-  /* The session manager is the bootstrap path; every other built-in app
-   * requires an authenticated session and a single live instance by name.
-   * This exception keeps the login prompt available before authentication. */
-  if (i != 4u && !session_logged_in()) {
+  /* Every other built-in app requires an authenticated session and a
+   * single live instance by name. */
+  if (!app_is_bootstrap(g_apps[i].name) && !session_logged_in()) {
     return APPS_EAUTH;
+  }
+  if (name_is(g_apps[i].name, "setup") && !install_available()) {
+    return -1;
   }
   if (sched_find_name(g_apps[i].name) != 0) {
     return APPS_ERUNNING;
@@ -98,6 +118,23 @@ int apps_launch(UINT32 i) {
     kputs("[APPS] spawn failed: ");
     kputs_hex((UINT64)(INT64)rc);
     kputs("\n");
+    return rc;
   }
-  return rc;
+  /* Only the process the kernel started as the installer may drive the
+   * destructive path; the pid is the capability. */
+  if (name_is(g_apps[i].name, "setup")) {
+    task_t *t = sched_find_name("setup");
+
+    install_authorize((t != 0) ? t->pid : 0);
+  }
+  return 0;
+}
+
+int apps_launch_name(const char *name) {
+  int i = apps_find(name);
+
+  if (i < 0) {
+    return -1;
+  }
+  return apps_launch((UINT32)i);
 }

@@ -34,6 +34,7 @@
 #define SYSINFO_REQ_TASKS2 0x030Bu
 #define SYSINFO_REQ_TACT   0x030Cu
 #define SYSINFO_REQ_NETDEVS 0x030Du /* end a task by pid */
+#define SYSINFO_REQ_SPAWN_NAME 0x030Eu /* start a built-in app by name */
 
 /* Replies. Distinct types per query so a client can match its answer
  * without a correlation id. */
@@ -111,9 +112,15 @@ typedef struct {
   UINT32 value;
 } sysinfo_theme_t;
 
+/* mode: ND_THEME_*; resolved: 0 light / 1 dark; version increments on
+ * every change so a client can poll cheaply. Appended to the M8 reply, so
+ * an old client still finds accent and wallpaper at the same offsets. */
 typedef struct {
   UINT32 accent;
   UINT32 wallpaper;
+  UINT32 mode;
+  UINT32 resolved;
+  UINT32 version;
 } sysinfo_theme_rsp_t;
 
 /* Kill: the pid to end. Reply is an INT32 status through RSP_OK. */

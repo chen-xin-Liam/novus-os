@@ -23,6 +23,7 @@ pub const REQ_TCP: u16 = 0x030A;
 pub const REQ_TASKS2: u16 = 0x030B;
 pub const REQ_TACT: u16 = 0x030C;
 pub const REQ_NETDEVS: u16 = 0x030D;
+pub const REQ_SPAWN_NAME: u16 = 0x030E;
 
 pub const RSP_OK: u16 = 0x0310;
 pub const RSP_TASKS: u16 = 0x0311;
@@ -103,17 +104,27 @@ pub struct Stats {
     pub wallpaper: u32,
 }
 
-/// Accent + wallpaper in one reply (sysinfo_theme_rsp_t).
+/// Accent, wallpaper and the light/dark state (sysinfo_theme_rsp_t).
+/// `mode` is the user's choice (0 light, 1 dark, 2 auto); `resolved` is
+/// what that choice means right now; `version` increments on every change.
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct Theme {
     pub accent: u32,
     pub wallpaper: u32,
+    pub mode: u32,
+    pub resolved: u32,
+    pub version: u32,
 }
 
 /// Theme ids for set_theme().
 pub const THEME_ACCENT: u8 = 0;
 pub const THEME_WALLPAPER: u8 = 1;
+pub const THEME_MODE: u8 = 2;
+
+pub const MODE_LIGHT: u32 = 0;
+pub const MODE_DARK: u32 = 1;
+pub const MODE_AUTO: u32 = 2;
 
 #[repr(C)]
 struct ListReq {
@@ -389,4 +400,14 @@ pub fn task_action(port: u64, pid: u64, action: u8) -> Option<i32> {
 /// answer.
 pub fn spawn(port: u64, which: u8) -> Option<i32> {
     query(port, REQ_SPAWN, &[which], RSP_OK)?.read::<i32>()
+}
+
+/// Start a built-in application by name. Preferred over `spawn`: the
+/// table gained the installer, so indices are no longer a stable ABI.
+pub fn spawn_name(port: u64, name: &str) -> Option<i32> {
+    let mut p = [0u8; 16];
+    let n = name.len().min(p.len() - 1);
+
+    p[..n].copy_from_slice(&name.as_bytes()[..n]);
+    query(port, REQ_SPAWN_NAME, &p, RSP_OK)?.read::<i32>()
 }

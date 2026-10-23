@@ -1,0 +1,90 @@
+# Novus Fluent design tokens - the single source for C and Rust.
+#
+# Colours are semantic, never literal at a call site: the shell, the window
+# manager, the installer and every built-in application read the same names,
+# so light/dark are two resolutions of one palette instead of two palettes.
+#
+# Regenerate with:
+#   python3 tools/themegen/themegen.py            # writes the generated files
+#   python3 tools/themegen/themegen.py --check    # fails when they are stale
+#
+# The output is committed: the build does not depend on Python (same rule as
+# the CJK font and the pinyin dictionary).
+
+[meta]
+version = "1.0"
+
+[metrics]
+radius_control = 6
+radius_card = 10
+radius_pill = 18
+space_xs = 4
+space_s = 8
+space_m = 12
+space_l = 16
+space_xl = 24
+control_h = 32
+button_h = 36
+row_h = 28
+title_h = 32
+shadow_spread = 14
+
+[light]
+canvas_top = "#EEF2F8"
+canvas_bottom = "#E3EAF3"
+surface = "#FFFFFF"
+card = "#FBFBFD"
+subtle = "#F0F2F5"
+stroke = "#E1E5EA"
+text = "#1B1B1B"
+dim = "#5F6368"
+accent = "#0067C0"
+on_accent = "#FFFFFF"
+success = "#107C10"
+warn = "#B45309"
+danger = "#C42B1C"
+selection = "#E5F1FB"
+shadow = "#000000"
+
+# Three desktop gradients; index order is the settings page order and the
+# value the sysinfo theme service stores.
+[[light.wallpapers]]
+top = "#EEF2F8"
+bottom = "#E3EAF3"
+
+[[light.wallpapers]]
+top = "#F2F2F2"
+bottom = "#E2E2E2"
+
+[[light.wallpapers]]
+top = "#EAF4F0"
+bottom = "#DCEDE6"
+
+[dark]
+canvas_top = "#1A1E24"
+canvas_bottom = "#11151A"
+surface = "#202020"
+card = "#272727"
+subtle = "#2E2E2E"
+stroke = "#3A3A3A"
+text = "#F5F5F5"
+dim = "#B8BCC2"
+accent = "#4CC2FF"
+on_accent = "#00243D"
+success = "#6CCB5F"
+warn = "#FCE100"
+danger = "#FF99A4"
+selection = "#1F3A4D"
+shadow = "#000000"
+
+[[dark.wallpapers]]
+top = "#1A1E24"
+bottom = "#11151A"
+
+[[dark.wallpapers]]
+top = "#202226"
+bottom = "#14161A"
+
+[[dark.wallpapers]]
+top = "#19221F"
+bottom = "#101614"

@@ -87,3 +87,22 @@ scripts/wm-churn.sh 4G 20             # 应用启停压力（含窗口装饰点�
 验收点：桌面与三个应用全中文；开始菜单浮于窗口之上且点击优先；文本框键入
 `nihao` 出现候选窗、空格上屏"鸟"；`[IME] pinyin up: 402 syllables`；
 `wm-churn` 20 轮无缺页、tick 持续；ISO 从 CD-ROM 启动同样可用。
+
+## 6. M10：Novus Fluent 与深色主题
+
+M10 把"Win11 风格"收敛为可复用的设计语言，并补上深色：
+
+- 令牌单一来源：`tools/themegen/theme.toml` → `graphics/nd_theme.[ch]` +
+  `apps/src/theme.rs`。`nvgui` 不再自带调色板，应用不再重复写颜色常量。
+- 三种模式：浅色、深色、跟随时间（19:00–07:00 深色）；设置页与快捷设置同时可改，
+  经 `SYSINFO_REQ_THEME` 落到 `nwm_theme_set_mode()`，版本号变化后壳层重建、
+  客户端重绘。
+- 新增圆角显示列表图元（op 6/7），卡片与胶囊按钮不再用四条线拼角；
+  `apps/src/ui.rs` 成为统一组件库。
+- 中文覆盖仍由 `fontgen` 保证：新增文案（安装向导、主题页）已重新生成
+  `graphics/nd_font_cjk.c`（2445 个字形）。
+
+完整的颜色、间距、组件与页面规范见
+[`docs/Novus UI 设计语言规范 V1.0.md`](Novus%20UI%20设计语言规范%20V1.0.md)；
+安装向导页面与主题联动见
+[`docs/图形安装向导设计与实现.md`](图形安装向导设计与实现.md)。

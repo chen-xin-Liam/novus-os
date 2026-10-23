@@ -44,6 +44,12 @@
 #ifndef CONFIG_NOVUS_INSTALLER
 #define CONFIG_NOVUS_INSTALLER 1
 #endif
+/* The text installer is the fallback for a machine with no framebuffer.
+ * The default path boots the kernel and shows the graphical wizard, so
+ * this stays off unless a config turns it on. */
+#ifndef CONFIG_NOVUS_INSTALLER_TEXT
+#define CONFIG_NOVUS_INSTALLER_TEXT 0
+#endif
 
 /* EFI_ALLOCATE_TYPE: 0 == AllocateAnyPages. */
 #define NOVUS_EFI_ALLOCATE_ANY_PAGES 0
@@ -59,6 +65,12 @@ static EFI_FILE_PROTOCOL *g_esp_root;
  * will not hand it out again after ExitBootServices. */
 static UINT64 g_live_base;
 static UINT64 g_live_size;
+
+/* ESP template for the in-system installer (BOOTX64.EFI + SYSTEM.IMG).
+ * Staged for the same reason as the live root: after ExitBootServices
+ * nothing can read the live medium any more. */
+static UINT64 g_esp_tpl_base;
+static UINT64 g_esp_tpl_size;
 
 /* ------------------------------------------------------------------ */
 /* Allocator for filesystem buffers                                    */
@@ -921,7 +933,7 @@ static void app_load(void) {
 /* ------------------------------------------------------------------ */
 /* Installer                                                           */
 /* ------------------------------------------------------------------ */
-#if CONFIG_NOVUS_INSTALLER
+#if CONFIG_NOVUS_INSTALLER && CONFIG_NOVUS_INSTALLER_TEXT
 
 /* A disk the installer must keep its hands off. Two cases, both cheap to
  * recognise and both exactly the disks that must not be overwritten:
@@ -1199,7 +1211,7 @@ done:
   return rc;
 }
 
-#endif /* CONFIG_NOVUS_INSTALLER */
+#endif /* CONFIG_NOVUS_INSTALLER && CONFIG_NOVUS_INSTALLER_TEXT */
 
 /* ------------------------------------------------------------------ */
 /* Live menu                                                           */
@@ -1238,7 +1250,7 @@ static void menu_show(void) {
   say_line(L"  ================================================");
   say_line(L"   1  Verify the system partition (Merkle)");
   say_line(L"   2  Load and verify signed modules (NKM)");
-  say_line(L"   3  Install Novus to a disk");
+  say_line(L"   3  Install Novus (graphical wizard)");
   say_line(L"   4  Continue into the kernel");
   say_line(L"");
   say(L"  choice [4]: ");
@@ -1269,8 +1281,13 @@ static void menu_run(void) {
 
 #if CONFIG_NOVUS_INSTALLER
   if (menu_marker_present()) {
-    say_line(L"[MENU] INSTALL.YES on the ESP: running the installer");
+#if CONFIG_NOVUS_INSTALLER_TEXT
+    say_line(L"[MENU] INSTALL.YES on the ESP: running the text installer");
     (VOID)install_run();
+#else
+    say_line(L"[MENU] INSTALL.YES on the ESP: booting the graphical installer");
+    shared_mem_get()->boot_mode = SHM_BOOT_MODE_INSTALL;
+#endif
     return;
   }
 #endif
@@ -1294,7 +1311,12 @@ static void menu_run(void) {
     break;
   case L'3':
 #if CONFIG_NOVUS_INSTALLER
+#if CONFIG_NOVUS_INSTALLER_TEXT
     (VOID)install_run();
+#else
+    say_line(L"[MENU] booting the graphical installer");
+    shared_mem_get()->boot_mode = SHM_BOOT_MODE_INSTALL;
+#endif
 #else
     say_line(L"[MENU] installer not built in");
 #endif
@@ -1409,6 +1431,20 @@ void stage3_prepare(void) {
     g_live_base = 0;
     g_live_size = 0;
   }
+
+  /* The installer writes a complete ESP, including the boot loader, so
+   * its template has to come off the live medium while the firmware file
+   * protocol still exists. Without it the graphical installer still runs
+   * and says so, instead of failing halfway through a disk. */
+  if (esp_read_reserved(L"ESP.IMG", &g_esp_tpl_base, &g_esp_tpl_size) == 0) {
+    say(L"[BOOT] install ESP template: ");
+    boot_put_dec(g_esp_tpl_size / 1024u);
+    say_line(L" KiB staged");
+  } else {
+    say_line(L"[BOOT] WARN install ESP template not staged");
+    g_esp_tpl_base = 0;
+    g_esp_tpl_size = 0;
+  }
 }
 
 void stage3_menu(void) {
@@ -1422,6 +1458,12 @@ void stage3_finish(void) {
 
   shm->live_root_base = g_live_base;
   shm->live_root_size = g_live_size;
+  shm->esp_img_base = g_esp_tpl_base;
+  shm->esp_img_size = g_esp_tpl_size;
+  shm->install_flags = (g_esp_tpl_base != 0 && g_esp_tpl_size != 0 &&
+                        g_live_base != 0 && g_live_size != 0)
+                           ? SHM_INSTALL_FLAG_PAYLOADS
+                           : 0u;
 
   /* Restore the kernel heap allocator: from here on AllocatePool is
    * gone, and NovusFS must never call into it. */

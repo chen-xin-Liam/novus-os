@@ -15,7 +15,7 @@
 
 #include "uefi.h"
 
-#define APPS_MAX 5
+#define APPS_MAX 6
 #define APPS_EAUTH (-101)
 
 /* Number of embedded applications. */
@@ -39,5 +39,9 @@ int apps_launch(UINT32 i);
 
 /* Look an application up by name; returns -1 when there is none. */
 int apps_find(const char *name);
+
+/* Start by name. The shell and the session manager use this so adding an
+ * application cannot silently shift what a table index means. */
+int apps_launch_name(const char *name);
 
 #endif /* NOVUS_APPS_H */

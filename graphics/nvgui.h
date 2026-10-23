@@ -62,8 +62,31 @@ typedef enum {
   NG_SLIDER,
   NG_PROGRESS,
   NG_LIST,
-  NG_TREE
+  NG_TREE,
+  NG_ICON,
+  NG_SWATCH
 } ng_type_t;
+
+/* Glyphs are drawn from primitives, never loaded from a resource: one
+ * monochrome shape set that recolours with the theme and needs no bitmap
+ * pipeline in a client that can only send rectangles. */
+typedef enum {
+  NG_ICON_NONE = 0,
+  NG_ICON_START,
+  NG_ICON_FILES,
+  NG_ICON_TASKS,
+  NG_ICON_SETTINGS,
+  NG_ICON_NET,
+  NG_ICON_SEARCH,
+  NG_ICON_POWER,
+  NG_ICON_SUN,
+  NG_ICON_MOON,
+  NG_ICON_AUTO,
+  NG_ICON_INSTALL,
+  NG_ICON_CHECK,
+  NG_ICON_CHEVRON,
+  NG_ICON_DISK
+} ng_icon_kind_t;
 
 typedef struct ng_widget ng_widget_t;
 typedef struct ng_ctx ng_ctx_t;
@@ -109,6 +132,7 @@ struct ng_widget {
     } label;
     struct {
       const char *text;
+      UINT8       icon; /* ng_icon_kind_t, 0 = a plain text button */
     } button;
     struct {
       const char *text;
@@ -149,6 +173,16 @@ struct ng_widget {
       UINT8      frame;  /* 1 px rounded border, for floating cards */
       UINT8      radius;
     } panel;
+    struct {
+      UINT8 kind; /* ng_icon_kind_t */
+      UINT8 size; /* glyph box in pixels, 0 = 20 */
+      UINT8 pad[2];
+    } icon;
+    struct {
+      nd_color_t color;
+      UINT8      selected;
+      UINT8      pad[3];
+    } swatch;
   } u;
 };
 
@@ -215,6 +249,15 @@ ng_widget_t *ng_panel(ng_widget_t *w, nd_color_t color);
 /* Give a panel a rounded border and corner radius (start menu, taskbar). */
 void ng_panel_frame(ng_widget_t *w, int on);
 
+/* A tile button: icon above a one-line caption, no chrome until hovered.
+ * Used by the desktop grid, the taskbar and the start menu's pinned grid. */
+ng_widget_t *ng_button_icon(ng_widget_t *w, const char *text,
+                            ng_icon_kind_t kind, ng_action_fn fn);
+
+/* A colour swatch (accent / wallpaper pickers). */
+ng_widget_t *ng_swatch(ng_widget_t *w, nd_color_t color, int selected,
+                       ng_action_fn fn);
+
 /* Show/hide and enable/disable (both damage the widget). */
 void ng_show(ng_widget_t *w, int visible);
 void ng_set_enabled(ng_widget_t *w, int enabled);
@@ -267,5 +310,17 @@ nd_rect_t ng_window_client(ng_widget_t *w);
 
 /* Raise `w`'s top-level window above its siblings. */
 void ng_raise(ng_widget_t *w);
+
+/* An icon button: a 40x40 hit area (or the size given to ng_create) that
+ * draws `kind` centred and behaves like a button. `size` is the glyph box
+ * in pixels (0 = 20). */
+ng_widget_t *ng_icon(ng_widget_t *w, ng_icon_kind_t kind, UINT32 size,
+                     ng_action_fn fn);
+
+/* Re-read the design tokens into the widget theme and damage the whole
+ * canvas. Called by the shell when the light/dark mode changes; windows
+ * that read the theme while painting pick the new colours up on the next
+ * frame without a rebuild. */
+void ng_theme_apply(void);
 
 #endif /* NOVUS_NVGUI_H */

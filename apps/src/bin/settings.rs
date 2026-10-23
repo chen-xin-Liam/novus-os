@@ -22,8 +22,6 @@ const NAV_W: i16 = 168;
 const CONTENT_X: i16 = 188;
 const CONTENT_W: i16 = 512;
 
-const CARD: u32 = 0x00FAFAFC;
-const CARD_TITLE: u32 = 0x00242428;
 const DANGER: u32 = 0x00C42B1C;
 
 /* Eight accents: the four from M8 plus four more so the grid is 2x4 like
@@ -68,6 +66,7 @@ struct State {
     page: Page,
     accent: u32,
     wallpaper: u32,
+    mode: u32,
     st: sinfo::Stats,
     tasks: [sinfo::TaskRec; MAX_ROWS],
     n_tasks: usize,
@@ -90,38 +89,38 @@ fn state_name(s: u8) -> &'static str {
 
 /* ---- drawing primitives ------------------------------------------------ */
 
-fn card(w: &wm::Win, x: i16, y: i16, cw: i16, ch: i16, title: &str) {
-    w.fill(x, y, cw, ch, CARD);
-    w.frame(x, y, cw, ch, ui::LINE);
-    w.text(x + 14, y + 12, CARD_TITLE, title);
+fn card(w: &mut wm::Win, x: i16, y: i16, cw: i16, ch: i16, title: &str) {
+    w.round_fill(x, y, cw, ch, 10, ui::card_bg());
+    w.round_frame(x, y, cw, ch, 10, ui::line());
+    w.text(x + 14, y + 12, ui::text(), title);
 }
 
 /// One "label ... value" line inside a card.
-fn kv(w: &wm::Win, x: i16, y: i16, key: &str, value: &str) {
-    w.text(x, y, ui::DIM, key);
-    w.text(x + 96, y, ui::TEXT, value);
+fn kv(w: &mut wm::Win, x: i16, y: i16, key: &str, value: &str) {
+    w.text(x, y, ui::dim(), key);
+    w.text(x + 96, y, ui::text(), value);
 }
 
 /// A 1 px outlined bar with a filled fraction, used for memory.
-fn meter(w: &wm::Win, x: i16, y: i16, mw: i16, pct: i16, color: u32) {
-    w.fill(x, y, mw, 10, ui::LINE);
+fn meter(w: &mut wm::Win, x: i16, y: i16, mw: i16, pct: i16, color: u32) {
+    w.fill(x, y, mw, 10, ui::line());
     w.fill(x, y, mw * pct / 100, 10, color);
 }
 
-fn button(w: &wm::Win, x: i16, y: i16, bw: i16, bh: i16, label: &str, accent: u32,
+fn button(w: &mut wm::Win, x: i16, y: i16, bw: i16, bh: i16, label: &str, accent: u32,
           dim: bool, danger: bool) {
-    let fg = if dim { ui::DIM } else { ui::TEXT };
-    let edge = if danger { DANGER } else if dim { ui::LINE } else { accent };
+    let fg = if dim { ui::dim() } else { ui::text() };
+    let edge = if danger { DANGER } else if dim { ui::line() } else { accent };
 
-    w.fill(x, y, bw, bh, if dim { ui::PANEL } else { ui::ROW_SEL });
+    w.fill(x, y, bw, bh, if dim { ui::card_bg() } else { ui::row_sel() });
     w.frame(x, y, bw, bh, edge);
     w.text(x + 8, y + (bh - 14) / 2, fg, label);
 }
 
-fn nav(w: &wm::Win, s: &State) {
-    w.fill(0, 0, NAV_W, CH, ui::PANEL);
-    w.shape(wm::OP_VLINE, NAV_W, 0, CH, 1, ui::LINE);
-    w.text_big(20, 18, ui::TEXT, "设置");
+fn nav(w: &mut wm::Win, s: &State) {
+    w.fill(0, 0, NAV_W, CH, ui::card_bg());
+    w.shape(wm::OP_VLINE, NAV_W, 0, CH, 1, ui::line());
+    w.text_big(20, 18, ui::text(), "设置");
 
     for (i, p) in PAGES.iter().enumerate() {
         let y = 62 + i as i16 * 42;
@@ -129,18 +128,18 @@ fn nav(w: &wm::Win, s: &State) {
         let hot = s.hover.0 < NAV_W && s.hover.1 >= y && s.hover.1 < y + 40;
 
         if sel {
-            w.fill(8, y, NAV_W - 16, 40, ui::ROW_SEL);
+            w.fill(8, y, NAV_W - 16, 40, ui::row_sel());
             w.fill(8, y + 9, 3, 22, s.accent);
         } else if hot {
-            w.fill(8, y, NAV_W - 16, 40, 0x00EFEFF3);
+            w.fill(8, y, NAV_W - 16, 40, ui::row_bg());
         }
-        w.fill(28, y + 16, 8, 8, if sel { s.accent } else { ui::DIM });
-        w.text(46, y + 12, if sel { ui::TEXT } else { ui::DIM }, PAGE_NAMES[i]);
+        w.fill(28, y + 16, 8, 8, if sel { s.accent } else { ui::dim() });
+        w.text(46, y + 12, if sel { ui::text() } else { ui::dim() }, PAGE_NAMES[i]);
     }
 }
 
-fn page_system(w: &wm::Win, s: &State) {
-    card(w, CONTENT_X, 80, CONTENT_W, 150, "设备");
+fn page_system(w: &mut wm::Win, s: &State) {
+    card(w, CONTENT_X, 80, CONTENT_W, 170, "设备");
     kv(w, CONTENT_X + 14, 116, "名称", "Novus 虚拟机");
     kv(w, CONTENT_X + 14, 142, "架构", "x86_64 · 64 位");
     kv(w, CONTENT_X + 14, 168, "显示", "1280 × 800 · 32 位色");
@@ -160,12 +159,12 @@ fn page_system(w: &wm::Win, s: &State) {
     let free_mb = (s.st.free_kb / 1024) as u32;
     let used_mb = total_mb.saturating_sub(free_mb);
     let pct = if total_mb == 0 { 0 } else { (used_mb * 100 / total_mb) as i16 };
-    w.text(CONTENT_X + 14, 306, ui::DIM, "内存");
+    w.text(CONTENT_X + 14, 306, ui::dim(), "内存");
     meter(w, CONTENT_X + 110, 306, 240, pct, s.accent);
     let mut mem = ui::Buf::new();
 
     mem.num(used_mb).s(" / ").num(total_mb).s(" MB");
-    w.text(CONTENT_X + 360, 306, ui::TEXT, mem.str());
+    w.text(CONTENT_X + 360, 306, ui::text(), mem.str());
 
     let t = ui::fmt_u32(s.st.tasks, &mut b);
     kv(w, CONTENT_X + 14, 330, "任务数", t);
@@ -177,6 +176,12 @@ fn page_system(w: &wm::Win, s: &State) {
     kv(w, CONTENT_X + 14, 374, "IPC", ipc_line.str());
 
     kv(w, CONTENT_X + 14, 398, "强调色", PRESET_NAMES[preset_index(s.accent)]);
+
+    /* Install entry: only meaningful on a live medium, where the boot
+     * stage staged the payloads. The app itself refuses with a note when
+     * that is not the case, so the button can stay. */
+    button(w, CONTENT_X + CONTENT_W - 148, 196, 132, 26, "打开安装程序",
+           s.accent, false, false);
 }
 
 fn preset_index(accent: u32) -> usize {
@@ -191,45 +196,54 @@ fn preset_index(accent: u32) -> usize {
     0
 }
 
-fn page_look(w: &wm::Win, s: &State) {
-    card(w, CONTENT_X, 80, CONTENT_W, 120, "颜色");
+fn page_look(w: &mut wm::Win, s: &State) {
+    /* Theme mode: the state comes from the kernel token layer, so this
+     * row and the shell's quick settings always agree. */
+    card(w, CONTENT_X, 76, CONTENT_W, 76, "主题");
+
+    let modes = ["浅色", "深色", "跟随时间"];
+    for i in 0..3usize {
+        let x = CONTENT_X + 14 + i as i16 * 154;
+        let y = 108;
+        let sel = s.mode == i as u32;
+        let label = modes[i];
+        let tw = ui::width(label);
+
+        if sel {
+            w.round_fill(x, y, 140, 32, 6, s.accent);
+            w.text(x + (140 - tw) / 2, y + 9, ui::on_accent(), label);
+        } else {
+            w.round_fill(x, y, 140, 32, 6, ui::card_bg());
+            w.round_frame(x, y, 140, 32, 6, ui::line());
+            w.text(x + (140 - tw) / 2, y + 9, ui::text(), label);
+        }
+    }
+
+    card(w, CONTENT_X, 162, CONTENT_W, 116, "颜色");
     for (i, c) in PRESETS.iter().enumerate() {
         let x = CONTENT_X + 14 + (i % 4) as i16 * 62;
-        let y = 112 + (i / 4) as i16 * 40;
+        let y = 194 + (i / 4) as i16 * 40;
 
-        w.fill(x, y, 44, 28, *c);
+        w.round_fill(x, y, 44, 28, 5, *c);
         if *c == s.accent {
-            w.frame(x - 2, y - 2, 48, 32, ui::TEXT);
+            w.round_frame(x - 2, y - 2, 48, 32, 6, ui::text());
         }
     }
     let idx = preset_index(s.accent);
-    w.text(CONTENT_X + 14 + 4 * 62 + 6, 118, ui::TEXT, PRESET_NAMES[idx]);
+    w.text(CONTENT_X + 14 + 4 * 62 + 6, 200, ui::text(), PRESET_NAMES[idx]);
+    w.text(CONTENT_X + 14, 256, ui::dim(), "强调色用于按钮、选中条与焦点环");
 
-    card(w, CONTENT_X, 216, CONTENT_W, 132, "桌面背景");
+    card(w, CONTENT_X, 290, CONTENT_W, 132, "桌面背景");
     for (i, p) in PAPERS.iter().enumerate() {
         let x = CONTENT_X + 14 + i as i16 * 164;
-        let y = 248;
+        let y = 322;
 
         w.fill(x, y, 150, 44, p.0);
         w.fill(x, y + 22, 150, 22, p.1);
-        w.frame(x, y, 150, 44, if i as u32 == s.wallpaper { s.accent } else { ui::LINE });
-        w.text(x + 6, y + 50, ui::DIM, PAPER_NAMES[i]);
+        w.round_frame(x, y, 150, 44, 6,
+                      if i as u32 == s.wallpaper { s.accent } else { ui::line() });
+        w.text(x + 6, y + 50, ui::dim(), PAPER_NAMES[i]);
     }
-
-    /* Live preview of the current accent on a miniature window. */
-    let (top, bottom) = PAPERS[(s.wallpaper as usize).min(PAPERS.len() - 1)];
-    let x = CONTENT_X + 14;
-    let y = 360;
-
-    w.fill(x, y, 220, 76, top);
-    w.fill(x, y + 38, 220, 38, bottom);
-    w.fill(x + 24, y + 14, 172, 52, ui::BG);
-    w.fill(x + 24, y + 14, 172, 16, ui::PANEL);
-    w.fill(x + 24, y + 14, 60, 2, s.accent);
-    w.text(x + 32, y + 17, ui::TEXT, "预览");
-    w.fill(x + 32, y + 38, 90, 4, ui::LINE);
-    w.fill(x + 32, y + 48, 120, 4, ui::LINE);
-    w.fill(x + 160, y + 40, 26, 14, s.accent);
 }
 
 /// The running task for built-in application `i`, if it is up. The list is
@@ -242,7 +256,7 @@ fn running_for<'a>(s: &'a State, i: usize) -> Option<&'a sinfo::TaskRec> {
         .find(|t| t.name() == APPS[i] && t.state != 3)
 }
 
-fn page_apps(w: &wm::Win, s: &State) {
+fn page_apps(w: &mut wm::Win, s: &State) {
     card(w, CONTENT_X, 80, CONTENT_W, 190, "正在运行");
 
     let mut shown = 0usize;
@@ -255,9 +269,9 @@ fn page_apps(w: &wm::Win, s: &State) {
         let mut b = [0u8; 12];
         let pid = ui::fmt_u32(t.pid as u32, &mut b);
 
-        w.text(CONTENT_X + 14, y + 6, ui::TEXT, APP_NAMES[i]);
-        w.text(CONTENT_X + 140, y + 6, ui::DIM, pid);
-        w.text(CONTENT_X + 220, y + 6, ui::DIM, state_name(t.state));
+        w.text(CONTENT_X + 14, y + 6, ui::text(), APP_NAMES[i]);
+        w.text(CONTENT_X + 140, y + 6, ui::dim(), pid);
+        w.text(CONTENT_X + 220, y + 6, ui::dim(), state_name(t.state));
         button(w, CONTENT_X + CONTENT_W - 84, y, 70, 24,
                if confirming { "确认结束" } else { "结束" }, s.accent, false,
                confirming);
@@ -267,7 +281,7 @@ fn page_apps(w: &wm::Win, s: &State) {
         }
     }
     if shown == 0 {
-        w.text(CONTENT_X + 14, 116, ui::DIM, "没有正在运行的内置应用");
+        w.text(CONTENT_X + 14, 116, ui::dim(), "没有正在运行的内置应用");
     }
 
     card(w, CONTENT_X, 286, CONTENT_W, 96, "可启动");
@@ -283,7 +297,7 @@ fn page_apps(w: &wm::Win, s: &State) {
     }
 }
 
-fn page_about(w: &wm::Win, s: &State) {
+fn page_about(w: &mut wm::Win, s: &State) {
     card(w, CONTENT_X, 80, CONTENT_W, 170, "版本");
     kv(w, CONTENT_X + 14, 116, "版本", "Novus OS 0.9（M9）");
     kv(w, CONTENT_X + 14, 142, "内核", "C · UEFI · x86_64");
@@ -292,31 +306,31 @@ fn page_about(w: &wm::Win, s: &State) {
     kv(w, CONTENT_X + 14, 220, "持久化", "不落盘，重启恢复默认");
 
     card(w, CONTENT_X, 266, CONTENT_W, 150, "里程碑");
-    w.text(CONTENT_X + 14, 302, ui::TEXT, "M1–M3  引导 / 内核 / 内存与中断");
-    w.text(CONTENT_X + 14, 326, ui::TEXT, "M4–M5  进程与地址空间 / 2D 渲染与控件");
-    w.text(CONTENT_X + 14, 350, ui::TEXT, "M6      IPC 与窗口管理器");
-    w.text(CONTENT_X + 14, 374, ui::TEXT, "M8–M9   Rust 应用 / 中文与 Win11 桌面");
+    w.text(CONTENT_X + 14, 302, ui::text(), "M1–M3  引导 / 内核 / 内存与中断");
+    w.text(CONTENT_X + 14, 326, ui::text(), "M4–M5  进程与地址空间 / 2D 渲染与控件");
+    w.text(CONTENT_X + 14, 350, ui::text(), "M6      IPC 与窗口管理器");
+    w.text(CONTENT_X + 14, 374, ui::text(), "M8–M9   Rust 应用 / 中文与 Win11 桌面");
 
     let mut b = [0u8; 12];
     let t = ui::fmt_u32(s.st.tasks, &mut b);
     let mut line = ui::Buf::new();
 
     line.s("当前 ").s(t).s(" 个任务 · 强调色 ").s(PRESET_NAMES[preset_index(s.accent)]);
-    w.text(CONTENT_X + 14, 400, ui::DIM, line.str());
+    w.text(CONTENT_X + 14, 400, ui::dim(), line.str());
 }
 
-fn draw(w: &wm::Win, s: &State) {
+fn draw(w: &mut wm::Win, s: &State) {
     w.clear();
-    w.fill(0, 0, CW, CH, ui::BG);
+    w.fill(0, 0, CW, CH, ui::bg());
     nav(w, s);
 
-    w.text_big(CONTENT_X, 24, ui::TEXT, PAGE_NAMES[match s.page {
+    w.text_big(CONTENT_X, 24, ui::text(), PAGE_NAMES[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
         Page::About => 3,
     }]);
-    w.text(CONTENT_X, 48, ui::DIM, PAGE_SUB[match s.page {
+    w.text(CONTENT_X, 48, ui::dim(), PAGE_SUB[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
@@ -331,14 +345,14 @@ fn draw(w: &wm::Win, s: &State) {
     }
 
     /* Footer: what just happened, plus the version. */
-    w.shape(wm::OP_HLINE, 0, CH - 34, CW, 1, ui::LINE);
+    w.shape(wm::OP_HLINE, 0, CH - 34, CW, 1, ui::line());
     if s.note.is_empty() {
-        w.text(12, CH - 24, ui::DIM, "Novus OS 设置");
+        w.text(12, CH - 24, ui::dim(), "Novus OS 设置");
     } else {
-        w.text(12, CH - 24, ui::TEXT, s.note);
+        w.text(12, CH - 24, ui::text(), s.note);
     }
     let v = "0.9";
-    w.text(CW - 14 - ui::width(v), CH - 24, ui::DIM, v);
+    w.text(CW - 14 - ui::width(v), CH - 24, ui::dim(), v);
     /* One paint for the whole frame: every item is on the list by now. */
     w.invalidate();
 }
@@ -387,16 +401,19 @@ pub extern "C" fn _start() -> ! {
     let Some(sys_port) = ipc::lookup(sinfo::PORT_NAME) else {
         sys::exit(2);
     };
-    let Some(win) = wm::Win::create(wm_port, 300, 190, CW as i32 + 2,
+    let Some(mut win) = wm::Win::create(wm_port, 300, 190, CW as i32 + 2,
                                     CH as i32 + wm::TITLE_H, "设置")
     else {
         sys::exit(3);
     };
 
+    ui::init(sys_port);
+
     let mut s = State {
         page: Page::System,
-        accent: ui::ACCENT,
+        accent: ui::accent(),
         wallpaper: 0,
+        mode: sinfo::MODE_LIGHT,
         st: sinfo::Stats {
             uptime: 0,
             free_kb: 0,
@@ -405,7 +422,7 @@ pub extern "C" fn _start() -> ! {
             windows: 0,
             ipc_sent: 0,
             ipc_drop: 0,
-            accent: ui::ACCENT,
+            accent: ui::accent(),
             wallpaper: 0,
         },
         tasks: [sinfo::TaskRec {
@@ -426,10 +443,11 @@ pub extern "C" fn _start() -> ! {
     if let Some(t) = sinfo::theme(sys_port) {
         s.accent = t.accent;
         s.wallpaper = t.wallpaper;
+        s.mode = t.mode;
     }
     load_stats(sys_port, &mut s.st);
     s.n_tasks = load_tasks(sys_port, &mut s.tasks);
-    draw(&win, &s);
+    draw(&mut win, &s);
 
     let mut idle = 0u32;
     loop {
@@ -440,8 +458,8 @@ pub extern "C" fn _start() -> ! {
                     sys::exit(0);
                 }
                 wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
-                    handle_click(&win, &mut s, m.x, m.y, sys_port);
-                    draw(&win, &s);
+                    handle_click(&mut win, &mut s, m.x, m.y, sys_port);
+                    draw(&mut win, &s);
                 }
                 wm::Ev::Mouse(m) => {
                     /* Hover only needs a repaint when the nav rail changes
@@ -450,7 +468,7 @@ pub extern "C" fn _start() -> ! {
                     s.hover = (m.x as i16, m.y as i16);
                     let nav_area = |p: (i16, i16)| p.0 < NAV_W && p.1 >= 62 && p.1 < 62 + 42 * 4;
                     if nav_area(old) || nav_area(s.hover) {
-                        draw(&win, &s);
+                        draw(&mut win, &s);
                     }
                 }
                 _ => {}
@@ -458,11 +476,19 @@ pub extern "C" fn _start() -> ! {
         }
 
         idle += 1;
+        if ui::poll(sys_port) {
+            if let Some(t) = sinfo::theme(sys_port) {
+                s.accent = t.accent;
+                s.wallpaper = t.wallpaper;
+                s.mode = t.mode;
+            }
+            draw(&mut win, &s);
+        }
         if s.confirm_left > 0 {
             s.confirm_left -= 1;
             if s.confirm_left == 0 && s.confirm_pid != 0 {
                 s.confirm_pid = 0;
-                draw(&win, &s);
+                draw(&mut win, &s);
             }
         }
         if idle >= 40 {
@@ -470,14 +496,14 @@ pub extern "C" fn _start() -> ! {
             if s.page == Page::System || s.page == Page::Apps {
                 load_stats(sys_port, &mut s.st);
                 s.n_tasks = load_tasks(sys_port, &mut s.tasks);
-                draw(&win, &s);
+                draw(&mut win, &s);
             }
         }
         sys::yield_now();
     }
 }
 
-fn handle_click(w: &wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
+fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
     /* Navigation rail. */
     if x < NAV_W as i32 {
         for (i, p) in PAGES.iter().enumerate() {
@@ -493,17 +519,55 @@ fn handle_click(w: &wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
     }
 
     match s.page {
+        Page::System => {
+            let bx = CONTENT_X + CONTENT_W - 148;
+            let by = 196;
+
+            if x >= bx as i32 && x < (bx + 132) as i32
+                && y >= by as i32 && y < (by + 26) as i32
+            {
+                match sinfo::spawn_name(sys_port, "setup") {
+                    Some(0) | Some(-100) => s.note = "安装程序已启动",
+                    _ => s.note = "安装载荷未就绪：需要从安装介质启动",
+                }
+            } else if x >= (CONTENT_X + 300) as i32 && y >= 300 && y < 320 {
+                s.note = "内存数据来自内核分页器";
+            }
+        }
         Page::Look => {
+            /* Theme mode buttons. */
+            for i in 0..3usize {
+                let px = CONTENT_X + 14 + i as i16 * 154;
+                let py = 108;
+
+                if x >= px as i32 && x < (px + 140) as i32
+                    && y >= py as i32 && y < (py + 32) as i32
+                {
+                    if let Some(t) = sinfo::set_theme(sys_port, sinfo::THEME_MODE, i as u32) {
+                        s.mode = t.mode;
+                        s.accent = t.accent;
+                        ui::set_palette(t.resolved == 1);
+                        ui::set_accent_rgb(t.accent);
+                        s.note = match i {
+                            0 => "已切换到浅色主题",
+                            1 => "已切换到深色主题",
+                            _ => "主题跟随时间（19:00 后深色）",
+                        };
+                    }
+                    return;
+                }
+            }
             /* Accent swatches. */
             for (i, c) in PRESETS.iter().enumerate() {
                 let px = CONTENT_X + 14 + (i % 4) as i16 * 62;
-                let py = 112 + (i / 4) as i16 * 40;
+                let py = 194 + (i / 4) as i16 * 40;
 
                 if x >= (px - 2) as i32 && x < (px + 46) as i32
                     && y >= (py - 2) as i32 && y < (py + 30) as i32
                 {
                     if let Some(t) = sinfo::set_theme(sys_port, sinfo::THEME_ACCENT, *c) {
                         s.accent = t.accent;
+                        ui::set_accent_rgb(t.accent);
                         s.note = "已应用强调色";
                     }
                     return;
@@ -512,7 +576,7 @@ fn handle_click(w: &wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             /* Wallpaper previews. */
             for i in 0..PAPERS.len() {
                 let px = CONTENT_X + 14 + i as i16 * 164;
-                let py = 248;
+                let py = 322;
 
                 if x >= px as i32 && x < (px + 150) as i32
                     && y >= py as i32 && y < (py + 44) as i32
@@ -581,18 +645,13 @@ fn handle_click(w: &wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
                 if x >= bx as i32 && x < (bx + 140) as i32
                     && y >= 318 && y < 346 && !running
                 {
-                    s.note = match sinfo::spawn(sys_port, i as u8) {
+                    s.note = match sinfo::spawn_name(sys_port, APPS[i]) {
                         Some(0) => "已启动应用",
                         Some(-100) => "该应用已在运行",
                         _ => "无法启动该应用",
                     };
                     return;
                 }
-            }
-        }
-        Page::System => {
-            if x >= (CONTENT_X + 300) as i32 && y >= 300 && y < 320 {
-                s.note = "内存数据来自内核分页器";
             }
         }
         Page::About => {}

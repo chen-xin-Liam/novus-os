@@ -1,23 +1,111 @@
-//! Drawing helpers shared by the three applications: the palette, integer
-//! formatting (no core::fmt - it would drag the formatting machinery into
-//! every blob), and the three stock widgets the apps actually use.
+//! Novus Fluent component library for the built-in applications.
+//!
+//! One palette, two resolutions: `theme.rs` has the generated light and
+//! dark tables, and the accessors below return the colour of the current
+//! one. An application never writes a literal colour, so light/dark is a
+//! switch here rather than a second set of drawing code.
+//!
+//! Cards, pill buttons and selection bars use the WM's v1.2 rounded ops.
+//! Everything stays inside the 40-shape / 48-text budget the server
+//! enforces; the client side counts and warns instead of silently losing
+//! the tail of a frame.
 
+use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+use crate::sinfo;
+use crate::theme::{self, Palette};
 use crate::wm;
 
-/* Windows 11, light: the window manager draws the frame in the same
- * palette, so a client's content and its chrome read as one surface. */
-pub const BG: u32 = 0x00FFFFFF;
-pub const PANEL: u32 = 0x00F3F3F3;
-pub const ROW: u32 = 0x00F7F7F9;
-pub const ROW_SEL: u32 = 0x00E5F1FB;
-pub const LINE: u32 = 0x00E1E5EA;
-pub const TEXT: u32 = 0x001B1B1B;
-pub const DIM: u32 = 0x005F6368;
-pub const ACCENT: u32 = 0x000067C0;
-pub const GOOD: u32 = 0x00107C10;
-pub const WARN: u32 = 0x00B45309;
+static DARK: AtomicBool = AtomicBool::new(false);
+static ACCENT: AtomicU32 = AtomicU32::new(0); /* 0 = palette accent */
+static VERSION: AtomicU32 = AtomicU32::new(0);
+static POLL: AtomicU32 = AtomicU32::new(0);
 
-pub const ROW_H: i16 = 22;
+pub fn pal() -> &'static Palette {
+    if DARK.load(Ordering::Relaxed) {
+        &theme::DARK
+    } else {
+        &theme::LIGHT
+    }
+}
+
+pub fn is_dark() -> bool {
+    DARK.load(Ordering::Relaxed)
+}
+
+pub fn bg() -> u32 { pal().surface }
+pub fn canvas() -> u32 { pal().canvas_top }
+pub fn card_bg() -> u32 { pal().card }
+pub fn row_bg() -> u32 { pal().card }
+pub fn row_sel() -> u32 { pal().selection }
+pub fn line() -> u32 { pal().stroke }
+pub fn text() -> u32 { pal().text }
+pub fn dim() -> u32 { pal().dim }
+pub fn good() -> u32 { pal().success }
+pub fn warn() -> u32 { pal().warn }
+pub fn danger() -> u32 { pal().danger }
+
+pub fn accent() -> u32 {
+    let a = ACCENT.load(Ordering::Relaxed);
+
+    if a == 0 { pal().accent } else { a }
+}
+
+/// Ink that stays readable on `bg`: the theme's on-accent colour for the
+/// stock accent, a luminance decision for an override.
+pub fn on_color(bg: u32) -> u32 {
+    let r = (bg >> 16) & 0xFF;
+    let g = (bg >> 8) & 0xFF;
+    let b = bg & 0xFF;
+    let luma = (r * 299 + g * 587 + b * 114) / 1000;
+
+    if luma >= 150 { 0x00002436 } else { 0x00FFFFFF }
+}
+
+pub fn on_accent() -> u32 {
+    on_color(accent())
+}
+
+fn apply(t: &sinfo::Theme) {
+    DARK.store(t.resolved == 1, Ordering::Relaxed);
+    ACCENT.store(if t.accent == pal().accent { 0 } else { t.accent }, Ordering::Relaxed);
+    VERSION.store(t.version, Ordering::Relaxed);
+}
+
+/// Read the theme once, before the first frame.
+pub fn init(sys_port: u64) {
+    if let Some(t) = sinfo::theme(sys_port) {
+        apply(&t);
+    }
+}
+
+/// Cheap poll (about once a second at 60 yields): returns true when the
+/// version changed and the window must be redrawn.
+pub fn poll(sys_port: u64) -> bool {
+    if POLL.fetch_add(1, Ordering::Relaxed) % 60 != 0 {
+        return false;
+    }
+    let Some(t) = sinfo::theme(sys_port) else { return false };
+    if t.version == VERSION.load(Ordering::Relaxed) {
+        return false;
+    }
+    apply(&t);
+    true
+}
+
+/// Settings applies a swatch locally; the reply carries the full state so
+/// the panel repaints without a second round trip.
+pub fn set_accent_rgb(rgb: u32) {
+    ACCENT.store(rgb, Ordering::Relaxed);
+}
+
+pub fn set_palette(dark: bool) {
+    DARK.store(dark, Ordering::Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// Text helpers
+// ---------------------------------------------------------------------------
 
 /// Advance of one character, mirroring nd_char_adv(): ASCII is 6 px at the
 /// UI scale, a CJK glyph is a 16 px cell.
@@ -38,9 +126,22 @@ pub fn width(s: &str) -> i16 {
     if n == 0 { 0 } else { w - 1 }
 }
 
+/// Width at text scale 2 (used by `text_big`).
+pub fn width_big(s: &str) -> i16 {
+    let mut w = 0;
+    let mut n = 0;
+
+    for c in s.chars() {
+        let a = char_adv(c);
+        w += if (c as u32) < 0x80 { a * 2 } else { a };
+        n += 1;
+    }
+    if n == 0 { 0 } else { w - 1 }
+}
+
 /// A fixed-width text line. The font is monospaced at 6 px per column, so
 /// padding with spaces is what aligns the columns - and one text run per
-/// row keeps a full list inside the window's 20-run display list.
+/// row keeps a full list inside the window's display list.
 pub struct Buf {
     b: [u8; 96],
     n: usize,
@@ -142,19 +243,51 @@ pub fn fmt_size(bytes: u32, buf: &mut [u8]) -> &str {
     unsafe { core::str::from_utf8_unchecked(&buf[..n + unit.len()]) }
 }
 
-/// Window chrome: background plus a one-line header.
-pub fn shell(w: &wm::Win, cw: i16, ch: i16, title: &str, accent: u32) {
-    w.fill(0, 0, cw, ch, BG);
-    w.fill(0, 0, cw, 26, PANEL);
-    w.shape(wm::OP_HLINE, 0, 26, cw, 1, LINE);
-    w.fill(0, 25, 90, 1, accent);
-    w.text(10, 8, TEXT, title);
+// ---------------------------------------------------------------------------
+// Surfaces
+// ---------------------------------------------------------------------------
+
+/// Page frame: page title, one-line subtitle and a short accent underline.
+/// The window chrome already carries the app name, so this is a content
+/// header, not a second title bar.
+pub fn page(w: &mut wm::Win, cw: i16, ch: i16, title: &str, subtitle: &str) {
+    w.fill(0, 0, cw, ch, bg());
+    w.text_big(20, 14, text(), title);
+    w.text(20, 42, dim(), subtitle);
+    w.fill(20, 64, cw - 40, 1, line());
+    w.round_fill(20, 64, 44, 3, 2, accent());
+}
+
+/// Compact header used by the M8 apps (36 px band, title on the left).
+/// New pages use `page`; this keeps existing layouts valid while the
+/// applications migrate one screen at a time.
+pub fn shell(w: &mut wm::Win, cw: i16, ch: i16, title: &str, _accent: u32) {
+    w.fill(0, 0, cw, ch, bg());
+    w.fill(0, 0, cw, 34, card_bg());
+    w.fill(0, 33, cw, 1, line());
+    w.round_fill(0, 33, 56, 3, 1, accent());
+    w.text(12, 10, text(), title);
+}
+
+/// A card: rounded surface with a hairline border.
+pub fn card(w: &mut wm::Win, x: i16, y: i16, cw: i16, ch: i16) {
+    w.round_fill(x, y, cw, ch, 10, card_bg());
+    w.round_frame(x, y, cw, ch, 10, line());
+}
+
+/// Section label inside a page (12 px, secondary).
+pub fn section(w: &mut wm::Win, x: i16, y: i16, label: &str) {
+    w.text(x, y, dim(), label);
+}
+
+pub fn divider(w: &mut wm::Win, x: i16, y: i16, cw: i16) {
+    w.fill(x, y, cw, 1, line());
 }
 
 /// A list row: optional selection block, label on the left, value on the
-/// right. Returns the row rectangle for hit testing: `(x, y, w, h)`.
+/// right, and a 3 px accent bar when selected. Returns the hit rectangle.
 pub fn row(
-    w: &wm::Win,
+    w: &mut wm::Win,
     y: i16,
     cw: i16,
     label: &str,
@@ -163,16 +296,68 @@ pub fn row(
     color: u32,
 ) -> (i16, i16, i16, i16) {
     if selected {
-        w.fill(4, y, cw - 8, ROW_H - 2, ROW_SEL);
+        w.round_fill(4, y, cw - 8, 26, 5, row_sel());
+        w.round_fill(4, y + 5, 3, 16, 1, accent());
     } else {
-        w.fill(4, y, cw - 8, ROW_H - 2, ROW);
+        w.round_fill(4, y, cw - 8, 26, 5, row_bg());
     }
-    w.text(12, y + 6, if selected { TEXT } else { color }, label);
+    w.text(14, y + 6, if selected { text() } else { color }, label);
     if !value.is_empty() {
         let vw = width(value);
-        w.text(cw - 10 - vw, y + 6, DIM, value);
+        w.text(cw - 12 - vw, y + 6, dim(), value);
     }
-    (4, y, cw - 8, ROW_H - 2)
+    (4, y, cw - 8, 26)
+}
+
+/// Rounded primary button. `color` is the fill; the caption colour is
+/// derived so a custom accent stays readable.
+pub fn button(w: &mut wm::Win, x: i16, y: i16, bw: i16, bh: i16, label: &str, color: u32) -> (i16, i16, i16, i16) {
+    w.round_fill(x, y, bw, bh, 6, color);
+    let tw = width(label);
+    w.text(x + (bw - tw) / 2, y + (bh - 14) / 2, on_color(color), label);
+    (x, y, bw, bh)
+}
+
+/// Secondary button: surface + hairline, used for cancel/back.
+pub fn ghost(w: &mut wm::Win, x: i16, y: i16, bw: i16, bh: i16, label: &str) -> (i16, i16, i16, i16) {
+    w.round_fill(x, y, bw, bh, 6, card_bg());
+    w.round_frame(x, y, bw, bh, 6, line());
+    let tw = width(label);
+    w.text(x + (bw - tw) / 2, y + (bh - 14) / 2, text(), label);
+    (x, y, bw, bh)
+}
+
+/// Sidebar navigation item: selected gets a soft fill and an accent bar.
+pub fn nav(w: &mut wm::Win, x: i16, y: i16, nw: i16, label: &str, selected: bool) -> (i16, i16, i16, i16) {
+    if selected {
+        w.round_fill(x, y, nw, 32, 6, row_sel());
+        w.round_fill(x, y + 7, 3, 18, 1, accent());
+        w.text(x + 14, y + 9, text(), label);
+    } else {
+        w.text(x + 14, y + 9, dim(), label);
+    }
+    (x, y, nw, 32)
+}
+
+/// Progress bar with a percentage caption.
+pub fn progress(w: &mut wm::Win, x: i16, y: i16, pw: i16, permille: u16) {
+    let fill = (pw as i32 * permille as i32 / 1000) as i16;
+
+    w.round_fill(x, y, pw, 8, 4, line());
+    if fill > 2 {
+        w.round_fill(x, y, fill, 8, 4, accent());
+    }
+    let mut buf = [0u8; 8];
+    let pct = (permille as u32 + 5) / 10;
+    let s = fmt_u32(pct, &mut buf);
+
+    w.text(x + pw + 8, y + 1, dim(), s);
+}
+
+/// Empty-state hint: a quiet line with a small accent dot.
+pub fn empty(w: &mut wm::Win, x: i16, y: i16, label: &str) {
+    w.round_fill(x, y + 4, 8, 8, 4, line());
+    w.text(x + 16, y, dim(), label);
 }
 
 pub fn inside(r: (i16, i16, i16, i16), x: i32, y: i32) -> bool {
@@ -181,10 +366,5 @@ pub fn inside(r: (i16, i16, i16, i16), x: i32, y: i32) -> bool {
     x >= rx as i32 && x < (rx + rw) as i32 && y >= ry as i32 && y < (ry + rh) as i32
 }
 
-/// A button. Returns its rectangle.
-pub fn button(w: &wm::Win, x: i16, y: i16, bw: i16, bh: i16, label: &str, accent: u32) -> (i16, i16, i16, i16) {
-    w.fill(x, y, bw, bh, ROW_SEL);
-    w.frame(x, y, bw, bh, accent);
-    w.text(x + 8, y + (bh - 14) / 2, TEXT, label);
-    (x, y, bw, bh)
-}
+/// Height of a list row, so callers do not repeat the number.
+pub const ROW_H: i16 = 22;

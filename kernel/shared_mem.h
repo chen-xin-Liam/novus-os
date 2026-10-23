@@ -92,8 +92,18 @@ typedef struct {
   UINT64 app_img_base;             /* 0x2E0: reserved pages (physical)  */
   UINT64 app_img_size;             /* 0x2E8: bytes, 0 = none staged     */
 
-  UINT8  reserved[7456 - 16];      /* 0x2F0: pad to exactly 8 KiB       */
+  /* ---- M10: install payload staged for the in-system installer. The
+   * ESP template (boot loader + system image) is read off the live ESP
+   * before ExitBootServices because the kernel has no firmware file
+   * access afterwards. tail carve-out only: no field above moves. ---- */
+  UINT64 esp_img_base;             /* 0x2F0: reserved pages (physical)  */
+  UINT64 esp_img_size;             /* 0x2F8: bytes, 0 = none staged     */
+  UINT32 install_flags;            /* 0x300: SHM_INSTALL_FLAG_*         */
+
+  UINT8  reserved[7456 - 16 - 20]; /* 0x304: pad to exactly 8 KiB       */
 } shared_mem_t;
+
+#define SHM_INSTALL_FLAG_PAYLOADS 0x00000001u /* ESP and system images staged */
 
 /* Frozen-layout guarantees; a violation here is a spec 2.3 break. */
 _Static_assert(sizeof(shared_mem_t) == SHARED_MEM_SIZE,
@@ -114,7 +124,12 @@ _Static_assert(__builtin_offsetof(shared_mem_t, nkm_img_size) == 0x2D8,
 /* The M4 carve-out starts where the M3 one ended. */
 _Static_assert(__builtin_offsetof(shared_mem_t, app_img_base) == 0x2E0,
                "shared_mem frozen layout drift: app_img_base");
-_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x2F0,
+/* M10 install payloads occupy the first bytes of the reserved tail. */
+_Static_assert(__builtin_offsetof(shared_mem_t, esp_img_base) == 0x2F0,
+               "shared_mem frozen layout drift: esp_img_base");
+_Static_assert(__builtin_offsetof(shared_mem_t, install_flags) == 0x300,
+               "shared_mem frozen layout drift: install_flags");
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x304,
                "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the block at SHARED_MEM_PHYS
