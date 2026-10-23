@@ -146,6 +146,9 @@ int nd_init(void) {
     kputs("[ND] no linear framebuffer captured, VGA text stays active\n");
     return 0;
   }
+  /* The surface uses pixel-word addressing, while GOP pitch may exceed the
+   * visible width; retaining PixelsPerScanLine is necessary to land each
+   * scanline at its actual hardware offset. */
   g_screen.px = (UINT32 *)(UINTN)g_disp.fb_phys;
   g_screen.w = (INT32)g_disp.width;
   g_screen.h = (INT32)g_disp.height;
@@ -198,6 +201,9 @@ void nd_cursor_hide(void) {
   g_cursor_on = 0;
 }
 
+/* The pointer position is its top-left corner: draw/hide copy a fixed
+ * 12-by-20 save-under rectangle, so the whole rectangle must remain inside
+ * the framebuffer at every edge. */
 void nd_cursor_set(INT32 x, INT32 y) {
   if (!g_screen_ready) {
     return;

@@ -23,6 +23,12 @@ static UINT32 g_offered;
 static UINT32 g_server;
 static UINT8  g_phase; /* 1 = wait offer, 2 = wait ack */
 
+/*
+ * The client keeps only the current transaction identifier and offered
+ * address/server, not a general lease-renewal state machine. Phase 1 accepts
+ * an OFFER and advances to phase 2; only an ACK in phase 2 binds the address
+ * and stops retries.
+ */
 static UINT32 get32be(const UINT8 *p) {
   return ((UINT32)p[0] << 24) | ((UINT32)p[1] << 16) | ((UINT32)p[2] << 8) |
          p[3];
@@ -117,6 +123,12 @@ void net_dhcp_tick(void) {
   dhcp_send((g_phase == 1u) ? 1u : 3u);
 }
 
+/*
+ * Replies are matched to the active xid and DHCP magic cookie before options
+ * can affect state. An OFFER resets the retry counter and starts a fresh
+ * deadline for REQUEST; unrelated message types or replies in the wrong
+ * phase leave the transaction unchanged.
+ */
 void net_dhcp_input(const UINT8 *p, UINT32 len) {
   UINT32 off;
   UINT8  type = 0;

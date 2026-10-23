@@ -56,6 +56,9 @@ const acpi_table_t *acpi_validate_table(UINT64 address,
 
 static const acpi_table_t *root_find(UINT64 address, int extended,
                                      const char signature[4]) {
+  /* Validate the root table before treating its payload as an array of
+   * physical addresses. Each candidate is independently checked for its
+   * range, declared length, and checksum by acpi_table(). */
   const acpi_table_t *root = acpi_table(address);
   UINT32 step = extended ? 8u : 4u;
   UINT32 offset;
@@ -96,6 +99,9 @@ static const acpi_table_t *scan_rsdp(UINT64 start, UINT64 bytes,
         !checksum_ok(rsdp, 20)) {
       continue;
     }
+    /* Prefer the 64-bit XSDT only when the complete extended RSDP fits
+     * the scanned window and its extended checksum is valid; the legacy
+     * RSDT remains the fallback for old or incomplete firmware records. */
     if (rsdp->revision >= 2u && address + sizeof(*rsdp) <= end &&
         rsdp->length >= sizeof(*rsdp) && rsdp->length <= 4096u &&
         rsdp->length <= end - address && checksum_ok(rsdp, rsdp->length)) {
@@ -121,6 +127,9 @@ const acpi_table_t *acpi_find_table(UINT64 mmap, UINT64 size, UINT64 stride,
   if (signature == NULL) {
     return NULL;
   }
+  /* Firmware-reported ACPI reclaim/NVS ranges are the first source. If
+   * they do not contain the requested table, probe the BIOS EBDA and
+   * finally the conventional high-memory RSDP window. */
   if (stride >= sizeof(EFI_MEMORY_DESCRIPTOR) && size >= stride &&
       phys_range(mmap, size)) {
     for (offset = 0; offset <= size - stride; offset += stride) {

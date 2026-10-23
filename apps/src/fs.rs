@@ -40,6 +40,9 @@ impl DirEntry {
     }
 }
 
+/* The syscall numbers here are the filesystem slice of trap.c's shared ABI
+ * (8 through 15); keep these wrappers paired with that table when extending
+ * the API, since applications call numbers directly without a generated stub. */
 fn path_arg(path: &str) -> Option<[u8; PATH_MAX]> {
     if path.is_empty() || path.len() >= PATH_MAX || path.as_bytes().contains(&0) {
         return None;
@@ -56,6 +59,9 @@ pub fn open(path: &str, create: bool) -> Option<u64> {
     if fd < 3 { None } else { Some(fd as u64) }
 }
 
+/* Returned descriptors index the current task's kernel table, so they are
+ * valid only in the process that opened them. Close each handle when done;
+ * the table disappears with that task if it exits first. */
 pub fn read(fd: u64, buf: &mut [u8]) -> i64 {
     sys::call(9, fd, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }

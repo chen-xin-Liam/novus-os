@@ -76,6 +76,9 @@ static int gpt_take_entry(const UINT8 *e, blkdev_t *dev, gpt_table_t *out,
   memcpy(p->type_guid, e, 16);
   p->first_lba = first;
   p->last_lba = last;
+  /* GPT LBAs are in native device blocks, while blkdev transfers are in
+   * 512-byte sectors; convert both the starting offset and extent before
+   * exposing this entry as a block-device partition. */
   p->first_sector = blkdev_lba_to_sector(dev, first);
   p->sector_count = blkdev_lba_count(dev, last - first + 1u);
   memcpy(p->name, e + 56, 36 * sizeof(CHAR16));
@@ -151,6 +154,9 @@ int gpt_read(blkdev_t *dev, gpt_table_t *out) {
     return -1;
   }
 
+  /* Only after the header checksum succeeds are its array location and
+   * dimensions trusted to drive reads from the device.
+   * The following range checks bound that array to device blocks. */
   entry_lba = le64(hdr + 72);
   entry_count = le32(hdr + 80);
   entry_size = le32(hdr + 84);
@@ -187,6 +193,9 @@ int gpt_read(blkdev_t *dev, gpt_table_t *out) {
                     (UINTN)spb, buf) != 0) {
       break;
     }
+    /* `index` advances for every on-disk slot, including unused entries;
+     * `stored_count` only advances for accepted partitions.
+     * Keeping the counters separate preserves the source-array position. */
     for (k = 0; k < per_block && index < (UINTN)entry_count; k++, index++) {
       (VOID)gpt_take_entry(buf + k * GPT_ENTRY_SIZE, dev, out,
                            &stored_count);

@@ -46,6 +46,9 @@ static UINT64 read_le64(const UINT8 *p) {
 }
 
 static int gas_parse(const UINT8 *raw, power_gas_t *gas) {
+  /* Only zero-offset System I/O and 32-bit-addressable System Memory GAS
+   * entries are accepted by the accessors below; unsupported spaces or
+   * malformed widths cannot be used for power-control writes. */
   gas->space = raw[0];
   gas->width = raw[1];
   gas->bit_offset = raw[2];
@@ -263,6 +266,9 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   }
   raw = (const UINT8 *)fadt;
   pm1_len = raw[FADT_PM1_CNT_LEN];
+  /* Prefer extended GAS registers when the FADT supplies a usable PM1a
+   * entry. Otherwise decode the legacy I/O addresses; shutdown is not
+   * marked ready until the DSDT also supplies the _S5_ sleep types. */
   if (fadt->length >= FADT_X_PM1A_CNT + 12u &&
       gas_parse(raw + FADT_X_PM1A_CNT, &pm1a) && pm1a.width >= 16u) {
     if (fadt->length >= FADT_X_PM1B_CNT + 12u) {
@@ -325,6 +331,9 @@ void power_off(void) {
     kputs("[POWER] shutdown unavailable: ACPI _S5_ not initialized\n");
     return;
   }
+  /* Preserve unrelated PM1 control bits and mask interrupts while both
+   * control registers are updated, since the SLP_TYP/SLP_EN pair requests
+   * the platform transition. The CPU halts if firmware does not power off. */
   flags = irq_save();
   if (gas_read16(&pm1a, &value) == 0) {
     value = (UINT16)((value & ~(PM1_SLP_TYP_MASK | PM1_SLP_EN)) |
@@ -343,6 +352,9 @@ void power_off(void) {
 void power_reboot(void) {
   UINT64 flags = irq_save();
 
+  /* Use the FADT reset register when available; otherwise try the legacy
+   * chipset reset ports in order. A successful reset does not return, so
+   * the halt is also the fallback if hardware ignores the request. */
   if (reset_ready && gas_write_reset(&reset_reg, reset_value) == 0) {
     power_halt();
   }

@@ -34,6 +34,9 @@ pub const RSP_NET: u16 = 0x0316;
 pub const RSP_TASKS2: u16 = 0x0317;
 pub const RSP_ERR: u16 = 0x03FF;
 
+/* Request and response type values are wire-level IDs shared with the
+ * kernel service, not Rust enum ordinals. Keep them stable across client
+ * releases so older built-in apps can still interpret service replies. */
 pub const DIR_APPS: u8 = 0;
 pub const DIR_DEV: u8 = 1;
 pub const DIR_PROC: u8 = 2;

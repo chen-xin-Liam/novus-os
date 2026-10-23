@@ -153,6 +153,9 @@ static void route(UINT32 gsi, int masked) {
   if ((line->flags & IRQ_LEVEL) != 0u) {
     low |= 1u << 15;
   }
+  /* Mask the live entry before changing its destination or vector.
+   * The final low-word write publishes the new route and requested mask
+   * state only after the high destination word has been updated. */
   ioapic_write(ctl, reg, ioapic_read(ctl, reg) | IOAPIC_MASK);
   ioapic_write(ctl, reg + 1u, g_destination << 24);
   ioapic_write(ctl, reg, low | (masked ? IOAPIC_MASK : 0u));
@@ -328,6 +331,9 @@ int irq_query(UINT32 line, irq_info_t *out) {
 void irq_dispatch(UINT32 vector) {
   UINT32 gsi;
 
+  /* The LAPIC's spurious vector has no in-service interrupt to retire,
+   * so it returns before both line accounting and the EOI write below.
+   * Other vectors reach the EOI path even when no registered line matches. */
   if (vector == IRQ_SPURIOUS_VECTOR) {
     return;
   }

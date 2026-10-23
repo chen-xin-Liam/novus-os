@@ -76,6 +76,9 @@ static void gdt_set_tss(int i, UINT64 base, UINT32 limit) {
 }
 
 void tss_set_rsp0(UINT64 rsp0) {
+  /* This only updates the privilege-entry stack pointer; it does not
+   * switch stacks immediately. The CPU consults it on a later ring-3
+   * to ring-0 transition. */
   g_tss.rsp0 = rsp0;
 }
 
@@ -115,6 +118,9 @@ void gdt_init(void) {
       : "rax", "memory");
 
   /* Load the task register. */
+  /* LTR takes the selector for the two-slot TSS descriptor; hardware marks
+   * that descriptor busy, while this kernel uses the TSS for stack entry
+   * state rather than hardware task switching. */
   __asm__ volatile("movw %0, %%ax\n"
                    "ltr %%ax\n"
                    :

@@ -98,6 +98,10 @@ int nd_visible(const nd_surface_t *s, INT32 x, INT32 y) {
 
 /* ---- surfaces --------------------------------------------------------- */
 
+/* Off-screen pixels are tightly packed as 32-bit words: stride is measured
+ * in pixels, not bytes, and each row begins at y * stride. The owned flag
+ * distinguishes these allocations from the framebuffer view, which must
+ * never be released by nd_surface_destroy(). */
 int nd_surface_create(nd_surface_t *s, INT32 w, INT32 h) {
   memset(s, 0, sizeof(*s));
   if (w <= 0 || h <= 0) {
@@ -450,6 +454,10 @@ void nd_blit(nd_surface_t *dst, INT32 x, INT32 y, const nd_surface_t *src,
   }
 }
 
+/* `alpha` is uniform opacity for the copied region, not per-pixel source
+ * alpha. The source rectangle is first restricted to its surface, then its
+ * offset is translated through destination clipping so cropped edges still
+ * read the matching source pixels. */
 void nd_blit_alpha(nd_surface_t *dst, INT32 x, INT32 y,
                    const nd_surface_t *src, nd_rect_t area, UINT8 alpha) {
   nd_rect_t clip;

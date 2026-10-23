@@ -120,6 +120,9 @@ const UINT8 *nd_font_rows(UINT8 ch) {
 
 /* ---- UTF-8 and mixed metrics ------------------------------------------ */
 
+/* The caller owns the byte cursor: successful decoding advances by one
+ * complete UTF-8 sequence, while malformed input consumes one byte and
+ * returns U+FFFD so a bad byte cannot make a text walk loop forever. */
 UINT32 nd_utf8_next(const char **text) {
   const UINT8 *p = (const UINT8 *)*text;
   UINT32       cp;
@@ -210,6 +213,9 @@ UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
   return (n == 0u) ? 0u : (w - scale);
 }
 
+/* Height is chosen for the whole line: any non-ASCII codepoint selects the
+ * taller CJK cell, so mixed Latin/CJK text can share a consistent baseline.
+ * One vertical origin avoids per-glyph jumps within the same string. */
 UINT32 nd_text_height(const char *text, UINT32 scale) {
   const char *p = text;
   UINT32      h = (scale != 0u) ? ND_GLYPH_H * scale : ND_GLYPH_H;

@@ -246,6 +246,9 @@ static int wal_append_entry(novusfs_fs_t *fs, UINT64 txid, UINT32 type,
   crc = novus_rs_crc32(0, fs->crcbuf, (UINT64)WAL_CRC_PREFIX + len);
   memcpy(fs->walbuf + WAL_CRC_PREFIX, &crc, sizeof(crc));
 
+  /* Alignment bytes are included in the ring entry size, but not in the
+   * CRC input; the scanner advances over them without interpreting them.
+   * Ring offsets still use the padded size to find the next entry header. */
   return wal_ring_append(fs, fs->walbuf, size);
 }
 
@@ -369,6 +372,9 @@ int wal_commit(novusfs_fs_t *fs, UINT64 txid) {
   if (wal_append_entry(fs, txid, NOVUSFS_TX_COMMIT, 0, NULL, 0) != 0) {
     return -1;
   }
+  /* The current ordering is marker append, block redo, then superblock
+   * pointer flush; the commit marker alone does not immediately flush that
+   * pointer, and the redo loop's result is not used to gate this flush. */
   wal_redo_txid(fs, txid);
   /* The transaction has changed protected blocks, so the stored Merkle
    * root no longer describes the image. Clearing the flag here is what
@@ -407,6 +413,9 @@ UINT64 wal_recover(novusfs_fs_t *fs) {
   }
 
   /* Pass 1: collect the TXIDs that reached a commit marker. */
+  /* The separate scan means DATA entries are not replayed merely because
+   * they precede a marker; pass 2 filters them by the collected TXID set.
+   * Only transactions with a recorded marker are eligible for redo. */
   off = fs->sb.wal_tail_ptr % fs->wal_bytes;
   remaining = wal_used_bytes(fs);
   while (remaining > 0) {

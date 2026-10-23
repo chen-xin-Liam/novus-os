@@ -68,6 +68,9 @@ static UINT32 g_pick_hint;
 /* ---- helpers ----------------------------------------------------------- */
 
 static UINT32 task_slice(const task_t *t) {
+  /* Foreground status scales only the tick budget; selection still scans
+   * task slots from the rotating hint. Dispatch refreshes this budget when
+   * the selected task is marked running. */
   return SCHED_SLICE_TICKS * (t->foreground ? 2u : 1u);
 }
 
@@ -468,6 +471,9 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
     kputs("\n");
   }
 
+  /* Keep both entry mechanisms aimed at the selected task before CR3
+   * changes: IDT privilege transitions use TSS.RSP0, while syscall_entry
+   * reads sys_kernel_rsp; the frame is then returned for iretq. */
   tss_set_rsp0(next->kstack_top);
   sys_kernel_rsp = next->kstack_top;
   vm_switch_cr3(next->cr3);

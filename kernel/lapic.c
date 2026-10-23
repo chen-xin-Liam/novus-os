@@ -104,6 +104,9 @@ UINT32 lapic_timer_calibrate(UINT64 mmap, UINT64 size, UINT64 stride) {
       !pm_timer_port(fadt, &port, &mask)) {
     return 0;
   }
+  /* Start the down-counter at its maximum while the ACPI PM timer measures
+   * a bounded reference interval. Subtracting the sampled remainder gives
+   * the LAPIC count for that interval; a timeout leaves calibration unusable. */
   lapic_write(g_lapic_base, LAPIC_REG_TIMER_DIV, 0x3u);
   lapic_write(g_lapic_base, LAPIC_REG_LVT_TIMER,
               LAPIC_TIMER_MASKED | IDT_TIMER_VECTOR);
@@ -165,6 +168,9 @@ UINT64 lapic_init(void) {
   }
 
   msr = lapic_rdmsr(LAPIC_MSR_APIC_BASE);
+  /* Derive the MMIO page from the enabled APIC-base MSR before using it;
+   * the software-enable bit below is a separate requirement for ICR IPIs.
+   * Register access is not usable until both enable conditions are met. */
   if ((msr & LAPIC_MSR_GLOBAL_EN) == 0) {
     msr |= LAPIC_MSR_GLOBAL_EN;
     lapic_wrmsr(LAPIC_MSR_APIC_BASE, msr);

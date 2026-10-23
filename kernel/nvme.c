@@ -165,6 +165,9 @@ static void nvme_free_ctrl(nvme_ctrl_t *ctrl) {
 }
 
 static UINT64 nvme_bar0(const pci_dev_t *dev) {
+  /* BAR0 must describe memory-mapped registers, not I/O space. This
+   * implementation accesses the BAR through the direct map and therefore
+   * rejects bases outside the address range it can map here. */
   UINT32 low = pci_read32(dev->bus, dev->dev, dev->func, 0x10u);
   UINT32 type = low & 0x6u;
   UINT64 base;
@@ -218,6 +221,9 @@ static int nvme_submit(nvme_queue_t *queue, const nvme_cmd_t *command) {
   nvme_cpl_t completion;
   UINT32 i;
 
+  /* A command becomes visible before the SQ tail doorbell notifies the
+   * controller. Completion phase distinguishes a fresh CQ entry from
+   * entries left from the previous wrap of this fixed-depth queue. */
   queue->sq[queue->sq_tail] = *command;
   __sync_synchronize();
   queue->sq_tail = (UINT16)((queue->sq_tail + 1u) % queue->depth);
@@ -260,6 +266,9 @@ static int nvme_identify(nvme_ctrl_t *ctrl, UINT32 nsid, UINT32 cns) {
 static int nvme_create_io_queues(nvme_ctrl_t *ctrl) {
   nvme_cmd_t command;
 
+  /* The I/O completion queue is created before its submission queue,
+   * allowing the latter's create command to name an already-existing CQ.
+   * Both queues use the allocated page bases supplied in PRP1. */
   if (nvme_queue_init(ctrl, &ctrl->io, 1u, NVME_QUEUE_DEPTH) != 0) {
     return -1;
   }
@@ -475,6 +484,9 @@ static int nvme_controller_init(const pci_dev_t *pci) {
   ctrl->admin.depth = NVME_QUEUE_DEPTH;
   ctrl->admin.phase = 1;
   ctrl->data = (UINT8 *)phys_to_virt(ctrl->data_phys);
+  /* ASQ, ACQ, and AQA are set up while the controller is disabled; EN is
+   * then written once they describe valid, zeroed DMA queue storage.
+   * This prevents the controller from fetching incomplete queue entries. */
   memset(ctrl->admin.sq, 0, 4096);
   memset((void *)ctrl->admin.cq, 0, 4096);
   nvme_write32(ctrl->regs, NVME_AQA,

@@ -87,6 +87,12 @@ typedef struct {
 
 static igb_t g_fiber;
 
+/*
+ * This driver configures one TX ring and one RX ring for the registered
+ * device; it does not set up multiple queues or per-queue interrupt vectors.
+ * Receive consumption is polling-based through netdev.poll, with rx_cur
+ * tracking the next descriptor inspected by the network core.
+ */
 static UINT32 ird(igb_t *c, UINT32 r) {
   return *(volatile UINT32 *)(void *)(c->base + r);
 }
@@ -138,6 +144,12 @@ static int igb_poll(netdev_t *d, UINT8 *buf, UINT32 cap, UINT32 *out_len) {
   return 1;
 }
 
+/*
+ * A descriptor is consumed only after its DD/status bit is set. Copying its
+ * payload precedes clearing status and returning the old slot through RDT;
+ * rx_cur then moves modulo the ring length to preserve descriptor order.
+ * There is no separate software RX FIFO in this path.
+ */
 int net_igb_probe(void) {
   pci_dev_t pci;
   netdev_t  dev;

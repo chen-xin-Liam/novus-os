@@ -130,6 +130,9 @@ int novusfs_mount(novusfs_fs_t *fs, blkdev_t *dev) {
   if (novusfs_super_read(fs, dev) != 0) {
     return -1;
   }
+  /* Recovery uses the geometry and ring pointers selected from the
+   * superblock; Merkle verification is a separate API, not done here.
+   * This keeps log recovery independent of the caller's integrity policy. */
   replayed = wal_recover(fs);
   if (replayed != 0) {
     kputs("[NOVS] wal: replayed ");
@@ -251,6 +254,9 @@ INT64 novusfs_write(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
   }
   old_size = in.size;
 
+  /* Split the request at block boundaries: each iteration logs a complete
+   * post-write block image, including untouched bytes from partial writes.
+   * Partial blocks are read first so bytes outside the span are preserved. */
   while (done < len) {
     UINT64 lblk = pos / NOVUSFS_BLOCK_SIZE;
     UINT64 boff = pos % NOVUSFS_BLOCK_SIZE;

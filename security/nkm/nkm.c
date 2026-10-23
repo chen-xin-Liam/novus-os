@@ -169,6 +169,10 @@ static void nkm_free_region(UINT8 *base, UINTN pages) {
 /* Every table and every segment payload must lie inside the image, and
  * the tables must not overlap each other or the header. Fills in the
  * derived offsets the rest of the load needs. */
+/* This runs before any image table is followed, while the image is still
+ * untrusted input. Its returned offsets are therefore the bounds contract
+ * used by later dependency, symbol, relocation and segment reads; a valid
+ * signature does not substitute for these structural checks. */
 static int nkm_check_layout(const nkm_header_t *h, UINT64 len, UINT32 *dep_off,
                             UINT32 *seg_off, UINT32 *sym_off,
                             UINT64 *data_min) {
@@ -584,6 +588,10 @@ int nkm_load(const void *image, UINT64 len, UINT32 flags) {
   }
 
   /* 9. Signature over the 32 digest bytes, against every trusted key. */
+  /* The compiled-in key pool is the trust boundary for normal loads: the
+   * image cannot nominate its own verifier key. The explicit unsigned flag
+   * bypasses only this authenticity check; digest and layout validation
+   * still run, but callers must treat that mode as untrusted code. */
   if ((flags & NKM_FLAG_ALLOW_UNSIGNED) != 0u) {
     kputs("[NKM] WARNING: signature check skipped by request\n");
     verified = -1;

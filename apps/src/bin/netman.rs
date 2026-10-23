@@ -149,6 +149,9 @@ fn draw(w: &wm::Win, n: &sinfo::Net, note: &str) {
     w.text(290, 354, ui::DIM, if note.is_empty() { "网关 10.0.2.2" } else { note });
 }
 
+/* Network state and test requests go through the named sysinfo IPC service;
+ * the app has no direct device handle and only renders the kernel's snapshot.
+ * A missing service is a startup error rather than a fabricated live state. */
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] netman up\n");
@@ -174,6 +177,9 @@ pub extern "C" fn _start() -> ! {
 
     draw(&win, &n, note);
 
+    /* Test buttons enqueue work, then later snapshots reveal its completion.
+     * Periodic refresh keeps counters and asynchronous results current without
+     * blocking the window's event loop on a network operation. */
     let mut idle = 0u32;
     loop {
         while let Some(ev) = win.next_event() {

@@ -207,6 +207,9 @@ static void ack(const ipc_msg_t *m, UINT32 win, INT32 status) {
   }
 }
 
+/* Focus is stored as a window-array index (the public id is only for events).
+ * A transition sends focus events to eligible owners and updates the
+ * scheduler's foreground weight; -1 selects the shell and clears that weight. */
 static void focus_set(int idx) {
   nwm_ev_focus_t ev;
   int           old = g_focus;
@@ -956,6 +959,10 @@ static UINT8 title_button(const nwm_window_t *w, INT32 x, INT32 y) {
   return 0;
 }
 
+/* Hardware mouse coordinates remain absolute for hit testing and shell
+ * dispatch; deliver_mouse translates them into the selected client's space.
+ * Press capture keeps release paired with its original window, while keys
+ * follow focus rather than whichever window is merely under the pointer. */
 static void route(const nd_event_t *ev) {
   int idx;
 

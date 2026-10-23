@@ -127,6 +127,13 @@ int net_send_frame(const UINT8 *frame, UINT32 len) {
   return 0;
 }
 
+/*
+ * Device selection is intentionally centralized: protocol code always sends
+ * through the first registered UP device rather than choosing a NIC itself.
+ * The driver callback owns hardware submission; this layer accounts only
+ * successful submissions and reports a failed callback as a TX error.
+ */
+
 /* ---- ARP -------------------------------------------------------------- */
 
 typedef struct {
@@ -277,6 +284,13 @@ int net_send_ip(UINT32 dst, UINT8 proto, const UINT8 *payload, UINT32 len) {
   }
   return net_send_frame(f, ETH_HDR + total);
 }
+
+/*
+ * IPv4 output does not queue a packet while neighbor resolution is pending.
+ * A cache miss emits ARP and returns a distinct retry result, so the caller
+ * must decide whether and when to submit the original payload again.
+ * Fragmentation is also absent: outbound payloads are bounded before framing.
+ */
 
 void net_ip_input(const UINT8 *p, UINT32 len) {
   UINT32 ihl;
@@ -478,6 +492,12 @@ static void net_eth_input(const UINT8 *f, UINT32 len) {
   }
 }
 
+/*
+ * The network tick drains at most eight frames from the driver's poll
+ * callback, then advances protocol timers once. This bounds receive work per
+ * scheduler tick; a still-nonempty driver queue is left for the next tick.
+ * Ethernet dispatch only hands payloads upward after the minimum header.
+ */
 void net_tick(void) {
   UINT32 i;
 
