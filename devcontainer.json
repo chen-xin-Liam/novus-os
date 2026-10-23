@@ -1,0 +1,24 @@
+{
+  "name": "Novus OS M2 Build Env",
+  "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+  "features": {
+    "gcc": {},
+    "cmake": {},
+    "docker-in-docker": {}
+  },
+  "postCreateCommand": "\
+    apt update && apt install -y build-essential gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 binutils-mingw-w64-x86-64 mingw-w64 xorriso mtools grub-pc-bin qemu-system-x86 ovmf bison flex libelf-dev && \
+    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y && \
+    source $HOME/.cargo/env && \
+    rustup target add x86_64-pc-windows-msvc && \
+    rustup target add x86_64-unknown-none \
+  ",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-vscode.cpptools",
+        "rust-lang.rust-analyzer"
+      ]
+    }
+  }
+}
