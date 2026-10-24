@@ -19,6 +19,7 @@
 #include "nd.h"
 #include "nd_internal.h"
 #include "nd_font_cjk.h"
+#include "nd_lang.h"
 
 #define ND_ALPHA_CHANNEL 0xFF000000u
 
@@ -562,6 +563,7 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
   INT32       cx = x;
   UINT32      cell;
 
+  text = nd_lang_tr(text);
   if (text == 0 || s->px == 0) {
     return;
   }

@@ -13,6 +13,7 @@ pub const OP_STEP: u64 = 3;
 pub const OP_ABORT: u64 = 4;
 pub const OP_STAT: u64 = 5;
 pub const OP_RESET: u64 = 6;
+pub const OP_LANG: u64 = 7;
 
 pub const PHASE_IDLE: u8 = 0;
 pub const PHASE_TABLE: u8 = 1;
@@ -29,6 +30,10 @@ pub const E_SMALL: u8 = 4;
 pub const E_FOREIGN: u8 = 5;
 pub const E_BUSY: u8 = 6;
 pub const E_ARG: u8 = 7;
+pub const E_BOOT_MEDIUM: u8 = 8;
+
+/// Block device flags, as reported by the kernel.
+pub const FLAG_REMOVABLE: u8 = 0x04;
 
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -103,8 +108,17 @@ pub fn disk(index: u8) -> Option<Disk> {
     if rc == 0 { Some(d) } else { None }
 }
 
-pub fn begin(index: u8) -> bool {
-    sys::call(19, OP_BEGIN, index as u64, 0, 0) == 0
+/// `fs`: INSTALL_FS_NOVUS (0), NTFS (1), ext4 (2). Values other than
+/// NovusFS are reserved and refused by the kernel until their drivers
+/// exist; the installer never sends them today.
+pub fn begin(index: u8, fs: u8) -> bool {
+    sys::call(19, OP_BEGIN, index as u64, fs as u64, 0) == 0
+}
+
+/// Remember the installer language so the new system partition can be
+/// given /language.cfg during the verification phase.
+pub fn set_language(lang: u32) -> bool {
+    sys::call(19, OP_LANG, lang as u64, 0, 0) == 0
 }
 
 /// One bounded step. Returns (phase, progress).
@@ -139,6 +153,7 @@ pub fn reason_text(reason: u8) -> &'static str {
         E_SMALL => "容量太小（至少 64 MiB）",
         E_FOREIGN => "已有分区表，可能属于其他系统",
         E_BUSY => "正在使用",
+        E_BOOT_MEDIUM => "当前正在从这块盘启动",
         _ => "不可用",
     }
 }
@@ -151,6 +166,7 @@ pub fn error_text(err: u8) -> &'static str {
         3 => "无法挂载新的系统分区",
         4 => "完整性校验失败",
         5 => "内存不足",
+        7 => "文件系统暂不受支持",
         _ => "安装失败",
     }
 }

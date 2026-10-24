@@ -1,5 +1,53 @@
 # Changes
 
+## M11 阶段 1：会话、双语与安装器
+
+- live 介质启动直接进入 `live` 会话，不再要求用户名/密码；只有安装到可写
+  NovusFS 后才进行首次账户创建。安装模式只启动 `setup`。
+- 新增中英双语：`tools/langgen/strings*.toml` 生成
+  `graphics/nd_lang_dict.c` 与 `apps/src/lang_dict.rs`；`nd_text` /
+  `nd_text_width` 在渲染层翻译，`ui::width` 用同一张表测量。
+- 新增 `SYSINFO_REQ_LANG (0x030F)` 与 `kernel/lang.c`：切换立即生效，
+  已安装系统持久化到 `/language.cfg`，安装器把选择写入新系统盘。
+- 安装器改为七页：语言、协议、磁盘、方案、确认、进度、完成/失败；新增 EULA、
+  文件系统选择（NovusFS 可用，NTFS/ext4 标注"规划中"并由内核拒绝）。
+- 新增 `kernel/usb.c`：xHCI 控制器（命令/事件环、端口复位、Enable Slot、
+  Address Device、描述符、SET_CONFIGURATION、Configure Endpoint）与 BOT
+  （CBW/CSW、READ CAPACITY、READ10/WRITE10），磁盘注册为 `usb00`。
+- `kernel/pci.c` 支持 64 位 BAR：按 BAR 对读取基址与长度，新增
+  `pci_bar_assign()`；固件把 xHCI 的 BAR0 放在 4 GiB 以上时，驱动把它搬进
+  32 位 PCI 空洞并读回能力寄存器确认。
+- 引导阶段从引导卷的设备路径解析 USB 端口并发布到共享内存；内核据此给
+  正在启动的盘打 `BLKDEV_FLAG_BOOT_ONLY`，向导拒绝它作为目标。
+- 新增 `docs/多语言、会话与 M11 输入输出.md`，记录已完成与未完成部分。
+- 多显示器 / EDID / 镜像尚未实现，仍为单输出 GOP 路径。
+
+## M11 阶段 1 续：多输出显示与窗口重绘
+
+- `graphics/nd_hal.c` 枚举固件提供的全部 GOP 输出（上限 4 个），读取 EDID
+  首选时序与数字/模拟链路，控制器支持时切到首选模式；第一个输出作主屏，
+  其余输出镜像同一画面（`nd_mirror_rect()`，字节序不同时逐像素交换红蓝）。
+- `nd_outputs()` 按"每个帧缓冲一个条目"报告，固件里指向同一显存的第二个
+  头衔不再被当成一块显示器；设置 → 系统新增"显示输出"卡片。
+- `kernel/sysinfo.c` 新增 `SYSINFO_REQ_DISPLAY (0x0318)` /
+  `SYSINFO_RSP_DISPLAY (0x0319)`，客户端 `sinfo::display()`。
+- 修复窗口重绘缺陷：CLEAR/SHAPE/TEXT 不再逐条触发重绘，改由帧尾 INVALIDATE
+  一次性绘制——此前一帧 50 余条消息会让半帧状态闪现（关窗后下方窗口内容
+  只剩一半）。
+- `nd_selftest` 增加 3 项镜像字节序往返检查（37 项全过）。
+
+## 验证
+
+- 标准安装（AHCI 目标）端到端通过；英文安装通过；安装后磁盘启动读取
+  `[LANG] loaded: en` 并进入首次账户设置；live 启动出现
+  `[SESSION] live session: no account required`。
+- USB：`[USB] BAR0 moved to 0x00000000F0000000`、`disk usb00 capacity
+  0x0000000000100000 sectors`，安装到 U 盘 `begin on usb00` →
+  `partition table written` → `ESP written` → `system image written` →
+  `verify root ok` → `install complete`；从该 U 盘启动得到
+  `[BOOT] live medium is on USB` 与 `is the boot medium`，Merkle 校验 PASS。
+- 未创建 git commit。
+
 ## M10 UI 统一与图形安装向导
 
 - 新增 Novus Fluent 令牌单一来源 `tools/themegen/theme.toml`，生成

@@ -27,4 +27,8 @@ int session_handle(const session_req_t *req, UINT64 caller_pid);
 int session_logged_in(void);
 int session_power_allowed(UINT64 caller_pid);
 
+/* 1 when this boot runs from a live medium: there is no account to ask
+ * for and the desktop starts already authenticated. */
+int session_live(void);
+
 #endif

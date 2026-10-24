@@ -429,6 +429,8 @@ static void paint(nd_rect_t clip) {
     nd_blit(scr, clip.x, clip.y, dst, clip);
     nd_surface_reset_clip(scr);
   }
+  /* A second display shows the same picture: copy what was just drawn. */
+  nd_mirror_rect(clip);
 }
 
 /* ---- protocol --------------------------------------------------------- */
@@ -722,7 +724,9 @@ static void req_clear(const ipc_msg_t *m) {
   w->draw_n = 0;
   w->shape_n = 0;
   w->text_n = 0;
-  damage(client_rect(w));
+  /* No damage here: the list is empty until the client finishes the frame,
+   * and repainting now would show a blank window. INVALIDATE is the end of
+   * a frame and does the damage. */
   ack(m, w->id, NWM_OK);
 }
 
@@ -746,11 +750,8 @@ static void req_shape(const ipc_msg_t *m) {
     return;
   }
   w->shape[w->shape_n++] = s;
-  {
-    nd_rect_t c = client_rect(w);
-
-    damage(nd_rect_intersect(c, nd_rect(c.x + s.x, c.y + s.y, s.w, s.h)));
-  }
+  /* Stored, not painted: a frame is painted as a whole when the client
+   * says INVALIDATE, so a half-delivered list never reaches the screen. */
   ack(m, w->id, NWM_OK);
 }
 
@@ -789,17 +790,7 @@ static void req_text(const ipc_msg_t *m) {
   t.text[len] = '\0';
   t.len = (UINT8)len;
   w->text[w->text_n++] = t;
-  {
-    nd_rect_t c = client_rect(w);
-    /* Width from the font, not from the byte count: a Chinese run is three
-     * bytes per glyph and would otherwise damage three times the area. */
-    UINT32 tw = nd_text_width(t.text, (t.scale != 0u) ? t.scale : 1u);
-
-    damage(nd_rect_intersect(c, nd_rect(c.x + t.x, c.y + t.y,
-                                        (INT32)tw + 1,
-                                        (INT32)nd_text_height(t.text,
-                                                              t.scale))));
-  }
+  /* Stored, not painted: see req_shape. */
   ack(m, w->id, NWM_OK);
 }
 

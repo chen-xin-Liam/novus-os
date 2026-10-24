@@ -18,6 +18,7 @@
 #include "gpt.h"
 #include "mm.h"
 #include "shared_mem.h"
+#include "nd_lang.h"
 #include "novusfs.h"
 
 #if CONFIG_NOVUS_INSTALLER
@@ -39,6 +40,8 @@ static UINT64    g_sys_sectors;
 
 static UINT8  g_active;
 static UINT8  g_table_written;
+static UINT8  g_lang;
+static UINT8  g_lang_set;
 static UINT64 g_owner_pid;
 static UINT64 g_off_esp;
 static UINT64 g_off_sys;
@@ -116,8 +119,11 @@ static UINT8 disk_reason(blkdev_t *dev) {
   if ((dev->flags & BLKDEV_FLAG_READONLY) != 0u) {
     return INSTALL_E_READONLY;
   }
-  if ((dev->flags & BLKDEV_FLAG_REMOVABLE) != 0u) {
-    return INSTALL_E_REMOVABLE;
+  /* A removable medium is a legitimate target: a USB stick the user
+   * wants Novus on. The one medium that is not a target is the one the
+   * system was booted from. */
+  if ((dev->flags & BLKDEV_FLAG_BOOT_ONLY) != 0u) {
+    return INSTALL_E_BOOT_MEDIUM;
   }
   if (dev->sector_count < INSTALL_MIN_SECTORS) {
     return INSTALL_E_SMALL;
@@ -190,7 +196,14 @@ static void build_specs(gpt_part_spec_t specs[2]) {
   }
 }
 
-int install_begin(UINT8 index) {
+void install_set_language(UINT8 lang) {
+  if (lang <= ND_LANG_EN) {
+    g_lang = lang;
+    g_lang_set = 1u;
+  }
+}
+
+int install_begin(UINT8 index, UINT8 fs) {
   blkdev_t *dev;
   UINT64    need;
 
@@ -198,6 +211,16 @@ int install_begin(UINT8 index) {
     return -1;
   }
   if (!install_available()) {
+    return -1;
+  }
+  /* The ABI accepts the choice so the wizard can offer the full matrix;
+   * the kernel only knows how to write NovusFS today. Refusing before any
+   * write is the honest answer. */
+  if (fs != INSTALL_FS_NOVUS) {
+    memset(&g_prog, 0, sizeof(g_prog));
+    g_prog.phase = INSTALL_PHASE_FAIL;
+    g_prog.err = INSTALL_ERR_FS;
+    kputs("[INST] file system not supported\n");
     return -1;
   }
   dev = blkdev_get_at((UINTN)index);
@@ -261,6 +284,31 @@ static int copy_step(const UINT8 *src, UINT64 bytes, UINT64 lba, UINT64 *off) {
   return 0;
 }
 
+/* The installer's language becomes the new system's language. Written
+ * before the tree is rebuilt, so the root hash covers the file. */
+static int write_language(novusfs_fs_t *fs) {
+  typedef struct {
+    UINT32 magic;
+    UINT32 lang;
+  } lang_cfg_t;
+  lang_cfg_t cfg;
+  UINT32     ino;
+
+  if (!g_lang_set) {
+    return 0;
+  }
+  ino = novusfs_lookup_path(fs, fs->sb.root_inode, "/language.cfg");
+  if (ino == 0) {
+    ino = novusfs_creat(fs, fs->sb.root_inode, "language.cfg");
+  }
+  if (ino == 0) {
+    return -1;
+  }
+  cfg.magic = 0x474E4C56u;
+  cfg.lang = g_lang;
+  return (novusfs_write(fs, ino, 0, &cfg, sizeof(cfg)) == (INT64)sizeof(cfg)) ? 0 : -1;
+}
+
 static int verify_system(void) {
   static novusfs_fs_t fs;
   blkdev_t *part;
@@ -275,10 +323,16 @@ static int verify_system(void) {
     (void)blkdev_release(part);
     return -1;
   }
+  if (write_language(&fs) != 0) {
+    novusfs_unmount(&fs);
+    (void)blkdev_release(part);
+    return -1;
+  }
   rc = novusfs_merkle_verify(&fs, root);
-  if (rc == NOVUSFS_MERKLE_NOT_BUILT) {
+  if (rc == NOVUSFS_MERKLE_NOT_BUILT || g_lang_set) {
     /* An image built without a root is still installable; build it now so
-     * the first boot has something to verify against. */
+     * the first boot has something to verify against. A language file
+     * changes the tree, so it is rebuilt either way. */
     rc = (novusfs_merkle_build(&fs, root) == 0) ? NOVUSFS_MERKLE_OK
                                                 : NOVUSFS_MERKLE_UNREADABLE;
   }
@@ -423,7 +477,8 @@ int  install_disk(UINT8 index, install_disk_t *out) {
   (void)out;
   return -1;
 }
-int install_begin(UINT8 index) { (void)index; return -1; }
+int install_begin(UINT8 index, UINT8 fs) { (void)index; (void)fs; return -1; }
+void install_set_language(UINT8 lang) { (void)lang; }
 int install_step(install_progress_t *out) { (void)out; return -1; }
 int install_progress(install_progress_t *out) { (void)out; return -1; }
 int install_abort(void) { return -1; }

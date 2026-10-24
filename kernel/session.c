@@ -25,6 +25,7 @@ typedef struct __attribute__((packed)) {
 static session_record_t g_record;
 static UINTN g_record_ready;
 static UINTN g_logged_in;
+static UINTN g_live;
 static UINTN g_failures;
 static UINT64 g_lock_until;
 static UINT64 g_salt_counter;
@@ -131,14 +132,30 @@ static int load_record(void) {
 void session_init(void) {
   g_record_ready = 0;
   g_logged_in = 0;
+  g_live = 0;
   g_failures = 0;
   g_lock_until = 0;
+
+  /* Live medium: the root is an image in reserved pages, so an account
+   * could not be stored across boots even if one were asked for. Start
+   * the desktop session directly; the first account is created only
+   * after an install onto a persistent NovusFS partition. */
+  if (!novusfs_root_persistent()) {
+    g_live = 1;
+    g_logged_in = 1;
+    kputs("[SESSION] live session: no account required\n");
+    desktop_start();
+    return;
+  }
+
   if (load_record() < 0) kputs("[SESSION] account record unavailable or invalid\n");
   else kputs(g_record_ready ? "[SESSION] account loaded; login required\n"
                             : "[SESSION] first boot; account setup required\n");
 }
 
 int session_logged_in(void) { return g_logged_in != 0; }
+
+int session_live(void) { return g_live != 0; }
 
 static int write_record(void) {
   novusfs_fs_t *fs = novusfs_root();

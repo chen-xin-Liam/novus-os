@@ -1,0 +1,94 @@
+# M11 installer additions: language selection, licence, file system.
+# Same format as strings.toml; langgen merges every strings*.toml file.
+
+[[string]]
+zh = "选择安装语言"
+en = "Choose the installer language"
+
+[[string]]
+zh = "中文"
+en = "Chinese"
+
+[[string]]
+zh = "协议"
+en = "Licence"
+
+[[string]]
+zh = "用户协议"
+en = "Licence agreement"
+
+[[string]]
+zh = "我已阅读并同意"
+en = "I have read and agree"
+
+[[string]]
+zh = "必须同意协议才能继续"
+en = "You must accept the agreement to continue"
+
+[[string]]
+zh = "同意并继续"
+en = "Accept and continue"
+
+[[string]]
+zh = "文件系统"
+en = "File system"
+
+[[string]]
+zh = "规划中"
+en = "Planned"
+
+[[string]]
+zh = "需要后续驱动里程碑"
+en = "Needs a later driver milestone"
+
+[[string]]
+zh = "语言"
+en = "Language"
+
+[[string]]
+zh = "安装语言"
+en = "Installer language"
+
+[[string]]
+zh = "本协议依据 GPLv2 分发 Novus OS，不提供任何担保。"
+en = "Novus OS is distributed under GPLv2 with no warranty of any kind."
+
+[[string]]
+zh = "安装会重建分区表，目标磁盘上的全部数据将被永久清除。"
+en = "Installation rebuilds the partition table and permanently erases all data on the target disk."
+
+[[string]]
+zh = "请确认已备份需要的文件，并已连接稳定电源。"
+en = "Make sure your files are backed up and the machine is on stable power."
+
+[[string]]
+zh = "安装程序会写入引导分区与系统分区，并重建完整性树。"
+en = "The installer writes the boot and system partitions and rebuilds the integrity tree."
+
+[[string]]
+zh = "安装完成后需要重启，并从新磁盘启动。"
+en = "When it finishes you must reboot from the new disk."
+
+[[string]]
+zh = "继续即表示你理解并接受以上条款。"
+en = "Continuing means you understand and accept these terms."
+
+[[string]]
+zh = "选择语言后，安装界面会立即切换。"
+en = "The installer switches language immediately."
+
+[[string]]
+zh = "勾选后才能继续"
+en = "Tick the box to continue"
+
+[[string]]
+zh = "安装介质与磁盘"
+en = "Installation medium and disks"
+
+[[string]]
+zh = "已切换到中文"
+en = "Switched to Chinese"
+
+[[string]]
+zh = "系统盘文件系统"
+en = "System file system"

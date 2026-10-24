@@ -94,6 +94,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/blkdev.c \
          kernel/ahci.c \
     kernel/nvme.c \
+    kernel/usb.c \
        kernel/gpt.c \
        kernel/nksym.c \
        graphics/nd_font.c \
@@ -105,10 +106,13 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_input.c \
        graphics/nvgui.c \
        graphics/nd_theme.c \
+       graphics/nd_lang.c \
+       graphics/nd_lang_dict.c \
        graphics/nd_demo.c \
        kernel/ipc.c \
        kernel/apps.c \
        kernel/install.c \
+       kernel/lang.c \
        kernel/sysinfo.c \
        kernel/rtc.c \
        kernel/pci.c \

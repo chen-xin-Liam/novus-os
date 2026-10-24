@@ -13,10 +13,10 @@
 #![no_std]
 #![no_main]
 
-use novus_apps::{ipc, sinfo, sys, ui, wm};
+use novus_apps::{ipc, lang, sinfo, sys, ui, wm};
 
 const CW: i16 = 720;
-const CH: i16 = 470;
+const CH: i16 = 560;
 
 const NAV_W: i16 = 168;
 const CONTENT_X: i16 = 188;
@@ -67,6 +67,7 @@ struct State {
     accent: u32,
     wallpaper: u32,
     mode: u32,
+    displays: sinfo::Display,
     st: sinfo::Stats,
     tasks: [sinfo::TaskRec; MAX_ROWS],
     n_tasks: usize,
@@ -139,49 +140,74 @@ fn nav(w: &mut wm::Win, s: &State) {
 }
 
 fn page_system(w: &mut wm::Win, s: &State) {
-    card(w, CONTENT_X, 80, CONTENT_W, 170, "设备");
+    card(w, CONTENT_X, 80, CONTENT_W, 150, "设备");
     kv(w, CONTENT_X + 14, 116, "名称", "Novus 虚拟机");
     kv(w, CONTENT_X + 14, 142, "架构", "x86_64 · 64 位");
     kv(w, CONTENT_X + 14, 168, "显示", "1280 × 800 · 32 位色");
     kv(w, CONTENT_X + 14, 194, "输入", "PS/2 键盘与鼠标");
-
-    card(w, CONTENT_X, 244, CONTENT_W, 176, "资源");
-
-    let mut b = [0u8; 16];
-    let secs = (s.st.uptime / 100) as u32;
-    let mut line = ui::Buf::new();
-
-    line.num(secs / 60).s(" 分 ").num(secs % 60).s(" 秒");
-    kv(w, CONTENT_X + 14, 280, "运行时间", line.str());
-
-    /* Memory: used = total - free, as a bar plus exact numbers. */
-    let total_mb = (s.st.total_kb / 1024) as u32;
-    let free_mb = (s.st.free_kb / 1024) as u32;
-    let used_mb = total_mb.saturating_sub(free_mb);
-    let pct = if total_mb == 0 { 0 } else { (used_mb * 100 / total_mb) as i16 };
-    w.text(CONTENT_X + 14, 306, ui::dim(), "内存");
-    meter(w, CONTENT_X + 110, 306, 240, pct, s.accent);
-    let mut mem = ui::Buf::new();
-
-    mem.num(used_mb).s(" / ").num(total_mb).s(" MB");
-    w.text(CONTENT_X + 360, 306, ui::text(), mem.str());
-
-    let t = ui::fmt_u32(s.st.tasks, &mut b);
-    kv(w, CONTENT_X + 14, 330, "任务数", t);
-    let t = ui::fmt_u32(s.st.windows, &mut b);
-    kv(w, CONTENT_X + 14, 352, "窗口数", t);
-
-    let mut ipc_line = ui::Buf::new();
-    ipc_line.num(s.st.ipc_sent).s(" 发出 / ").num(s.st.ipc_drop).s(" 丢弃");
-    kv(w, CONTENT_X + 14, 374, "IPC", ipc_line.str());
-
-    kv(w, CONTENT_X + 14, 398, "强调色", PRESET_NAMES[preset_index(s.accent)]);
 
     /* Install entry: only meaningful on a live medium, where the boot
      * stage staged the payloads. The app itself refuses with a note when
      * that is not the case, so the button can stay. */
     button(w, CONTENT_X + CONTENT_W - 148, 196, 132, 26, "打开安装程序",
            s.accent, false, false);
+
+    /* Display outputs: one row per monitor the firmware offered. The
+     * preferred timing comes from the display's EDID; the link type says
+     * whether it hangs off DP/eDP/HDMI or VGA. */
+    card(w, CONTENT_X, 242, CONTENT_W, 136, "显示输出");
+    if s.displays.count == 0 {
+        w.text(CONTENT_X + 14, 286, ui::dim(), "没有可用的图形输出");
+    } else {
+        let mut i = 0u32;
+
+        while i < s.displays.count && i < 4 {
+            let o = s.displays.out[i as usize];
+            let y = 286 + i as i16 * 24;
+            let mut b = ui::Buf::new();
+
+            b.num(i + 1).s(" · ").num(o.width).s(" × ").num(o.height);
+            b.s(if o.primary() { " · 主屏" } else { " · 镜像" });
+            b.s(if o.digital() { " · 数字" } else { " · 模拟" });
+            if o.pref_width != 0 &&
+               (o.pref_width != o.width || o.pref_height != o.height) {
+                b.s("（首选 ").num(o.pref_width).s(" × ")
+                 .num(o.pref_height).s("）");
+            }
+            w.text(CONTENT_X + 14, y, ui::dim(), b.str());
+            i += 1;
+        }
+    }
+
+    card(w, CONTENT_X, 390, CONTENT_W, 152, "资源");
+
+    let secs = (s.st.uptime / 100) as u32;
+    let mut line = ui::Buf::new();
+
+    line.num(secs / 60).s(" 分 ").num(secs % 60).s(" 秒");
+    kv(w, CONTENT_X + 14, 424, "运行时间", line.str());
+
+    /* Memory: used = total - free, as a bar plus exact numbers. */
+    let total_mb = (s.st.total_kb / 1024) as u32;
+    let free_mb = (s.st.free_kb / 1024) as u32;
+    let used_mb = total_mb.saturating_sub(free_mb);
+    let pct = if total_mb == 0 { 0 } else { (used_mb * 100 / total_mb) as i16 };
+    w.text(CONTENT_X + 14, 450, ui::dim(), "内存");
+    meter(w, CONTENT_X + 110, 450, 240, pct, s.accent);
+    let mut mem = ui::Buf::new();
+
+    mem.num(used_mb).s(" / ").num(total_mb).s(" MB");
+    w.text(CONTENT_X + 360, 450, ui::text(), mem.str());
+
+    let mut counts = ui::Buf::new();
+    counts.num(s.st.tasks).s(" 个任务 · ").num(s.st.windows).s(" 个窗口");
+    kv(w, CONTENT_X + 14, 474, "当前", counts.str());
+
+    let mut ipc_line = ui::Buf::new();
+    ipc_line.num(s.st.ipc_sent).s(" 发出 / ").num(s.st.ipc_drop).s(" 丢弃");
+    kv(w, CONTENT_X + 14, 498, "IPC", ipc_line.str());
+
+    kv(w, CONTENT_X + 14, 522, "强调色", PRESET_NAMES[preset_index(s.accent)]);
 }
 
 fn preset_index(accent: u32) -> usize {
@@ -197,52 +223,72 @@ fn preset_index(accent: u32) -> usize {
 }
 
 fn page_look(w: &mut wm::Win, s: &State) {
+    /* Language first: it changes every label on this page too. */
+    card(w, CONTENT_X, 76, CONTENT_W, 64, "语言");
+    let langs = ["中文", "English"];
+    for i in 0..2usize {
+        let x = CONTENT_X + 14 + i as i16 * 150;
+        let y = 100;
+        let sel = (crate::lang::get() == 1) == (i == 1);
+        let label = langs[i];
+        let tw = ui::width(label);
+
+        if sel {
+            w.round_fill(x, y, 136, 28, 6, s.accent);
+            w.text(x + (136 - tw) / 2, y + 7, ui::on_accent(), label);
+        } else {
+            w.round_fill(x, y, 136, 28, 6, ui::card_bg());
+            w.round_frame(x, y, 136, 28, 6, ui::line());
+            w.text(x + (136 - tw) / 2, y + 7, ui::text(), label);
+        }
+    }
+
     /* Theme mode: the state comes from the kernel token layer, so this
      * row and the shell's quick settings always agree. */
-    card(w, CONTENT_X, 76, CONTENT_W, 76, "主题");
+    card(w, CONTENT_X, 150, CONTENT_W, 70, "主题");
 
     let modes = ["浅色", "深色", "跟随时间"];
     for i in 0..3usize {
         let x = CONTENT_X + 14 + i as i16 * 154;
-        let y = 108;
+        let y = 176;
         let sel = s.mode == i as u32;
         let label = modes[i];
         let tw = ui::width(label);
 
         if sel {
-            w.round_fill(x, y, 140, 32, 6, s.accent);
-            w.text(x + (140 - tw) / 2, y + 9, ui::on_accent(), label);
+            w.round_fill(x, y, 140, 30, 6, s.accent);
+            w.text(x + (140 - tw) / 2, y + 8, ui::on_accent(), label);
         } else {
-            w.round_fill(x, y, 140, 32, 6, ui::card_bg());
-            w.round_frame(x, y, 140, 32, 6, ui::line());
-            w.text(x + (140 - tw) / 2, y + 9, ui::text(), label);
+            w.round_fill(x, y, 140, 30, 6, ui::card_bg());
+            w.round_frame(x, y, 140, 30, 6, ui::line());
+            w.text(x + (140 - tw) / 2, y + 8, ui::text(), label);
         }
     }
 
-    card(w, CONTENT_X, 162, CONTENT_W, 116, "颜色");
+    card(w, CONTENT_X, 230, CONTENT_W, 110, "颜色");
     for (i, c) in PRESETS.iter().enumerate() {
         let x = CONTENT_X + 14 + (i % 4) as i16 * 62;
-        let y = 194 + (i / 4) as i16 * 40;
+        let y = 258 + (i / 4) as i16 * 38;
 
-        w.round_fill(x, y, 44, 28, 5, *c);
+        w.round_fill(x, y, 44, 26, 5, *c);
         if *c == s.accent {
-            w.round_frame(x - 2, y - 2, 48, 32, 6, ui::text());
+            w.round_frame(x - 2, y - 2, 48, 30, 6, ui::text());
         }
     }
     let idx = preset_index(s.accent);
-    w.text(CONTENT_X + 14 + 4 * 62 + 6, 200, ui::text(), PRESET_NAMES[idx]);
-    w.text(CONTENT_X + 14, 256, ui::dim(), "强调色用于按钮、选中条与焦点环");
+    w.text(CONTENT_X + 14 + 4 * 62 + 6, 264, ui::text(), PRESET_NAMES[idx]);
+    w.text(CONTENT_X + 14, 320, ui::dim(), "强调色用于按钮、选中条与焦点环");
 
-    card(w, CONTENT_X, 290, CONTENT_W, 132, "桌面背景");
+    card(w, CONTENT_X, 350, CONTENT_W, 86, "桌面背景");
     for (i, p) in PAPERS.iter().enumerate() {
         let x = CONTENT_X + 14 + i as i16 * 164;
-        let y = 322;
+        let y = 376;
 
-        w.fill(x, y, 150, 44, p.0);
-        w.fill(x, y + 22, 150, 22, p.1);
-        w.round_frame(x, y, 150, 44, 6,
+        w.fill(x, y, 150, 34, p.0);
+        w.fill(x, y + 17, 150, 17, p.1);
+        w.round_frame(x, y, 150, 34, 6,
                       if i as u32 == s.wallpaper { s.accent } else { ui::line() });
-        w.text(x + 6, y + 50, ui::dim(), PAPER_NAMES[i]);
+        w.text(x + 6, y + 42, ui::dim(), PAPER_NAMES[i]);
     }
 }
 
@@ -414,6 +460,16 @@ pub extern "C" fn _start() -> ! {
         accent: ui::accent(),
         wallpaper: 0,
         mode: sinfo::MODE_LIGHT,
+        displays: sinfo::Display {
+            count: 0,
+            out: [sinfo::DisplayOut {
+                width: 0,
+                height: 0,
+                pref_width: 0,
+                pref_height: 0,
+                flags: 0,
+            }; 4],
+        },
         st: sinfo::Stats {
             uptime: 0,
             free_kb: 0,
@@ -445,6 +501,7 @@ pub extern "C" fn _start() -> ! {
         s.wallpaper = t.wallpaper;
         s.mode = t.mode;
     }
+    s.displays = sinfo::display(sys_port).unwrap_or(s.displays);
     load_stats(sys_port, &mut s.st);
     s.n_tasks = load_tasks(sys_port, &mut s.tasks);
     draw(&mut win, &s);
@@ -481,6 +538,12 @@ pub extern "C" fn _start() -> ! {
                 s.accent = t.accent;
                 s.wallpaper = t.wallpaper;
                 s.mode = t.mode;
+            }
+            /* Outputs only change when the firmware finds another display,
+             * but a hot-plugged monitor is exactly when the page must not
+             * show stale data. */
+            if let Some(d) = sinfo::display(sys_port) {
+                s.displays = d;
             }
             draw(&mut win, &s);
         }
@@ -535,13 +598,28 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             }
         }
         Page::Look => {
+            /* Language buttons. */
+            for i in 0..2usize {
+                let px = CONTENT_X + 14 + i as i16 * 150;
+                let py = 100;
+
+                if x >= px as i32 && x < (px + 136) as i32
+                    && y >= py as i32 && y < (py + 28) as i32
+                {
+                    if let Some(t) = sinfo::set_lang(sys_port, i as u32) {
+                        lang::set(t.lang);
+                        s.note = if i == 0 { "已切换到中文" } else { "Switched to English" };
+                    }
+                    return;
+                }
+            }
             /* Theme mode buttons. */
             for i in 0..3usize {
                 let px = CONTENT_X + 14 + i as i16 * 154;
-                let py = 108;
+                let py = 176;
 
                 if x >= px as i32 && x < (px + 140) as i32
-                    && y >= py as i32 && y < (py + 32) as i32
+                    && y >= py as i32 && y < (py + 30) as i32
                 {
                     if let Some(t) = sinfo::set_theme(sys_port, sinfo::THEME_MODE, i as u32) {
                         s.mode = t.mode;
@@ -560,10 +638,10 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             /* Accent swatches. */
             for (i, c) in PRESETS.iter().enumerate() {
                 let px = CONTENT_X + 14 + (i % 4) as i16 * 62;
-                let py = 194 + (i / 4) as i16 * 40;
+                let py = 258 + (i / 4) as i16 * 38;
 
                 if x >= (px - 2) as i32 && x < (px + 46) as i32
-                    && y >= (py - 2) as i32 && y < (py + 30) as i32
+                    && y >= (py - 2) as i32 && y < (py + 28) as i32
                 {
                     if let Some(t) = sinfo::set_theme(sys_port, sinfo::THEME_ACCENT, *c) {
                         s.accent = t.accent;
@@ -576,10 +654,10 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             /* Wallpaper previews. */
             for i in 0..PAPERS.len() {
                 let px = CONTENT_X + 14 + i as i16 * 164;
-                let py = 322;
+                let py = 376;
 
                 if x >= px as i32 && x < (px + 150) as i32
-                    && y >= py as i32 && y < (py + 44) as i32
+                    && y >= py as i32 && y < (py + 34) as i32
                 {
                     if let Some(t) = sinfo::set_theme(sys_port, sinfo::THEME_WALLPAPER, i as u32) {
                         s.wallpaper = t.wallpaper;

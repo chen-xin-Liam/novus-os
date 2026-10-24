@@ -12,6 +12,7 @@
 
 use core::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 
+use crate::lang;
 use crate::sinfo;
 use crate::theme::{self, Palette};
 use crate::wm;
@@ -72,25 +73,37 @@ fn apply(t: &sinfo::Theme) {
     VERSION.store(t.version, Ordering::Relaxed);
 }
 
-/// Read the theme once, before the first frame.
+/// One bilingual label: `l("磁盘", "Disk")`.
+pub fn l(zh: &'static str, en: &'static str) -> &'static str {
+    lang::l(zh, en)
+}
+
+/// Read theme and language once, before the first frame.
 pub fn init(sys_port: u64) {
     if let Some(t) = sinfo::theme(sys_port) {
         apply(&t);
     }
+    lang::init(sys_port);
 }
 
-/// Cheap poll (about once a second at 60 yields): returns true when the
-/// version changed and the window must be redrawn.
+/// Cheap poll (about once a second at 60 yields): true when either the
+/// theme or the language changed and the window must be redrawn.
 pub fn poll(sys_port: u64) -> bool {
     if POLL.fetch_add(1, Ordering::Relaxed) % 60 != 0 {
         return false;
     }
-    let Some(t) = sinfo::theme(sys_port) else { return false };
-    if t.version == VERSION.load(Ordering::Relaxed) {
-        return false;
+    let mut changed = false;
+
+    if let Some(t) = sinfo::theme(sys_port) {
+        if t.version != VERSION.load(Ordering::Relaxed) {
+            apply(&t);
+            changed = true;
+        }
     }
-    apply(&t);
-    true
+    if lang::poll(sys_port) {
+        changed = true;
+    }
+    changed
 }
 
 /// Settings applies a swatch locally; the reply carries the full state so
@@ -116,6 +129,7 @@ pub fn char_adv(c: char) -> i16 {
 /// Painted width of `s`, matching nd_text_width(): the last cell has no
 /// inter-character gap.
 pub fn width(s: &str) -> i16 {
+    let s = lang::tr(s);
     let mut w = 0;
     let mut n = 0;
 
@@ -128,6 +142,7 @@ pub fn width(s: &str) -> i16 {
 
 /// Width at text scale 2 (used by `text_big`).
 pub fn width_big(s: &str) -> i16 {
+    let s = lang::tr(s);
     let mut w = 0;
     let mut n = 0;
 
@@ -137,6 +152,23 @@ pub fn width_big(s: &str) -> i16 {
         n += 1;
     }
     if n == 0 { 0 } else { w - 1 }
+}
+
+/// Longest prefix of `s` that fits in `max_px`, cut on a codepoint edge.
+/// English labels are wider than their Chinese source, so callers that
+/// have a fixed column should clip rather than overdraw the neighbour.
+pub fn fit<'a>(s: &'a str, max_px: i16) -> &'a str {
+    let target = lang::tr(s);
+    let mut used = 0i16;
+
+    for (i, c) in target.char_indices() {
+        let a = char_adv(c);
+        if used + a > max_px {
+            return &target[..i];
+        }
+        used += a;
+    }
+    target
 }
 
 /// A fixed-width text line. The font is monospaced at 6 px per column, so

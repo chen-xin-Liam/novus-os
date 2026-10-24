@@ -29,6 +29,9 @@ TIMEOUT="${TIMEOUT:-75}"
 # which is how the dark theme and the shell are captured.
 FLOW="${FLOW:-install}"
 EXTRA="${EXTRA:-}"
+# EN=1 clicks the English button on the language page before walking the
+# wizard; the click is a relative PS/2 move from the initial centre.
+EN="${EN:-0}"
 
 if [ ! -f out/novus-live.iso ]; then
     echo "out/novus-live.iso not found. Run 'make iso' first." >&2
@@ -64,13 +67,14 @@ cleanup() {
 }
 trap cleanup EXIT
 
-python3 - "$MON" "$SHOT" "$TIMEOUT" "$FLOW" <<'PY'
+python3 - "$MON" "$SHOT" "$TIMEOUT" "$FLOW" "$EN" <<'PY'
 import os
 import socket
 import sys
 import time
 
 mon, shot, timeout, flow = sys.argv[1], sys.argv[2], float(sys.argv[3]), sys.argv[4]
+en = sys.argv[5] == "1"
 deadline = time.time() + 10
 while time.time() < deadline:
     if os.path.exists(mon):
@@ -81,7 +85,17 @@ else:
     sys.exit(1)
 
 s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-s.connect(mon)
+# QEMU creates the socket before listen() is complete; connecting in that
+# window returns ECONNREFUSED even though the monitor is about to exist.
+deadline = time.time() + 10
+while True:
+    try:
+        s.connect(mon)
+        break
+    except (FileNotFoundError, ConnectionRefusedError):
+        if time.time() > deadline:
+            raise
+        time.sleep(0.2)
 s.settimeout(1.0)
 
 
@@ -109,12 +123,22 @@ print("sent: 3 (graphical installer)")
 
 # Kernel + WM + setup window.
 time.sleep(20)
+if en:
+    cmd("mouse_move 76 26")
+    time.sleep(0.5)
+    cmd("mouse_button 1")
+    cmd("mouse_button 0")
+    time.sleep(1)
 cmd("screendump " + shot)
 
 # Walk the wizard with the keyboard, which is also the accessibility path:
-# Welcome -> Disk -> Plan -> Confirm, tick the box, start.
+# Language -> Licence (accept) -> Disk -> Plan -> Confirm -> start.
 time.sleep(1)
-cmd("sendkey ret")   # welcome -> disk
+cmd("sendkey ret")   # language -> licence
+time.sleep(1)
+cmd("sendkey spc")   # accept the licence
+time.sleep(1)
+cmd("sendkey ret")   # licence -> disk
 time.sleep(2)
 cmd("sendkey ret")   # disk -> plan
 time.sleep(2)

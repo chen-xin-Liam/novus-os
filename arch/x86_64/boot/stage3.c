@@ -72,6 +72,12 @@ static UINT64 g_live_size;
 static UINT64 g_esp_tpl_base;
 static UINT64 g_esp_tpl_size;
 
+/* Root USB port the live medium was booted from (0 = not a USB device).
+ * The kernel's USB driver marks the disk on that port as the running
+ * system, so the installer can refuse to write over it. */
+static UINT32 g_boot_usb_port;
+static UINT32 g_boot_is_usb;
+
 /* ------------------------------------------------------------------ */
 /* Allocator for filesystem buffers                                    */
 /* ------------------------------------------------------------------ */
@@ -163,6 +169,43 @@ static EFI_STATUS open_by_guid(EFI_HANDLE handle, EFI_GUID *guid,
  * half of the pair is missing. */
 static const char *g_esp_via = "none";
 
+/* The root port of a USB device path: the first messaging node of type
+ * USB carries the port on the hub it hangs off. Zero when the live medium
+ * is not USB (a CD or a hard disk). */
+static void say(const CHAR16 *s);
+static void say_line(const CHAR16 *s);
+
+/* Is the volume we booted from sitting on a USB controller?
+ *
+ * The loaded image only carries a file path node, but the volume handle
+ * knows the whole chain - the controller and the port the medium sits on.
+ * That is the address the kernel's USB driver compares against. */
+static UINT32 volume_usb_port(EFI_HANDLE volume) {
+  EFI_GUID                   dp_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+  EFI_DEVICE_PATH_PROTOCOL  *dp = NULL;
+  UINT8                     *p;
+
+  if (volume == NULL ||
+      open_by_guid(volume, &dp_guid, (VOID **)&dp) != EFI_SUCCESS ||
+      dp == NULL) {
+    return 0;
+  }
+  p = (UINT8 *)dp;
+  while (p[0] != 0x7Fu) { /* END_ENTIRE_DEVICE_PATH */
+    UINT16 len = (UINT16)p[2] | (UINT16)((UINT16)p[3] << 8);
+
+    if (len < 4u) {
+      break;
+    }
+    if (p[0] == 0x03u && p[1] == 0x05u) { /* MESSAGING / USB */
+      g_boot_is_usb = 1;
+      return (UINT32)p[4];
+    }
+    p += len;
+  }
+  return 0;
+}
+
 static int esp_open(void) {
   EFI_GUID lip_guid = EFI_LOADED_IMAGE_PROTOCOL_GUID;
   EFI_GUID sfs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
@@ -177,6 +220,7 @@ static int esp_open(void) {
       if (sfs->OpenVolume(sfs, &g_esp_root) == EFI_SUCCESS &&
           g_esp_root != NULL) {
         g_esp_via = "firmware FS on the boot device";
+        g_boot_usb_port = volume_usb_port(li->DeviceHandle);
         return 0;
       }
     }
@@ -1460,10 +1504,16 @@ void stage3_finish(void) {
   shm->live_root_size = g_live_size;
   shm->esp_img_base = g_esp_tpl_base;
   shm->esp_img_size = g_esp_tpl_size;
+  shm->boot_usb_port = g_boot_usb_port;
   shm->install_flags = (g_esp_tpl_base != 0 && g_esp_tpl_size != 0 &&
                         g_live_base != 0 && g_live_size != 0)
                            ? SHM_INSTALL_FLAG_PAYLOADS
                            : 0u;
+  if (g_boot_is_usb) {
+    shm->install_flags |= SHM_INSTALL_FLAG_BOOT_USB;
+    shm->boot_usb_port = g_boot_usb_port;
+    say_line(L"[BOOT] live medium is on USB");
+  }
 
   /* Restore the kernel heap allocator: from here on AllocatePool is
    * gone, and NovusFS must never call into it. */

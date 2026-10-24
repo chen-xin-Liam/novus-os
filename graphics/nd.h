@@ -119,6 +119,34 @@ typedef struct {
   const char *backend;   /* "GOP framebuffer" or "none" */
 } nd_display_t;
 
+/* One graphics output. The boot stage finds every GOP device the firmware
+ * offers, reads its EDID and picks the mode that matches the display's
+ * preferred timing; the kernel renders into the primary one and mirrors
+ * the picture onto the others. */
+#define ND_MAX_OUTPUTS 4u
+
+typedef struct {
+  UINT8  available;      /* 1 = usable framebuffer */
+  UINT8  bgr;            /* 1 = memory byte order B,G,R,X */
+  UINT8  digital;        /* 1 = digital link (DP/eDP/HDMI), 0 = VGA */
+  UINT8  primary;        /* 1 = the output the desktop is drawn on */
+  UINT32 width;
+  UINT32 height;
+  UINT32 pitch;
+  UINT32 pref_width;     /* EDID preferred timing, 0 when unknown */
+  UINT32 pref_height;
+  UINT64 fb_phys;
+  UINT64 fb_size;
+} nd_output_t;
+
+/* The outputs the firmware offered, primary first. */
+const nd_output_t *nd_outputs(UINT32 *count);
+
+/* Copy a rectangle of the primary output onto the other ones. Pixels are
+ * converted when the two framebuffers use a different byte order, and the
+ * copy is clipped to the smaller output. */
+void nd_mirror_rect(nd_rect_t r);
+
 /* Boot stage, before ExitBootServices: read the current GOP mode and keep
  * the numbers. Returns 1 when a usable linear framebuffer was found. */
 int nd_capture_boot(void *system_table);

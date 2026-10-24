@@ -1,0 +1,1336 @@
+# Novus OS - UI strings, Chinese source and English translation (M11).
+#
+# The Chinese text is the key: the renderer looks it up when English is
+# active, so a page never has to know about language ids. Missing entries
+# fall back to Chinese instead of showing an id or an empty label.
+#
+# Regenerate the tables with:
+#   python3 tools/langgen/langgen.py
+
+[[string]]
+zh = "已应用设置"
+en = "Settings applied"
+
+[[string]]
+zh = "已取消"
+en = "Cancelled"
+
+[[string]]
+zh = "已启用 NX 保护"
+en = "NX protection enabled"
+
+[[string]]
+zh = "已关闭 NX 保护"
+en = "NX protection disabled"
+
+[[string]]
+zh = "窗口已关闭"
+en = "Window closed"
+
+[[string]]
+zh = "Novus OS：内核 C + 用户态 Rust，Novus Fluent 桌面"
+en = "Novus OS: C kernel + Rust userland, Novus Fluent desktop"
+
+[[string]]
+zh = "创建进程"
+en = "Create process"
+
+[[string]]
+zh = "映射页面"
+en = "Map page"
+
+[[string]]
+zh = "检查 NX 保护"
+en = "Check NX protection"
+
+[[string]]
+zh = "切换 CR3"
+en = "Switch CR3"
+
+[[string]]
+zh = "退出码 0"
+en = "Exit code 0"
+
+[[string]]
+zh = "显示与控件"
+en = "Display & controls"
+
+[[string]]
+zh = "2D 渲染与控件演示"
+en = "2D rendering & widget demo"
+
+[[string]]
+zh = "内置点阵字体、裁剪与透明混合"
+en = "Built-in bitmap font, clipping, alpha blending"
+
+[[string]]
+zh = "应用"
+en = "Apply"
+
+[[string]]
+zh = "取消"
+en = "Cancel"
+
+[[string]]
+zh = "使用 NX 保护数据页"
+en = "Protect data pages with NX"
+
+[[string]]
+zh = "滑块"
+en = "Slider"
+
+[[string]]
+zh = "拖动标题栏、点击控件、Tab 切换焦点"
+en = "Drag the title bar, click controls, Tab to focus"
+
+[[string]]
+zh = "控件"
+en = "Widgets"
+
+[[string]]
+zh = "文本框"
+en = "Text box"
+
+[[string]]
+zh = "在此输入"
+en = "Type here"
+
+[[string]]
+zh = "列表"
+en = "List"
+
+[[string]]
+zh = "树"
+en = "Tree"
+
+[[string]]
+zh = "文件管理器"
+en = "Files"
+
+[[string]]
+zh = "任务管理器"
+en = "Task manager"
+
+[[string]]
+zh = "设置"
+en = "Settings"
+
+[[string]]
+zh = "网络"
+en = "Network"
+
+[[string]]
+zh = "安装系统"
+en = "Install system"
+
+[[string]]
+zh = "搜索应用、设置与文件"
+en = "Search apps, settings and files"
+
+[[string]]
+zh = "已固定"
+en = "Pinned"
+
+[[string]]
+zh = "控件演示"
+en = "Widget demo"
+
+[[string]]
+zh = "推荐"
+en = "Recommended"
+
+[[string]]
+zh = "控件与列表"
+en = "Controls & lists"
+
+[[string]]
+zh = "关于本系统"
+en = "About this system"
+
+[[string]]
+zh = "Novus 用户"
+en = "Novus user"
+
+[[string]]
+zh = "Live 会话"
+en = "Live session"
+
+[[string]]
+zh = "快速设置"
+en = "Quick settings"
+
+[[string]]
+zh = "主题"
+en = "Theme"
+
+[[string]]
+zh = "浅色"
+en = "Light"
+
+[[string]]
+zh = "深色"
+en = "Dark"
+
+[[string]]
+zh = "跟随时间"
+en = "Auto"
+
+[[string]]
+zh = "强调色"
+en = "Accent colour"
+
+[[string]]
+zh = "壁纸"
+en = "Wallpaper"
+
+[[string]]
+zh = "网络已连接"
+en = "Network connected"
+
+[[string]]
+zh = "重启"
+en = "Restart"
+
+[[string]]
+zh = "关机"
+en = "Shut down"
+
+[[string]]
+zh = "就绪"
+en = "Ready"
+
+[[string]]
+zh = "磁盘"
+en = "Disk"
+
+[[string]]
+zh = "窗口裁剪，避免窗口越界渲染"
+en = "Window clipping keeps drawing inside the frame"
+
+[[string]]
+zh = "共享内存规范"
+en = "Shared memory spec"
+
+[[string]]
+zh = "以太网"
+en = "Ethernet"
+
+[[string]]
+zh = "光纤/SFP"
+en = "Fiber/SFP"
+
+[[string]]
+zh = "无线"
+en = "Wireless"
+
+[[string]]
+zh = "未知"
+en = "Unknown"
+
+[[string]]
+zh = "已连接"
+en = "Connected"
+
+[[string]]
+zh = "未连接"
+en = "Disconnected"
+
+[[string]]
+zh = "无驱动"
+en = "No driver"
+
+[[string]]
+zh = "这是分区，不是整块磁盘"
+en = "This is a partition, not a whole disk"
+
+[[string]]
+zh = "只读介质"
+en = "Read-only media"
+
+[[string]]
+zh = "可移除介质"
+en = "Removable media"
+
+[[string]]
+zh = "容量太小（至少 64 MiB）"
+en = "Too small (64 MiB minimum)"
+
+[[string]]
+zh = "已有分区表，可能属于其他系统"
+en = "Has a partition table, possibly another OS"
+
+[[string]]
+zh = "正在使用"
+en = "In use"
+
+[[string]]
+zh = "不可用"
+en = "Unavailable"
+
+[[string]]
+zh = "无法写入分区表"
+en = "Could not write the partition table"
+
+[[string]]
+zh = "写入安装数据失败"
+en = "Could not write the installation data"
+
+[[string]]
+zh = "无法挂载新的系统分区"
+en = "Could not mount the new system partition"
+
+[[string]]
+zh = "完整性校验失败"
+en = "Integrity check failed"
+
+[[string]]
+zh = "内存不足"
+en = "Out of memory"
+
+[[string]]
+zh = "安装失败"
+en = "Installation failed"
+
+[[string]]
+zh = "结束任务"
+en = "End task"
+
+[[string]]
+zh = "蓝"
+en = "Blue"
+
+[[string]]
+zh = "绿"
+en = "Green"
+
+[[string]]
+zh = "琥珀"
+en = "Amber"
+
+[[string]]
+zh = "紫"
+en = "Purple"
+
+[[string]]
+zh = "红"
+en = "Red"
+
+[[string]]
+zh = "青"
+en = "Teal"
+
+[[string]]
+zh = "玫瑰"
+en = "Rose"
+
+[[string]]
+zh = "石墨"
+en = "Graphite"
+
+[[string]]
+zh = "云母蓝"
+en = "Mica blue"
+
+[[string]]
+zh = "晨雾灰"
+en = "Morning grey"
+
+[[string]]
+zh = "青瓷"
+en = "Celadon"
+
+[[string]]
+zh = "系统"
+en = "System"
+
+[[string]]
+zh = "个性化"
+en = "Personalisation"
+
+[[string]]
+zh = "关于"
+en = "About"
+
+[[string]]
+zh = "设备信息与实时资源"
+en = "Device info and live resources"
+
+[[string]]
+zh = "颜色与应用外观"
+en = "Colour and app appearance"
+
+[[string]]
+zh = "内置应用的运行状态"
+en = "Running built-in apps"
+
+[[string]]
+zh = "版本与实现说明"
+en = "Version and implementation notes"
+
+[[string]]
+zh = "运行"
+en = "Running"
+
+[[string]]
+zh = "退出"
+en = "Exited"
+
+[[string]]
+zh = "等待"
+en = "Waiting"
+
+[[string]]
+zh = "空闲"
+en = "Idle"
+
+[[string]]
+zh = "设备"
+en = "Device"
+
+[[string]]
+zh = "名称"
+en = "Name"
+
+[[string]]
+zh = "Novus 虚拟机"
+en = "Novus virtual machine"
+
+[[string]]
+zh = "架构"
+en = "Architecture"
+
+[[string]]
+zh = "x86_64 · 64 位"
+en = "x86_64 · 64-bit"
+
+[[string]]
+zh = "显示"
+en = "Display"
+
+[[string]]
+zh = "1280 × 800 · 32 位色"
+en = "1280 × 800 · 32-bit colour"
+
+[[string]]
+zh = "输入"
+en = "Input"
+
+[[string]]
+zh = "PS/2 键盘与鼠标"
+en = "PS/2 keyboard and mouse"
+
+[[string]]
+zh = "资源"
+en = "Resources"
+
+[[string]]
+zh = " 分"
+en = " min"
+
+[[string]]
+zh = " 秒"
+en = " s"
+
+[[string]]
+zh = "运行时间"
+en = "Uptime"
+
+[[string]]
+zh = "内存"
+en = "Memory"
+
+[[string]]
+zh = "任务数"
+en = "Tasks"
+
+[[string]]
+zh = "窗口数"
+en = "Windows"
+
+[[string]]
+zh = " 发出 /"
+en = " sent /"
+
+[[string]]
+zh = " 丢弃"
+en = " dropped"
+
+[[string]]
+zh = "打开安装程序"
+en = "Open installer"
+
+[[string]]
+zh = "颜色"
+en = "Colour"
+
+[[string]]
+zh = "强调色用于按钮、选中条与焦点环"
+en = "Accent marks buttons, selection bars and focus rings"
+
+[[string]]
+zh = "桌面背景"
+en = "Wallpaper"
+
+[[string]]
+zh = "正在运行"
+en = "Running"
+
+[[string]]
+zh = "确认结束"
+en = "Confirm end"
+
+[[string]]
+zh = "结束"
+en = "End"
+
+[[string]]
+zh = "没有正在运行的内置应用"
+en = "No built-in app is running"
+
+[[string]]
+zh = "可启动"
+en = "Available"
+
+[[string]]
+zh = "版本"
+en = "Version"
+
+[[string]]
+zh = "Novus OS 0.9（M9）"
+en = "Novus OS 0.9 (M9)"
+
+[[string]]
+zh = "内核"
+en = "Kernel"
+
+[[string]]
+zh = "用户态"
+en = "Userland"
+
+[[string]]
+zh = "Rust（no_std，扁平镜像）"
+en = "Rust (no_std, flat image)"
+
+[[string]]
+zh = "桌面"
+en = "Desktop"
+
+[[string]]
+zh = "Novus-WM · 双缓冲合成"
+en = "Novus-WM · double-buffered compositing"
+
+[[string]]
+zh = "持久化"
+en = "Persistence"
+
+[[string]]
+zh = "不落盘，重启恢复默认"
+en = "Not saved; defaults return on reboot"
+
+[[string]]
+zh = "里程碑"
+en = "Milestones"
+
+[[string]]
+zh = "M1–M3  引导 / 内核 / 内存与中断"
+en = "M1–M3  Boot / kernel / memory and interrupts"
+
+[[string]]
+zh = "M4–M5  进程与地址空间 / 2D 渲染与控件"
+en = "M4–M5  Processes and address spaces / 2D and widgets"
+
+[[string]]
+zh = "M6      IPC 与窗口管理器"
+en = "M6      IPC and window manager"
+
+[[string]]
+zh = "M8–M9   Rust 应用 / 中文与 Win11 桌面"
+en = "M8–M9   Rust apps / Chinese and the Win11 desktop"
+
+[[string]]
+zh = "当前"
+en = "Now"
+
+[[string]]
+zh = " 个任务 · 强调色"
+en = " tasks · accent"
+
+[[string]]
+zh = "Novus OS 设置"
+en = "Novus OS Settings"
+
+[[string]]
+zh = "安装程序已启动"
+en = "Installer started"
+
+[[string]]
+zh = "安装载荷未就绪：需要从安装介质启动"
+en = "Install payload unavailable: boot from the installation medium"
+
+[[string]]
+zh = "内存数据来自内核分页器"
+en = "Memory data comes from the kernel pager"
+
+[[string]]
+zh = "已切换到浅色主题"
+en = "Switched to the light theme"
+
+[[string]]
+zh = "已切换到深色主题"
+en = "Switched to the dark theme"
+
+[[string]]
+zh = "主题跟随时间（19:00 后深色）"
+en = "Theme follows the clock (dark after 19:00)"
+
+[[string]]
+zh = "已应用强调色"
+en = "Accent applied"
+
+[[string]]
+zh = "已更换桌面背景"
+en = "Wallpaper changed"
+
+[[string]]
+zh = "已结束所选应用"
+en = "Selected app ended"
+
+[[string]]
+zh = "该系统任务不可结束"
+en = "System tasks cannot be ended"
+
+[[string]]
+zh = "无法结束该应用"
+en = "Could not end the app"
+
+[[string]]
+zh = "再次点击确认结束"
+en = "Click again to confirm"
+
+[[string]]
+zh = "启动"
+en = "Start"
+
+[[string]]
+zh = "已启动应用"
+en = "App started"
+
+[[string]]
+zh = "该应用已在运行"
+en = "The app is already running"
+
+[[string]]
+zh = "无法启动该应用"
+en = "Could not start the app"
+
+[[string]]
+zh = "链路"
+en = "Link"
+
+[[string]]
+zh = "类型"
+en = "Type"
+
+[[string]]
+zh = "状态"
+en = "State"
+
+[[string]]
+zh = "速率"
+en = "Speed"
+
+[[string]]
+zh = "设备数"
+en = "Devices"
+
+[[string]]
+zh = "地址"
+en = "Address"
+
+[[string]]
+zh = "掩码"
+en = "Mask"
+
+[[string]]
+zh = "网关"
+en = "Gateway"
+
+[[string]]
+zh = "已获取租约"
+en = "Lease acquired"
+
+[[string]]
+zh = "获取中…"
+en = "Requesting…"
+
+[[string]]
+zh = "超时（静态地址）"
+en = "Timed out (static address)"
+
+[[string]]
+zh = "未启动"
+en = "Not started"
+
+[[string]]
+zh = "计数与测试"
+en = "Counters and tests"
+
+[[string]]
+zh = "收"
+en = "RX"
+
+[[string]]
+zh = "  发"
+en = "  TX"
+
+[[string]]
+zh = "  错"
+en = "  ERR"
+
+[[string]]
+zh = "成功"
+en = "OK"
+
+[[string]]
+zh = "进行中…"
+en = "Running…"
+
+[[string]]
+zh = "超时"
+en = "Timed out"
+
+[[string]]
+zh = "未测试"
+en = "Not tested"
+
+[[string]]
+zh = "Ping 网关"
+en = "Ping gateway"
+
+[[string]]
+zh = "TCP 回显测试"
+en = "TCP echo test"
+
+[[string]]
+zh = "网关 10.0.2.2"
+en = "Gateway 10.0.2.2"
+
+[[string]]
+zh = "已发出 ping"
+en = "Ping sent"
+
+[[string]]
+zh = "连接 10.0.2.2:9000"
+en = "Connecting to 10.0.2.2:9000"
+
+[[string]]
+zh = "无法连接系统服务"
+en = "Could not reach the system service"
+
+[[string]]
+zh = "无法打开目录"
+en = "Could not open the directory"
+
+[[string]]
+zh = "读取目录失败"
+en = "Could not read the directory"
+
+[[string]]
+zh = "选择目录后点打开，或运行文件测试"
+en = "Select a directory and open it, or run a file test"
+
+[[string]]
+zh = "内置目录"
+en = "Built-in directories"
+
+[[string]]
+zh = "（空）"
+en = "(empty)"
+
+[[string]]
+zh = "目录"
+en = "Directory"
+
+[[string]]
+zh = "文件"
+en = "File"
+
+[[string]]
+zh = "虚拟"
+en = "Virtual"
+
+[[string]]
+zh = "打开"
+en = "Open"
+
+[[string]]
+zh = "上级"
+en = "Up"
+
+[[string]]
+zh = "建测试目录"
+en = "Create test directory"
+
+[[string]]
+zh = "写入往返测试"
+en = "Write round-trip test"
+
+[[string]]
+zh = "项"
+en = "items"
+
+[[string]]
+zh = "选中一行后点运行"
+en = "Select a row and press Run"
+
+[[string]]
+zh = "读取中"
+en = "Reading"
+
+[[string]]
+zh = "测试目录已创建"
+en = "Test directory created"
+
+[[string]]
+zh = "测试目录已存在"
+en = "Test directory already exists"
+
+[[string]]
+zh = "创建目录失败"
+en = "Could not create the directory"
+
+[[string]]
+zh = "open/write/read 往返通过"
+en = "open/write/read round trip passed"
+
+[[string]]
+zh = "文件读写失败"
+en = "File I/O failed"
+
+[[string]]
+zh = "已启动"
+en = "Started"
+
+[[string]]
+zh = "已在运行"
+en = "Already running"
+
+[[string]]
+zh = "无法启动"
+en = "Could not start"
+
+[[string]]
+zh = "欢迎"
+en = "Welcome"
+
+[[string]]
+zh = "方案"
+en = "Plan"
+
+[[string]]
+zh = "确认"
+en = "Confirm"
+
+[[string]]
+zh = "进度"
+en = "Progress"
+
+[[string]]
+zh = "完成"
+en = "Finish"
+
+[[string]]
+zh = "系统安装程序"
+en = "System installer"
+
+[[string]]
+zh = "内核安装服务"
+en = "Kernel install service"
+
+[[string]]
+zh = "写入前会再次确认"
+en = "You will confirm again before writing"
+
+[[string]]
+zh = "欢迎使用"
+en = "Welcome"
+
+[[string]]
+zh = "Novus OS 图形安装程序：四步完成系统安装。"
+en = "Novus OS graphical installer: four steps to a working system."
+
+[[string]]
+zh = "安装程序会把一份完整的系统写入所选磁盘。"
+en = "The installer writes a complete system to the selected disk."
+
+[[string]]
+zh = "过程不联网，也不改动 UEFI 固件设置。"
+en = "It does not use the network or change UEFI firmware settings."
+
+[[string]]
+zh = "安装前请确认"
+en = "Before you continue"
+
+[[string]]
+zh = "目标磁盘上的所有数据都会被清除"
+en = "Everything on the target disk will be erased"
+
+[[string]]
+zh = "安装完成后重启，并从新磁盘启动"
+en = "Reboot from the new disk after installation"
+
+[[string]]
+zh = "本机需要至少 2 GiB 内存"
+en = "The machine needs at least 2 GiB of RAM"
+
+[[string]]
+zh = "当前是实时系统，安装不会影响正在运行的这一份。"
+en = "This is a live system; installing does not touch the running copy."
+
+[[string]]
+zh = "安装会做什么"
+en = "What the installer does"
+
+[[string]]
+zh = "选择一块整盘作为目标"
+en = "Choose one whole disk as the target"
+
+[[string]]
+zh = "写入引导分区与系统镜像"
+en = "Write the boot and system partitions"
+
+[[string]]
+zh = "重建完整性树并校验"
+en = "Rebuild and verify the integrity tree"
+
+[[string]]
+zh = "下一步"
+en = "Next"
+
+[[string]]
+zh = "按 Enter 继续"
+en = "Press Enter to continue"
+
+[[string]]
+zh = "选择磁盘"
+en = "Select a disk"
+
+[[string]]
+zh = "列出所有整块磁盘；灰色项附有不可选原因。"
+en = "Every whole disk is listed; greyed rows say why they cannot be used."
+
+[[string]]
+zh = "没有可用的整块磁盘"
+en = "No usable whole disk"
+
+[[string]]
+zh = "安装需要一块未分区的本机磁盘。"
+en = "Installation needs an unpartitioned local disk."
+
+[[string]]
+zh = "刷新"
+en = "Refresh"
+
+[[string]]
+zh = "可用"
+en = "Available"
+
+[[string]]
+zh = "将清除整盘数据"
+en = "This erases the whole disk"
+
+[[string]]
+zh = "安装会重建分区表，原磁盘上的系统与文件将无法恢复。"
+en = "The partition table is rebuilt; systems and files on the disk cannot be recovered."
+
+[[string]]
+zh = "确认磁盘名称与容量后再继续。"
+en = "Check the disk name and capacity before continuing."
+
+[[string]]
+zh = "选择一块标记为“可用”的磁盘"
+en = "Choose a disk marked Available"
+
+[[string]]
+zh = "安装方案"
+en = "Installation plan"
+
+[[string]]
+zh = "Novus 使用 GPT：一个 EFI 系统分区和一个 NovusFS 系统分区。"
+en = "Novus uses GPT: one EFI system partition and one NovusFS system partition."
+
+[[string]]
+zh = "分区布局"
+en = "Partition layout"
+
+[[string]]
+zh = "EFI 系统分区"
+en = "EFI system partition"
+
+[[string]]
+zh = "引导加载器与系统映像模板（FAT）"
+en = "Boot loader and system image template (FAT)"
+
+[[string]]
+zh = "NovusFS 系统分区"
+en = "NovusFS system partition"
+
+[[string]]
+zh = "带 WAL 与 Merkle 完整性树的系统镜像"
+en = "System image with WAL and a Merkle integrity tree"
+
+[[string]]
+zh = "分区大小由镜像自动计算，按 1 MiB 对齐。"
+en = "Sizes are derived from the images, aligned to 1 MiB."
+
+[[string]]
+zh = "目标磁盘"
+en = "Target disk"
+
+[[string]]
+zh = "继续"
+en = "Continue"
+
+[[string]]
+zh = "下一步需要确认整盘擦除"
+en = "The next page asks you to confirm the erase"
+
+[[string]]
+zh = "确认安装"
+en = "Confirm installation"
+
+[[string]]
+zh = "这是最后一次可以返回的页面。"
+en = "This is the last page you can go back from."
+
+[[string]]
+zh = "即将安装到"
+en = "Installing to"
+
+[[string]]
+zh = "分区表、引导分区与系统分区都将被重建"
+en = "The partition table, boot partition and system partition will be rebuilt"
+
+[[string]]
+zh = "整盘数据将被永久清除"
+en = "All data on the disk will be erased permanently"
+
+[[string]]
+zh = "无法撤销，也无法从本安装程序恢复。"
+en = "This cannot be undone or recovered from the installer."
+
+[[string]]
+zh = "请确保已备份需要的文件。"
+en = "Make sure you have backed up anything you need."
+
+[[string]]
+zh = "我已知晓：目标磁盘上的全部数据会被清除"
+en = "I understand: everything on the target disk will be erased"
+
+[[string]]
+zh = "上一步"
+en = "Back"
+
+[[string]]
+zh = "开始安装"
+en = "Start installation"
+
+[[string]]
+zh = "勾选确认后才能开始"
+en = "Tick the box before starting"
+
+[[string]]
+zh = "写入分区表"
+en = "Writing partition table"
+
+[[string]]
+zh = "写入引导分区"
+en = "Writing boot partition"
+
+[[string]]
+zh = "写入系统分区"
+en = "Writing system partition"
+
+[[string]]
+zh = "校验完整性树"
+en = "Verifying integrity tree"
+
+[[string]]
+zh = "安装完成"
+en = "Installation complete"
+
+[[string]]
+zh = "准备中"
+en = "Preparing"
+
+[[string]]
+zh = "正在安装"
+en = "Installing"
+
+[[string]]
+zh = "请勿关闭电源或拔出目标磁盘。"
+en = "Do not power off or unplug the target disk."
+
+[[string]]
+zh = "分区表"
+en = "Partition table"
+
+[[string]]
+zh = "引导分区"
+en = "Boot partition"
+
+[[string]]
+zh = "系统分区"
+en = "System partition"
+
+[[string]]
+zh = "完整性校验"
+en = "Integrity check"
+
+[[string]]
+zh = "总进度"
+en = "Overall progress"
+
+[[string]]
+zh = "已写入"
+en = "Written"
+
+[[string]]
+zh = "共"
+en = "of"
+
+[[string]]
+zh = "写入分区表前可以取消"
+en = "You can cancel before the partition table is written"
+
+[[string]]
+zh = "分区表已写入，无法取消；完成后可重启"
+en = "The partition table is written; cancelling is no longer possible. Reboot when done."
+
+[[string]]
+zh = "系统已写入目标磁盘。"
+en = "The system is on the target disk."
+
+[[string]]
+zh = "系统已就绪"
+en = "System ready"
+
+[[string]]
+zh = "重启后从新磁盘启动，进入首次设置。"
+en = "Reboot from the new disk to finish first-time setup."
+
+[[string]]
+zh = "完成前请确认"
+en = "Before you finish"
+
+[[string]]
+zh = "UEFI 启动顺序中包含新磁盘的 EFI 分区"
+en = "The UEFI boot order includes the new disk's EFI partition"
+
+[[string]]
+zh = "安装介质可以拔出，系统不再依赖它"
+en = "You can remove the installation medium; the system no longer needs it"
+
+[[string]]
+zh = "首次启动会要求创建本地账户"
+en = "The first boot asks you to create a local account"
+
+[[string]]
+zh = "完整性树校验通过"
+en = "Integrity tree verified"
+
+[[string]]
+zh = "立即重启"
+en = "Restart now"
+
+[[string]]
+zh = "安装未完成"
+en = "Installation incomplete"
+
+[[string]]
+zh = "目标磁盘可能已经不再是可以启动的系统盘。"
+en = "The target disk may no longer be a bootable system disk."
+
+[[string]]
+zh = "写入中断"
+en = "Writing stopped"
+
+[[string]]
+zh = "建议"
+en = "What to try"
+
+[[string]]
+zh = "检查磁盘连接与容量后重试"
+en = "Check the disk connection and capacity, then retry"
+
+[[string]]
+zh = "若磁盘已写入部分数据，可重新安装覆盖"
+en = "If part of the disk was written, installing again overwrites it"
+
+[[string]]
+zh = "安装失败不会影响正在运行的实时系统"
+en = "A failed install does not affect the running live system"
+
+[[string]]
+zh = "返回"
+en = "Back"
+
+[[string]]
+zh = "重试"
+en = "Retry"
+
+[[string]]
+zh = "安装 Novus OS"
+en = "Install Novus OS"
+
+[[string]]
+zh = "暂停"
+en = "Suspended"
+
+[[string]]
+zh = "状态      PID       CPU ticks    时间片"
+en = "State     PID       CPU ticks    Slice"
+
+[[string]]
+zh = "当前没有可显示的任务"
+en = "No tasks to display"
+
+[[string]]
+zh = "上页"
+en = "Prev"
+
+[[string]]
+zh = "下页"
+en = "Next"
+
+[[string]]
+zh = "进程:"
+en = "Process:"
+
+[[string]]
+zh = "CPU 使用率"
+en = "CPU usage"
+
+[[string]]
+zh = "%     历史采样"
+en = "%     history"
+
+[[string]]
+zh = "CPU 占用按采样周期内非 idle 任务 tick 计算"
+en = "CPU usage counts non-idle task ticks per sample"
+
+[[string]]
+zh = "文件    选项    查看"
+en = "File    Options    View"
+
+[[string]]
+zh = "进程"
+en = "Processes"
+
+[[string]]
+zh = "性能"
+en = "Performance"
+
+[[string]]
+zh = "选择一个进程以结束任务"
+en = "Select a process to end"
+
+[[string]]
+zh = "任务已结束"
+en = "Task ended"
+
+[[string]]
+zh = "系统任务受保护，无法结束"
+en = "System tasks are protected and cannot be ended"
+
+[[string]]
+zh = "任务正在退出"
+en = "The task is exiting"
+
+[[string]]
+zh = "结束失败：任务不存在或权限不足"
+en = "Could not end: no such task or not permitted"
+
+[[string]]
+zh = "不能结束任务管理器自身"
+en = "The task manager cannot end itself"
+
+[[string]]
+zh = "本地账户"
+en = "Local account"
+
+[[string]]
+zh = "首次启动：创建本地账户"
+en = "First boot: create a local account"
+
+[[string]]
+zh = "Novus OS 登录"
+en = "Novus OS sign-in"
+
+[[string]]
+zh = "用户名"
+en = "Username"
+
+[[string]]
+zh = "密码"
+en = "Password"
+
+[[string]]
+zh = "创建账户"
+en = "Create account"
+
+[[string]]
+zh = "登录"
+en = "Sign in"
+
+[[string]]
+zh = "会话已登录"
+en = "Session signed in"
+
+[[string]]
+zh = "注销"
+en = "Sign out"
+
+[[string]]
+zh = "用户会话"
+en = "User session"
+
+[[string]]
+zh = "创建首个账户，用户名仅支持 ASCII"
+en = "Create the first account; ASCII usernames only"
+
+[[string]]
+zh = "输入用户名和密码"
+en = "Enter your username and password"
+
+[[string]]
+zh = "登录窗口保持运行；请登录、注销或关机"
+en = "The sign-in window stays open; sign in, sign out or shut down"
+
+[[string]]
+zh = "已注销"
+en = "Signed out"
+
+[[string]]
+zh = "账户已创建并登录"
+en = "Account created and signed in"
+
+[[string]]
+zh = "登录成功"
+en = "Signed in"
+
+[[string]]
+zh = "账户已存在或尚未创建"
+en = "Account already exists or has not been created"
+
+[[string]]
+zh = "尝试次数过多，请稍后再试"
+en = "Too many attempts; try again later"
+
+[[string]]
+zh = "需要可写持久 NovusFS 磁盘才能创建账户"
+en = "Creating an account needs a writable persistent NovusFS disk"
+
+[[string]]
+zh = "登录失败：检查用户名和密码"
+en = "Sign-in failed: check the username and password"

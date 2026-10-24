@@ -1,9 +1,14 @@
-//! Novus OS - graphical installer (M10).
+//! Novus OS - graphical installer (M11).
 //!
-//! Six pages over the kernel's install service: welcome, disk, plan,
-//! confirm, progress, result. The app owns no disk logic - it asks the
-//! kernel for candidates, shows why a disk is greyed out, and drives the
-//! copy one bounded step at a time so this window keeps repainting.
+//! Seven pages over the kernel's install service: language, licence, disk,
+//! plan, confirm, progress, result. The app owns no disk logic - it asks
+//! the kernel for candidates, shows why a disk is greyed out, and drives
+//! the copy one bounded step at a time so this window keeps repainting.
+//!
+//! Language: the buttons call SYSINFO_REQ_LANG, which switches the
+//! renderer for every window (including this one) and is persisted by the
+//! kernel when the root is writable. Text drawn here only needs the lookup
+//! to happen at draw time, which the kernel does.
 //!
 //! Destructive actions are gated twice: the kernel only accepts calls
 //! from the process apps_launch() started as "setup", and this app
@@ -12,7 +17,7 @@
 #![no_std]
 #![no_main]
 
-use novus_apps::{install, ipc, sinfo, sys, ui, wm};
+use novus_apps::{install, ipc, lang, sinfo, sys, ui, wm};
 
 const CW: i16 = 900;
 const CH: i16 = 600;
@@ -25,7 +30,8 @@ const MAX_DISKS: usize = 8;
 
 #[derive(Clone, Copy, PartialEq)]
 enum Page {
-    Welcome,
+    Language,
+    License,
     Disk,
     Plan,
     Confirm,
@@ -34,16 +40,17 @@ enum Page {
     Fail,
 }
 
-const STEPS: [&str; 6] = ["欢迎", "磁盘", "方案", "确认", "进度", "完成"];
+const STEPS: [&str; 7] = ["语言", "协议", "磁盘", "方案", "确认", "进度", "完成"];
 
 fn step_of(p: Page) -> usize {
     match p {
-        Page::Welcome => 0,
-        Page::Disk => 1,
-        Page::Plan => 2,
-        Page::Confirm => 3,
-        Page::Progress => 4,
-        Page::Done | Page::Fail => 5,
+        Page::Language => 0,
+        Page::License => 1,
+        Page::Disk => 2,
+        Page::Plan => 3,
+        Page::Confirm => 4,
+        Page::Progress => 5,
+        Page::Done | Page::Fail => 6,
     }
 }
 
@@ -51,10 +58,12 @@ struct App {
     win: wm::Win,
     page: Page,
     disks: [install::Disk; MAX_DISKS],
-    slot: [u8; MAX_DISKS], /* block-table index of each listed disk */
+    slot: [u8; MAX_DISKS],
     n_disks: usize,
     sel: usize,
     confirmed: bool,
+    accepted: bool,
+    fs: u8,
     started: bool,
     prog: install::Progress,
     sys_port: u64,
@@ -129,42 +138,38 @@ fn sidebar(w: &mut wm::Win, page: Page) {
     w.fill(0, 0, SIDE, CH, ui::card_bg());
     w.fill(SIDE - 1, 0, 1, CH, ui::line());
     w.text_big(24, 22, ui::text(), "Novus OS");
-    w.text(24, 50, ui::dim(), "系统安装程序");
+    w.text(24, 50, ui::dim(), ui::l("系统安装程序", "System installer"));
 
     let cur = step_of(page);
     let mut i = 0;
-    while i < 6 {
-        let y = 96 + i as i16 * 46;
+    while i < 7 {
+        let y = 86 + i as i16 * 40;
         let done = i < cur;
         let active = i == cur;
 
-        if active {
-            w.round_fill(20, y - 6, SIDE - 40, 38, 8, ui::row_sel());
-        }
         if done {
-            w.round_fill(28, y, 22, 22, 11, ui::accent());
-            w.shape(wm::OP_HLINE, 32, y + 8, 4, 2, ui::on_accent());
-            w.shape(wm::OP_HLINE, 35, y + 11, 4, 2, ui::on_accent());
-            w.shape(wm::OP_HLINE, 38, y + 6, 5, 2, ui::on_accent());
+            w.round_fill(28, y, 20, 20, 10, ui::accent());
+            w.shape(wm::OP_HLINE, 32, y + 9, 4, 2, ui::on_accent());
+            w.shape(wm::OP_HLINE, 35, y + 6, 7, 2, ui::on_accent());
         } else if active {
-            w.round_fill(28, y, 22, 22, 11, ui::accent());
+            w.round_fill(28, y, 20, 20, 10, ui::accent());
             let mut d = [0u8; 2];
             d[0] = b'1' + i as u8;
             w.text(34, y + 3, ui::on_accent(),
                    unsafe { core::str::from_utf8_unchecked(&d[..1]) });
         } else {
-            w.round_frame(28, y, 22, 22, 11, ui::line());
+            w.round_frame(28, y, 20, 20, 10, ui::line());
             let mut d = [0u8; 2];
             d[0] = b'1' + i as u8;
             w.text(34, y + 3, ui::dim(),
                    unsafe { core::str::from_utf8_unchecked(&d[..1]) });
         }
-        w.text(60, y + 3, if active { ui::text() } else { ui::dim() }, STEPS[i]);
+        w.text(58, y + 3, if active { ui::text() } else { ui::dim() }, STEPS[i]);
         i += 1;
     }
 
-    w.text(24, CH - 42, ui::dim(), "内核安装服务");
-    w.text(24, CH - 24, ui::dim(), "写入前会再次确认");
+    w.text(24, CH - 42, ui::dim(), ui::l("内核安装服务", "Kernel install service"));
+    w.text(24, CH - 24, ui::dim(), ui::l("写入前会再次确认", "You will confirm again before writing"));
 }
 
 fn header(w: &mut wm::Win, title: &str, subtitle: &str) {
@@ -184,12 +189,15 @@ fn primary(w: &mut wm::Win, x: i16, label: &str, enabled: bool) -> (i16, i16, i1
     ui::button(w, x, FOOT_Y, 176, 36, label, color)
 }
 
+fn primary_hit(x: i16, y: i16) -> bool {
+    x >= CONTENT_X + CONTENT_W - 176 && y >= FOOT_Y
+}
+
 fn step_mark(w: &mut wm::Win, x: i16, y: i16, done: bool, active: bool) {
     if done {
         w.round_fill(x, y, 18, 18, 9, ui::accent());
-        w.shape(wm::OP_HLINE, x + 3, y + 8, 3, 2, ui::on_accent());
-        w.shape(wm::OP_HLINE, x + 5, y + 11, 3, 2, ui::on_accent());
-        w.shape(wm::OP_HLINE, x + 8, y + 7, 5, 2, ui::on_accent());
+        w.shape(wm::OP_HLINE, x + 4, y + 10, 4, 2, ui::on_accent());
+        w.shape(wm::OP_HLINE, x + 7, y + 6, 7, 2, ui::on_accent());
     } else if active {
         w.round_fill(x, y, 18, 18, 9, ui::accent());
         w.round_fill(x + 7, y + 7, 4, 4, 2, ui::on_accent());
@@ -198,47 +206,91 @@ fn step_mark(w: &mut wm::Win, x: i16, y: i16, done: bool, active: bool) {
     }
 }
 
-fn draw_welcome(w: &mut wm::Win) {
-    header(w, "欢迎使用", "Novus OS 图形安装程序：四步完成系统安装。");
-    w.text(CONTENT_X, 108, ui::text(), "安装程序会把一份完整的系统写入所选磁盘。");
-    w.text(CONTENT_X, 132, ui::dim(), "过程不联网，也不改动 UEFI 固件设置。");
+fn draw_language(w: &mut wm::Win) {
+    header(w, ui::l("选择安装语言", "Choose the installer language"),
+           "Novus OS Setup");
 
-    ui::card(w, CONTENT_X, 168, CONTENT_W, 164);
-    w.text(CONTENT_X + 20, 188, ui::text(), "安装前请确认");
-    w.text(CONTENT_X + 20, 216, ui::dim(), "目标磁盘上的所有数据都会被清除");
-    w.text(CONTENT_X + 20, 242, ui::dim(), "安装完成后重启，并从新磁盘启动");
-    w.text(CONTENT_X + 20, 268, ui::dim(), "本机需要至少 2 GiB 内存");
-    ui::divider(w, CONTENT_X + 20, 292, CONTENT_W - 40);
-    w.text(CONTENT_X + 20, 304, ui::dim(), "当前是实时系统，安装不会影响正在运行的这一份。");
+    ui::card(w, CONTENT_X, 112, CONTENT_W, 150);
+    w.text(CONTENT_X + 20, 132, ui::dim(),
+           ui::l("选择语言后，安装界面会立即切换。",
+                 "The installer switches language immediately."));
 
-    /* What the wizard will do, so the first page is not just a warning. */
-    ui::card(w, CONTENT_X, 352, CONTENT_W, 150);
-    w.text(CONTENT_X + 20, 372, ui::text(), "安装会做什么");
-    let steps = [
-        ("1", "选择一块整盘作为目标"),
-        ("2", "写入引导分区与系统镜像"),
-        ("3", "重建完整性树并校验"),
-    ];
+    let labels = [ui::l("中文", "Chinese"), "English"];
     let mut i = 0usize;
-    while i < 3 {
-        let y = 400 + i as i16 * 30;
-        w.round_fill(CONTENT_X + 22, y, 18, 18, 9, ui::row_sel());
-        w.text(CONTENT_X + 28, y + 2, ui::accent(), steps[i].0);
-        w.text(CONTENT_X + 52, y + 2, ui::dim(), steps[i].1);
+    while i < 2 {
+        let x = CONTENT_X + 30 + i as i16 * 250;
+        let y = 168;
+        let selected = (lang::get() == 1) == (i == 1);
+
+        if selected {
+            w.round_fill(x, y, 220, 48, 8, ui::accent());
+            w.text_big(x + (220 - ui::width_big(labels[i])) / 2, y + 8,
+                       ui::on_accent(), labels[i]);
+        } else {
+            w.round_fill(x, y, 220, 48, 8, ui::card_bg());
+            w.round_frame(x, y, 220, 48, 8, ui::line());
+            w.text_big(x + (220 - ui::width_big(labels[i])) / 2, y + 8,
+                       ui::text(), labels[i]);
+        }
         i += 1;
     }
 
-    primary(w, CONTENT_X + CONTENT_W - 176, "下一步", true);
-    footer_hint(w, "按 Enter 继续");
+    w.text(CONTENT_X, 290, ui::dim(),
+           ui::l("安装程序会把一份完整的系统写入所选磁盘。",
+                 "The installer writes a complete system to the selected disk."));
+    w.text(CONTENT_X, 314, ui::dim(),
+           ui::l("过程不联网，也不改动 UEFI 固件设置。",
+                 "It does not use the network or change UEFI firmware settings."));
+
+    primary(w, CONTENT_X + CONTENT_W - 176, ui::l("下一步", "Next"), true);
+    footer_hint(w, ui::l("按 Enter 继续", "Press Enter to continue"));
+}
+
+fn draw_license(w: &mut wm::Win, accepted: bool) {
+    header(w, ui::l("用户协议", "Licence agreement"),
+           ui::l("继续前请阅读以下条款。", "Read the following before continuing."));
+
+    ui::card(w, CONTENT_X, 96, CONTENT_W, 300);
+    let lines = [
+        "本协议依据 GPLv2 分发 Novus OS，不提供任何担保。",
+        "安装会重建分区表，目标磁盘上的全部数据将被永久清除。",
+        "请确认已备份需要的文件，并已连接稳定电源。",
+        "安装程序会写入引导分区与系统分区，并重建完整性树。",
+        "安装完成后需要重启，并从新磁盘启动。",
+        "继续即表示你理解并接受以上条款。",
+    ];
+    let mut i = 0usize;
+    while i < lines.len() {
+        w.text(CONTENT_X + 20, 120 + i as i16 * 42, ui::dim(), lines[i]);
+        i += 1;
+    }
+
+    let box_x = CONTENT_X + 20;
+    let box_y = 416;
+    w.round_fill(box_x, box_y, 22, 22, 5, if accepted { ui::accent() } else { ui::card_bg() });
+    w.round_frame(box_x, box_y, 22, 22, 5, if accepted { ui::accent() } else { ui::line() });
+    if accepted {
+        w.shape(wm::OP_HLINE, box_x + 5, box_y + 11, 13, 1, ui::on_accent());
+    }
+    w.text(box_x + 34, box_y + 4, ui::text(), "我已阅读并同意");
+
+    ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, ui::l("返回", "Back"));
+    primary(w, CONTENT_X + CONTENT_W - 176,
+            ui::l("同意并继续", "Accept and continue"), accepted);
+    footer_hint(w, ui::l("勾选后才能继续", "Tick the box to continue"));
 }
 
 fn draw_disks(w: &mut wm::Win, disks: &[install::Disk; MAX_DISKS], n_disks: usize, sel: usize) {
-    header(w, "选择磁盘", "列出所有整块磁盘；灰色项附有不可选原因。");
+    header(w, ui::l("选择磁盘", "Select a disk"),
+           ui::l("列出所有整块磁盘；灰色项附有不可选原因。",
+                 "Every whole disk is listed; greyed rows say why they cannot be used."));
 
     if n_disks == 0 {
-        ui::empty(w, CONTENT_X, 110, "没有可用的整块磁盘");
-        w.text(CONTENT_X, 138, ui::dim(), "安装需要一块未分区的本机磁盘。");
-        primary(w, CONTENT_X + CONTENT_W - 176, "刷新", true);
+        ui::empty(w, CONTENT_X, 110, ui::l("没有可用的整块磁盘", "No usable whole disk"));
+        w.text(CONTENT_X, 138, ui::dim(),
+               ui::l("安装需要一块未分区的本机磁盘。",
+                     "Installation needs an unpartitioned local disk."));
+        primary(w, CONTENT_X + CONTENT_W - 176, ui::l("刷新", "Refresh"), true);
         return;
     }
 
@@ -255,15 +307,25 @@ fn draw_disks(w: &mut wm::Win, disks: &[install::Disk; MAX_DISKS], n_disks: usiz
             w.round_fill(CONTENT_X, y, CONTENT_W, 50, 8, ui::card_bg());
         }
         w.round_frame(CONTENT_X, y, CONTENT_W, 50, 8, ui::line());
-        w.round_fill(CONTENT_X + 18, y + 13, 24, 24, 6,
+        let removable = d.flags & install::FLAG_REMOVABLE != 0;
+        w.round_fill(CONTENT_X + 18, y + 14, 22, 22, 6,
                      if d.eligible != 0 { ui::accent() } else { ui::line() });
-        w.text(CONTENT_X + 30, y + 18, ui::on_accent(), "D");
+        w.text(CONTENT_X + 29, y + 18, ui::on_accent(),
+               if removable { "U" } else { "D" });
 
-        w.text(CONTENT_X + 56, y + 10, if d.eligible != 0 { ui::text() } else { ui::dim() }, d.label());
+        w.text(CONTENT_X + 54, y + 10,
+               if d.eligible != 0 { ui::text() } else { ui::dim() }, d.label());
         let mut sz = [0u8; 24];
-        w.text(CONTENT_X + 56, y + 28, ui::dim(), fmt_mib(d.sectors, &mut sz));
+        w.text(CONTENT_X + 54, y + 28, ui::dim(), fmt_mib(d.sectors, &mut sz));
+        w.text(CONTENT_X + 190, y + 28, ui::dim(),
+               if removable { ui::l("USB 可移除", "USB removable") }
+               else { ui::l("内置磁盘", "Internal disk") });
 
-        let reason = if d.eligible != 0 { "可用" } else { install::reason_text(d.reason) };
+        let reason = if d.eligible != 0 {
+            ui::l("可用", "Available")
+        } else {
+            install::reason_text(d.reason)
+        };
         let rw = ui::width(reason);
         w.text(CONTENT_X + CONTENT_W - 18 - rw, y + 18,
                if d.eligible != 0 { ui::good() } else { ui::dim() }, reason);
@@ -272,70 +334,113 @@ fn draw_disks(w: &mut wm::Win, disks: &[install::Disk; MAX_DISKS], n_disks: usiz
 
     let detail_y = 96 + n_disks as i16 * 58 + 12;
     if sel < n_disks && disks[sel].eligible != 0 {
-        ui::card(w, CONTENT_X, detail_y, CONTENT_W, 92);
-        w.text(CONTENT_X + 20, detail_y + 16, ui::danger(), "将清除整盘数据");
-        w.text(CONTENT_X + 20, detail_y + 42, ui::dim(),
-               "安装会重建分区表，原磁盘上的系统与文件将无法恢复。");
-        w.text(CONTENT_X + 20, detail_y + 64, ui::dim(),
-               "确认磁盘名称与容量后再继续。");
+        ui::card(w, CONTENT_X, detail_y, CONTENT_W, 80);
+        w.text(CONTENT_X + 20, detail_y + 14, ui::danger(),
+               ui::l("将清除整盘数据", "This erases the whole disk"));
+        w.text(CONTENT_X + 20, detail_y + 40, ui::dim(),
+               ui::l("安装会重建分区表，原磁盘上的系统与文件将无法恢复。",
+                     "The partition table is rebuilt; systems and files on the disk cannot be recovered."));
     }
 
-    primary(w, CONTENT_X + CONTENT_W - 176, "下一步",
+    primary(w, CONTENT_X + CONTENT_W - 176, ui::l("下一步", "Next"),
             sel < n_disks && disks[sel].eligible != 0);
-    footer_hint(w, "选择一块标记为“可用”的磁盘");
+    footer_hint(w, ui::l("选择一块标记为“可用”的磁盘", "Choose a disk marked Available"));
 }
 
-fn draw_plan(w: &mut wm::Win, disk: Option<install::Disk>) {
-    header(w, "安装方案", "Novus 使用 GPT：一个 EFI 系统分区和一个 NovusFS 系统分区。");
+fn draw_plan(w: &mut wm::Win, disk: Option<install::Disk>, fs: u8) {
+    header(w, ui::l("安装方案", "Installation plan"),
+           ui::l("Novus 使用 GPT：一个 EFI 系统分区和一个系统分区。",
+                 "Novus uses GPT: one EFI system partition and one system partition."));
 
-    ui::card(w, CONTENT_X, 96, CONTENT_W, 190);
-    w.text(CONTENT_X + 20, 116, ui::text(), "分区布局");
-    ui::divider(w, CONTENT_X + 20, 146, CONTENT_W - 40);
+    ui::card(w, CONTENT_X, 96, CONTENT_W, 150);
+    w.text(CONTENT_X + 20, 116, ui::text(), ui::l("文件系统", "File system"));
 
-    w.round_fill(CONTENT_X + 20, 164, 10, 10, 3, ui::accent());
-    w.text(CONTENT_X + 40, 160, ui::text(), "EFI 系统分区");
-    w.text(CONTENT_X + 40, 180, ui::dim(), "引导加载器与系统映像模板（FAT）");
+    let options = [
+        ("NovusFS", "NovusFS"),
+        ("NTFS", "NTFS"),
+        ("ext4", "ext4"),
+    ];
+    let mut i = 0usize;
+    while i < 3 {
+        let x = CONTENT_X + 20 + i as i16 * 190;
+        let y = 144;
+        let enabled = i == 0;
+        let selected = fs as usize == i;
 
-    w.round_fill(CONTENT_X + 20, 210, 10, 10, 3, ui::good());
-    w.text(CONTENT_X + 40, 206, ui::text(), "NovusFS 系统分区");
-    w.text(CONTENT_X + 40, 226, ui::dim(), "带 WAL 与 Merkle 完整性树的系统镜像");
+        if selected && enabled {
+            w.round_fill(x, y, 178, 42, 8, ui::accent());
+            w.text(x + 14, y + 14, ui::on_accent(), options[i].0);
+        } else {
+            w.round_fill(x, y, 178, 42, 8, ui::card_bg());
+            w.round_frame(x, y, 178, 42, 8, ui::line());
+            w.text(x + 14, y + 14, if enabled { ui::text() } else { ui::dim() }, options[i].0);
+        }
+        if !enabled {
+            w.text(x + 14, y + 28, ui::dim(), ui::l("规划中", "Planned"));
+        }
+        i += 1;
+    }
 
-    w.text(CONTENT_X + 20, 254, ui::dim(), "分区大小由镜像自动计算，按 1 MiB 对齐。");
+    w.text(CONTENT_X + 20, 202, ui::dim(),
+           ui::l("NTFS/ext4 需要后续驱动里程碑；本次安装使用 NovusFS。",
+                 "NTFS/ext4 need a later driver milestone; this install uses NovusFS."));
+
+    ui::card(w, CONTENT_X, 262, CONTENT_W, 150);
+    w.text(CONTENT_X + 20, 282, ui::text(), ui::l("分区布局", "Partition layout"));
+    ui::divider(w, CONTENT_X + 20, 308, CONTENT_W - 40);
+    w.round_fill(CONTENT_X + 20, 324, 10, 10, 3, ui::accent());
+    w.text(CONTENT_X + 40, 320, ui::text(), ui::l("EFI 系统分区", "EFI system partition"));
+    w.text(CONTENT_X + 40, 340, ui::dim(),
+           ui::l("引导加载器与系统映像模板（FAT）",
+                 "Boot loader and system image template (FAT)"));
+    w.round_fill(CONTENT_X + 20, 372, 10, 10, 3, ui::good());
+    w.text(CONTENT_X + 40, 368, ui::text(), ui::l("NovusFS 系统分区", "NovusFS system partition"));
+    w.text(CONTENT_X + 40, 388, ui::dim(),
+           ui::l("带 WAL 与 Merkle 完整性树的系统镜像",
+                 "System image with WAL and a Merkle integrity tree"));
 
     if let Some(d) = disk {
         let mut sz = [0u8; 24];
 
-        ui::card(w, CONTENT_X, 306, CONTENT_W, 84);
-        w.text(CONTENT_X + 20, 326, ui::dim(), "目标磁盘");
-        w.text(CONTENT_X + 20, 350, ui::text(), d.label());
+        w.text(CONTENT_X, 436, ui::dim(), ui::l("目标磁盘", "Target disk"));
+        w.text(CONTENT_X + 100, 436, ui::text(), d.label());
         let s = fmt_mib(d.sectors, &mut sz);
         let sw = ui::width(s);
-        w.text(CONTENT_X + CONTENT_W - 20 - sw, 350, ui::dim(), s);
+        w.text(CONTENT_X + CONTENT_W - sw, 436, ui::dim(), s);
     }
 
-    primary(w, CONTENT_X + CONTENT_W - 176, "继续", true);
-    footer_hint(w, "下一步需要确认整盘擦除");
+    primary(w, CONTENT_X + CONTENT_W - 176, ui::l("继续", "Continue"), true);
+    footer_hint(w, ui::l("下一步需要确认整盘擦除", "The next page asks you to confirm the erase"));
 }
 
 fn draw_confirm(w: &mut wm::Win, disk: Option<install::Disk>, confirmed: bool) {
-    header(w, "确认安装", "这是最后一次可以返回的页面。");
+    header(w, ui::l("确认安装", "Confirm installation"),
+           ui::l("这是最后一次可以返回的页面。",
+                 "This is the last page you can go back from."));
 
     if let Some(d) = disk {
         let mut sz = [0u8; 24];
 
         ui::card(w, CONTENT_X, 96, CONTENT_W, 150);
-        w.text(CONTENT_X + 20, 116, ui::text(), "即将安装到");
+        w.text(CONTENT_X + 20, 116, ui::text(), ui::l("即将安装到", "Installing to"));
         w.text_big(CONTENT_X + 20, 144, ui::text(), d.label());
         let s = fmt_mib(d.sectors, &mut sz);
         w.text(CONTENT_X + 20, 184, ui::dim(), s);
-        w.text(CONTENT_X + 20, 206, ui::dim(), "分区表、引导分区与系统分区都将被重建");
+        w.text(CONTENT_X + 20, 206, ui::dim(),
+               ui::l("分区表、引导分区与系统分区都将被重建",
+                     "The partition table, boot partition and system partition will be rebuilt"));
     }
 
-    w.round_fill(CONTENT_X, 266, CONTENT_W, 96, 10, if ui::is_dark() { 0x003A1E1E } else { 0x00FDF0EF });
+    w.round_fill(CONTENT_X, 266, CONTENT_W, 96, 10,
+                 if ui::is_dark() { 0x003A1E1E } else { 0x00FDF0EF });
     w.round_frame(CONTENT_X, 266, CONTENT_W, 96, 10, ui::danger());
-    w.text(CONTENT_X + 20, 286, ui::danger(), "整盘数据将被永久清除");
-    w.text(CONTENT_X + 20, 312, ui::dim(), "无法撤销，也无法从本安装程序恢复。");
-    w.text(CONTENT_X + 20, 334, ui::dim(), "请确保已备份需要的文件。");
+    w.text(CONTENT_X + 20, 286, ui::danger(),
+           ui::l("整盘数据将被永久清除", "All data on the disk will be erased permanently"));
+    w.text(CONTENT_X + 20, 312, ui::dim(),
+           ui::l("无法撤销，也无法从本安装程序恢复。",
+                 "This cannot be undone or recovered from the installer."));
+    w.text(CONTENT_X + 20, 334, ui::dim(),
+           ui::l("请确保已备份需要的文件。", "Make sure you have backed up anything you need."));
 
     let box_x = CONTENT_X + 20;
     let box_y = 388;
@@ -346,27 +451,34 @@ fn draw_confirm(w: &mut wm::Win, disk: Option<install::Disk>, confirmed: bool) {
     }
     w.text(box_x + 34, box_y + 4, ui::text(), "我已知晓：目标磁盘上的全部数据会被清除");
 
-    ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, "上一步");
-    primary(w, CONTENT_X + CONTENT_W - 176, "开始安装", confirmed);
-    footer_hint(w, "勾选确认后才能开始");
+    ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, ui::l("上一步", "Back"));
+    primary(w, CONTENT_X + CONTENT_W - 176, ui::l("开始安装", "Start installation"), confirmed);
+    footer_hint(w, ui::l("勾选确认后才能开始", "Tick the box before starting"));
 }
 
 fn phase_name(phase: u8) -> &'static str {
     match phase {
-        install::PHASE_TABLE => "写入分区表",
-        install::PHASE_ESP => "写入引导分区",
-        install::PHASE_SYSTEM => "写入系统分区",
-        install::PHASE_VERIFY => "校验完整性树",
-        install::PHASE_DONE => "安装完成",
-        _ => "准备中",
+        install::PHASE_TABLE => ui::l("写入分区表", "Writing partition table"),
+        install::PHASE_ESP => ui::l("写入引导分区", "Writing boot partition"),
+        install::PHASE_SYSTEM => ui::l("写入系统分区", "Writing system partition"),
+        install::PHASE_VERIFY => ui::l("校验完整性树", "Verifying integrity tree"),
+        install::PHASE_DONE => ui::l("安装完成", "Installation complete"),
+        _ => ui::l("准备中", "Preparing"),
     }
 }
 
 fn draw_progress(w: &mut wm::Win, prog: &install::Progress) {
-    header(w, "正在安装", "请勿关闭电源或拔出目标磁盘。");
+    header(w, ui::l("正在安装", "Installing"),
+           ui::l("请勿关闭电源或拔出目标磁盘。",
+                 "Do not power off or unplug the target disk."));
 
     let phases = [install::PHASE_TABLE, install::PHASE_ESP, install::PHASE_SYSTEM, install::PHASE_VERIFY];
-    let labels = ["分区表", "引导分区", "系统分区", "完整性校验"];
+    let labels = [
+        ui::l("分区表", "Partition table"),
+        ui::l("引导分区", "Boot partition"),
+        ui::l("系统分区", "System partition"),
+        ui::l("完整性校验", "Integrity check"),
+    ];
     let cur = prog.phase;
     let mut i = 0usize;
     while i < 4 {
@@ -384,7 +496,7 @@ fn draw_progress(w: &mut wm::Win, prog: &install::Progress) {
     }
 
     ui::card(w, CONTENT_X, 286, CONTENT_W, 130);
-    w.text(CONTENT_X + 20, 306, ui::dim(), "总进度");
+    w.text(CONTENT_X + 20, 306, ui::dim(), ui::l("总进度", "Overall progress"));
     let pw = CONTENT_W - 120;
     ui::progress(w, CONTENT_X + 20, 336, pw, prog.permille);
 
@@ -392,60 +504,81 @@ fn draw_progress(w: &mut wm::Win, prog: &install::Progress) {
     let mut total = [0u8; 24];
     let d = fmt_mb(prog.done_kb, &mut done);
     let t = fmt_mb(prog.total_kb, &mut total);
-    w.text(CONTENT_X + 20, 366, ui::dim(), "已写入");
+    w.text(CONTENT_X + 20, 366, ui::dim(), ui::l("已写入", "Written"));
     w.text(CONTENT_X + 80, 366, ui::text(), d);
-    w.text(CONTENT_X + 190, 366, ui::dim(), "共");
+    w.text(CONTENT_X + 190, 366, ui::dim(), ui::l("共", "of"));
     w.text(CONTENT_X + 220, 366, ui::text(), t);
 
     w.text(CONTENT_X, 448, ui::dim(),
            if cur <= install::PHASE_TABLE {
-               "写入分区表前可以取消"
+               ui::l("写入分区表前可以取消", "You can cancel before the partition table is written")
            } else {
-               "分区表已写入，无法取消；完成后可重启"
+               ui::l("分区表已写入，无法取消；完成后可重启",
+                     "The partition table is written; cancelling is no longer possible. Reboot when done.")
            });
 
     if cur <= install::PHASE_TABLE {
-        ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, "取消");
+        ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, ui::l("取消", "Cancel"));
     }
 }
 
 fn draw_done(w: &mut wm::Win) {
-    header(w, "安装完成", "系统已写入目标磁盘。");
+    header(w, ui::l("安装完成", "Installation complete"),
+           ui::l("系统已写入目标磁盘。", "The system is on the target disk."));
 
     w.round_fill(CONTENT_X, 108, 64, 64, 32, ui::accent());
     w.shape(wm::OP_HLINE, CONTENT_X + 16, 132, 8, 3, ui::on_accent());
     w.shape(wm::OP_HLINE, CONTENT_X + 22, 140, 8, 3, ui::on_accent());
     w.shape(wm::OP_HLINE, CONTENT_X + 30, 128, 18, 3, ui::on_accent());
-    w.text_big(CONTENT_X + 88, 106, ui::text(), "系统已就绪");
-    w.text(CONTENT_X + 88, 146, ui::dim(), "重启后从新磁盘启动，进入首次设置。");
+    w.text_big(CONTENT_X + 88, 106, ui::text(), ui::l("系统已就绪", "System ready"));
+    w.text(CONTENT_X + 88, 146, ui::dim(),
+           ui::l("重启后从新磁盘启动，进入首次设置。",
+                 "Reboot from the new disk to finish first-time setup."));
 
     ui::card(w, CONTENT_X, 206, CONTENT_W, 168);
-    w.text(CONTENT_X + 20, 226, ui::text(), "完成前请确认");
-    w.text(CONTENT_X + 20, 256, ui::dim(), "UEFI 启动顺序中包含新磁盘的 EFI 分区");
-    w.text(CONTENT_X + 20, 282, ui::dim(), "安装介质可以拔出，系统不再依赖它");
-    w.text(CONTENT_X + 20, 308, ui::dim(), "首次启动会要求创建本地账户");
+    w.text(CONTENT_X + 20, 226, ui::text(), ui::l("完成前请确认", "Before you finish"));
+    w.text(CONTENT_X + 20, 256, ui::dim(),
+           ui::l("UEFI 启动顺序中包含新磁盘的 EFI 分区",
+                 "The UEFI boot order includes the new disk's EFI partition"));
+    w.text(CONTENT_X + 20, 282, ui::dim(),
+           ui::l("安装介质可以拔出，系统不再依赖它",
+                 "You can remove the installation medium; the system no longer needs it"));
+    w.text(CONTENT_X + 20, 308, ui::dim(),
+           ui::l("首次启动会要求创建本地账户",
+                 "The first boot asks you to create a local account"));
     ui::divider(w, CONTENT_X + 20, 336, CONTENT_W - 40);
-    w.text(CONTENT_X + 20, 348, ui::good(), "完整性树校验通过");
+    w.text(CONTENT_X + 20, 348, ui::good(),
+           ui::l("完整性树校验通过", "Integrity tree verified"));
 
-    ui::button(w, CONTENT_X + CONTENT_W - 176, FOOT_Y, 176, 36, "立即重启", ui::accent());
-    ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, "关机");
+    ui::button(w, CONTENT_X + CONTENT_W - 176, FOOT_Y, 176, 36,
+               ui::l("立即重启", "Restart now"), ui::accent());
+    ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, ui::l("关机", "Shut down"));
 }
 
 fn draw_fail(w: &mut wm::Win, err: u8) {
-    header(w, "安装未完成", "目标磁盘可能已经不再是可以启动的系统盘。");
+    header(w, ui::l("安装未完成", "Installation incomplete"),
+           ui::l("目标磁盘可能已经不再是可以启动的系统盘。",
+                 "The target disk may no longer be a bootable system disk."));
 
     w.round_fill(CONTENT_X, 108, 64, 64, 32, ui::danger());
-    w.text_big(CONTENT_X + 88, 112, ui::text(), "写入中断");
+    w.text_big(CONTENT_X + 88, 112, ui::text(), ui::l("写入中断", "Writing stopped"));
     w.text(CONTENT_X + 88, 144, ui::dim(), install::error_text(err));
 
     ui::card(w, CONTENT_X, 206, CONTENT_W, 150);
-    w.text(CONTENT_X + 20, 226, ui::text(), "建议");
-    w.text(CONTENT_X + 20, 256, ui::dim(), "检查磁盘连接与容量后重试");
-    w.text(CONTENT_X + 20, 282, ui::dim(), "若磁盘已写入部分数据，可重新安装覆盖");
-    w.text(CONTENT_X + 20, 308, ui::dim(), "安装失败不会影响正在运行的实时系统");
+    w.text(CONTENT_X + 20, 226, ui::text(), ui::l("建议", "What to try"));
+    w.text(CONTENT_X + 20, 256, ui::dim(),
+           ui::l("检查磁盘连接与容量后重试",
+                 "Check the disk connection and capacity, then retry"));
+    w.text(CONTENT_X + 20, 282, ui::dim(),
+           ui::l("若磁盘已写入部分数据，可重新安装覆盖",
+                 "If part of the disk was written, installing again overwrites it"));
+    w.text(CONTENT_X + 20, 308, ui::dim(),
+           ui::l("安装失败不会影响正在运行的实时系统",
+                 "A failed install does not affect the running live system"));
 
-    ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, "返回");
-    ui::button(w, CONTENT_X + CONTENT_W - 176, FOOT_Y, 176, 36, "重试", ui::accent());
+    ui::ghost(w, CONTENT_X, FOOT_Y, 140, 36, ui::l("返回", "Back"));
+    ui::button(w, CONTENT_X + CONTENT_W - 176, FOOT_Y, 176, 36,
+               ui::l("重试", "Retry"), ui::accent());
 }
 
 fn draw(app: &mut App) {
@@ -463,9 +596,10 @@ fn draw(app: &mut App) {
     let disk = if sel < app.n_disks { Some(app.disks[sel]) } else { None };
 
     match page {
-        Page::Welcome => draw_welcome(&mut app.win),
+        Page::Language => draw_language(&mut app.win),
+        Page::License => draw_license(&mut app.win, app.accepted),
         Page::Disk => draw_disks(&mut app.win, &app.disks, app.n_disks, sel),
-        Page::Plan => draw_plan(&mut app.win, disk),
+        Page::Plan => draw_plan(&mut app.win, disk, app.fs),
         Page::Confirm => draw_confirm(&mut app.win, disk, app.confirmed),
         Page::Progress => draw_progress(&mut app.win, &app.prog),
         Page::Done => draw_done(&mut app.win),
@@ -474,17 +608,34 @@ fn draw(app: &mut App) {
     app.win.invalidate();
 }
 
-fn primary_hit(x: i16, y: i16) -> bool {
-    x >= CONTENT_X + CONTENT_W - 176 && y >= FOOT_Y
+fn begin_install(app: &mut App) {
+    if app.n_disks == 0 || app.sel >= app.n_disks || app.disks[app.sel].eligible == 0 {
+        return;
+    }
+    if !app.confirmed {
+        return;
+    }
+    install::set_language(lang::get());
+    if install::begin(app.slot[app.sel], app.fs) {
+        app.started = true;
+        app.page = Page::Progress;
+        app.prog = install::Progress::new();
+    } else {
+        app.page = Page::Fail;
+        app.prog.err = 6;
+    }
 }
 
 /// The primary action of the current page. Mouse click and Enter share it,
 /// so the keyboard path can never diverge from the button.
 fn advance(app: &mut App) {
     match app.page {
-        Page::Welcome => {
-            app.page = Page::Disk;
-            scan(app);
+        Page::Language => app.page = Page::License,
+        Page::License => {
+            if app.accepted {
+                app.page = Page::Disk;
+                scan(app);
+            }
         }
         Page::Disk => {
             if app.n_disks > app.sel && app.disks[app.sel].eligible != 0 {
@@ -512,7 +663,8 @@ fn advance(app: &mut App) {
 
 fn go_back(app: &mut App) {
     match app.page {
-        Page::Disk => app.page = Page::Welcome,
+        Page::License => app.page = Page::Language,
+        Page::Disk => app.page = Page::License,
         Page::Plan => app.page = Page::Disk,
         Page::Confirm => app.page = Page::Plan,
         Page::Fail => {
@@ -521,23 +673,6 @@ fn go_back(app: &mut App) {
             scan(app);
         }
         _ => {}
-    }
-}
-
-fn begin_install(app: &mut App) {
-    if app.n_disks == 0 || app.sel >= app.n_disks || app.disks[app.sel].eligible == 0 {
-        return;
-    }
-    if !app.confirmed {
-        return;
-    }
-    if install::begin(app.slot[app.sel]) {
-        app.started = true;
-        app.page = Page::Progress;
-        app.prog = install::Progress::new();
-    } else {
-        app.page = Page::Fail;
-        app.prog.err = 6;
     }
 }
 
@@ -556,7 +691,7 @@ pub extern "C" fn _start() -> ! {
 
     let mut app = App {
         win,
-        page: Page::Welcome,
+        page: Page::Language,
         disks: [install::Disk {
             name: [0; 12],
             sectors: 0,
@@ -570,6 +705,8 @@ pub extern "C" fn _start() -> ! {
         n_disks: 0,
         sel: 0,
         confirmed: false,
+        accepted: false,
+        fs: 0,
         started: false,
         prog: install::Progress::new(),
         sys_port,
@@ -587,9 +724,36 @@ pub extern "C" fn _start() -> ! {
                     let page = app.page;
 
                     match page {
-                        Page::Welcome | Page::Plan => {
+                        Page::Language => {
+                            let mut i = 0usize;
+                            while i < 2 {
+                                let bx = CONTENT_X + 30 + i as i16 * 250;
+                                if x >= bx && x < bx + 220 && y >= 168 && y < 216 {
+                                    let want = i as u32;
+                                    if app.sys_port != 0 {
+                                        if let Some(t) = sinfo::set_lang(app.sys_port, want) {
+                                            lang::set(t.lang);
+                                        }
+                                    } else {
+                                        lang::set(want);
+                                    }
+                                }
+                                i += 1;
+                            }
                             if primary_hit(x, y) {
                                 advance(&mut app);
+                            }
+                        }
+                        Page::License => {
+                            if y >= FOOT_Y {
+                                if primary_hit(x, y) {
+                                    advance(&mut app);
+                                } else if x < CONTENT_X + 160 {
+                                    go_back(&mut app);
+                                }
+                            } else if x >= CONTENT_X + 20 && x < CONTENT_X + 42 &&
+                                      y >= 416 && y < 438 {
+                                app.accepted = !app.accepted;
                             }
                         }
                         Page::Disk => {
@@ -614,6 +778,22 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         }
+                        Page::Plan => {
+                            let mut i = 0usize;
+                            while i < 3 {
+                                let bx = CONTENT_X + 20 + i as i16 * 190;
+                                if x >= bx && x < bx + 178 && y >= 144 && y < 186 {
+                                    if i == 0 {
+                                        app.fs = 0;
+                                    }
+                                    /* NTFS/ext4 are planned, not selectable. */
+                                }
+                                i += 1;
+                            }
+                            if primary_hit(x, y) {
+                                advance(&mut app);
+                            }
+                        }
                         Page::Confirm => {
                             if y >= FOOT_Y {
                                 if primary_hit(x, y) {
@@ -621,7 +801,7 @@ pub extern "C" fn _start() -> ! {
                                 } else if x < CONTENT_X + 160 {
                                     go_back(&mut app);
                                 }
-                            } else if x >= CONTENT_X + 20 && x < CONTENT_X + 40 &&
+                            } else if x >= CONTENT_X + 20 && x < CONTENT_X + 42 &&
                                       y >= 388 && y < 414 {
                                 app.confirmed = !app.confirmed;
                             }
@@ -661,14 +841,16 @@ pub extern "C" fn _start() -> ! {
                 }
                 wm::Ev::Key(key) => {
                     match key {
-                        0x100 => go_back(&mut app),       /* Esc */
-                        0x109 => advance(&mut app),       /* Enter */
-                        0x20 => {                          /* Space */
+                        0x100 => go_back(&mut app),
+                        0x109 => advance(&mut app),
+                        0x20 => {
                             if app.page == Page::Confirm {
                                 app.confirmed = !app.confirmed;
+                            } else if app.page == Page::License {
+                                app.accepted = !app.accepted;
                             }
                         }
-                        0x101 => {                         /* Up */
+                        0x101 => {
                             if app.page == Page::Disk {
                                 let mut i = app.sel;
                                 while i > 0 {
@@ -680,7 +862,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         }
-                        0x102 => {                         /* Down */
+                        0x102 => {
                             if app.page == Page::Disk {
                                 let mut i = app.sel + 1;
                                 while i < app.n_disks {

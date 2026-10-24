@@ -69,7 +69,7 @@ def preview(chars):
                           for x in range(GLYPH)))
 
 
-SOURCES = ["graphics", "wm/novus-wm", "apps/src", "kernel"]
+SOURCES = ["graphics", "wm/novus-wm", "apps/src", "kernel", "tools/langgen"]
 
 
 def scan_sources(chars):
@@ -79,7 +79,8 @@ def scan_sources(chars):
     for root in SOURCES:
         for dirpath, _, files in os.walk(os.path.join(ROOT, root)):
             for f in files:
-                if not (f.endswith(".c") or f.endswith(".h") or f.endswith(".rs")):
+                if not (f.endswith(".c") or f.endswith(".h") or
+                        f.endswith(".rs") or f.endswith(".toml")):
                     continue
                 try:
                     text = open(os.path.join(dirpath, f), encoding="utf-8",

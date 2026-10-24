@@ -12,6 +12,7 @@
 
 #include "nd_internal.h"
 #include "nd_font_cjk.h"
+#include "nd_lang.h"
 
 static const UINT8 g_font[95][ND_GLYPH_H] = {
     /* 32 ' ' */ {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -173,7 +174,7 @@ UINT32 nd_char_adv(UINT32 cp, UINT32 scale) {
 }
 
 UINT32 nd_text_width(const char *text, UINT32 scale) {
-  const char *p = text;
+  const char *p = nd_lang_tr(text);
   UINT32      w = 0;
   UINT32      n = 0;
 
@@ -217,11 +218,11 @@ UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
  * taller CJK cell, so mixed Latin/CJK text can share a consistent baseline.
  * One vertical origin avoids per-glyph jumps within the same string. */
 UINT32 nd_text_height(const char *text, UINT32 scale) {
-  const char *p = text;
+  const char *p = nd_lang_tr(text);
   UINT32      h = (scale != 0u) ? ND_GLYPH_H * scale : ND_GLYPH_H;
   UINT32      cjk = (scale != 0u) ? ND_CJK_H * scale : ND_CJK_H;
 
-  if (text == 0) {
+  if (p == 0) {
     return h;
   }
   while (p != 0 && *p != '\0') {

@@ -44,31 +44,58 @@ void pci_write32(UINT8 bus, UINT8 dev, UINT8 func, UINT8 off, UINT32 val) {
   io_out32(PCI_CONFIG_DATA, val);
 }
 
-/* Physical base of one memory BAR, or 0 when it is unused, an I/O BAR,
- * a 64-bit BAR (the pair is refused for simplicity) or above 4 GiB. */
-static UINT64 bar_base(UINT8 bus, UINT8 dev, UINT8 func, UINT8 index) {
+/* Size and base of one memory BAR.
+ *
+ * A 64-bit BAR is a pair of dwords: the low half carries the type bits
+ * (bit 2 set) and the high half holds the upper address. Both halves are
+ * sized together, so the driver learns the real window length, and the
+ * full 64-bit base is reported even when it lies above 4 GiB - the
+ * kernel's identity map stops at 4 GiB, so such a BAR has to be moved
+ * before it can be used. */
+static int bar_info(UINT8 bus, UINT8 dev, UINT8 func, UINT8 index,
+                    UINT64 *base_out, UINT64 *size_out) {
   UINT8  off = (UINT8)(0x10u + index * 4u);
   UINT32 lo = pci_read32(bus, dev, func, off);
-  UINT32 mask;
-  UINT64 base;
+  UINT32 hi = 0;
+  UINT32 mask_lo;
+  UINT32 mask_hi = 0;
+  UINT64 size;
+  int    is64;
 
   if ((lo & 0x1u) != 0u) {
-    return 0; /* I/O space BAR */
+    return -1; /* I/O space */
   }
-  if ((lo & 0x6u) == 0x4u) {
-    return 0; /* 64-bit BAR: the upper half is in the next slot */
+  /* The high dword of a 64-bit BAR is not a BAR of its own. */
+  if (index > 0u) {
+    UINT32 prev = pci_read32(bus, dev, func, (UINT8)(off - 4u));
+
+    if ((prev & 0x1u) == 0u && (prev & 0x6u) == 0x4u) {
+      return -2;
+    }
+  }
+  is64 = ((lo & 0x6u) == 0x4u);
+  if (is64) {
+    hi = pci_read32(bus, dev, func, (UINT8)(off + 4u));
   }
   pci_write32(bus, dev, func, off, 0xFFFFFFFFu);
-  mask = pci_read32(bus, dev, func, off);
+  mask_lo = pci_read32(bus, dev, func, off);
+  if (is64) {
+    pci_write32(bus, dev, func, (UINT8)(off + 4u), 0xFFFFFFFFu);
+    mask_hi = pci_read32(bus, dev, func, (UINT8)(off + 4u));
+    pci_write32(bus, dev, func, (UINT8)(off + 4u), hi);
+  }
   pci_write32(bus, dev, func, off, lo);
-  if (mask == 0u || mask == 0xFFFFFFFFu) {
-    return 0;
+
+  if (mask_lo == 0u || mask_lo == 0xFFFFFFFFu) {
+    return -1;
   }
-  base = (UINT64)(lo & 0xFFFFFFF0u);
-  if (base == 0u || base >= 0x100000000ULL) {
-    return 0;
+  size = ((UINT64)(~(mask_lo & 0xFFFFFFF0u)) & 0xFFFFFFF0u) + 1u;
+  if (is64 && mask_hi != 0u && mask_hi != 0xFFFFFFFFu) {
+    size += ((UINT64)(~mask_hi) + 1u) << 32;
   }
-  return base;
+  *base_out = ((UINT64)(lo & 0xFFFFFFF0u)) | ((UINT64)hi << 32);
+  *size_out = size;
+  return 0;
 }
 
 void pci_enable_device(const pci_dev_t *d) {
@@ -76,6 +103,37 @@ void pci_enable_device(const pci_dev_t *d) {
 
   cmd |= 0x6u; /* memory space + bus master */
   pci_write32(d->bus, d->dev, d->func, 0x04, cmd);
+}
+
+int pci_bar_assign(pci_dev_t *d, UINT8 index, UINT64 addr) {
+  UINT8  off;
+  UINT32 cmd;
+  UINT32 lo;
+  int    is64;
+
+  if (d == 0 || index > 5u || d->bar_size[index] == 0u) {
+    return -1;
+  }
+  off = (UINT8)(0x10u + index * 4u);
+  lo = pci_read32(d->bus, d->dev, d->func, off);
+  is64 = ((lo & 0x1u) == 0u && (lo & 0x6u) == 0x4u);
+  cmd = pci_read32(d->bus, d->dev, d->func, 0x04);
+  /* The window moves, so decoding has to be off while it is written. */
+  pci_write32(d->bus, d->dev, d->func, 0x04, cmd & ~2u);
+  pci_write32(d->bus, d->dev, d->func, off, (UINT32)(addr & 0xFFFFFFF0u));
+  if (is64) {
+    pci_write32(d->bus, d->dev, d->func, (UINT8)(off + 4u),
+                (UINT32)(addr >> 32));
+  }
+  pci_write32(d->bus, d->dev, d->func, 0x04, cmd | 2u);
+
+  lo = pci_read32(d->bus, d->dev, d->func, off);
+  if ((lo & 0xFFFFFFF0u) != (UINT32)(addr & 0xFFFFFFF0u)) {
+    return -1;
+  }
+  d->bar64[index] = addr;
+  d->bar[index] = (addr < 0x100000000ULL) ? addr : 0u;
+  return 0;
 }
 
 int pci_scan(pci_dev_t *out, int max) {
@@ -101,6 +159,7 @@ int pci_scan(pci_dev_t *out, int max) {
           continue;
         }
         d = &out[n++];
+        memset(d, 0, sizeof(*d));
         d->bus = (UINT8)bus;
         d->dev = dev;
         d->func = fn;
@@ -111,7 +170,15 @@ int pci_scan(pci_dev_t *out, int max) {
         d->prog_if = pci_read8(d->bus, dev, fn, 0x09);
         d->irq = pci_read8(d->bus, dev, fn, 0x3C);
         for (i = 0; i < 6u; i++) {
-          d->bar[i] = bar_base(d->bus, dev, fn, i);
+          UINT64 base = 0;
+          UINT64 size = 0;
+
+          if (bar_info(d->bus, dev, fn, i, &base, &size) == 0) {
+            d->bar64[i] = base;
+            d->bar_size[i] = size;
+            /* Only a base inside the identity map can be dereferenced. */
+            d->bar[i] = (base < 0x100000000ULL) ? base : 0u;
+          }
         }
       }
     }

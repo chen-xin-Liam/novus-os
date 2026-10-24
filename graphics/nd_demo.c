@@ -21,6 +21,8 @@
 #include "nd_ime.h"
 #include "rtc.h"
 #include "apps.h"
+#include "session.h"
+#include "nd_lang.h"
 #include "sched.h"
 #include "nwm.h"
 #include "power.h"
@@ -175,6 +177,32 @@ void nd_selftest(void) {
       CHECK(pixel(&s, 100, 200) == ND_RGB(9, 9, 9), "blit");
       nd_surface_destroy(&src);
     }
+  }
+
+  /* Mirroring copies the picture between framebuffers that may disagree
+   * about the byte order, so the conversion has to round-trip exactly. */
+  {
+    nd_surface_t rgb;
+    nd_surface_t bgr;
+    UINT32        words[4];
+    nd_color_t    c = ND_RGB(0x12, 0x34, 0x56);
+    UINT32        w_bgr;
+    UINT32        w_rgb;
+    UINT32        mirrored;
+
+    memset(&rgb, 0, sizeof(rgb));
+    memset(&bgr, 0, sizeof(bgr));
+    rgb.px = words; rgb.w = 2; rgb.h = 2; rgb.stride = 2;
+    rgb.fb = 1; rgb.bgr = 0; rgb.clip = nd_rect(0, 0, 2, 2);
+    bgr.px = words; bgr.w = 2; bgr.h = 2; bgr.stride = 2;
+    bgr.fb = 1; bgr.bgr = 1; bgr.clip = nd_rect(0, 0, 2, 2);
+    w_bgr = nd_hw_pixel(&bgr, c);
+    w_rgb = nd_hw_pixel(&rgb, c);
+    mirrored = (w_rgb & 0xFF00FF00u) | ((w_rgb & 0x000000FFu) << 16) |
+               ((w_rgb & 0x00FF0000u) >> 16);
+    CHECK(w_bgr == 0xFF123456u, "bgr keeps the canonical word");
+    CHECK(w_rgb == 0xFF563412u, "rgb swaps red and blue");
+    CHECK(mirrored == w_bgr, "mirror conversion round-trips");
   }
 
   /* ---- widgets ---- */
@@ -407,6 +435,7 @@ static ng_widget_t *g_quick;
 static ng_widget_t *g_clock_label;
 static ng_widget_t *g_run_dot[4];
 static UINT32       g_theme_seen;
+static UINT32       g_lang_seen;
 static char         g_clock[8] = "00:00";
 static char         g_search[48];
 
@@ -474,6 +503,16 @@ void nd_demo_idle(void) {
   (void)nd_theme_resolve();
   if (nd_theme_version() != g_theme_seen) {
     nd_demo_theme_sync();
+  }
+  /* Language needs no rebuild (the renderer resolves each label), only a
+   * full repaint so every cached pixel is replaced. */
+  if (nd_lang_version() != g_lang_seen) {
+    nd_surface_t *s = nd_screen();
+
+    g_lang_seen = nd_lang_version();
+    if (s != 0) {
+      ng_damage(nd_rect(0, 0, s->w, s->h));
+    }
   }
 }
 
@@ -771,7 +810,8 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
         ng_create(g_start_menu, NG_PANEL, 20, 498, 440, 1), ctx->theme.win_border);
     (void)line;
   }
-  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 516, 220, 20), "Novus 用户",
+  ng_label(ng_create(g_start_menu, NG_LABEL, 20, 516, 220, 20),
+           session_live() ? ND_L("Live 会话", "Live session") : "Novus 用户",
            ctx->theme.text_dim, 1);
   ng_icon(ng_create(g_start_menu, NG_ICON, 372, 508, 36, 36), NG_ICON_SETTINGS,
           18, on_launch_settings);
@@ -893,6 +933,7 @@ void nd_demo_init(void) {
   nd_cursor_draw();
   g_demo_ready = 1;
   g_theme_seen = nd_theme_version();
+  g_lang_seen = nd_lang_version();
   kputs("[ND] demo desktop painted\n");
 }
 
@@ -925,6 +966,7 @@ void nd_demo_theme_sync(void) {
   build_desktop(screen, ctx);
   ng_render_all();
   g_theme_seen = nd_theme_version();
+  g_lang_seen = nd_lang_version();
   kputs("[ND] theme applied: ");
   kputs(nd_theme_is_dark() ? "dark\n" : "light\n");
 }

@@ -100,10 +100,16 @@ typedef struct {
   UINT64 esp_img_size;             /* 0x2F8: bytes, 0 = none staged     */
   UINT32 install_flags;            /* 0x300: SHM_INSTALL_FLAG_*         */
 
-  UINT8  reserved[7456 - 16 - 20]; /* 0x304: pad to exactly 8 KiB       */
+  /* ---- M11: root USB port the live medium was booted from (0 = none).
+   * The installer refuses to write over the medium that is running. ---- */
+  UINT32 boot_usb_port;            /* 0x304: xHCI root port number      */
+
+  UINT8  reserved[7456 - 16 - 24]; /* 0x308: pad to exactly 8 KiB       */
 } shared_mem_t;
 
 #define SHM_INSTALL_FLAG_PAYLOADS 0x00000001u /* ESP and system images staged */
+#define SHM_INSTALL_FLAG_BOOT_USB 0x00000002u /* live medium is on USB     */
+#define SHM_INSTALL_FLAG_BOOT_USB_AMBIGUOUS 0x00000004u /* several USB volumes */
 
 /* Frozen-layout guarantees; a violation here is a spec 2.3 break. */
 _Static_assert(sizeof(shared_mem_t) == SHARED_MEM_SIZE,
@@ -129,7 +135,9 @@ _Static_assert(__builtin_offsetof(shared_mem_t, esp_img_base) == 0x2F0,
                "shared_mem frozen layout drift: esp_img_base");
 _Static_assert(__builtin_offsetof(shared_mem_t, install_flags) == 0x300,
                "shared_mem frozen layout drift: install_flags");
-_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x304,
+_Static_assert(__builtin_offsetof(shared_mem_t, boot_usb_port) == 0x304,
+               "shared_mem frozen layout drift: boot_usb_port");
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x308,
                "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the block at SHARED_MEM_PHYS

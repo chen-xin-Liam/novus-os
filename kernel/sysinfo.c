@@ -17,6 +17,9 @@
 #include "net.h"
 #include "blkdev.h"
 #include "nd_theme.h"
+#include "nd.h"
+#include "nd_lang.h"
+#include "lang.h"
 
 #if CONFIG_NOVUS_IPC && CONFIG_NOVUS_WM
 
@@ -456,6 +459,49 @@ static void req_spawn(const ipc_msg_t *m) {
   }
 }
 
+/* Language: one switch, persisted on a persistent root. Live boots answer
+ * with the in-memory value and ignore the write. */
+static void req_lang(const ipc_msg_t *m) {
+  sysinfo_lang_t     q;
+  sysinfo_lang_rsp_t r;
+
+  if (m->hdr.len >= sizeof(q)) {
+    memcpy(&q, m->payload, sizeof(q));
+    if (q.set != 0u && q.value <= ND_LANG_EN) {
+      nd_lang_set(q.value);
+      lang_save(q.value);
+    }
+  }
+  r.lang = nd_lang_get();
+  r.version = nd_lang_version();
+  answer(m, SYSINFO_RSP_OK, &r, sizeof(r));
+}
+
+/* The graphics outputs: how many displays the firmware offered, how big
+ * they are, and whether the link is digital or analog. */
+static void req_display(const ipc_msg_t *m) {
+  sysinfo_display_rsp_t r;
+  const nd_output_t  *outs;
+  UINT32             count = 0;
+  UINT32             i;
+
+  outs = nd_outputs(&count);
+  memset(&r, 0, sizeof(r));
+  if (count > SYSINFO_DISPLAY_MAX) {
+    count = SYSINFO_DISPLAY_MAX;
+  }
+  for (i = 0; i < count; i++) {
+    r.out[i].width = outs[i].width;
+    r.out[i].height = outs[i].height;
+    r.out[i].pref_width = outs[i].pref_width;
+    r.out[i].pref_height = outs[i].pref_height;
+    r.out[i].flags = (outs[i].digital != 0u ? 1u : 0u) |
+                     (outs[i].primary != 0u ? 2u : 0u);
+  }
+  r.count = count;
+  answer(m, SYSINFO_RSP_DISPLAY, &r, sizeof(r));
+}
+
 /* Name-based launch: the wire format is the task name, zero padded. Kept
  * alongside the M8 index request so adding an app cannot change what an
  * old caller meant. */
@@ -517,6 +563,12 @@ static void handle(const ipc_msg_t *m) {
     break;
   case SYSINFO_REQ_SPAWN_NAME:
     req_spawn_name(m);
+    break;
+  case SYSINFO_REQ_LANG:
+    req_lang(m);
+    break;
+  case SYSINFO_REQ_DISPLAY:
+    req_display(m);
     break;
   case SYSINFO_REQ_THEME:
     req_theme(m);

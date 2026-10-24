@@ -509,14 +509,32 @@ typedef struct {
 
 typedef struct _EFI_GRAPHICS_OUTPUT_PROTOCOL EFI_GRAPHICS_OUTPUT_PROTOCOL;
 
+typedef EFI_STATUS (EFIAPI *EFI_GRAPHICS_OUTPUT_QUERY_MODE)(
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *This, UINT32 ModeNumber, UINTN *SizeOfInfo,
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION **Info);
+typedef EFI_STATUS (EFIAPI *EFI_GRAPHICS_OUTPUT_SET_MODE)(
+    EFI_GRAPHICS_OUTPUT_PROTOCOL *This, UINT32 ModeNumber);
+
 /* Only QueryMode and Mode are used; the other members keep the layout
  * identical to the specification. */
 struct _EFI_GRAPHICS_OUTPUT_PROTOCOL {
-  VOID                            *QueryMode;
-  VOID                            *SetMode;
-  VOID                            *Blt;
+  EFI_GRAPHICS_OUTPUT_QUERY_MODE QueryMode;
+  EFI_GRAPHICS_OUTPUT_SET_MODE  SetMode;
+  VOID                           *Blt;
   EFI_GRAPHICS_OUTPUT_PROTOCOL_MODE *Mode;
 };
+
+/* EDID of the display a graphics output is wired to. The boot stage reads
+ * it to learn the preferred mode and whether the link is digital (DP,
+ * eDP, HDMI) or analog (VGA). */
+#define EFI_EDID_ACTIVE_PROTOCOL_GUID                                     \
+  NOVUS_EFI_GUID(0xBDC8E6E5, 0xF9BA, 0x4169, 0xA0, 0x35, 0xA7, 0xD1, 0x0B, \
+                 0x3F, 0xC6, 0xDE)
+
+typedef struct {
+  UINT32 Size;
+  UINT8 *Data;
+} EFI_EDID_ACTIVE_PROTOCOL;
 
 /* ------------------------------------------------------------------ */
 /* Simple File System / File protocols                                 */

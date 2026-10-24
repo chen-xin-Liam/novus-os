@@ -17,6 +17,7 @@
 #include "kernel.h"
 #include "mm.h"
 #include "nd.h"
+#include <stddef.h>
 
 #define ND_FB_MAX_WIDTH  4096u
 #define ND_FB_MAX_HEIGHT 2160u
@@ -64,82 +65,209 @@ static const char *const g_cursor_shape[ND_CURSOR_H] = {
 
 /* ---- boot stage ------------------------------------------------------- */
 
-int nd_capture_boot(void *system_table) {
-  EFI_SYSTEM_TABLE             *st = (EFI_SYSTEM_TABLE *)system_table;
-  EFI_GRAPHICS_OUTPUT_PROTOCOL *gop = 0;
-  EFI_GUID                      guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
-  EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
-  UINT32                        bgr;
+/* Every graphics output the firmware offers. The boot stage fills this
+ * in and the kernel stage reads it after ExitBootServices, so it lives in
+ * .data: the kernel's entry point clears .bss, not .data. */
+static nd_output_t g_outputs[ND_MAX_OUTPUTS] __attribute__((section(".data")));
+static UINT32 g_output_count __attribute__((section(".data")));
 
-  memset(&g_disp, 0, sizeof(g_disp));
-  g_disp.backend = "none";
-  if (st == 0 || st->BootServices == 0) {
-    return 0;
-  }
-  if (EFI_ERROR(st->BootServices->LocateProtocol(&guid, 0, (VOID **)&gop)) ||
-      gop == 0 || gop->Mode == 0 || gop->Mode->Info == 0) {
-    return 0;
-  }
-  info = gop->Mode->Info;
-  if (gop->Mode->FrameBufferBase == 0 || info->HorizontalResolution == 0u ||
-      info->VerticalResolution == 0u) {
-    return 0;
-  }
-  if (info->HorizontalResolution > ND_FB_MAX_WIDTH ||
-      info->VerticalResolution > ND_FB_MAX_HEIGHT) {
-    return 0;
-  }
-
-  /* Only 8-bit-per-channel modes are drawn directly. BITMASK is accepted
-   * when it describes exactly the same two layouts; a masked 16bpp mode
-   * would need a converter this milestone does not have. */
+/* Can the renderer draw into this pixel format directly? */
+static int mode_drawable(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info,
+                         UINT32 *bgr_out) {
   if (info->PixelFormat == PixelBlueGreenRedReserved8BitPerColor) {
-    bgr = 1;
+    *bgr_out = 1u;
   } else if (info->PixelFormat == PixelRedGreenBlueReserved8BitPerColor) {
-    bgr = 0;
+    *bgr_out = 0u;
   } else if (info->PixelFormat == PixelBitMask &&
              info->PixelInformation.RedMask == 0x00FF0000u &&
              info->PixelInformation.GreenMask == 0x0000FF00u &&
              info->PixelInformation.BlueMask == 0x000000FFu) {
-    bgr = 1;
+    *bgr_out = 1u;
   } else if (info->PixelFormat == PixelBitMask &&
              info->PixelInformation.RedMask == 0x000000FFu &&
-             info->PixelInformation.GreenMask == 0x0000FF00u &&
-             info->PixelInformation.BlueMask == 0x00FF0000u) {
-    bgr = 0;
+             info->PixelInformation.GreenMask == 0x00FF0000u &&
+             info->PixelInformation.BlueMask == 0x0000FF00u) {
+    *bgr_out = 0u;
   } else {
     return 0;
   }
+  return 1;
+}
 
-  /* The kernel only identity-maps the low 4 GiB; a framebuffer above that
-   * is reachable through the physmap, but the physmap stops at ram_top,
-   * which excludes MMIO. Refuse instead of faulting. */
-  {
-    UINT64 size = (UINT64)info->PixelsPerScanLine *
-                  (UINT64)info->VerticalResolution * 4u;
-    if (gop->Mode->FrameBufferBase >= ND_LOW_4G ||
-        gop->Mode->FrameBufferBase + size > ND_LOW_4G) {
-      return 0;
+/* What does the display ask for?
+ *
+ * The EDID block names the preferred timing and whether the link is
+ * digital (DP, eDP, HDMI) or analog (VGA). A display without EDID keeps
+ * the mode the firmware picked. */
+static void edid_preferred(EFI_SYSTEM_TABLE *st, EFI_HANDLE handle,
+                           UINT32 *w, UINT32 *h, UINT8 *digital) {
+  EFI_GUID                  guid = EFI_EDID_ACTIVE_PROTOCOL_GUID;
+  EFI_EDID_ACTIVE_PROTOCOL *edid = NULL;
+  UINT8                    *d;
+
+  *w = 0u;
+  *h = 0u;
+  *digital = 0u;
+  if (EFI_ERROR(st->BootServices->HandleProtocol(handle, &guid,
+                                                (VOID **)&edid)) ||
+      edid == 0 || edid->Data == 0) {
+    return;
+  }
+  d = edid->Data;
+  if (d[0] != 0x00u || d[1] != 0xFFu || d[18] == 0x00u) {
+    return; /* not an EDID block, or no detailed timing descriptor */
+  }
+  /* Byte 20, bit 7: 1 = digital input, 0 = analog. */
+  *digital = (d[20] & 0x80u) ? 1u : 0u;
+  /* The first detailed timing descriptor starts at byte 54. */
+  *w = (UINT32)d[56] | ((UINT32)(d[58] & 0xF0u) << 4);
+  *h = (UINT32)d[59] | ((UINT32)(d[61] & 0xF0u) << 4);
+}
+
+/* Switch the output to the mode the display prefers, when the controller
+ * offers one. The firmware's own mode is kept when it does not. */
+static void gop_apply_preferred(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINT32 pw,
+                                UINT32 ph) {
+  UINT32 m;
+
+  if (pw == 0u || ph == 0u || gop->QueryMode == 0) {
+    return;
+  }
+  for (m = 0; m < gop->Mode->MaxMode; m++) {
+    UINTN                                size = 0;
+    EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
+    UINT32                               bgr = 0;
+
+    if (EFI_ERROR(gop->QueryMode(gop, m, &size, &info)) || info == 0) {
+      continue;
     }
+    if (info->HorizontalResolution != pw || info->VerticalResolution != ph) {
+      continue;
+    }
+    if (!mode_drawable(info, &bgr)) {
+      continue;
+    }
+    if (EFI_ERROR(gop->SetMode(gop, m))) {
+      continue;
+    }
+    return;
+  }
+}
+
+int nd_capture_boot(void *system_table) {
+  EFI_SYSTEM_TABLE *st = (EFI_SYSTEM_TABLE *)system_table;
+  EFI_GUID          gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+  EFI_HANDLE       *handles = NULL;
+  UINTN             n = 0;
+  UINTN             i;
+  UINT32            count = 0;
+
+  memset(&g_disp, 0, sizeof(g_disp));
+  memset(g_outputs, 0, sizeof(g_outputs));
+  g_output_count = 0;
+  g_disp.backend = "none";
+  if (st == 0 || st->BootServices == 0) {
+    return 0;
   }
 
-  g_disp.available = 1;
-  g_disp.bgr = (UINT8)bgr;
-  g_disp.width = info->HorizontalResolution;
-  g_disp.height = info->VerticalResolution;
-  g_disp.pitch = info->PixelsPerScanLine;
-  g_disp.bpp = 32;
-  g_disp.fb_phys = gop->Mode->FrameBufferBase;
-  g_disp.fb_size = gop->Mode->FrameBufferSize;
-  g_disp.backend = "GOP framebuffer";
+  /* Every graphics output the firmware offers, not just the first one. */
+  if (!EFI_ERROR(st->BootServices->LocateHandleBuffer(AllHandles, &gop_guid,
+                                                      NULL, &n, &handles)) &&
+      handles != 0) {
+    for (i = 0; i < n && count < ND_MAX_OUTPUTS; i++) {
+      EFI_GRAPHICS_OUTPUT_PROTOCOL         *gop = NULL;
+      EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
+      nd_output_t *o = &g_outputs[count];
+      UINT32       pw = 0;
+      UINT32       ph = 0;
+      UINT8        digital = 0;
+      UINT32       bgr = 0;
+      UINT64       size;
+
+      if (EFI_ERROR(st->BootServices->HandleProtocol(handles[i], &gop_guid,
+                                                    (VOID **)&gop)) ||
+          gop == 0 || gop->Mode == 0 || gop->Mode->Info == 0) {
+        continue;
+      }
+      edid_preferred(st, handles[i], &pw, &ph, &digital);
+      gop_apply_preferred(gop, pw, ph);
+
+      info = gop->Mode->Info;
+      if (!mode_drawable(info, &bgr)) {
+        continue;
+      }
+      if (info->HorizontalResolution == 0u || info->VerticalResolution == 0u ||
+          info->HorizontalResolution > ND_FB_MAX_WIDTH ||
+          info->VerticalResolution > ND_FB_MAX_HEIGHT) {
+        continue;
+      }
+      /* The kernel only identity-maps the low 4 GiB; a framebuffer above
+       * that is unreachable through the physmap. Refuse instead of
+       * faulting. */
+      size = (UINT64)info->PixelsPerScanLine * (UINT64)info->VerticalResolution *
+             4u;
+      if (gop->Mode->FrameBufferBase == 0 ||
+          gop->Mode->FrameBufferBase >= ND_LOW_4G ||
+          gop->Mode->FrameBufferBase + size > ND_LOW_4G) {
+        continue;
+      }
+
+      o->available = 1;
+      o->bgr = (UINT8)bgr;
+      o->digital = digital;
+      o->primary = (count == 0u) ? 1u : 0u;
+      o->width = info->HorizontalResolution;
+      o->height = info->VerticalResolution;
+      o->pitch = info->PixelsPerScanLine;
+      o->pref_width = pw;
+      o->pref_height = ph;
+      o->fb_phys = gop->Mode->FrameBufferBase;
+      o->fb_size = gop->Mode->FrameBufferSize;
+      count++;
+    }
+  }
+  g_output_count = count;
+  if (count == 0u) {
+    return 0;
+  }
+
+  /* The first output carries the desktop; the others mirror it. */
+  {
+    nd_output_t *p = &g_outputs[0];
+
+    g_disp.available = 1;
+    g_disp.bgr = p->bgr;
+    g_disp.width = p->width;
+    g_disp.height = p->height;
+    g_disp.pitch = p->pitch;
+    g_disp.bpp = 32;
+    g_disp.fb_phys = p->fb_phys;
+    g_disp.fb_size = p->fb_size;
+    g_disp.backend = (count > 1u) ? "GOP framebuffer, mirrored"
+                                  : "GOP framebuffer";
+  }
   return 1;
 }
 
 /* ---- kernel stage ----------------------------------------------------- */
 
+/* The other outputs: they show the same picture as the primary one. */
+static nd_surface_t g_mirror[ND_MAX_OUTPUTS - 1u];
+static UINT32       g_mirror_count;
+
+/* What the settings page shows: one entry per framebuffer, because
+ * firmware often lists a second head that points at the very same memory
+ * and calling that a display would be a lie. */
+static nd_output_t g_reported[ND_MAX_OUTPUTS];
+static UINT32      g_reported_count;
+
 int nd_init(void) {
+  UINT32 i;
+
   g_screen_ready = 0;
   memset(&g_screen, 0, sizeof(g_screen));
+  memset(g_mirror, 0, sizeof(g_mirror));
+  g_mirror_count = 0;
   g_cursor_on = 0;
 
   if (!g_disp.available) {
@@ -157,6 +285,37 @@ int nd_init(void) {
   g_screen.bgr = g_disp.bgr;
   g_screen.clip = nd_rect(0, 0, g_screen.w, g_screen.h);
 
+  /* Every further output mirrors the primary one, and the reported list
+   * keeps one entry per framebuffer: a second head over the same memory is
+   * not a display, it is a duplicate the firmware felt like listing. */
+  g_reported_count = 0;
+  for (i = 0; i < g_output_count && i < ND_MAX_OUTPUTS; i++) {
+    UINT32 k;
+    int    duplicate = 0;
+
+    for (k = 0; k < g_reported_count; k++) {
+      if (g_reported[k].fb_phys == g_outputs[i].fb_phys) {
+        duplicate = 1;
+        break;
+      }
+    }
+    if (duplicate) {
+      continue;
+    }
+    g_reported[g_reported_count++] = g_outputs[i];
+  }
+  for (i = 1; i < g_reported_count && i < ND_MAX_OUTPUTS; i++) {
+    nd_surface_t *m = &g_mirror[g_mirror_count++];
+
+    m->px = (UINT32 *)(UINTN)g_reported[i].fb_phys;
+    m->w = (INT32)g_reported[i].width;
+    m->h = (INT32)g_reported[i].height;
+    m->stride = g_reported[i].pitch;
+    m->fb = 1;
+    m->bgr = g_reported[i].bgr;
+    m->clip = nd_rect(0, 0, m->w, m->h);
+  }
+
   g_screen_ready = 1;
   g_cx = g_screen.w / 2;
   g_cy = g_screen.h / 2;
@@ -173,13 +332,93 @@ int nd_init(void) {
   kputs_hex(g_disp.fb_phys);
   kputs(g_disp.bgr ? ", BGR\n" : ", RGB\n");
 
+  /* One line per output: what it is, how big, and what it would prefer. */
+  for (i = 0; i < g_reported_count; i++) {
+    kputs("[ND] output ");
+    kputs_hex((UINT64)i);
+    kputs(g_reported[i].primary ? " primary" : " mirror");
+    kputs(" ");
+    kputs_hex(g_reported[i].width);
+    kputs("x");
+    kputs_hex(g_reported[i].height);
+    kputs(g_reported[i].digital ? " digital" : " analog");
+    if (g_reported[i].pref_width != 0u) {
+      kputs(", preferred ");
+      kputs_hex(g_reported[i].pref_width);
+      kputs("x");
+      kputs_hex(g_reported[i].pref_height);
+    }
+    kputs("\n");
+  }
+
   nd_clear(&g_screen, ND_RGB(0x10, 0x14, 0x1C));
   return 1;
 }
 
 const nd_display_t *nd_display(void) { return &g_disp; }
 
+const nd_output_t *nd_outputs(UINT32 *count) {
+  if (count != 0) {
+    *count = g_reported_count;
+  }
+  return g_reported;
+}
+
 nd_surface_t *nd_screen(void) { return g_screen_ready ? &g_screen : 0; }
+
+/* Red and blue trade places when the two framebuffers disagree about
+ * the byte order. */
+static UINT32 mirror_swap(UINT32 px) {
+  return (px & 0xFF00FF00u) | ((px & 0x000000FFu) << 16) |
+         ((px & 0x00FF0000u) >> 16);
+}
+
+/* Copy a rectangle of the primary output onto the other outputs. The copy
+ * is clipped to the smaller of the two, so a 1080p desktop on a 4K panel
+ * shows the picture in the top left corner instead of running off it. */
+void nd_mirror_rect(nd_rect_t r) {
+  nd_surface_t *src = nd_screen();
+  UINT32        i;
+
+  if (src == 0 || g_mirror_count == 0u) {
+    return;
+  }
+  for (i = 0; i < g_mirror_count; i++) {
+    nd_surface_t *dst = &g_mirror[i];
+    INT32         x0 = (r.x > 0) ? r.x : 0;
+    INT32         y0 = (r.y > 0) ? r.y : 0;
+    INT32         x1 = r.x + r.w;
+    INT32         y1 = r.y + r.h;
+    INT32         x;
+    INT32         y;
+
+    if (x1 > dst->w) {
+      x1 = dst->w;
+    }
+    if (y1 > dst->h) {
+      y1 = dst->h;
+    }
+    if (x1 > src->w) {
+      x1 = src->w;
+    }
+    if (y1 > src->h) {
+      y1 = src->h;
+    }
+    for (y = y0; y < y1; y++) {
+      const UINT32 *srow = src->px + (UINT32)y * src->stride + (UINT32)x0;
+      UINT32       *drow = dst->px + (UINT32)y * dst->stride + (UINT32)x0;
+
+      for (x = x0; x < x1; x++) {
+        UINT32 px = srow[x - x0];
+
+        if (src->bgr != dst->bgr) {
+          px = mirror_swap(px);
+        }
+        drow[x - x0] = px;
+      }
+    }
+  }
+}
 
 /* ---- software pointer ------------------------------------------------- */
 

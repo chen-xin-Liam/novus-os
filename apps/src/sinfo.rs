@@ -24,6 +24,68 @@ pub const REQ_TASKS2: u16 = 0x030B;
 pub const REQ_TACT: u16 = 0x030C;
 pub const REQ_NETDEVS: u16 = 0x030D;
 pub const REQ_SPAWN_NAME: u16 = 0x030E;
+pub const REQ_LANG: u16 = 0x030F;
+pub const REQ_DISPLAY: u16 = 0x0318;
+
+/// One graphics output, as the firmware described it.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DisplayOut {
+    pub width: u32,
+    pub height: u32,
+    pub pref_width: u32,
+    pub pref_height: u32,
+    pub flags: u32,
+}
+
+/// Every graphics output the machine has.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Display {
+    pub count: u32,
+    pub out: [DisplayOut; 4],
+}
+
+impl DisplayOut {
+    /// A digital link: DP, eDP or HDMI. An analog one is VGA.
+    pub fn digital(&self) -> bool {
+        self.flags & 1 != 0
+    }
+
+    /// The output the desktop is drawn on.
+    pub fn primary(&self) -> bool {
+        self.flags & 2 != 0
+    }
+}
+
+pub fn display(port: u64) -> Option<Display> {
+    query(port, REQ_DISPLAY, &[], RSP_DISPLAY)?.read::<Display>()
+}
+
+/// Language reply: current value and a version that changes on every set.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Lang {
+    pub lang: u32,
+    pub version: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct LangReq {
+    set: u32,
+    value: u32,
+}
+
+pub fn lang(port: u64) -> Option<Lang> {
+    query(port, REQ_LANG, &[], RSP_OK)?.read::<Lang>()
+}
+
+pub fn set_lang(port: u64, lang: u32) -> Option<Lang> {
+    let q = LangReq { set: 1, value: lang };
+
+    query(port, REQ_LANG, ipc::bytes_of(&q), RSP_OK)?.read::<Lang>()
+}
 
 pub const RSP_OK: u16 = 0x0310;
 pub const RSP_TASKS: u16 = 0x0311;
@@ -33,6 +95,7 @@ pub const RSP_ACCENT: u16 = 0x0314;
 pub const RSP_THEME: u16 = 0x0315;
 pub const RSP_NET: u16 = 0x0316;
 pub const RSP_TASKS2: u16 = 0x0317;
+pub const RSP_DISPLAY: u16 = 0x0319;
 pub const RSP_ERR: u16 = 0x03FF;
 
 /* Request and response type values are wire-level IDs shared with the

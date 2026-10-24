@@ -425,7 +425,12 @@ static void sys_setup(trap_frame_t *f) {
   }
 
   case INSTALL_OP_BEGIN:
-    f->rax = (UINT64)(INT64)install_begin((UINT8)arg);
+    f->rax = (UINT64)(INT64)install_begin((UINT8)arg, (UINT8)ptr);
+    return;
+
+  case INSTALL_OP_LANG:
+    install_set_language((UINT8)arg);
+    f->rax = 0;
     return;
 
   case INSTALL_OP_STEP: {

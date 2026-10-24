@@ -219,7 +219,6 @@ static int blkpart_write(void *ctx, UINT64 sector, UINTN count,
 
 blkdev_t *blkdev_partition_init(const char *name, blkdev_t *parent,
                                 UINT64 first_sector, UINT64 sector_count) {
-  UINTN i;
   UINTN name_len = 0;
   UINT32 spb;
   blkpart_ctx_t *ctx;

@@ -22,6 +22,8 @@ pub mod fs;
 pub mod sinfo;
 pub mod sys;
 pub mod theme;
+pub mod lang;
+pub mod lang_dict;
 pub mod ui;
 pub mod wm;
 pub mod install;

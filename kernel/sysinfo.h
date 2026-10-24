@@ -35,6 +35,18 @@
 #define SYSINFO_REQ_TACT   0x030Cu
 #define SYSINFO_REQ_NETDEVS 0x030Du /* end a task by pid */
 #define SYSINFO_REQ_SPAWN_NAME 0x030Eu /* start a built-in app by name */
+#define SYSINFO_REQ_LANG      0x030Fu /* get / set the UI language */
+#define SYSINFO_REQ_DISPLAY   0x0318u /* the graphics outputs of the machine */
+
+typedef struct {
+  UINT32 lang;    /* 0 zh, 1 en */
+  UINT32 version; /* increments on every change */
+} sysinfo_lang_rsp_t;
+
+typedef struct {
+  UINT32 set;   /* 0 = query only */
+  UINT32 value; /* ND_LANG_* */
+} sysinfo_lang_t;
 
 /* Replies. Distinct types per query so a client can match its answer
  * without a correlation id. */
@@ -46,6 +58,7 @@
 #define SYSINFO_RSP_THEME  0x0315u
 #define SYSINFO_RSP_NET    0x0316u
 #define SYSINFO_RSP_TASKS2 0x0317u
+#define SYSINFO_RSP_DISPLAY 0x0319u
 #define SYSINFO_RSP_ERR    0x03FFu
 
 /* Directories the file manager can browse. */
@@ -122,6 +135,24 @@ typedef struct {
   UINT32 resolved;
   UINT32 version;
 } sysinfo_theme_rsp_t;
+
+/* The graphics outputs the firmware offered: one entry per display, with
+ * the mode in use, the mode the display would prefer, and whether the
+ * link is digital (DP/eDP/HDMI) or analog (VGA). */
+#define SYSINFO_DISPLAY_MAX 4u
+
+typedef struct {
+  UINT32 width;
+  UINT32 height;
+  UINT32 pref_width;
+  UINT32 pref_height;
+  UINT32 flags; /* bit 0: digital link, bit 1: the primary output */
+} sysinfo_display_out_t;
+
+typedef struct {
+  UINT32                  count;
+  sysinfo_display_out_t   out[SYSINFO_DISPLAY_MAX];
+} sysinfo_display_rsp_t;
 
 /* Kill: the pid to end. Reply is an INT32 status through RSP_OK. */
 typedef struct {

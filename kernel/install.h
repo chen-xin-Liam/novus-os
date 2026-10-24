@@ -44,6 +44,7 @@
 #define INSTALL_E_FOREIGN      5u
 #define INSTALL_E_BUSY         6u
 #define INSTALL_E_ARG          7u
+#define INSTALL_E_BOOT_MEDIUM  8u
 
 /* Errors during the run. */
 #define INSTALL_ERR_NONE       0u
@@ -53,6 +54,13 @@
 #define INSTALL_ERR_VERIFY     4u
 #define INSTALL_ERR_NOMEM      5u
 #define INSTALL_ERR_ARG        6u
+#define INSTALL_ERR_FS         7u /* file system requested is not implemented */
+
+/* Target file system. Only NovusFS is writable by the kernel today; the
+ * other values reserve the ABI for the driver milestones. */
+#define INSTALL_FS_NOVUS 0u
+#define INSTALL_FS_NTFS  1u
+#define INSTALL_FS_EXT4  2u
 
 /* One candidate, as the wizard sees it. `flags` mirrors BLKDEV_FLAG_*. */
 typedef struct {
@@ -81,6 +89,7 @@ typedef struct {
 #define INSTALL_OP_ABORT 4u
 #define INSTALL_OP_STAT  5u  /* b = user install_progress_t*             */
 #define INSTALL_OP_RESET 6u
+#define INSTALL_OP_LANG  7u  /* a = ND_LANG_*, written to the new system  */
 
 /* Read the staged payload addresses; call once after the heap and the
  * direct map are up. */
@@ -94,9 +103,12 @@ int install_available(void);
 int install_count(void);
 int install_disk(UINT8 index, install_disk_t *out);
 
-/* Start: validates everything (payloads, target, capacity) before the
- * first destructive write. Returns 0 or a negative error. */
-int install_begin(UINT8 index);
+/* Start: validates everything (payloads, target, capacity, file system)
+ * before the first destructive write. Returns 0 or a negative error. */
+int install_begin(UINT8 index, UINT8 fs);
+
+/* Language written into the new system partition during verification. */
+void install_set_language(UINT8 lang);
 
 /* Advance one bounded step. Writes the current progress and returns the
  * phase, or -1 when no install is running. */
