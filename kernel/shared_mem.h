@@ -104,7 +104,16 @@ typedef struct {
    * The installer refuses to write over the medium that is running. ---- */
   UINT32 boot_usb_port;            /* 0x304: xHCI root port number      */
 
-  UINT8  reserved[7456 - 16 - 24]; /* 0x308: pad to exactly 8 KiB       */
+  /* ---- Wallpaper package (WPAPERS.PKG) staged off the ESP. The
+   * photos are not in the loader: the boot stage reads the package into
+   * reserved pages, exactly like the module and the application images,
+   * and graphics/nd_wallpaper.c indexes into them. base == 0 means the
+   * medium carries no package, and the desktop paints a flat colour
+   * instead. tail carve-out only: no field above moves. ---- */
+  UINT64 wpkg_img_base;            /* 0x308: reserved pages (physical)  */
+  UINT64 wpkg_img_size;            /* 0x310: bytes, 0 = none staged     */
+
+  UINT8  reserved[7456 - 16 - 24 - 16]; /* 0x318: pad to exactly 8 KiB  */
 } shared_mem_t;
 
 #define SHM_INSTALL_FLAG_PAYLOADS 0x00000001u /* ESP and system images staged */
@@ -137,7 +146,10 @@ _Static_assert(__builtin_offsetof(shared_mem_t, install_flags) == 0x300,
                "shared_mem frozen layout drift: install_flags");
 _Static_assert(__builtin_offsetof(shared_mem_t, boot_usb_port) == 0x304,
                "shared_mem frozen layout drift: boot_usb_port");
-_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x308,
+/* The wallpaper package occupies the next bytes of the reserved tail. */
+_Static_assert(__builtin_offsetof(shared_mem_t, wpkg_img_base) == 0x308,
+               "shared_mem frozen layout drift: wpkg_img_base");
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x318,
                "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the block at SHARED_MEM_PHYS

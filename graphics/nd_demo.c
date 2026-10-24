@@ -17,6 +17,7 @@
 #include "kernel.h"
 #include "nvgui.h"
 #include "nd_theme.h"
+#include "nd_wallpaper.h"
 #include "nd_input.h"
 #include "nd_ime.h"
 #include "rtc.h"
@@ -644,6 +645,10 @@ static void on_accent7(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_acce
 static void on_paper0(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(0); }
 static void on_paper1(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(1); }
 static void on_paper2(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(2); }
+static void on_paper3(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(3); }
+static void on_paper4(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(4); }
+static void on_paper5(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(5); }
+static void on_paper6(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(6); }
 
 static void on_shutdown(ng_ctx_t *c, ng_widget_t *w) {
   (void)c;
@@ -847,12 +852,21 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   }
   ng_label(ng_create(g_quick, NG_LABEL, 20, 182, 120, 16), "壁纸",
            ctx->theme.text_dim, 1);
-  ng_swatch(ng_create(g_quick, NG_SWATCH, 20, 204, 32, 32),
-            nd_theme_paper_top(0), nd_theme_wallpaper() == 0u, on_paper0);
-  ng_swatch(ng_create(g_quick, NG_SWATCH, 58, 204, 32, 32),
-            nd_theme_paper_top(1), nd_theme_wallpaper() == 1u, on_paper1);
-  ng_swatch(ng_create(g_quick, NG_SWATCH, 96, 204, 32, 32),
-            nd_theme_paper_top(2), nd_theme_wallpaper() == 2u, on_paper2);
+  {
+    /* One swatch per embedded photo; the theme's paper colour stands in
+     * for the image until it is decoded. */
+    static ng_action_fn paper_acts[ND_WALLPAPER_COUNT] = {
+      on_paper0, on_paper1, on_paper2, on_paper3,
+      on_paper4, on_paper5, on_paper6
+    };
+    int pi;
+
+    for (pi = 0; pi < ND_WALLPAPER_COUNT; pi++) {
+      ng_swatch(ng_create(g_quick, NG_SWATCH, 20 + pi * 38, 204, 32, 32),
+                nd_theme_paper_top(pi), (int)nd_theme_wallpaper() == pi,
+                paper_acts[pi]);
+    }
+  }
   ng_label(ng_create(g_quick, NG_LABEL, 20, 252, 300, 16), "网络已连接",
            ctx->theme.text_dim, 1);
   ng_button(ng_create(g_quick, NG_BUTTON, 20, 282, 92, 32), "重启", on_reboot);
@@ -920,6 +934,9 @@ void nd_demo_init(void) {
   if (screen == 0) {
     return;
   }
+  /* Decode the wallpaper for this screen size before the first frame; a
+   * failure just leaves the gradient in place. */
+  nd_wallpaper_init(screen->w, screen->h);
   nd_input_init();
   ctx = ng_init(screen);
   if (ctx == 0) {

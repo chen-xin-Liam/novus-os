@@ -23,6 +23,7 @@
 #include "sched.h"
 #include "nd.h"
 #include "nd_theme.h"
+#include "nd_wallpaper.h"
 #include "nd_input.h"
 #include "nvgui.h"
 #include "nwm.h"
@@ -1272,6 +1273,9 @@ void nwm_wallpaper_set(UINT32 idx) {
   if (ng_ctx_get() == 0) {
     return;
   }
+  /* Decode the new photo first: the shell rebuild triggered by the theme
+   * version bump below then paints it in the same tick. */
+  nd_wallpaper_set(idx);
   nd_theme_set_wallpaper(idx);
   ng_theme_apply();
 }

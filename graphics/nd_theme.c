@@ -59,15 +59,23 @@ static const nd_metrics_t g_metrics = {
 };
 
 static const UINT32 g_light_papers[][2] = {
-    {0xFFEEF2F8u, 0xFFE3EAF3u},
-    {0xFFF2F2F2u, 0xFFE2E2E2u},
-    {0xFFEAF4F0u, 0xFFDCEDE6u},
+    {0xFF9E8AB5u, 0xFF0279A4u},
+    {0xFFBFE3C1u, 0xFF25657Du},
+    {0xFF3499E4u, 0xFF6FA5CEu},
+    {0xFF5B6D80u, 0xFF2B4308u},
+    {0xFF813562u, 0xFF7A1D74u},
+    {0xFFCC7505u, 0xFF30221Du},
+    {0xFF733641u, 0xFF7E475Fu},
 };
 
 static const UINT32 g_dark_papers[][2] = {
-    {0xFF1A1E24u, 0xFF11151Au},
-    {0xFF202226u, 0xFF14161Au},
-    {0xFF19221Fu, 0xFF101614u},
+    {0xFF3A3145u, 0xFF023A4Eu},
+    {0xFF3E5240u, 0xFF12313Du},
+    {0xFF1A4C77u, 0xFF37566Bu},
+    {0xFF2D3740u, 0xFF152208u},
+    {0xFF401B31u, 0xFF3D0E3Au},
+    {0xFF663A02u, 0xFF181110u},
+    {0xFF391B20u, 0xFF3E2330u},
 };
 
 static nd_theme_mode_t g_mode = ND_THEME_AUTO;

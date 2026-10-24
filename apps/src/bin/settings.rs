@@ -32,13 +32,19 @@ const PRESETS: [u32; 8] = [
 ];
 const PRESET_NAMES: [&str; 8] = ["蓝", "绿", "琥珀", "紫", "红", "青", "玫瑰", "石墨"];
 
-/* Wallpaper presets, index i must match nwm.c g_papers[]. */
-const PAPERS: [(u32, u32); 3] = [
-    (0x00EEF2F8, 0x00E3EAF3),
-    (0x00F2F2F2, 0x00E2E2E2),
-    (0x00EAF4F0, 0x00DCEDE6),
+/* Wallpaper presets, index i must match nwm.c / nd_wallpaper.c and the
+ * theme's paper colours (the photos are embedded in the kernel; these
+ * gradient pairs are the picker swatches and the decoding fallback). */
+const PAPERS: [(u32, u32); 7] = [
+    (0x009E8AB5, 0x000279A4),
+    (0x00BFE3C1, 0x0025657D),
+    (0x003499E4, 0x006FA5CE),
+    (0x005B6D80, 0x002B4308),
+    (0x00813562, 0x007A1D74),
+    (0x00CC7505, 0x0030221D),
+    (0x00733641, 0x007E475F),
 ];
-const PAPER_NAMES: [&str; 3] = ["云母蓝", "晨雾灰", "青瓷"];
+const PAPER_NAMES: [&str; 7] = ["彩纸", "青渐变", "海岸", "梯田", "紫夜", "沙丘", "暮色"];
 
 const APPS: [&str; 3] = ["fileman", "taskman", "settings"];
 const APP_NAMES: [&str; 3] = ["文件管理器", "任务管理器", "设置"];
@@ -279,16 +285,16 @@ fn page_look(w: &mut wm::Win, s: &State) {
     w.text(CONTENT_X + 14 + 4 * 62 + 6, 264, ui::text(), PRESET_NAMES[idx]);
     w.text(CONTENT_X + 14, 320, ui::dim(), "强调色用于按钮、选中条与焦点环");
 
-    card(w, CONTENT_X, 350, CONTENT_W, 86, "桌面背景");
+    card(w, CONTENT_X, 350, CONTENT_W, 134, "桌面背景");
     for (i, p) in PAPERS.iter().enumerate() {
-        let x = CONTENT_X + 14 + i as i16 * 164;
-        let y = 376;
+        let x = CONTENT_X + 14 + (i % 4) as i16 * 124;
+        let y = 376 + (i / 4) as i16 * 58;
 
-        w.fill(x, y, 150, 34, p.0);
-        w.fill(x, y + 17, 150, 17, p.1);
-        w.round_frame(x, y, 150, 34, 6,
+        w.fill(x, y, 112, 34, p.0);
+        w.fill(x, y + 17, 112, 17, p.1);
+        w.round_frame(x, y, 112, 34, 6,
                       if i as u32 == s.wallpaper { s.accent } else { ui::line() });
-        w.text(x + 6, y + 42, ui::dim(), PAPER_NAMES[i]);
+        w.text(x + 6, y + 38, ui::dim(), PAPER_NAMES[i]);
     }
 }
 
@@ -653,10 +659,10 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             }
             /* Wallpaper previews. */
             for i in 0..PAPERS.len() {
-                let px = CONTENT_X + 14 + i as i16 * 164;
-                let py = 376;
+                let px = CONTENT_X + 14 + (i % 4) as i16 * 124;
+                let py = 376 + (i / 4) as i16 * 58;
 
-                if x >= px as i32 && x < (px + 150) as i32
+                if x >= px as i32 && x < (px + 112) as i32
                     && y >= py as i32 && y < (py + 34) as i32
                 {
                     if let Some(t) = sinfo::set_theme(sys_port, sinfo::THEME_WALLPAPER, i as u32) {

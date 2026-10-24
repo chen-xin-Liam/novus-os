@@ -16,6 +16,7 @@
 #include "kernel.h"
 #include "nvgui.h"
 #include "nd_theme.h"
+#include "nd_wallpaper.h"
 #include "nd_ime.h"
 
 static ng_ctx_t    g_ctx;
@@ -1224,8 +1225,9 @@ static void draw_swatch(ng_widget_t *w) {
 static void draw_self(ng_widget_t *w) {
   switch (w->type) {
   case NG_DESKTOP:
-    nd_gradient_v(g_ctx.surf, w->abs, g_ctx.theme.desktop_top,
-                  g_ctx.theme.desktop_bottom);
+    /* Photo wallpaper when one is decoded, a flat design-token colour
+     * otherwise (no package on the medium, or a decode failure). */
+    nd_wallpaper_paint(g_ctx.surf, &w->abs, g_ctx.theme.desktop_top);
     break;
   case NG_WINDOW:
     draw_window(w);

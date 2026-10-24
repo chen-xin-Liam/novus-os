@@ -38,6 +38,7 @@ MKFAT       := $(TOOLS_OUT)/mkfat
 MKISO       := $(TOOLS_OUT)/mkiso
 MKFSNOVUS   := $(TOOLS_OUT)/mkfsnovus
 MKDISK      := $(TOOLS_OUT)/mkdisk
+WPKG        := $(TOOLS_OUT)/wpkg
 
 # fs/novusfs is freestanding and declares memcpy/memset/memcmp itself,
 # with a 64-bit length. Renaming them keeps those declarations from
@@ -70,9 +71,15 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # stay well under the 32 MiB limit imposed by the El Torito hard-disk
 # emulation sector-count field. The live ESP is only slightly larger
 # because it also carries the template.
+#
+# Both images also carry the wallpaper package (WPAPERS.PKG, about
+# 3.7 MiB), which is what keeps the photos out of the loader: the boot stage
+# stages the file into reserved pages and the kernel decodes it from there.
+# The package is counted twice in the live ESP - once for itself, once inside
+# the template - so it is the term that sets these two numbers.
 SYS_SIZE_MB     ?= 8
-ESP_TPL_SIZE_MB ?= 12
-ESP_SIZE_MB     ?= 24
+ESP_TPL_SIZE_MB ?= 15
+ESP_SIZE_MB     ?= 30
 
 ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
@@ -81,6 +88,19 @@ ISO_IMG   := out/novus-live.iso
 NKM_TEST_H := security/nkm/nkm_test_module.h
 DISK_IMG  := out/novus-disk.img
 NKM_MOD   := out/test.nkm
+WPKG_IMG  := out/wallpapers.pkg
+
+# The photos are one file on the ESP, not part of the loader: the boot stage
+# stages it into reserved pages and the kernel's wallpaper layer indexes into
+# those pages (see tools/wpkg and graphics/nd_wallpaper.c). It goes into the
+# install template as well as the live ESP, so a system installed from this
+# medium keeps its wallpapers; a medium without the file still boots and the
+# desktop paints a flat colour instead.
+$(WPKG_IMG): $(WPKG) $(WP_IMGS) | out
+	$(WPKG) $@ $(WP_IMGS)
+
+.PHONY: wpkg-img
+wpkg-img: $(WPKG_IMG)
 
 # Size of the host-built disk image. The ESP template and the system
 # partition together need a little over 20 MiB; the rest is room for the
@@ -94,9 +114,9 @@ NKM_SEED ?= $(shell python3 -c \
   "import hashlib;print(hashlib.sha256(b'novus nkm development signing key v1').hexdigest())")
 
 .PHONY: tools esp novus-img disk-img iso iso-force run-iso install \
-        nkm-test-module
+        nkm-test-module wpkg
 
-tools: $(MKFAT) $(MKISO) $(MKFSNOVUS) $(MKDISK)
+tools: $(MKFAT) $(MKISO) $(MKFSNOVUS) $(MKDISK) $(WPKG)
 
 $(TOOLS_OUT):
 	mkdir -p $(TOOLS_OUT)
@@ -106,6 +126,9 @@ $(MKFAT): tools/mkfat/mkfat.c | $(TOOLS_OUT)
 
 $(MKISO): tools/mkiso/mkiso.c | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) -o $@ $<
+
+$(WPKG): tools/wpkg/wpkg.c graphics/wpkg.h | $(TOOLS_OUT)
+	$(HOSTCC) $(HOSTCFLAGS) -Itools/wpkg -o $@ $<
 
 # One rule per kernel filesystem source, flattened like the kernel's own
 # object naming, so the host build and the kernel build never share an
@@ -285,22 +308,25 @@ esp: $(ESP_IMG)
 
 # ESP template: what the installer writes to a target disk's ESP. Built
 # separately from the live ESP because an image cannot contain itself.
-$(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) | out
+$(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(WPKG_IMG) | out
 	$(MKFAT) $@ $(ESP_TPL_SIZE_MB) \
 	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
-	    $(NOVUS_IMG):SYSTEM.IMG
+	    $(NOVUS_IMG):SYSTEM.IMG \
+	    $(WPKG_IMG):WPAPERS.PKG
 
 # The live ESP. BOOTX64.EFI is the firmware's default fallback path;
 # NOVUS/SYSTEM.IMG is the live root; NOVUS/ESP.IMG is the install
 # template; NOVUS/TEST.NKM is the signed module the loader verifies;
+# WPAPERS.PKG is the photo package the wallpaper layer stages;
 # APPS/DEMO.NUC is staged for the boot-stage NUC loader.
 $(ESP_IMG): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) $(NKM_MOD) \
-			$(NUC_ESP_DEPS) $(CPPCC_ESP_DEPS) | out
+			$(NUC_ESP_DEPS) $(CPPCC_ESP_DEPS) $(WPKG_IMG) | out
 	$(MKFAT) $@ $(ESP_SIZE_MB) \
 	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
 	    $(NOVUS_IMG):SYSTEM.IMG \
 	    $(ESP_TPL):ESP.IMG \
 	    $(NKM_MOD):TEST.NKM \
+	    $(WPKG_IMG):WPAPERS.PKG \
 	    $(NUC_ESP_ARGS) $(CPPCC_ESP_ARGS)
 
 # A signed test module, produced by the same Ed25519 code the kernel

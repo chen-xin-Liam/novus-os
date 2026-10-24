@@ -107,6 +107,8 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_core.c \
        graphics/nd_hal.c \
        graphics/nd_input.c \
+       graphics/nd_jpeg.c \
+       graphics/nd_wallpaper.c \
        graphics/nvgui.c \
        graphics/nd_theme.c \
        graphics/nd_lang.c \
@@ -247,6 +249,32 @@ all: banner out/NOVUS.EFI
 banner:
     @echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER) display=$(CONFIG_NOVUS_DISPLAY) gui=$(CONFIG_NOVUS_GUI) ipc=$(CONFIG_NOVUS_IPC) wm=$(CONFIG_NOVUS_WM) cppcc=$(CONFIG_USER_CPPCC) win32=$(CONFIG_NOVUS_WIN32)"
 
+# ---------------------------------------------------------------------------
+# Wallpaper photos (assets/backgrounds)
+# ---------------------------------------------------------------------------
+# The photos do NOT go into the EFI image. They are packed into one file,
+# WPAPERS.PKG, by tools/wpkg (see tools/tools.mk); the boot stage reads
+# that file off the ESP into reserved pages before ExitBootServices and the
+# kernel's wallpaper layer indexes into those pages. Keeping ~3.7 MB of JPEG
+# out of the loader is what lets the live ESP stay under the 32 MB ceiling of
+# the El Torito boot entry, and a medium without the file still boots - the
+# desktop then paints a flat colour instead of a photo.
+#
+# The source photos are 6000..8640 px wide; what gets packed is
+# assets/backgrounds-screen, resampled to 2560 px on the long edge, which is
+# what the package budget allows (see tools/wpgen/wpgen.py for the numbers).
+# The order here is the wallpaper index order: index 0 is the default and
+# must match graphics/nd_wallpaper.c and the theme's paper colours. Defined
+# after the 'all' target on purpose: make takes the first target it sees as
+# the default.
+WP_DIR    := assets/backgrounds-screen
+WP_IMGS := $(WP_DIR)/pexels-snapsbyclark-12981877.jpg \
+           $(WP_DIR)/pexels-codioful-6985184.jpg \
+           $(WP_DIR)/pexels-ian-panelo-40321675.jpg \
+           $(WP_DIR)/mrbinz-vietnam-10445204_1920.jpg \
+           $(WP_DIR)/pexels-thales13-40360883.jpg \
+           $(WP_DIR)/pexels-tu-n-vu-2153773491-40278712.jpg \
+           $(WP_DIR)/treptoweralex-usa-9889580.jpg
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
 # embedded trampoline binary.

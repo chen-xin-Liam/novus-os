@@ -119,8 +119,8 @@ typedef struct {
   UINT32 wallpaper;
 } sysinfo_stats_t;
 
-/* Theme query/set. id 0 = accent (rgb), 1 = wallpaper index (0..2).
- * A query ignores `value`. */
+/* Theme query/set. id 0 = accent (rgb), 1 = wallpaper index (0..6, one per
+ * embedded photo wallpaper). A query ignores `value`. */
 typedef struct {
   UINT8  id;
   UINT8  pad[3];

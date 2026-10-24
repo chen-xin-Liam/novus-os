@@ -37,7 +37,8 @@ int nwm_spawn_client(void);
 UINT32 nwm_accent_get(void);
 void   nwm_accent_set(UINT32 rgb);
 
-/* Desktop wallpaper (0..2): the shell's mica gradient pair. */
+/* Desktop wallpaper (0..6): the embedded photo wallpapers; the theme keeps
+ * a matching gradient pair as fallback. */
 UINT32 nwm_wallpaper_get(void);
 void   nwm_wallpaper_set(UINT32 idx);
 

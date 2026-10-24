@@ -46,19 +46,38 @@ danger = "#C42B1C"
 selection = "#E5F1FB"
 shadow = "#000000"
 
-# Three desktop gradients; index order is the settings page order and the
-# value the sysinfo theme service stores.
+# Seven desktop gradients; index order is the settings page order and the
+# value the sysinfo theme service stores. Each pair matches the photo
+# wallpaper of the same index in assets/backgrounds (top/bottom strip
+# averages) and doubles as the picker swatch plus the fallback shown while
+# the photo decodes.
 [[light.wallpapers]]
-top = "#EEF2F8"
-bottom = "#E3EAF3"
+top = "#9E8AB5"
+bottom = "#0279A4"
 
 [[light.wallpapers]]
-top = "#F2F2F2"
-bottom = "#E2E2E2"
+top = "#BFE3C1"
+bottom = "#25657D"
 
 [[light.wallpapers]]
-top = "#EAF4F0"
-bottom = "#DCEDE6"
+top = "#3499E4"
+bottom = "#6FA5CE"
+
+[[light.wallpapers]]
+top = "#5B6D80"
+bottom = "#2B4308"
+
+[[light.wallpapers]]
+top = "#813562"
+bottom = "#7A1D74"
+
+[[light.wallpapers]]
+top = "#CC7505"
+bottom = "#30221D"
+
+[[light.wallpapers]]
+top = "#733641"
+bottom = "#7E475F"
 
 [dark]
 canvas_top = "#1A1E24"
@@ -77,14 +96,31 @@ danger = "#FF99A4"
 selection = "#1F3A4D"
 shadow = "#000000"
 
+# Dark mode: the same photos, dimmed towards the dark canvas.
 [[dark.wallpapers]]
-top = "#1A1E24"
-bottom = "#11151A"
+top = "#3A3145"
+bottom = "#023A4E"
 
 [[dark.wallpapers]]
-top = "#202226"
-bottom = "#14161A"
+top = "#3E5240"
+bottom = "#12313D"
 
 [[dark.wallpapers]]
-top = "#19221F"
-bottom = "#101614"
+top = "#1A4C77"
+bottom = "#37566B"
+
+[[dark.wallpapers]]
+top = "#2D3740"
+bottom = "#152208"
+
+[[dark.wallpapers]]
+top = "#401B31"
+bottom = "#3D0E3A"
+
+[[dark.wallpapers]]
+top = "#663A02"
+bottom = "#181110"
+
+[[dark.wallpapers]]
+top = "#391B20"
+bottom = "#3E2330"

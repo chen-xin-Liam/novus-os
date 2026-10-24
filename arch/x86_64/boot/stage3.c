@@ -975,6 +975,37 @@ static void app_load(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Wallpaper package                                                   */
+/* ------------------------------------------------------------------ */
+/* The photos ship as one file on the ESP instead of inside the loader, so
+ * the PE image stays small and a medium that does not carry the file still
+ * boots. It is staged exactly like the module and the application - into
+ * reserved pages, published through shared memory - because the kernel
+ * cannot read the ESP once boot services are gone. A missing package is
+ * not an error: the desktop then paints a flat colour. */
+
+static void wpkg_load(void) {
+  shared_mem_t *shm = shared_mem_get();
+  UINT64        base = 0;
+  UINT64        size = 0;
+
+  shm->wpkg_img_base = 0;
+  shm->wpkg_img_size = 0;
+  if (g_esp_root == NULL) {
+    return;
+  }
+  if (esp_read_reserved(L"WPAPERS.PKG", &base, &size) != 0) {
+    say_line(L"[WPKG] no WPAPERS.PKG: flat desktop colour");
+    return;
+  }
+  shm->wpkg_img_base = base;
+  shm->wpkg_img_size = size;
+  say(L"[WPKG] wallpaper package staged: ");
+  boot_put_dec(size);
+  say_line(L" bytes for the kernel stage");
+}
+
+/* ------------------------------------------------------------------ */
 /* Installer                                                           */
 /* ------------------------------------------------------------------ */
 #if CONFIG_NOVUS_INSTALLER && CONFIG_NOVUS_INSTALLER_TEXT
@@ -1459,6 +1490,9 @@ void stage3_prepare(void) {
 
   /* M4: stage the NUC application next to the module. */
   app_load();
+
+  /* The photo package: one file, same staging path as everything else. */
+  wpkg_load();
 
   /* Live root: adopt the NovusFS image off the ESP into reserved pages.
    * Without it the kernel has no filesystem at all, so a failure here is
