@@ -1,4 +1,4 @@
-//! Novus OS - task manager (M8).
+//! Novus OS - task manager.
 
 #![no_std]
 #![no_main]
