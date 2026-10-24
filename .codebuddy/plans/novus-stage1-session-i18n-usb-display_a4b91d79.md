@@ -88,235 +88,247 @@ todos:
 
 ## 产品概述
 
-在 M10 桌面上交付阶段 1：live 环境免登录、安装后首次设置账户；壳层与全部内置应用支持中英文即时切换；安装器新增语言选择、用户协议与文件系统选择，并补齐 USB 存储识别；显示侧实现固件 GOP 多输出、EDID 首选分辨率与多显示器镜像。
+为 Novus OS 增加 ext4 与 NTFS 两套完整读写驱动，使安装向导里的"系统分区文件系统"不再是置灰选项：用户选 ext4 或 NTFS 时，安装器按文件把系统镜像写入目标分区，启动时由内核识别该文件系统并挂载为根，会话、设置、文件管理器等全部内置应用照常工作。
 
 ## 核心功能
 
-- **会话分流**：live 介质启动时自动进入名为 live 的会话，不显示账号密码；只有安装到持久 NovusFS 后才要求首次创建账户与登录；安装模式只启动安装器。
-- **全系统双语**：壳层、窗口管理器、登录、安装器、文件管理器、任务管理器、设置、网络管理均从统一字符串表取文案；安装器首屏与设置页可切换，切换即时生效；已安装系统把语言写入系统盘，首次启动继承。
-- **安装器流程**：语言（双语标签）→ 用户协议（GPLv2 要点、免责声明、数据清除提示，必须勾选）→ 磁盘 → 方案 → 确认 → 进度 → 完成/失败。
-- **文件系统选择**：NovusFS 可选并实际安装；NTFS/ext4 显示为规划中且不可选，注明需要后续驱动里程碑，接口预留文件系统参数。
-- **磁盘识别**：新增 xHCI + SCSI BOT 的 USB 存储驱动，USB 磁盘出现在安装器列表；显示总线类型、容量、分区表状态与不可选原因；正在启动的 USB 介质标记为不可写目标；所有等待有超时，驱动失败不影响启动。
-- **显示适配**：引导阶段枚举全部 GOP 输出，读取 EDID 首选分辨率并选择最接近的模式；主输出渲染，其余输出镜像同一桌面；界面显示输出数量、分辨率与数字/模拟类型。连接器精确区分 eDP/DP/HDMI/VGA 留给原生驱动里程碑。
+- **VFS 派发层**：新增统一文件系统接口与根文件系统注册表，`kernel/trap.c` 的文件类系统调用从"直接调 NovusFS"改为经 VFS 派发；NovusFS 作为第一个后端，行为保持不变。
+- **ext4 驱动**（`fs/ext4/`）：超级块（64bit、metadata_csum）、组描述符、inode（256 字节）、extent 树（含索引节点）、块/节点位图、目录（线性 + htree 读取）、块读写；挂载时重放 journal 已提交事务；稀疏文件与大文件（>4GiB、SEEK_HOLE/SEEK_DATA）；xattr（inode 内 + 外部块）、符号链接、硬链接；crc32c 校验；`mkfs.ext4` 等价格式化。
+- **NTFS 驱动**（`fs/ntfs/`）：引导扇区、MFT 记录、属性解析（$STANDARD_INFORMATION、$FILE_NAME、$DATA、$INDEX_ROOT/$INDEX_ALLOCATION、$BITMAP、$SECURITY_DESCRIPTOR、$EFS）；resident/non-resident runlist（含稀疏）；LZNT1 解压读取；重解析点（符号链接）解析；$UsnJrnl 变更日志读取与索引 B-tree 目录枚举；加密文件识别（提示"已加密"）；`mkfs.ntfs` 等价格式化。
+- **安装器按文件拷贝**：新安装路径遍历 live NovusFS 镜像的目录树，逐个文件写入目标 ext4/NTFS；分步执行、显示进度、可取消；非 NovusFS 目标上 Merkle 整盘校验如实降级为逐文件哈希校验并明确告知用户。
+- **启动挂载**：`kmain` 按超级块签名（NovusFS magic / ext4 `0xEF53` / NTFS `"NTFS    "`）识别系统分区文件系统，经 VFS 挂载为根；GPT 查找增加 ext4/NTFS 分区类型 GUID。
+- **交叉验证**：ext4 用宿主机 e2fsprogs（`mkfs.ext4`/`debugfs`）生成镜像并校验读写；NTFS 安装 ntfs-3g 后用 `mkfs.ntfs`/`ntfsls`/`ntfscat` 校验（安装软件包需用户审批）。
 
 ## 范围边界
 
-- 本轮不实现 NTFS/ext4 的格式化与读写，不实现原生 DP/eDP/HDMI 驱动、扩展桌面、IDE/RAID/MMC 驱动与 USB 热插拔。
-- 多显示器本轮只做镜像；不同分辨率按左上角裁剪，文档说明。
-- AP 核相关功能不在本阶段范围。
+- 不做 ext4 实时日志写入（仅挂载时重放）、不做 NTFS 写入压缩、不做 EFS 解密（只识别并提示）、不做文件系统在线修复与 resize。
+- live 介质仍从 NovusFS 镜像（`SYSTEM.IMG`）启动，不受影响；已安装系统的系统分区可选三种文件系统之一。
+- 不修改 NUC、GPT、FAT、块设备与 NovusFS 的现有磁盘格式。
 
 ## 技术栈
 
-- 内核与图形：C（freestanding，x86_64 UEFI），沿用 NovusDisplay、nvgui、Novus-WM、IPC。
-- 内置应用：Rust `no_std`（x86_64-unknown-none），扁平 NUC 镜像内嵌内核。
-- 存储：`kernel/blkdev`、`kernel/gpt`、`fs/novusfs`；新增 xHCI/BOT 驱动注册为 `blkdev_t`。
-- 构建：mingw 交叉 gcc + `make`；Rust 以 dev 用户与 `~/.cargo` 构建；字符串与主题生成物提交仓库，普通构建不依赖 Python。
-- 验证：QEMU q35 + OVMF；安装脚本、USB 目标、桌面截图与串口日志。
+- 内核：C（freestanding，x86_64 UEFI），复用 `kernel/blkdev.c`（64 位扇区、分区视图）、`kernel/gpt.c`、`kernel/pmm.c` 与 `fs/novusfs` 的分配器约定。
+- 新增：`fs/vfs`（派发层）、`fs/ext4`、`fs/ntfs` 三个目录；`Kconfig` 增加 `CONFIG_NOVUS_VFS` / `CONFIG_NOVUS_EXT4` / `CONFIG_NOVUS_NTFS`。
+- 安装器：扩展现有 `kernel/install.c` 分步状态机（`INSTALL_FS_*` 已预留）。
+- 验证：宿主机 `mkfs.ext4`/`debugfs`（已有）、`ntfs-3g`（需安装）；QEMU q35 + OVMF + `scripts/run-install-test.sh`。
+- 构建：`make` / `make iso`，dev 用户 + `~/.cargo`；生成物提交，普通构建不依赖 Python。
 
 ## 实现方案
 
-### 1. 多语言单一来源
+### 1. VFS 派发层（前置，两个文件系统都要用）
 
-新增 `tools/langgen/strings.toml`，每条包含语义 id 与 zh/en 两列；`langgen.py` 一次生成：
+现在 `kernel/trap.c` 的文件类系统调用（编号 8-15）与 `kernel/session.c` 直接调用 `novusfs_*`。新增 `fs/vfs.h`：
 
-- `graphics/nd_lang.h/.c`：`lang_id_t` 枚举、两张字符串表、`nd_tr()`、`nd_lang_set/get/version()`。
-- `apps/src/lang.rs`：同序 `Id` 枚举、ZH/EN 表、`tr()`、`set/get/version()`、`poll(sys_port)`。
-- `langgen.py --check` 校验生成物是否过期；`check_sources.py` 扫描 C/Rust 源文件，发现字符串表之外的 CJK 字面量即失败，防止迁移漏项。
-- `tools/fontgen/fontgen.py` 增加 `strings.toml` 扫描，避免文案迁出源码后缺字。
+```c
+typedef struct vfs_ops {
+  int (*mount)(void *fs, blkdev_t *dev);
+  int (*read_block)(void *fs, UINT64 blk, void *buf);
+  int (*write_block)(void *fs, UINT64 blk, const void *buf);
+  int (*lookup)(void *fs, UINT32 dir_ino, const char *name, UINT32 *ino);
+  int (*readdir)(void *fs, UINT32 dir_ino, UINT32 index, char *name, UINT32 *ino);
+  int (*read_file)(void *fs, UINT32 ino, UINT64 off, void *buf, UINT32 len, UINT32 *got);
+  int (*write_file)(void *fs, UINT32 ino, UINT64 off, const void *buf, UINT32 len);
+  int (*create)(void *fs, UINT32 dir_ino, const char *name, UINT32 *ino);
+  int (*unlink)(void *fs, UINT32 dir_ino, const char *name);
+  int (*mkdir)(void *fs, UINT32 dir_ino, const char *name, UINT32 *ino);
+  int (*stat)(void *fs, UINT32 ino, UINT64 *size, UINT8 *type);
+  int (*seek_hole)(void *fs, UINT32 ino, UINT64 off, UINT64 *hole);
+  int (*read_xattr)(void *fs, UINT32 ino, const char *key, void *val, UINT32 *len);
+  int (*write_xattr)(void *fs, UINT32 ino, const char *key, const void *val, UINT32 len);
+  int (*read_link)(void *fs, UINT32 ino, char *target, UINT32 len);
+} vfs_ops_t;
 
-运行时：
+int  vfs_register(const char *name, const vfs_ops_t *ops, UINT32 magic_off,
+                  const UINT8 *magic, UINT32 magic_len);
+int  vfs_mount_root(blkdev_t *dev);      /* 按签名探测并挂载 */
+void *vfs_root(void);                     /* 当前根文件系统私有数据 */
+const vfs_ops_t *vfs_root_ops(void);
+```
 
-- 新增 `kernel/lang.c/.h`：`lang_init()` 在根文件系统挂载后读取 `/config/language`（仅持久根），`lang_save()` 写回；live 只存内存。
-- `sysinfo` 新增 `REQ_LANG 0x030F`，请求 `{set,value}`，回复 `{lang,version}`；`nd_lang_set()` 递增版本。
-- 壳层在空闲 tick 同时比较主题与语言版本，变化时重建控件树；Rust 应用在 `ui::poll()` 中按约一秒轮询语言版本，变化时重绘并更新窗口标题。
-- 英文布局：新增 `ui::fit(text,max_px)` 与按像素宽度计算的列位置，替换任务管理器/文件管理器的固定列；1024×768 与 1280×800 下验收。
+`kernel/trap.c` 的 8-15 号调用改为 `vfs_root_ops()->xxx(vfs_root(), …)`；NovusFS 提供第一个 `vfs_ops_t` 适配（内部仍调 `novusfs_*`），行为与现在逐字节一致——这一步单独提交、单独回归，确保"换了派发层但 NovusFS 路径零变化"。
 
-### 2. 会话分流
+### 2. ext4 驱动（`fs/ext4/`，与 NTFS 并行推进）
 
-- `session.h` 增加 `session_enter_live()`、`session_live()`、`session_display_name()`。
-- `session_init()`：`novusfs_root_persistent()==0` 时直接进入 live 会话（`g_logged_in=1`，不读 users.db）；持久根保持“首次建账户/登录”逻辑。
-- `kmain`：安装模式启动 `setup`；否则 live 不启动登录窗口，持久根启动 `session`。语言初始化必须在 `nd_demo_init()` 之前。
-- 壳层页脚显示 `Live 会话 / Live session`；电源操作在 live 下允许。
+- **super.c**：解析 1024 字节超级块（`s_inodes_count`、`s_blocks_count_lo/hi`、`s_log_block_size`、`s_inode_size`、`s_feature_incompat` 的 64bit/metadata_csum、`s_desc_size`、`s_checksum_type`、UUID、卷名）；支持块大小 1K/2K/4K（默认 4K）。
+- **group.c**：组描述符表（64bit 时 `ext4_group_desc` 为 64 字节，含块/节点位图、inode 表的高位字段）。
+- **inode.c**：256 字节 inode；`i_flags`（`EXT4_EXTENTS_FL`、`EXT4_HUGE_FILE_FL`）；extent 树解析（`eh_depth==0` 线性 extent，`>0` 走 `ex_index` 索引节点，支持任意深度）；`i_block` 内的快速符号链接（目标 < 60 字节）；`i_links_count` 硬链接。
+- **bitmap.c**：块位图与节点位图的分配/释放（写路径）。
+- **dir.c**：线性目录遍历；`dir_index`（htree）开启时按 dx_root 的间接块读取，退化为"顺序扫全部块"以保证正确。
+- **extent.c**：extent → 逻辑块到物理块的映射，含未初始化 extent 的处理；稀疏文件的空洞在读路径返回零、不落盘。
+- **xattr.c**：inode 内 `ibody` xattr 与外部 xattr 块（`i_file_acl`）解析与写入；`user.*` 命名空间。
+- **journal.c**：挂载时读取 journal inode（inum 8）的描述符块与提交块，对**已提交事务**做 redo（只写数据块，不处理撤销）；跳过未提交与校验失败的事务并打印一行 `[EXT4] journal: replayed N blocks`。
+- **crc32c.c**：反射多项式 0x1EDC6F41 的表驱动实现；校验 inode、目录块、位图、超级块校验和（`metadata_csum` 开启时）。
+- **ext4.c**：`vfs_ops_t` 适配 + `ext4_format()`（写超级块、组描述符、位图、根目录、lost+found、journal inode 预留）。
+- 内存策略：沿用 NovusFS 的做法——每文件系统一个固定私有结构 + 有界栈缓冲（4 KiB 块缓冲 ×2），路径查找用固定深度循环，不做无界递归。
 
-### 3. 安装器
+### 3. NTFS 驱动（`fs/ntfs/`，与 ext4 并行）
 
-- 页面改为：语言、协议、磁盘、方案、确认、进度、完成/失败，侧栏 7 步；语言页同时承担欢迎内容，标题用双语常量，选择后其余文案立即切换。
-- 协议页：分页/滚动的 EULA 文本（每条不超过 90 字节，避免 WM 单段 96 字节上限），必须勾选同意才能继续；内容为 GPLv2 要点、无保修声明、整盘数据清除提示。
-- 方案页：文件系统选择，NovusFS 可用；NTFS/ext4 置灰并显示“需要后续驱动里程碑”，不允许选中。
-- `install_begin` 扩展文件系统参数（0 NovusFS，1 NTFS，2 ext4）；非 0 返回 `INSTALL_ERR_FS`，为后续实现留出 ABI。
-- 语言交接：`INSTALL_OP_LANG` 记录选择；安装校验阶段挂载新系统分区后写入 `/config/language`，再卸载，保证首次启动语言一致。
-- 磁盘页显示总线（AHCI/NVMe/USB）、容量、分区表状态、不可选原因与刷新按钮。
+- **boot.c**：解析 OEM 名 `"NTFS    "`、`bytes_per_sector`、`sectors_per_cluster`、`mft_lcn`、`mft_record_size`、`clusters_per_index_block`、卷序列号与卷标。
+- **mft.c**：MFT 记录头（`"FILE"`/`"BAD"`/`"END"`）、更新序列数组（fixup：把每个 512 字节扇区末尾的 USA 值替换回去）、属性遍历（`ATTR_STANDARD_INFORMATION`/`ATTR_FILE_NAME`/`ATTR_DATA`/`ATTR_INDEX_ROOT`/`ATTR_INDEX_ALLOCATION`/`ATTR_BITMAP`/`ATTR_OBJECT_ID`/`ATTR_EFS`）。
+- **attr.c**：resident（值在记录内）与 non-resident（runlist：`(length, 位移)` 对，位移为负表示稀疏洞）两种形态；多 runlist 片段拼接；`$DATA` 无名流即文件内容，命名流（ADS）列出但默认不打开。
+- **lznt1.c**：压缩属性解压（16 位标志 + LZ77 变长的分块格式），读到未压缩数据时原样返回。
+- **index.c**：`$INDEX_ROOT` + `$INDEX_ALLOCATION` 的 B-tree 目录枚举（索引项按 `$FILE_NAME` 排序，含子节点 `VCN` 尾指针）；支持只读顺序遍历与按键查找。
+- **usn.c**：`$UsnJrnl:$J` 记录流解析（`USN_RECORD` 头部 + 文件名偏移），供"最近变更"查询。
+- **efs.c**：检测 `$EFS`（属性名 `$EFS`）存在即标记"已加密"，读尝试返回明确错误码 `NTFS_E_ENCRYPTED`，由文件管理器显示提示。
+- **reparse.c**：`$REPARSE_POINT` 的符号链接标签（`SYMLINK`）解析为目标路径。
+- **ntfs.c**：`vfs_ops_t` 适配 + `ntfs_format()`（引导扇区 + MFT 前 16 个元数据文件 + 根目录 + $Bitmap + $LogFile 占位）。
 
-### 4. USB 存储
+### 4. 安装器按文件拷贝
 
-- `kernel/pci.c` 支持 64 位 BAR 对：读取高 32 位、合成物理地址，仍要求低于 4 GiB。
-- 新增 `kernel/xhci.c/.h`：PCI 发现（class 0x0C/0x03/0x30）、BAR0 映射、控制器复位与运行、命令环/事件环/ERST、端口复位与速度识别、Enable Slot、Address Device、控制传输读取设备/配置描述符、SET_CONFIGURATION。
-- 新增 `kernel/usb_storage.c/.h`：BOT 的 CBW/CSW、INQUIRY、READ CAPACITY、READ10/WRITE10、Bulk-Only Reset 与 Clear Feature Halt；单次传输上限 64 KiB，块层 128 KiB 写请求内部拆分。
-- 所有等待使用有界轮询与超时；失败只打印 `[USB]` 日志并继续启动，不阻塞调度器。
-- `blkdev_t` 增加 `bus` 字段（AHCI/NVMe/USB/RAM），`install_disk_t` 透出；新增 `BLKDEV_FLAG_BOOT_MEDIUM`。
-- 引导阶段从 `LoadedImage->DeviceHandle` 的设备路径解析 USB 端口与 PCI 地址，写入共享内存保留尾部；xHCI 匹配后给启动盘打 `BOOT_MEDIUM`。解析失败时保守处理：所有 USB 磁盘不可作为安装目标。
-- 安装规则：可移除磁盘允许作为目标，但必须可写、非启动介质、容量达标、裸盘或 Novus 自身两分区布局；其他分区表仍拒绝。
+`kernel/install.c` 现有分步状态机新增"文件拷贝"路径（`install_begin(index, fs)` 中 `fs != INSTALL_FS_NOVUS` 时进入）：
 
-### 5. 显示多输出
+1. `TABLE`：建 GPT + 写 ESP（与现在一致）。
+2. `FORMAT`：在系统分区上 `ext4_format()` / `ntfs_format()`（一步）。
+3. `COPY`：**分步遍历 live NovusFS 树**（`novusfs_dir_readdir` 递归，固定深度），每个文件按 64 KiB 分片 `vfs_root_ops()->write_file()`；进度按"已拷贝文件数 / 总文件数"与字节数双轨显示。
+4. `VERIFY`：非 NovusFS 目标上，逐文件重读并比对哈希（复用现有哈希原语），在向导里明确写成"逐文件校验"而非 Merkle 整盘校验；NovusFS 目标保持现有 Merkle 流程不变。
 
-- `uefi.h` 补 `EFI_EDID_ACTIVE_PROTOCOL`、设备路径节点、GOP QueryMode/SetMode 函数类型。
-- `nd_capture_boot` 改为 `LocateHandleBuffer(GOP)` 枚举最多 4 个输出；对每个输出读取 EDID 第一详细时序得到首选分辨率与数字/模拟类型，在 `QueryMode` 中选择最接近且不超过 4 GiB、32bpp RGB/BGR 的模式并 `SetMode`；失败保留当前模式。
-- 新增 `nd_output_t` 与 `nd_outputs()`：记录每个输出的分辨率、pitch、格式、首选分辨率、数字/模拟、主输出标记。
-- 镜像：`nd_copy_rect` 在源/目标 surface 间做像素格式转换；当绘制目标是屏幕时，`nd_blit` 与光标绘制后把脏矩形复制到其余输出。不同分辨率按左上角裁剪并记录一次日志。
-- 无 EDID 或单输出时行为与现在一致；新增 EDID 解析与像素转换的无硬件自检，加入 `nd_selftest`。
-- 设置页“系统”新增显示输出卡片，数据来自 `SYSINFO_REQ_DISPLAY`。
+`install.h` 新增 `INSTALL_PHASE_FORMAT` 与 `INSTALL_PHASE_COPY`（仅追加，不改既有编号）；`apps/src/install.rs` 与 `setup.rs` 同步阶段文案；向导方案页三个选项全部可选，NTFS/ext4 下显示"按文件拷贝 + 逐文件校验"的说明。
+
+### 5. 启动挂载（`kernel/kmain.c`）
+
+- 系统分区查找：在 `gpt_find_novusfs` 之外增加 `gpt_find_type()`（ext4 Linux data `0FC63DAF-8483-4772-8E79-3D69D8477DE4` 或 Linux filesystem `E6D9D4F0-...`，NTFS basic data `EBD0A0A2-B9E5-4433-87C0-68B6B72699C7`）。
+- `vfs_mount_root(part_dev)` 按签名探测：读第 0 块，匹配 NovusFS magic / ext4 `0xEF53`（偏移 0x438）/ NTFS OEM 名（偏移 3）→ 调对应后端 `mount` → `vfs` 记录根。
+- Merkle 自检：仅当根为 NovusFS 时执行（现状）；ext4/NTFS 时打印 `[BOOT] system partition is ext4/ntfs: integrity check skipped`，如实降级，不假装通过。
+- 会话、文件管理器、设置的文件读写经 VFS，无需改动应用层。
+
+## 实现要点
+
+- **提交与回归节奏**：VFS 派换层单独一步并回归（NovusFS 路径零行为变化）；ext4 与 NTFS 各自"读路径 → 宿主编图验证 → 写路径 → 再验证"；最后才是安装器与启动链路。
+- **性能**：块读写走 `blkdev_read/write`（每次 ≤128 KiB 与 USB/SATA 传输块对齐）；目录枚举一次读入整个目录块；extent/runlist 查找为 O(深度)，避免每次线性扫盘；`crc32c` 用 256 项表。
+- **内存**：每文件系统一个静态私有结构（≤3 个 4 KiB 缓冲 + 有界路径缓冲），不引入堆分配；MFT 记录与 extent 节点用固定 4 KiB 栈缓冲逐级解析。
+- **日志**：`[VFS]` / `[EXT4]` / `[NTFS]` / `[INST]` 前缀；挂载失败打印签名与特征位，便于定位"特性不支持"与"镜像损坏"的差别。
+- **安全**：所有来自磁盘的长度/偏移先校验再使用（inode 大小 vs 卷大小、runlist 长度 vs 分区大小、MFT 记录号 vs 记录总数），越界一律返回错误而不是信任。
+- **Kconfig**：`CONFIG_NOVUS_VFS` 默认 y；`CONFIG_NOVUS_EXT4` / `CONFIG_NOVUS_NTFS` 默认 y（可在小内存配置关闭）；关闭时安装向导对应选项隐藏。
 
 ## 架构设计
 
 ```mermaid
 flowchart TB
-  subgraph Boot
-    B1[stage3: ESP.IMG, USB boot path]
-    B2[nd_capture_boot: GOP outputs + EDID]
+  subgraph Apps["用户态应用"]
+    A1[session / fileman / settings]
   end
-  subgraph Kernel
-    K1[lang.c + nd_lang tables]
-    K2[session: live or installed]
-    K3[xhci + usb_storage -> blkdev]
-    K4[install service: FS, language, USB policy]
-    K5[nd_hal: primary + mirror]
+
+  subgraph Kernel["内核"]
+    T[trap.c fs 系统调用 8-15]
+    V[fs/vfs 派发层 + 根注册表]
+    N[fs/novusfs]
+    E[fs/ext4]
+    F[fs/ntfs]
+    I[kernel/install.c 按文件拷贝]
+    K[kmain.c 按签名挂载根]
   end
-  subgraph Apps
-    A1[setup: language, EULA, disk, plan]
-    A2[shell and 5 apps: tr ids]
+
+  subgraph Host["宿主机验证"]
+    H1[mkfs.ext4 / debugfs]
+    H2[mkfs.ntfs / ntfsls / ntfscat]
   end
-  B1 --> K4
-  B2 --> K5
-  K1 --> A2
-  K1 --> A1
-  K3 --> K4
-  K2 --> A2
-  A1 --> K4
+
+  A1 --> T --> V
+  V --> N
+  V --> E
+  V --> F
+  I --> V
+  K --> V
+  H1 -.交叉验证.-> E
+  H2 -.交叉验证.-> F
 ```
 
 ## 目录结构
 
 ```
-tools/langgen/strings.toml        # [NEW] 中英文案唯一来源（含 EULA 行）
-tools/langgen/langgen.py          # [NEW] 生成 C/Rust 字符串表，支持 --check
-tools/langgen/check_sources.py    # [NEW] 检查源码中残留 CJK 字面量
-graphics/nd_lang.h/.c             # [NEW 生成] lang_id_t、两张表、nd_tr、语言状态
-kernel/lang.c/.h                  # [NEW] 读取/保存 /config/language，供启动与 sysinfo 使用
-graphics/nd_hal.c                 # [MODIFY] GOP 多输出、EDID、SetMode、镜像、EDID 自检
-graphics/nd_core.c                # [MODIFY] nd_blit 后镜像脏矩形；nd_copy_rect 辅助
-graphics/nd.h                     # [MODIFY] nd_output_t、nd_outputs、nd_mirror_rect
-graphics/nd_demo.c                # [MODIFY] 全量文案迁移、live 用户、语言版本重建
-graphics/nd_ime.c                 # [MODIFY] 候选窗文案迁移
-arch/x86_64/include/uefi.h        # [MODIFY] EDID 协议、设备路径节点、GOP 函数类型
-arch/x86_64/boot/stage3.c         # [MODIFY] 解析 USB 启动路径并发布共享内存
-kernel/shared_mem.h               # [MODIFY] 追加 boot_usb_* 字段与偏移断言
-kernel/session.c/.h               # [MODIFY] live 会话、显示名与启动分流
-kernel/sysinfo.c/.h               # [MODIFY] REQ_LANG、REQ_DISPLAY 与回复
-kernel/install.c/.h               # [MODIFY] 文件系统参数、语言写入、USB 规则、总线字段
-kernel/blkdev.h/.c                # [MODIFY] bus 字段、BOOT_MEDIUM 标志
-kernel/pci.c/.h                   # [MODIFY] 64 位 BAR 对支持
-kernel/xhci.c/.h                  # [NEW] xHCI 控制器、端口、传输与枚举
-kernel/usb_storage.c/.h           # [NEW] BOT 磁盘，注册 blkdev_t
-kernel/kmain.c                    # [MODIFY] lang_init、xhci_init、会话启动顺序
-apps/src/lang.rs                  # [NEW 生成] Id、ZH/EN 表、set/get/poll
-apps/src/ui.rs                    # [MODIFY] 语言轮询、fit 与列宽工具
-apps/src/sinfo.rs                 # [MODIFY] lang/display 请求
-apps/src/install.rs               # [MODIFY] fs 参数与语言操作
-apps/src/bin/setup.rs             # [MODIFY] 七页流程、EULA、语言、文件系统选择
-apps/src/bin/session.rs           # [MODIFY] 双语登录/建账户
-apps/src/bin/fileman.rs           # [MODIFY] 双语、动态列宽
-apps/src/bin/taskman.rs           # [MODIFY] 双语、动态列宽
-apps/src/bin/settings.rs          # [MODIFY] 语言项、显示输出卡片、双语
-apps/src/bin/netman.rs            # [MODIFY] 双语
-Makefile                          # [MODIFY] 新源文件、lang 目标、lang-check
-Kconfig / configs/novus_defconfig # [MODIFY] CONFIG_NOVUS_USB
-scripts/run-install-test.sh       # [MODIFY] 新流程按键、USB 目标模式
-docs/多语言与显示输出支持.md      # [NEW] 语言表、切换、持久化、输出检测与镜像
-docs/图形安装向导设计与实现.md     # [MODIFY] 七页流程、EULA、FS 选项、USB 规则
-docs/中文支持与 Win11 桌面.md      # [MODIFY] 双语说明
-docs/M8 内置系统应用.md            # [MODIFY] 语言轮询与动态列宽
-README.md / changes.md            # [MODIFY] M11 阶段 1
+novus-os/
+├── fs/
+│   ├── vfs.h / vfs.c                 # [NEW] 统一接口、签名探测、根注册表
+│   ├── novusfs/
+│   │   └── vfs.c                     # [NEW] NovusFS 的 vfs_ops_t 适配（行为不变）
+│   ├── ext4/
+│   │   ├── ext4.h                    # [NEW] 私有结构与常量
+│   │   ├── super.c group.c inode.c extent.c bitmap.c dir.c xattr.c
+│   │   ├── journal.c crc32c.c        # [NEW] journal 重放与校验和
+│   │   └── format.c vfs.c            # [NEW] mkfs 与 vfs 适配
+│   └── ntfs/
+│       ├── ntfs.h                    # [NEW] 私有结构与常量
+│       ├── boot.c mft.c attr.c index.c usn.c efs.c reparse.c lznt1.c
+│       └── format.c vfs.c            # [NEW] mkfs 与 vfs 适配
+├── kernel/
+│   ├── trap.c                        # [MODIFY] fs 系统调用改经 VFS 派发
+│   ├── install.c / install.h         # [MODIFY] FORMAT/COPY 阶段、fs 分支、逐文件校验
+│   ├── kmain.c                       # [MODIFY] 按签名挂载 ext4/NTFS 根、Merkle 降级
+│   ├── gpt.c/.h                      # [MODIFY] 增加按分区类型 GUID 查找
+│   └── session.c                     # [MODIFY] 经 VFS 读写 /users.db
+├── apps/src/
+│   ├── install.rs                    # [MODIFY] 新阶段与文案
+│   └── bin/setup.rs                  # [MODIFY] 文件系统三选一全部可选 + 说明
+├── Makefile / Kconfig / configs/novus_defconfig   # [MODIFY] 新源文件与开关
+├── scripts/
+│   └── verify-fs.sh                  # [NEW] 宿主编图 + QEMU 往返验证脚本
+├── docs/
+│   ├── ext4 与 NTFS 驱动.md          # [NEW] 结构、特性矩阵、验证方法、限制
+│   ├── 图形安装向导设计与实现.md     # [MODIFY] 文件拷贝路径与校验降级说明
+│   └── 中文支持与 Win11 桌面.md      # [MODIFY] 文件管理器多文件系统说明
+├── README.md / changes.md            # [MODIFY] M12 里程碑
+└── tools/fontgen/ + graphics/nd_font_cjk.c       # [MODIFY] 新文案字模
 ```
 
 ## 关键代码结构
 
 ```c
-/* graphics/nd_lang.h（生成） */
-typedef enum { LANG_SHELL_START, /* ... */ LANG_COUNT } lang_id_t;
-const char *nd_tr(lang_id_t id);
-void nd_lang_set(UINT32 lang);   /* 0 zh, 1 en */
-UINT32 nd_lang_get(void);
-UINT32 nd_lang_version(void);
-```
+/* fs/vfs.h —— 三个文件系统共用的最小接口。
+ * 每个后端只实现自己支持的部分，不支持的置 NULL，VFS 返回 -ENOSYS。 */
+typedef struct vfs_ops vfs_ops_t;   /* 见实现方案第 1 节 */
 
-```c
-/* kernel/install.h —— 只追加的安装 ABI */
-#define INSTALL_ERR_FS 7u
-#define INSTALL_FS_NOVUS 0u
-#define INSTALL_FS_NTFS  1u
-#define INSTALL_FS_EXT4  2u
-#define INSTALL_OP_LANG  7u
-int install_begin(UINT8 index, UINT8 fs);   /* 非 0 返回 -1，err=INSTALL_ERR_FS */
-void install_set_language(UINT8 lang);      /* 校验阶段写入新系统盘 */
-```
-
-```c
-/* graphics/nd.h —— 多输出描述与镜像 */
-#define ND_MAX_OUTPUTS 4u
+/* 签名探测：mount 时读第一块，按 (偏移, 字节) 匹配。 */
 typedef struct {
-  UINT8  available, digital, primary;
-  UINT16 width, height, pref_w, pref_h;
-  UINT32 pitch, bgr;
-  UINT64 fb_phys, fb_size;
-} nd_output_t;
-const nd_output_t *nd_outputs(UINT32 *count);
-void nd_mirror_rect(nd_rect_t r);  /* 主输出已绘制后复制到其余输出 */
+  const char *name;        /* "novusfs" / "ext4" / "ntfs" */
+  UINT32      magic_off;
+  UINT8       magic[8];
+  UINT32      magic_len;
+  const vfs_ops_t *ops;
+} vfs_backend_t;
 ```
 
-## 实现要点
+```c
+/* fs/ext4/ext4.h —— 私有结构（接口级） */
+typedef struct {
+  blkdev_t   *dev;
+  UINT32      block_size;      /* 1024 << s_log_block_size */
+  UINT32      inodes_per_group;
+  UINT32      inode_size;
+  UINT64      blocks_count;
+  UINT32      first_data_block;
+  UINT32      desc_size;       /* 64bit 特征时为 64 */
+  UINT8       has_64bit;
+  UINT8       has_metadata_csum;
+  UINT8       has_journal;
+  UINT32      journal_inum;
+  UINT8       buf[4096];       /* 有界块缓冲 */
+} ext4_fs_t;
+```
 
-- **xHCI 风险控制**：所有寄存器等待、端口复位、命令/传输完成都设上限；初始化失败只降级为“无 USB 磁盘”，不能 panic 或卡住 tick。
-- **启动盘识别保守策略**：设备路径解析不确定时，所有 USB 磁盘标记为启动介质，宁可拒绝目标也不能写掉运行中的介质。
-- **镜像性能**：只复制脏矩形；每帧最多 4 个输出；像素格式只支持 32bpp RGB/BGR，其他输出跳过并记录。
-- **语言切换一致性**：C 侧壳层重建静态控件树；Rust 应用重绘并更新窗口标题；安装器在开始安装前锁定语言并交给内核写入新盘。
-- **英文排版**：所有固定列改为按 `ui::width()` 计算；长文案用 `ui::fit()` 截断；1024×768 下无越界。
-- **字体**：迁移完成后重跑 `fontgen`；`langgen --check` 与 `check_sources.py` 纳入验收，避免缺字或漏译。
-- **兼容性**：`SYS_SETUP` 只追加 op 与参数；共享内存只在保留尾部追加并更新断言；单输出、无 USB、无 EDID 的机器保持现有行为。
-
-## 设计风格
-
-沿用 Novus Fluent：Mica 渐变画布、表面/卡片三层次、1 px 描边、单一强调色；新旧页面使用同一套令牌，不引入新的视觉语言。
-
-## 安装向导（900×600）
-
-- 左侧 240 px 品牌与 7 步导航：语言、协议、磁盘、方案、确认、进度、完成；当前步强调色圆点，完成步显示对勾。
-- 语言页：顶部双语标题“选择语言 / Select language”，两个 140×36 分段按钮（中文、English），下方三条安装前提示；选择后整页即时切换。
-- 协议页：内容卡片内 8–10 行等宽文本，右侧细滚动条；下方勾选框“我已阅读并同意 / I accept”，未勾选时主按钮为禁用灰。
-- 磁盘页：每块磁盘一行，左侧总线徽标（AHCI/NVMe/USB）、名称、容量，右侧状态；不可选行整体降为次要文字色并附原因。
-- 方案页：文件系统三选一卡片，NovusFS 选中；NTFS/ext4 卡片降低对比度并标注“规划中 / Planned”，点击只更新说明，不改变选择。
-- 确认页保留红色警告卡与勾选；进度页保留四阶段清单与进度条；完成/失败页按钮与现有风格一致。
-
-## 设置新增
-
-- 个性化页增加“语言 / Language”卡片，中英分段按钮，切换后立即重建壳层并持久化。
-- 系统页增加“显示输出”卡片：每行显示输出序号、分辨率、数字/模拟、主输出标记；无多输出时显示“单输出”。
-
-## 字体与颜色
-
-- 中文 16 px 点阵，英文 5×7 点阵（1x 正文、2x 标题）；英文使用同一套字号，不额外放大。
-- 颜色继续取语义令牌：accent #0067C0 / #4CC2FF，surface #FFFFFF / #202020，card #FBFBFD / #272727，stroke #E1E5EA / #3A3A3A，danger #C42B1C / #FF99A4。
-- 英文文案比中文长，按钮宽度按文本测量，不使用固定字符数；列表列位置动态计算。
+```c
+/* fs/ntfs/ntfs.h —— 私有结构（接口级） */
+typedef struct {
+  blkdev_t   *dev;
+  UINT32      sector_size;
+  UINT32      cluster_size;
+  UINT64      mft_lcn;
+  UINT32      mft_record_size;
+  UINT32      index_block_size;
+  UINT32      mft_record_count;
+  UINT8       rec[4096];       /* 单条 MFT 记录缓冲（含 fixup） */
+} ntfs_fs_t;
+```
 
 ## Agent Extensions
 
 ### SubAgent
 
 - **code-explorer**
-- Purpose: 迁移前完整梳理 C 壳层、IME、6 个 Rust 应用与安装器的中文字面量、窗口标题、固定列布局，以及 session/blkdev/display 的调用点。
-- Expected outcome: 带文件与行号的清单，作为字符串表拆分和迁移顺序的依据。
+- Purpose: 动手前彻底梳理 `kernel/trap.c` 的 fs 系统调用（8-15）全部调用点、`fs/novusfs` 对外 API 的使用面、`kernel/kmain.c` 的系统分区挂载链，以及 `kernel/install.c` 的现有阶段机，确保 VFS 派换不遗漏任何直接调用。
+- Expected outcome: 一份带文件与行号的调用点清单，作为 VFS 适配与回归验证的对照表。
 
 ### Skill
 
 - **lsp-code-analysis**
-- Purpose: 在扩展 `install_disk_t`、`sysinfo` 请求、`blkdev_t`、`nd_display_t` 后做语义级引用核对，确认 C/Rust 两侧结构同步且无遗漏调用点。
-- Expected outcome: 协议字段与结构体的引用清单，编译前发现类型或偏移不一致。
+- Purpose: 在 VFS 派换、ext4/NTFS 两个驱动接入后做语义级核对：检查 `vfs_ops_t` 实现与声明的字段一致性、`install.h` 新增阶段号在 C 与 Rust 两侧的同步、`kmain.c` 挂载链的类型与错误路径。
+- Expected outcome: 接口实现一致性核对结果，编译前发现字段缺失或偏移不一致。

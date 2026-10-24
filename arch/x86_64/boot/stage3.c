@@ -1290,7 +1290,7 @@ static EFI_INPUT_KEY menu_wait_key(void) {
 static void menu_show(void) {
   say_line(L"");
   say_line(L"  ================================================");
-  say_line(L"   Novus OS M3 - live system");
+  say_line(L"   Novus OS - live system");
   say_line(L"  ================================================");
   say_line(L"   1  Verify the system partition (Merkle)");
   say_line(L"   2  Load and verify signed modules (NKM)");

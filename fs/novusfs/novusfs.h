@@ -456,6 +456,9 @@ UINT32 novusfs_creat(novusfs_fs_t *fs, UINT32 dir_ino, const char *name);
 /* Create a directory; returns its inode number. */
 UINT32 novusfs_mkdir(novusfs_fs_t *fs, UINT32 dir_ino, const char *name);
 
+/* Remove one entry from a directory. */
+int novusfs_unlink(novusfs_fs_t *fs, UINT32 dir_ino, const char *name);
+
 /* Write `len` bytes at `off` of `ino`; grows the file as needed.
  * The whole update runs inside one WAL transaction. Returns the number
  * of bytes written, or -1 on error. */

@@ -1,7 +1,7 @@
 #include "lang.h"
 #include "kernel.h"
 #include "nd_lang.h"
-#include "novusfs.h"
+#include "../fs/vfs.h"
 
 #define LANG_FILE "/language.cfg"
 #define LANG_MAGIC 0x474E4C56u /* "VLNG" */
@@ -12,24 +12,19 @@ typedef struct {
 } lang_cfg_t;
 
 void lang_init(void) {
-  novusfs_fs_t *fs;
-  lang_cfg_t    cfg;
-  UINT32        ino;
+  vfs_fs_t *fs;
+  lang_cfg_t cfg;
 
   nd_lang_init(ND_LANG_ZH);
-  if (!novusfs_root_persistent()) {
+  if (!vfs_root_persistent()) {
     kputs("[LANG] live session: language kept in memory\n");
     return;
   }
-  fs = novusfs_root();
-  if (fs == NULL || !fs->mounted) {
+  fs = vfs_root();
+  if (fs == NULL) {
     return;
   }
-  ino = novusfs_lookup_path(fs, fs->sb.root_inode, LANG_FILE);
-  if (ino == 0) {
-    return;
-  }
-  if (novusfs_read(fs, ino, 0, &cfg, sizeof(cfg)) == (INT64)sizeof(cfg) &&
+  if (vfs_read_file(fs, LANG_FILE, &cfg, sizeof(cfg)) == 0 &&
       cfg.magic == LANG_MAGIC && cfg.lang <= ND_LANG_EN) {
     nd_lang_init(cfg.lang);
     kputs("[LANG] loaded: ");
@@ -38,27 +33,17 @@ void lang_init(void) {
 }
 
 void lang_save(UINT32 lang) {
-  novusfs_fs_t *fs;
-  lang_cfg_t    cfg;
-  UINT32        ino;
+  vfs_fs_t *fs;
+  lang_cfg_t cfg;
 
-  if (!novusfs_root_persistent()) {
+  if (!vfs_root_persistent()) {
     return;
   }
-  fs = novusfs_root();
-  if (fs == NULL || !fs->mounted || lang > ND_LANG_EN) {
-    return;
-  }
-  ino = novusfs_lookup_path(fs, fs->sb.root_inode, LANG_FILE);
-  if (ino == 0) {
-    ino = novusfs_creat(fs, fs->sb.root_inode, "language.cfg");
-  }
-  if (ino == 0) {
+  fs = vfs_root();
+  if (fs == NULL || lang > ND_LANG_EN) {
     return;
   }
   cfg.magic = LANG_MAGIC;
   cfg.lang = lang;
-  if (novusfs_write(fs, ino, 0, &cfg, sizeof(cfg)) == (INT64)sizeof(cfg)) {
-    (void)novusfs_super_flush(fs);
-  }
+  (void)vfs_write_file(fs, LANG_FILE, &cfg, sizeof(cfg));
 }

@@ -176,6 +176,37 @@ UINT32 novusfs_creat(novusfs_fs_t *fs, UINT32 dir_ino, const char *name) {
   return ino;
 }
 
+/* Remove one name from a directory. The change goes through the write
+ * ahead log like every other metadata change, so a power cut leaves the
+ * directory as it was. */
+int novusfs_unlink(novusfs_fs_t *fs, UINT32 dir_ino, const char *name) {
+  novusfs_inode_t din;
+  UINT64           txid;
+
+  if (fs == NULL || !fs->mounted || name == NULL) {
+    return -1;
+  }
+  if (novusfs_inode_read(fs, dir_ino, &din) != 0) {
+    return -1;
+  }
+  txid = wal_begin(fs);
+  if (txid == 0u) {
+    return -1;
+  }
+  if (novusfs_dir_remove(fs, &din, name, txid) != 0) {
+    wal_abort(fs, txid);
+    return -1;
+  }
+  if (novusfs_inode_write_tx(fs, &din, txid) != 0) {
+    wal_abort(fs, txid);
+    return -1;
+  }
+  if (wal_commit(fs, txid) != 0) {
+    return -1;
+  }
+  return 0;
+}
+
 UINT32 novusfs_mkdir(novusfs_fs_t *fs, UINT32 dir_ino, const char *name) {
   novusfs_inode_t pdin;
   novusfs_inode_t ndin;

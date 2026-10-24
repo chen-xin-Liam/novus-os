@@ -131,13 +131,21 @@ SRC := arch/x86_64/boot/main.c \
        fs/novusfs/wal.c \
        fs/novusfs/merkle.c \
        fs/novusfs/novusfs.c \
+       fs/vfs.c \
+       fs/ext4/volume.c \
+       fs/ext4/alloc.c \
+       fs/ext4/mount.c \
+       fs/ext4/format.c \
+       fs/ext4/inode.c \
+       fs/ext4/dir.c \
+       fs/ext4/vfs_ext4.c \
        security/nkm/nkm.c
 
 # Assembly sources. Uppercase .S (case-sensitive) makes gcc run the C
 # preprocessor over the file first; gcc invokes the assembler itself.
 ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S arch/x86_64/kernel/chkstk.S
 
-INC := -Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs \
+INC := -Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs -Ifs \
        -Isecurity/nkm -Ibuild
 
 # Freestanding UEFI environment: no libc, no host runtime, no stack

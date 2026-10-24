@@ -316,7 +316,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   g_con->ClearScreen(g_con);
 
   boot_puts(L"=========================================\r\n");
-  boot_puts(L"      Novus OS - M3 Boot Stage\r\n");
+  boot_puts(L"      Novus OS - Boot Stage\r\n");
   boot_puts(L"=========================================\r\n");
   boot_puts(L"[BOOT] UEFI boot started\r\n");
 

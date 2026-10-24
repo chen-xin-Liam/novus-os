@@ -25,7 +25,10 @@
 #include "nuc.h"
 /* M2: NovusFS lives in fs/novusfs, which the build adds to the include
  * path, so the kernel stage can reach its public header directly. */
-#include "novusfs.h"
+#include "../fs/vfs.h"
+#include "../fs/novusfs/novusfs.h"
+/* M12: the ext4 driver, built from fs/ext4. */
+#include "../fs/ext4/ext4.h"
 /* M3: block device table (to adopt the live root) and the signed module
  * loader, both new this milestone. */
 #include "blkdev.h"
@@ -69,9 +72,9 @@ void kputs_hex(UINT64 v) {
 }
 
 typedef struct {
-  novusfs_fs_t *fs;
-  UINTN shown;
-  UINTN read_ok;
+  vfs_fs_t *fs;
+  UINTN    shown;
+  UINTN    read_ok;
 } storage_list_ctx_t;
 
 static novusfs_fs_t storage_fs[BLKDEV_MAX_DEVICES];
@@ -79,8 +82,9 @@ static UINTN storage_fs_count;
 
 static void storage_list_entry(void *ctx, UINT32 ino, const char *name) {
   storage_list_ctx_t *list = (storage_list_ctx_t *)ctx;
-  novusfs_inode_t inode;
-  UINT8 sample[32];
+  UINT64 size;
+  UINT16 mode;
+  UINT8  sample[32];
 
   if (list->shown < 8u) {
     kputs("[AHCI] NovusFS entry: ");
@@ -88,11 +92,11 @@ static void storage_list_entry(void *ctx, UINT32 ino, const char *name) {
     kputs("\n");
     list->shown++;
   }
-  if (list->read_ok || novusfs_inode_read(list->fs, ino, &inode) != 0 ||
-      inode.mode != NOVUSFS_IFILE) {
+  if (list->read_ok || list->fs->stat(list->fs, ino, &size, &mode) != 0 ||
+      mode != VFS_MODE_FILE) {
     return;
   }
-  if (novusfs_read(list->fs, ino, 0, sample, sizeof(sample)) >= 0) {
+  if (list->fs->read(list->fs, ino, 0, sample, sizeof(sample)) >= 0) {
     kputs("[AHCI] NovusFS file read PASS: ");
     kputs(name);
     kputs("\n");
@@ -150,11 +154,12 @@ static void storage_mount_ahci_novusfs(void) {
     kputs("[AHCI] NovusFS mounted: ");
     kputs(part_dev->name);
     kputs("\n");
-    list.fs = fs;
+    list.fs = vfs_novusfs_wrap(fs);
     list.shown = 0;
     list.read_ok = 0;
-    if (novusfs_dir_readdir(fs, fs->sb.root_inode, storage_list_entry,
-                            &list) != 0) {
+    if (list.fs == NULL ||
+        list.fs->readdir(list.fs, list.fs->root, storage_list_entry,
+                         &list) != 0) {
       kputs("[AHCI] NovusFS root listing failed\n");
     } else if (!list.read_ok) {
       kputs("[AHCI] NovusFS has no readable regular file in root\n");
@@ -218,6 +223,13 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
     kputs("[WARN] NovusFS selftest failed, continuing degraded\n");
   }
   storage_mount_ahci_novusfs();
+  if (vfs_selftest() != 0) {
+    kputs("[WARN] VFS selftest failed, continuing degraded\n");
+  }
+  /* M12: exercise the ext4 read/write/mkfs/mount paths on a ramdisk. */
+  if (ext4_selftest() != 0) {
+    kputs("[WARN] ext4 selftest failed, continuing degraded\n");
+  }
 
   /* M3: report what the boot stage found. The verification itself had to
    * happen before ExitBootServices - only the boot stage can still read

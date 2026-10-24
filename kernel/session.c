@@ -4,7 +4,7 @@
 #include "apps.h"
 #include "nuc.h"
 #include "shared_mem.h"
-#include "../fs/novusfs/novusfs.h"
+#include "../fs/vfs.h"
 #include "../lib/novuslib_rs.h"
 #include <stddef.h>
 
@@ -117,12 +117,10 @@ static void make_salt(UINT64 pid, UINT8 salt[16]) {
 }
 
 static int load_record(void) {
-  novusfs_fs_t *fs = novusfs_root();
-  UINT32 ino;
+  vfs_fs_t *fs = vfs_root();
   if (fs == NULL) return -1;
-  ino = novusfs_lookup_path(fs, fs->sb.root_inode, "/users.db");
-  if (ino == 0) return 0;
-  if (novusfs_read(fs, ino, 0, &g_record, sizeof(g_record)) != sizeof(g_record) ||
+  if (vfs_lookup_path(fs, "/users.db") == 0) return 0;
+  if (vfs_read_file(fs, "/users.db", &g_record, sizeof(g_record)) != 0 ||
       g_record.magic != SESSION_MAGIC || g_record.version != SESSION_VERSION ||
       g_record.username[0] == '\0') return -1;
   g_record_ready = 1;
@@ -140,7 +138,7 @@ void session_init(void) {
    * could not be stored across boots even if one were asked for. Start
    * the desktop session directly; the first account is created only
    * after an install onto a persistent NovusFS partition. */
-  if (!novusfs_root_persistent()) {
+  if (!vfs_root_persistent()) {
     g_live = 1;
     g_logged_in = 1;
     kputs("[SESSION] live session: no account required\n");
@@ -158,13 +156,9 @@ int session_logged_in(void) { return g_logged_in != 0; }
 int session_live(void) { return g_live != 0; }
 
 static int write_record(void) {
-  novusfs_fs_t *fs = novusfs_root();
-  UINT32 ino;
+  vfs_fs_t *fs = vfs_root();
   if (fs == NULL) return -1;
-  ino = novusfs_lookup_path(fs, fs->sb.root_inode, "/users.db");
-  if (ino == 0) ino = novusfs_creat(fs, fs->sb.root_inode, "users.db");
-  if (ino == 0) return -1;
-  return novusfs_write(fs, ino, 0, &g_record, sizeof(g_record)) == sizeof(g_record) ? 0 : -1;
+  return vfs_write_file(fs, "/users.db", &g_record, sizeof(g_record));
 }
 
 static int username_valid(const session_req_t *req) {
@@ -207,7 +201,7 @@ int session_handle(const session_req_t *req, UINT64 caller_pid) {
   if (!username_valid(req) || !password_valid(req)) return -1;
   if (req->op == SESSION_OP_SETUP) {
     if (g_record_ready) return -2;
-    if (!novusfs_root_persistent()) return -4;
+    if (!vfs_root_persistent()) return -4;
     memset(&g_record, 0, sizeof(g_record));
     g_record.magic = SESSION_MAGIC;
     g_record.version = SESSION_VERSION;

@@ -22,6 +22,7 @@
 #include "ipc.h"
 #include "irq.h"
 #include "../fs/novusfs/novusfs.h"
+#include "../fs/vfs.h"
 #include "power.h"
 #include "session.h"
 #include "install.h"
@@ -212,26 +213,6 @@ static int user_path(task_t *t, UINT64 va, char path[FS_PATH_MAX]) {
   return -1;
 }
 
-static int fs_parent_path(novusfs_fs_t *fs, char path[FS_PATH_MAX],
-                          UINT32 *parent, char **leaf) {
-  UINTN len = 0;
-  UINTN split = 0;
-  while (path[len] != '\0') len++;
-  while (len > 0 && path[len - 1u] == '/') path[--len] = '\0';
-  if (len == 0) return -1;
-  split = len;
-  while (split > 0 && path[split - 1u] != '/') split--;
-  *leaf = path + split;
-  if ((*leaf)[0] == '\0' || bounded_strlen(*leaf, NOVUSFS_NAME_MAX + 1u) > NOVUSFS_NAME_MAX) return -1;
-  if (split == 0) {
-    *parent = fs->sb.root_inode;
-  } else {
-    path[split - 1u] = '\0';
-    *parent = novusfs_lookup_path(fs, fs->sb.root_inode, path);
-  }
-  return *parent == 0 ? -1 : 0;
-}
-
 static int fs_fd_index(task_t *t, UINT64 fd) {
   UINT64 index;
   /* Filesystem handles are task-local slots, not global kernel objects:
@@ -245,16 +226,16 @@ static int fs_fd_index(task_t *t, UINT64 fd) {
 
 static void sys_fs_open(trap_frame_t *f) {
   task_t *t = sched_current();
-  novusfs_fs_t *fs = novusfs_root();
+  vfs_fs_t *fs = vfs_root();
   char path[FS_PATH_MAX];
   UINT32 ino;
   UINT32 parent;
   char *leaf;
   UINT32 i;
   if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0) { f->rax = (UINT64)-1; return; }
-  ino = novusfs_lookup_path(fs, fs->sb.root_inode, path);
-  if (ino == 0 && (f->rsi & 1u) != 0u && fs_parent_path(fs, path, &parent, &leaf) == 0) {
-    ino = novusfs_creat(fs, parent, leaf);
+  ino = vfs_lookup_path(fs, path);
+  if (ino == 0 && (f->rsi & 1u) != 0u && vfs_parent_path(fs, path, &parent, &leaf) == 0) {
+    ino = fs->creat(fs, parent, leaf);
   }
   if (ino == 0) { f->rax = (UINT64)-1; return; }
   for (i = 0; i < TASK_FD_MAX; i++) {
@@ -273,14 +254,14 @@ static void sys_fs_open(trap_frame_t *f) {
 
 static void sys_fs_read(trap_frame_t *f) {
   task_t *t = sched_current();
-  novusfs_fs_t *fs = novusfs_root();
+  vfs_fs_t *fs = vfs_root();
   UINT8 buf[FS_IO_MAX];
   INT64 n;
   int index;
   UINT64 len = f->rdx > FS_IO_MAX ? FS_IO_MAX : f->rdx;
   if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 ||
       t->fd[index].is_dir) { f->rax = (UINT64)-1; return; }
-  n = novusfs_read(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
+  n = fs->read(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
   if (n < 0 || user_copy(t->cr3, f->rsi, buf, (UINT64)n, 1) != 0) { f->rax = (UINT64)-1; return; }
   t->fd[index].offset += (UINT64)n;
   f->rax = (UINT64)n;
@@ -288,14 +269,14 @@ static void sys_fs_read(trap_frame_t *f) {
 
 static void sys_fs_write(trap_frame_t *f) {
   task_t *t = sched_current();
-  novusfs_fs_t *fs = novusfs_root();
+  vfs_fs_t *fs = vfs_root();
   UINT8 buf[FS_IO_MAX];
   int index;
   UINT64 len = f->rdx > FS_IO_MAX ? FS_IO_MAX : f->rdx;
   INT64 n;
   if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 ||
       t->fd[index].is_dir || user_copy(t->cr3, f->rsi, buf, len, 0) != 0) { f->rax = (UINT64)-1; return; }
-  n = novusfs_write(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
+  n = fs->write(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
   if (n < 0) { f->rax = (UINT64)-1; return; }
   t->fd[index].offset += (UINT64)n;
   f->rax = (UINT64)n;
@@ -311,15 +292,15 @@ static void sys_fs_close(trap_frame_t *f) {
 
 static void sys_fs_stat(trap_frame_t *f) {
   task_t *t = sched_current();
-  novusfs_fs_t *fs = novusfs_root();
+  vfs_fs_t *fs = vfs_root();
   char path[FS_PATH_MAX];
   user_stat_t out;
   UINT32 ino;
   UINT64 size;
   UINT16 mode;
   if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
-      (ino = novusfs_lookup_path(fs, fs->sb.root_inode, path)) == 0 ||
-      novusfs_stat(fs, ino, &size, &mode) != 0) { f->rax = (UINT64)-1; return; }
+      (ino = vfs_lookup_path(fs, path)) == 0 ||
+      fs->stat(fs, ino, &size, &mode) != 0) { f->rax = (UINT64)-1; return; }
   memset(&out, 0, sizeof(out));
   out.size = size;
   out.mode = mode;
@@ -328,15 +309,15 @@ static void sys_fs_stat(trap_frame_t *f) {
 
 static void sys_fs_opendir(trap_frame_t *f) {
   task_t *t = sched_current();
-  novusfs_fs_t *fs = novusfs_root();
+  vfs_fs_t *fs = vfs_root();
   char path[FS_PATH_MAX];
   UINT32 ino;
   UINT64 size;
   UINT16 mode;
   UINT32 i;
   if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
-      (ino = novusfs_lookup_path(fs, fs->sb.root_inode, path)) == 0 ||
-      novusfs_stat(fs, ino, &size, &mode) != 0 || mode != NOVUSFS_IDIR) { f->rax = (UINT64)-1; return; }
+      (ino = vfs_lookup_path(fs, path)) == 0 ||
+      fs->stat(fs, ino, &size, &mode) != 0 || mode != VFS_MODE_DIR) { f->rax = (UINT64)-1; return; }
   for (i = 0; i < TASK_FD_MAX; i++) {
     if (!t->fd[i].used) {
       t->fd[i].ino = ino;
@@ -351,19 +332,19 @@ static void sys_fs_opendir(trap_frame_t *f) {
   f->rax = (UINT64)-1;
 }
 
-typedef struct { UINT32 skip; UINT32 seen; user_dirent_t *entry; novusfs_fs_t *fs; } readdir_ctx_t;
+typedef struct { UINT32 skip; UINT32 seen; user_dirent_t *entry; vfs_fs_t *fs; } readdir_ctx_t;
 static void fs_readdir_pick(void *arg, UINT32 ino, const char *name) {
   readdir_ctx_t *ctx = (readdir_ctx_t *)arg;
   if (ctx->seen++ != ctx->skip) return;
   ctx->entry->ino = ino;
   ctx->entry->name_len = (UINT16)bounded_strlen(name, NOVUSFS_NAME_MAX);
   memcpy(ctx->entry->name, name, ctx->entry->name_len + 1u);
-  (void)novusfs_stat(ctx->fs, ino, NULL, &ctx->entry->mode);
+  (void)ctx->fs->stat(ctx->fs, ino, NULL, &ctx->entry->mode);
 }
 
 static void sys_fs_readdir(trap_frame_t *f) {
   task_t *t = sched_current();
-  novusfs_fs_t *fs = novusfs_root();
+  vfs_fs_t *fs = vfs_root();
   user_dirent_t out;
   readdir_ctx_t ctx;
   int index;
@@ -373,7 +354,7 @@ static void sys_fs_readdir(trap_frame_t *f) {
   ctx.seen = 0;
   ctx.entry = &out;
   ctx.fs = fs;
-  if (novusfs_dir_readdir(fs, t->fd[index].ino, fs_readdir_pick, &ctx) != 0) { f->rax = (UINT64)-1; return; }
+  if (fs->readdir(fs, t->fd[index].ino, fs_readdir_pick, &ctx) != 0) { f->rax = (UINT64)-1; return; }
   if (ctx.seen <= ctx.skip) { f->rax = 0; return; }
   if (user_copy(t->cr3, f->rsi, &out, sizeof(out), 1) != 0) { f->rax = (UINT64)-1; return; }
   t->fd[index].dir_index++;
@@ -382,16 +363,16 @@ static void sys_fs_readdir(trap_frame_t *f) {
 
 static void sys_fs_mkdir(trap_frame_t *f) {
   task_t *t = sched_current();
-  novusfs_fs_t *fs = novusfs_root();
+  vfs_fs_t *fs = vfs_root();
   char path[FS_PATH_MAX];
   UINT32 parent;
   UINT32 existing;
   char *leaf;
   if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
-      fs_parent_path(fs, path, &parent, &leaf) != 0) { f->rax = (UINT64)-1; return; }
-  existing = novusfs_dir_lookup(fs, parent, leaf);
+      vfs_parent_path(fs, path, &parent, &leaf) != 0) { f->rax = (UINT64)-1; return; }
+  existing = fs->lookup(fs, parent, leaf);
   if (existing != 0) { f->rax = (UINT64)-1; return; }
-  f->rax = novusfs_mkdir(fs, parent, leaf) == 0 ? (UINT64)-1 : 0;
+  f->rax = fs->mkdir(fs, parent, leaf) == 0 ? (UINT64)-1 : 0;
 }
 
 /* Installer control. The pid check is the capability: only the process
