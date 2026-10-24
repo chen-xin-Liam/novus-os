@@ -18,6 +18,7 @@
 #include "shared_mem.h"
 #include "pmm.h"
 #include "mm.h"
+#include "ide.h"
 #include "heap.h"
 #include "lapic.h"
 #include "smp.h"
@@ -87,7 +88,7 @@ static void storage_list_entry(void *ctx, UINT32 ino, const char *name) {
   UINT8  sample[32];
 
   if (list->shown < 8u) {
-    kputs("[AHCI] NovusFS entry: ");
+  kputs("[STORAGE] NovusFS entry: ");
     kputs(name);
     kputs("\n");
     list->shown++;
@@ -97,7 +98,7 @@ static void storage_list_entry(void *ctx, UINT32 ino, const char *name) {
     return;
   }
   if (list->fs->read(list->fs, ino, 0, sample, sizeof(sample)) >= 0) {
-    kputs("[AHCI] NovusFS file read PASS: ");
+    kputs("[STORAGE] NovusFS file read PASS: ");
     kputs(name);
     kputs("\n");
     list->read_ok = 1;
@@ -122,7 +123,11 @@ static void storage_mount_ahci_novusfs(void) {
       !((disk->name[0] == 'a' && disk->name[1] == 'h' &&
          disk->name[2] == 'c' && disk->name[3] == 'i') ||
         (disk->name[0] == 'n' && disk->name[1] == 'v' &&
-         disk->name[2] == 'm' && disk->name[3] == 'e'))) {
+         disk->name[2] == 'm' && disk->name[3] == 'e') ||
+        (disk->name[0] == 'i' && disk->name[1] == 'd' &&
+         disk->name[2] == 'e') ||
+        (disk->name[0] == 'u' && disk->name[1] == 's' &&
+         disk->name[2] == 'b'))) {
       continue;
     }
     if (gpt_read(disk, &table) != 0 ||
@@ -139,19 +144,19 @@ static void storage_mount_ahci_novusfs(void) {
     part_dev = blkdev_partition_init(part_name, disk, part.first_sector,
                                      part.sector_count);
     if (part_dev == NULL) {
-      kputs("[AHCI] NovusFS partition registration failed\n");
+      kputs("[STORAGE] NovusFS partition registration failed\n");
       continue;
     }
     fs = &storage_fs[storage_fs_count];
     if (novusfs_mount(fs, part_dev) != 0) {
-      kputs("[AHCI] NovusFS mount failed: ");
+      kputs("[STORAGE] NovusFS mount failed: ");
       kputs(part_dev->name);
       kputs("\n");
       continue;
     }
     storage_fs_count++;
     novusfs_set_root(fs);
-    kputs("[AHCI] NovusFS mounted: ");
+    kputs("[STORAGE] NovusFS mounted: ");
     kputs(part_dev->name);
     kputs("\n");
     list.fs = vfs_novusfs_wrap(fs);
@@ -160,9 +165,9 @@ static void storage_mount_ahci_novusfs(void) {
     if (list.fs == NULL ||
         list.fs->readdir(list.fs, list.fs->root, storage_list_entry,
                          &list) != 0) {
-      kputs("[AHCI] NovusFS root listing failed\n");
+      kputs("[STORAGE] NovusFS root listing failed\n");
     } else if (!list.read_ok) {
-      kputs("[AHCI] NovusFS has no readable regular file in root\n");
+      kputs("[STORAGE] NovusFS has no readable regular file in root\n");
     }
   }
 }
@@ -197,6 +202,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   (void)nvme_init();
   /* M11: USB sticks are ordinary block devices to everything above. */
   (void)usb_init();
+  /* Storage milestone: the onboard IDE/ATA controller (the QEMU "pc"
+   * machine's default disk) is gone from the firmware block-device list
+   * after ExitBootServices, so drive it natively. */
+  (void)ide_init();
 
   /* M5: NovusDisplay. Bind a surface to the framebuffer the boot stage
    * captured, then run the renderer/widget self test on an off-screen

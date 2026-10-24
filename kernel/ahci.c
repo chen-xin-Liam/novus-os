@@ -26,6 +26,7 @@
 #define AHCI_PXCMD 0x18u
 #define AHCI_PXTFD 0x20u
 #define AHCI_PXSSTS 0x28u
+#define AHCI_PXSCTL 0x2Cu
 #define AHCI_PXCI 0x38u
 #define AHCI_GHC_HR 0x00000001u
 #define AHCI_GHC_AE 0x80000000u
@@ -393,7 +394,29 @@ static int ahci_port_init(volatile UINT32 *hba, UINT32 index,
   ssts = ahci_read(p->regs, AHCI_PXSSTS);
   if ((ssts & AHCI_SSTS_DET_MASK) != 3u ||
       (ssts & AHCI_SSTS_IPM_MASK) != 0x100u) {
-    return 0;
+    /* The link may not have trained yet. Issue a COMRESET and re-poll rather
+     * than silently dropping the port. */
+    UINT32 i;
+    UINT32 sctl = ahci_read(p->regs, AHCI_PXSCTL);
+
+    ahci_write(p->regs, AHCI_PXSCTL, (sctl & ~0xFu) | 0x1u);
+    for (i = 0; i < AHCI_TIMEOUT / 1000; i++) {
+      if ((ahci_read(p->regs, AHCI_PXSSTS) & AHCI_SSTS_DET_MASK) == 1u) {
+        break;
+      }
+    }
+    ahci_write(p->regs, AHCI_PXSCTL, (sctl & ~0xFu) | 0x0u);
+    for (i = 0; i < AHCI_TIMEOUT / 1000; i++) {
+      ssts = ahci_read(p->regs, AHCI_PXSSTS);
+      if ((ssts & AHCI_SSTS_DET_MASK) == 3u &&
+          (ssts & AHCI_SSTS_IPM_MASK) == 0x100u) {
+        break;
+      }
+    }
+    if ((ssts & AHCI_SSTS_DET_MASK) != 3u ||
+        (ssts & AHCI_SSTS_IPM_MASK) != 0x100u) {
+      return 0;
+    }
   }
   if (ahci_alloc_port(p) != 0 || ahci_stop_engine(p->regs) != 0) {
     ahci_release_port(p);
@@ -472,13 +495,23 @@ int ahci_init(void) {
         d->prog_if != AHCI_PCI_PROGIF) {
       continue;
     }
-    abar = d->bar[5];
+    abar = d->bar64[5];
     if (abar == 0) {
-      kputs("[AHCI] controller BAR5 unavailable below 4 GiB\n");
+      kputs("[AHCI] controller BAR5 unavailable\n");
       continue;
     }
     pci_enable_device(d);
-    hba = (volatile UINT32 *)(UINTN)abar;
+    if (abar >= 0x100000000ULL) {
+      void *m = mm_map_phys(abar, 0x100000, MM_MAP_UC);
+
+      if (m == NULL) {
+        kputs("[AHCI] controller BAR5 unmappable above 4 GiB\n");
+        continue;
+      }
+      hba = (volatile UINT32 *)m;
+    } else {
+      hba = (volatile UINT32 *)(UINTN)abar;
+    }
     cap = ahci_read(hba, 0x00);
     pi = ahci_read(hba, AHCI_PI);
     ahci_write(hba, AHCI_GHC, ahci_read(hba, AHCI_GHC) | AHCI_GHC_HR);

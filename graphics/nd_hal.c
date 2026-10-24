@@ -19,8 +19,8 @@
 #include "nd.h"
 #include <stddef.h>
 
-#define ND_FB_MAX_WIDTH  4096u
-#define ND_FB_MAX_HEIGHT 2160u
+#define ND_FB_MAX_WIDTH  8192u
+#define ND_FB_MAX_HEIGHT 4320u
 #define ND_LOW_4G       0x100000000ULL
 
 #define ND_CURSOR_W 12
@@ -78,16 +78,16 @@ static int mode_drawable(const EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info,
     *bgr_out = 1u;
   } else if (info->PixelFormat == PixelRedGreenBlueReserved8BitPerColor) {
     *bgr_out = 0u;
-  } else if (info->PixelFormat == PixelBitMask &&
-             info->PixelInformation.RedMask == 0x00FF0000u &&
-             info->PixelInformation.GreenMask == 0x0000FF00u &&
-             info->PixelInformation.BlueMask == 0x000000FFu) {
-    *bgr_out = 1u;
-  } else if (info->PixelFormat == PixelBitMask &&
-             info->PixelInformation.RedMask == 0x000000FFu &&
-             info->PixelInformation.GreenMask == 0x00FF0000u &&
-             info->PixelInformation.BlueMask == 0x0000FF00u) {
-    *bgr_out = 0u;
+  } else if (info->PixelFormat == PixelBitMask) {
+    /* Most GOPs expose a 32-bit XRGB/XBGR bitmask whose component order we
+     * use to pick BGR vs RGB so the common cases stay colour-correct. Odd
+     * masks are still drawn as 32bpp rather than dropping the whole output. */
+    if (info->PixelInformation.RedMask == 0x000000FFu &&
+        info->PixelInformation.BlueMask == 0x00FF0000u) {
+      *bgr_out = 0u;
+    } else {
+      *bgr_out = 1u;
+    }
   } else {
     return 0;
   }
@@ -201,14 +201,12 @@ int nd_capture_boot(void *system_table) {
           info->VerticalResolution > ND_FB_MAX_HEIGHT) {
         continue;
       }
-      /* The kernel only identity-maps the low 4 GiB; a framebuffer above
-       * that is unreachable through the physmap. Refuse instead of
-       * faulting. */
+      /* A framebuffer above 4 GiB is no longer a reason to drop the output:
+       * the kernel maps it on demand through mm_map_phys. Accept it as long
+       * as the base is non-zero; store our own byte size for the mapping. */
       size = (UINT64)info->PixelsPerScanLine * (UINT64)info->VerticalResolution *
              4u;
-      if (gop->Mode->FrameBufferBase == 0 ||
-          gop->Mode->FrameBufferBase >= ND_LOW_4G ||
-          gop->Mode->FrameBufferBase + size > ND_LOW_4G) {
+      if (gop->Mode->FrameBufferBase == 0) {
         continue;
       }
 
@@ -222,7 +220,7 @@ int nd_capture_boot(void *system_table) {
       o->pref_width = pw;
       o->pref_height = ph;
       o->fb_phys = gop->Mode->FrameBufferBase;
-      o->fb_size = gop->Mode->FrameBufferSize;
+      o->fb_size = (UINT32)size;
       count++;
     }
   }
@@ -277,7 +275,20 @@ int nd_init(void) {
   /* The surface uses pixel-word addressing, while GOP pitch may exceed the
    * visible width; retaining PixelsPerScanLine is necessary to land each
    * scanline at its actual hardware offset. */
-  g_screen.px = (UINT32 *)(UINTN)g_disp.fb_phys;
+  /* The primary surface may sit above 4 GiB; map it through the high virtual
+   * region when it does so the renderer can address it directly. */
+  {
+    void *fb = (g_disp.fb_phys < 0x100000000ULL)
+                   ? (void *)(UINTN)g_disp.fb_phys
+                   : mm_map_phys(g_disp.fb_phys, g_disp.fb_size, MM_MAP_UC);
+
+    if (fb == NULL) {
+      kputs("[ND] primary framebuffer unmapable above 4 GiB\n");
+      g_disp.available = 0;
+      return 0;
+    }
+    g_screen.px = (UINT32 *)fb;
+  }
   g_screen.w = (INT32)g_disp.width;
   g_screen.h = (INT32)g_disp.height;
   g_screen.stride = g_disp.pitch;
@@ -305,15 +316,27 @@ int nd_init(void) {
     g_reported[g_reported_count++] = g_outputs[i];
   }
   for (i = 1; i < g_reported_count && i < ND_MAX_OUTPUTS; i++) {
-    nd_surface_t *m = &g_mirror[g_mirror_count++];
+    nd_surface_t *m = &g_mirror[g_mirror_count];
+    void         *fb;
 
-    m->px = (UINT32 *)(UINTN)g_reported[i].fb_phys;
+    fb = (g_reported[i].fb_phys < 0x100000000ULL)
+             ? (void *)(UINTN)g_reported[i].fb_phys
+             : mm_map_phys(g_reported[i].fb_phys, g_reported[i].fb_size,
+                           MM_MAP_UC);
+    if (fb == NULL) {
+      /* A mirror whose framebuffer cannot be mapped would fault on the first
+       * blit; skip it rather than take the whole display down. */
+      kputs("[ND] mirror framebuffer unmapable, skipped\n");
+      continue;
+    }
+    m->px = (UINT32 *)fb;
     m->w = (INT32)g_reported[i].width;
     m->h = (INT32)g_reported[i].height;
     m->stride = g_reported[i].pitch;
     m->fb = 1;
     m->bgr = g_reported[i].bgr;
     m->clip = nd_rect(0, 0, m->w, m->h);
+    g_mirror_count++;
   }
 
   g_screen_ready = 1;
@@ -373,9 +396,12 @@ static UINT32 mirror_swap(UINT32 px) {
          ((px & 0x00FF0000u) >> 16);
 }
 
-/* Copy a rectangle of the primary output onto the other outputs. The copy
- * is clipped to the smaller of the two, so a 1080p desktop on a 4K panel
- * shows the picture in the top left corner instead of running off it. */
+/* Present a rectangle of the primary output on every other output. When a
+ * mirror matches the primary it is a straight 1:1 clone; otherwise the picture
+ * is scaled to fit (preserving aspect ratio and centred, with letterbox
+ * margins) so no output loses the desktop regardless of its resolution. The
+ * scaling is nearest-neighbour, which is what the boot-stage framebuffer path
+ * already relied on for the 1:1 case. */
 void nd_mirror_rect(nd_rect_t r) {
   nd_surface_t *src = nd_screen();
   UINT32        i;
@@ -385,36 +411,85 @@ void nd_mirror_rect(nd_rect_t r) {
   }
   for (i = 0; i < g_mirror_count; i++) {
     nd_surface_t *dst = &g_mirror[i];
-    INT32         x0 = (r.x > 0) ? r.x : 0;
-    INT32         y0 = (r.y > 0) ? r.y : 0;
-    INT32         x1 = r.x + r.w;
-    INT32         y1 = r.y + r.h;
-    INT32         x;
-    INT32         y;
+    INT32         x0, x1, y0, y1, x, y;
 
-    if (x1 > dst->w) {
-      x1 = dst->w;
-    }
-    if (y1 > dst->h) {
-      y1 = dst->h;
-    }
-    if (x1 > src->w) {
-      x1 = src->w;
-    }
-    if (y1 > src->h) {
-      y1 = src->h;
-    }
-    for (y = y0; y < y1; y++) {
-      const UINT32 *srow = src->px + (UINT32)y * src->stride + (UINT32)x0;
-      UINT32       *drow = dst->px + (UINT32)y * dst->stride + (UINT32)x0;
-
-      for (x = x0; x < x1; x++) {
-        UINT32 px = srow[x - x0];
-
-        if (src->bgr != dst->bgr) {
-          px = mirror_swap(px);
+    if (dst->w == src->w && dst->h == src->h) {
+      x0 = (r.x > 0) ? r.x : 0;
+      y0 = (r.y > 0) ? r.y : 0;
+      x1 = r.x + r.w;
+      y1 = r.y + r.h;
+      if (x1 > dst->w) x1 = dst->w;
+      if (y1 > dst->h) y1 = dst->h;
+      if (x1 > src->w) x1 = src->w;
+      if (y1 > src->h) y1 = src->h;
+      for (y = y0; y < y1; y++) {
+        const UINT32 *srow = src->px + (UINT32)y * src->stride + (UINT32)x0;
+        UINT32       *drow = dst->px + (UINT32)y * dst->stride + (UINT32)x0;
+        for (x = x0; x < x1; x++) {
+          UINT32 px = srow[x - x0];
+          if (src->bgr != dst->bgr) {
+            px = mirror_swap(px);
+          }
+          drow[x - x0] = px;
         }
-        drow[x - x0] = px;
+      }
+      continue;
+    }
+    {
+      INT64  scale;
+      INT32  off_x, off_y;
+      int    full = (r.x <= 0 && r.y <= 0 && r.x + r.w >= src->w &&
+                     r.y + r.h >= src->h);
+
+      if ((INT64)dst->h * (INT64)src->w < (INT64)dst->w * (INT64)src->h) {
+        scale = (INT64)dst->h * 1000 / (INT64)src->h;
+      } else {
+        scale = (INT64)dst->w * 1000 / (INT64)src->w;
+      }
+      off_x = (INT32)(((INT64)dst->w - (INT64)src->w * scale / 1000) / 2);
+      off_y = (INT32)(((INT64)dst->h - (INT64)src->h * scale / 1000) / 2);
+      /* On a full redraw, clear the letterbox margins so stale pixels do not
+       * linger beside the scaled picture. */
+      if (full) {
+        UINT32 yy, xx;
+        for (yy = 0; yy < (UINT32)dst->h; yy++) {
+          UINT32 *row = dst->px + (UINT32)yy * dst->stride;
+          for (xx = 0; xx < (UINT32)dst->w; xx++) {
+            row[xx] = 0xFF10141Cu;
+          }
+        }
+      }
+      y0 = off_y + (INT32)((INT64)r.y * scale / 1000);
+      y1 = off_y + (INT32)((INT64)(r.y + r.h) * scale / 1000);
+      x0 = off_x + (INT32)((INT64)r.x * scale / 1000);
+      x1 = off_x + (INT32)((INT64)(r.x + r.w) * scale / 1000);
+      if (y0 < 0) y0 = 0;
+      if (x0 < 0) x0 = 0;
+      if (y1 > dst->h) y1 = dst->h;
+      if (x1 > dst->w) x1 = dst->w;
+      for (y = y0; y < y1; y++) {
+        INT32         sy = (INT32)((INT64)(y - off_y) * 1000 / scale);
+        const UINT32 *srow;
+        UINT32       *drow;
+
+        if (sy < 0 || sy >= src->h) {
+          continue;
+        }
+        srow = src->px + (UINT32)sy * src->stride;
+        drow = dst->px + (UINT32)y * dst->stride;
+        for (x = x0; x < x1; x++) {
+          INT32  sx = (INT32)((INT64)(x - off_x) * 1000 / scale);
+          UINT32 px;
+
+          if (sx < 0 || sx >= src->w) {
+            continue;
+          }
+          px = srow[sx];
+          if (src->bgr != dst->bgr) {
+            px = mirror_swap(px);
+          }
+          drow[x] = px;
+        }
       }
     }
   }

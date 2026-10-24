@@ -33,6 +33,14 @@ UINT64 mm_kernel_cr3(void);
 void *phys_to_virt(UINT64 phys);
 UINT64 virt_to_phys(const void *v);
 
+/* Map `size` bytes of physical memory (any address, including one above
+ * ram_top such as a device BAR or a framebuffer) into the kernel virtual
+ * space and return a linear pointer, or NULL on failure. Callers pass
+ * MM_MAP_UC for device MMIO to mark the range uncacheable. The returned
+ * pointer stays valid for the lifetime of the kernel. */
+#define MM_MAP_UC 0x01u
+void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags);
+
 /* Read the same physical byte (kernel .text region) through the identity
  * map and through PHYSMAP_BASE and report PASS/FAIL on the console. */
 void mm_selftest(void);

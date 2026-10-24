@@ -110,12 +110,28 @@ typedef struct {
   UINT16 ep_out_mps;
   UINT64 sectors;
   UINT32 tag;
+  UINT8  lun;
 
   blkdev_t dev;
   char     name[8];
 } usb_t;
 
-static usb_t g_usb[1];
+/* One registered USB disk may be a LUN on a multi-LUN device, or a device on a
+ * distinct controller. The block layer keeps a context per disk (with its own
+ * blkdev_t, since blkdev_register dedups by device pointer) so concurrent I/O
+ * to different LUNs/controllers cannot clobber each other's LUN field. */
+typedef struct {
+  usb_t   *u;
+  UINT8    lun;
+  blkdev_t dev;
+  char     name[8];
+} usb_disk_t;
+
+#define USB_MAX_CONTROLLERS 8u
+#define USB_MAX_DISKS      16u
+
+static usb_t g_usb[USB_MAX_CONTROLLERS];
+static usb_disk_t g_usb_disks_ctx[USB_MAX_DISKS];
 static UINTN g_usb_disks;
 
 static inline void mfence(void) { __asm__ volatile("mfence" ::: "memory"); }
@@ -377,6 +393,7 @@ static int bulk_send(usb_t *u, int in, UINT64 dma_phys, UINT32 len) {
 
 static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
   UINT32 i = 0;
+  int ms_if = 0;
 
   while (i + 2u <= len) {
     UINT8 dlen = cfg[i];
@@ -386,7 +403,10 @@ static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
       break;
     }
     if (dtype == 4u && dlen >= 9u) {
-      /* Keep scanning: the mass-storage interface is the one we want. */
+      /* Only a mass-storage (0x08) interface drives our BOT path. */
+      if (cfg[i + 5u] == 0x08u) {
+        ms_if = 1;
+      }
     } else if (dtype == 5u && dlen >= 7u) {
       UINT8 addr = cfg[i + 2u];
       UINT8 attr = cfg[i + 3u];
@@ -404,7 +424,7 @@ static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
     }
     i += dlen;
   }
-  return (u->ep_in_num != 0u && u->ep_out_num != 0u) ? 0 : -1;
+  return (ms_if && u->ep_in_num != 0u && u->ep_out_num != 0u) ? 0 : -1;
 }
 
 static int address_device(usb_t *u, UINT32 port, UINT32 speed) {
@@ -493,7 +513,7 @@ static int bot_command(usb_t *u, const UINT8 *cb, UINT8 cb_len, int data_in,
   cbw[8] = (UINT8)data_len; cbw[9] = (UINT8)(data_len >> 8);
   cbw[10] = (UINT8)(data_len >> 16); cbw[11] = (UINT8)(data_len >> 24);
   cbw[12] = data_in ? 0x80u : 0x00u;
-  cbw[13] = 0; /* LUN 0 */
+  cbw[13] = (UINT8)(u->lun & 0x0Fu); /* LUN */
   cbw[14] = cb_len;
   for (i = 0; i < cb_len; i++) {
     cbw[15 + i] = cb[i];
@@ -532,7 +552,8 @@ static int bot_command(usb_t *u, const UINT8 *cb, UINT8 cb_len, int data_in,
 }
 
 static int usb_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
-  usb_t *u = (usb_t *)ctx;
+  usb_disk_t *d = (usb_disk_t *)ctx;
+  usb_t *u = d->u;
   UINT8 *out = (UINT8 *)buf;
 
   if (u == NULL || u->slot == 0u || sector + count > u->sectors) {
@@ -541,14 +562,18 @@ static int usb_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
   while (count != 0u) {
     UINTN n = (count > USB_SECTORS_PER_XFER) ? USB_SECTORS_PER_XFER : count;
     UINT8 cb[16];
-    UINT32 lba = (UINT32)sector;
+    UINT64 lba = sector;
 
     memset(cb, 0, sizeof(cb));
-    cb[0] = 0x28; /* READ10 */
-    cb[2] = (UINT8)(lba >> 24); cb[3] = (UINT8)(lba >> 16);
-    cb[4] = (UINT8)(lba >> 8); cb[5] = (UINT8)lba;
-    cb[7] = (UINT8)(n >> 8); cb[8] = (UINT8)n;
-    if (bot_command(u, cb, 10, 1, (UINT32)n * 512u, u->data) != 0) {
+    cb[0] = 0x88; /* READ(16) */
+    cb[2] = (UINT8)(lba >> 56); cb[3] = (UINT8)(lba >> 48);
+    cb[4] = (UINT8)(lba >> 40); cb[5] = (UINT8)(lba >> 32);
+    cb[6] = (UINT8)(lba >> 24); cb[7] = (UINT8)(lba >> 16);
+    cb[8] = (UINT8)(lba >> 8);  cb[9] = (UINT8)lba;
+    cb[10] = (UINT8)(n >> 24); cb[11] = (UINT8)(n >> 16);
+    cb[12] = (UINT8)(n >> 8);  cb[13] = (UINT8)n;
+    u->lun = d->lun;
+    if (bot_command(u, cb, 16, 1, (UINT32)n * 512u, u->data) != 0) {
       return -1;
     }
     memcpy(out, u->data, (UINTN)n * 512u);
@@ -560,7 +585,8 @@ static int usb_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
 }
 
 static int usb_write(void *ctx, UINT64 sector, UINTN count, const void *buf) {
-  usb_t *u = (usb_t *)ctx;
+  usb_disk_t *d = (usb_disk_t *)ctx;
+  usb_t *u = d->u;
   const UINT8 *in = (const UINT8 *)buf;
 
   if (u == NULL || u->slot == 0u || sector + count > u->sectors) {
@@ -569,15 +595,19 @@ static int usb_write(void *ctx, UINT64 sector, UINTN count, const void *buf) {
   while (count != 0u) {
     UINTN n = (count > USB_SECTORS_PER_XFER) ? USB_SECTORS_PER_XFER : count;
     UINT8 cb[16];
-    UINT32 lba = (UINT32)sector;
+    UINT64 lba = sector;
 
     memcpy(u->data, in, (UINTN)n * 512u);
     memset(cb, 0, sizeof(cb));
-    cb[0] = 0x2a; /* WRITE10 */
-    cb[2] = (UINT8)(lba >> 24); cb[3] = (UINT8)(lba >> 16);
-    cb[4] = (UINT8)(lba >> 8); cb[5] = (UINT8)lba;
-    cb[7] = (UINT8)(n >> 8); cb[8] = (UINT8)n;
-    if (bot_command(u, cb, 10, 0, (UINT32)n * 512u, u->data) != 0) {
+    cb[0] = 0x8a; /* WRITE(16) */
+    cb[2] = (UINT8)(lba >> 56); cb[3] = (UINT8)(lba >> 48);
+    cb[4] = (UINT8)(lba >> 40); cb[5] = (UINT8)(lba >> 32);
+    cb[6] = (UINT8)(lba >> 24); cb[7] = (UINT8)(lba >> 16);
+    cb[8] = (UINT8)(lba >> 8);  cb[9] = (UINT8)lba;
+    cb[10] = (UINT8)(n >> 24); cb[11] = (UINT8)(n >> 16);
+    cb[12] = (UINT8)(n >> 8);  cb[13] = (UINT8)n;
+    u->lun = d->lun;
+    if (bot_command(u, cb, 16, 0, (UINT32)n * 512u, u->data) != 0) {
       return -1;
     }
     in += (UINTN)n * 512u;
@@ -589,23 +619,35 @@ static int usb_write(void *ctx, UINT64 sector, UINTN count, const void *buf) {
 
 static int read_capacity(usb_t *u) {
   UINT8 cb[16];
-  UINT8 out[8];
-  UINT32 last;
+  UINT64 last;
   UINT32 bs;
 
   memset(cb, 0, sizeof(cb));
-  cb[0] = 0x25; /* READ CAPACITY(10) */
-  if (bot_command(u, cb, 10, 1, 8, out) != 0) {
-    return -1;
+  cb[0] = 0x9e; /* READ CAPACITY(16) */
+  cb[1] = 0x10; /* service action */
+  cb[13] = 32;  /* allocation length */
+  if (bot_command(u, cb, 16, 1, 32, u->data) == 0) {
+    last = ((UINT64)u->data[0] << 56) | ((UINT64)u->data[1] << 48) |
+           ((UINT64)u->data[2] << 40) | ((UINT64)u->data[3] << 32) |
+           ((UINT64)u->data[4] << 24) | ((UINT64)u->data[5] << 16) |
+           ((UINT64)u->data[6] << 8)  | (UINT64)u->data[7];
+    bs = ((UINT32)u->data[8] << 24) | ((UINT32)u->data[9] << 16) |
+         ((UINT32)u->data[10] << 8)  | (UINT32)u->data[11];
+  } else {
+    memset(cb, 0, sizeof(cb));
+    cb[0] = 0x25; /* READ CAPACITY(10) fallback for older devices */
+    if (bot_command(u, cb, 10, 1, 8, u->data) != 0) {
+      return -1;
+    }
+    last = ((UINT64)u->data[0] << 24) | ((UINT64)u->data[1] << 16) |
+           ((UINT64)u->data[2] << 8)  | (UINT64)u->data[3];
+    bs = ((UINT32)u->data[4] << 24) | ((UINT32)u->data[5] << 16) |
+         ((UINT32)u->data[6] << 8)  | (UINT32)u->data[7];
   }
-  last = ((UINT32)out[0] << 24) | ((UINT32)out[1] << 16) |
-         ((UINT32)out[2] << 8) | out[3];
-  bs = ((UINT32)out[4] << 24) | ((UINT32)out[5] << 16) |
-       ((UINT32)out[6] << 8) | out[7];
   if (bs == 0u || bs > 4096u) {
     return -1;
   }
-  u->sectors = ((UINT64)last + 1u) * (bs / 512u);
+  u->sectors = (last + 1u) * (bs / 512u);
   u->dev.block_size = bs;
   return 0;
 }
@@ -768,21 +810,45 @@ static UINT64 relocate_bar0(pci_dev_t *d) {
   return 0;
 }
 
+static int usb_max_lun(usb_t *u) {
+  UINT8 setup[8];
+  UINT8 buf[1];
+
+  memset(setup, 0, sizeof(setup));
+  setup[0] = 0xA1; /* device-to-host, class, interface */
+  setup[1] = 0xFE; /* GET MAX LUN */
+  setup[6] = 1;    /* wLength = 1 */
+  if (control_xfer(u, setup, buf, 1, 1) == 0) {
+    return (int)buf[0];
+  }
+  return 0;
+}
+
 int usb_init(void) {
   pci_dev_t devices[PCI_MAX_DEVICES];
   int       n;
   int       i;
+  int       ci = 0;
 
   n = pci_scan(devices, PCI_MAX_DEVICES);
   for (i = 0; i < n; i++) {
-    usb_t *u = &g_usb[0];
+    usb_t *u;
     UINT32 hcs1;
     UINT32 hcc1;
 
+    if (g_usb_disks >= USB_MAX_DISKS) {
+      break;
+    }
     if (devices[i].class_code != 0x0Cu || devices[i].subclass != 0x03u ||
         devices[i].prog_if != 0x30u) {
       continue;
     }
+    if (ci >= (int)USB_MAX_CONTROLLERS) {
+      continue;
+    }
+    u = &g_usb[ci];
+    ci++;
+    memset(u, 0, sizeof(*u));
     memset(u, 0, sizeof(*u));
     {
       UINT64 bar = devices[i].bar[0];
@@ -855,6 +921,8 @@ int usb_init(void) {
 
       for (port = 1; port <= u->max_ports && port <= USB_MAX_PORTS; port++) {
         UINT32 speed = 0;
+        int max_lun;
+        int lun;
 
         if (port_reset(u, port, &speed) != 0) {
           continue;
@@ -863,58 +931,68 @@ int usb_init(void) {
           kputs("[USB] enumeration failed\n");
           continue;
         }
-        if (read_capacity(u) != 0) {
-          kputs("[USB] READ CAPACITY failed\n");
-          continue;
-        }
+        max_lun = usb_max_lun(u);
+        for (lun = 0; lun <= max_lun; lun++) {
+          usb_disk_t *d;
 
-        u->name[0] = 'u'; u->name[1] = 's'; u->name[2] = 'b';
-        u->name[3] = (char)('0' + (g_usb_disks / 10));
-        u->name[4] = (char)('0' + (g_usb_disks % 10));
-        u->name[5] = '\0';
+          if (g_usb_disks >= USB_MAX_DISKS) {
+            break;
+          }
+          u->lun = (UINT8)lun;
+          if (read_capacity(u) != 0) {
+            continue;
+          }
+          d = &g_usb_disks_ctx[g_usb_disks];
+          memset(d, 0, sizeof(*d));
+          d->u = u;
+          d->lun = (UINT8)lun;
 
-        u->dev.name = u->name;
-        u->dev.sector_count = u->sectors;
-        u->dev.block_size = (u->dev.block_size == 0u) ? 512u : u->dev.block_size;
-        u->dev.flags = BLKDEV_FLAG_REMOVABLE;
-        /* The medium the system was booted from must never be a target.
-         * The boot stage publishes the USB port it came from; the port
-         * number in the device path and the xHCI root hub port can differ
-         * by one, so both are accepted. When several USB volumes were
-         * present the running one could not be identified, and every USB
-         * disk is refused instead of guessing. */
-        {
-          shared_mem_t *shm = shared_mem_get();
+          d->name[0] = 'u'; d->name[1] = 's'; d->name[2] = 'b';
+          d->name[3] = (char)('0' + (g_usb_disks / 10));
+          d->name[4] = (char)('0' + (g_usb_disks % 10));
+          d->name[5] = '\0';
 
-          if (shm != NULL &&
-              (shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB) != 0u) {
-            UINT32 raw = shm->boot_usb_port;
+          d->dev.name = d->name;
+          d->dev.sector_count = u->sectors;
+          d->dev.block_size = (u->dev.block_size == 0u) ? 512u : u->dev.block_size;
+          d->dev.flags = BLKDEV_FLAG_REMOVABLE;
+          /* The medium the system was booted from must never be a target.
+           * The boot stage publishes the USB port it came from; the port
+           * number in the device path and the xHCI root hub port can differ
+           * by one, so both are accepted. When several USB volumes were
+           * present the running one could not be identified, and every USB
+           * disk is refused instead of guessing. */
+          {
+            shared_mem_t *shm = shared_mem_get();
 
-            if ((shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB_AMBIGUOUS) !=
-                    0u ||
-                (UINT32)port == raw || (UINT32)port == raw + 1u) {
-              u->dev.flags |= BLKDEV_FLAG_BOOT_ONLY;
-              kputs("[USB] disk ");
-              kputs(u->name);
-              kputs(" is the boot medium\n");
+            if (shm != NULL &&
+                (shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB) != 0u) {
+              UINT32 raw = shm->boot_usb_port;
+
+              if ((shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB_AMBIGUOUS)
+                      != 0u ||
+                  (UINT32)port == raw || (UINT32)port == raw + 1u) {
+                d->dev.flags |= BLKDEV_FLAG_BOOT_ONLY;
+                kputs("[USB] disk ");
+                kputs(d->name);
+                kputs(" is the boot medium\n");
+              }
             }
           }
+          d->dev.ctx = d;
+          d->dev.read = usb_read;
+          d->dev.write = usb_write;
+          if (blkdev_register(&d->dev) == 0) {
+            g_usb_disks++;
+            kputs("[USB] disk ");
+            kputs(d->name);
+            kputs(" capacity ");
+            kputs_hex(u->sectors);
+            kputs(" sectors\n");
+          }
         }
-        u->dev.ctx = u;
-        u->dev.read = usb_read;
-        u->dev.write = usb_write;
-        if (blkdev_register(&u->dev) == 0) {
-          g_usb_disks++;
-          kputs("[USB] disk ");
-          kputs(u->name);
-          kputs(" capacity ");
-          kputs_hex(u->sectors);
-          kputs(" sectors\n");
-        }
-        break; /* one disk per controller is enough for the installer */
       }
     }
-    break;
   }
   return (int)g_usb_disks;
 }

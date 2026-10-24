@@ -34,6 +34,7 @@
 #define MM_PTE_PRESENT     0x0000000000000001ULL
 #define MM_PTE_WRITE       0x0000000000000002ULL
 #define MM_PTE_HUGE        0x0000000000000080ULL /* PS: leaf at PDE level */
+#define MM_PTE_PCD         0x0000000000000010ULL /* cache disable (device) */
 
 /* Address fields. Table pointers carry bits [51:12], 2 MiB leaf entries
  * carry bits [51:21] (bits 20:12 must be zero there or #PF fires). */
@@ -183,4 +184,86 @@ void mm_selftest(void) {
   } else {
     kputs("[MM] physmap readback FAIL\n");
   }
+}
+
+/* ---- high physical mapping (device MMIO / framebuffers above ram_top) -----
+ *
+ * The identity map covers only the low 4 GiB and the physmap window only RAM
+ * below ram_top, so a device register block or a framebuffer sitting at a
+ * physical address above those windows is unreachable. mm_map_phys() maps such
+ * ranges into a fixed high virtual region through PML4[257] using 2 MiB huge
+ * pages (the page-table grain the rest of mm_init already uses). */
+#define MM_DEVMAP_BASE        0xFFFF808000000000ULL  /* -> PML4[257] */
+#define MM_DEVMAP_PML4_IDX    257u
+#define MM_MAP_UC             0x01u
+
+static UINT64 g_devmap_next = MM_DEVMAP_BASE;
+
+/* Return the (already mapped) child table for a present parent entry, or
+ * allocate and wire one in. Callers write the leaf through the returned
+ * pointer. */
+static mm_table_t *mm_ensure_level(mm_table_t *parent, UINT32 idx) {
+  UINT64 e = parent->e[idx];
+
+  if ((e & MM_PTE_PRESENT) != 0u) {
+    return (mm_table_t *)phys_to_virt(e & MM_PTE_ADDR4K_MASK);
+  }
+  {
+    UINT64 child_phys;
+    mm_table_t *child = mm_table_new(&child_phys);
+
+    if (child == 0) {
+      return 0;
+    }
+    parent->e[idx] = MM_PTE_PRESENT | MM_PTE_WRITE |
+                     (child_phys & MM_PTE_ADDR4K_MASK);
+    return child;
+  }
+}
+
+/* Walk PML4[257] down to the PD covering virtual address `va`, creating the
+ * PDPT and PD on demand. Returns the PD (virtual) or NULL. */
+static mm_table_t *mm_dev_pd(UINT64 va) {
+  mm_table_t *pml4 = (mm_table_t *)phys_to_virt(mm_kernel_cr3());
+  mm_table_t *pdpt;
+  mm_table_t *pd;
+
+  if (pml4 == 0) {
+    return 0;
+  }
+  pdpt = mm_ensure_level(pml4, MM_DEVMAP_PML4_IDX);
+  if (pdpt == 0) {
+    return 0;
+  }
+  pd = mm_ensure_level(pdpt, (UINT32)((va >> 30) & 0x1FFu));
+  return pd;
+}
+
+void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags) {
+  UINT64 base = g_devmap_next;
+  UINT64 cur = base;
+  UINT32 n = (UINT32)(((size + 0x1FFFFFu) >> 21) & 0xFFFFFFFFu);
+  UINT32 i;
+
+  if (n == 0u) {
+    return 0;
+  }
+  for (i = 0; i < n; i++) {
+    UINT64 p = (phys & ~0x1FFFFFu) + ((UINT64)i << 21);
+    UINT64 v = cur + ((UINT64)i << 21);
+    mm_table_t *pd = mm_dev_pd(v);
+    UINT32 pdi;
+
+    if (pd == 0) {
+      return 0;
+    }
+    pdi = (UINT32)((v >> 21) & 0x1FFu);
+    pd->e[pdi] = MM_PTE_PRESENT | MM_PTE_WRITE | MM_PTE_HUGE |
+                 (p & MM_PTE_ADDR2M_MASK);
+    if ((flags & MM_MAP_UC) != 0u) {
+      pd->e[pdi] |= MM_PTE_PCD;
+    }
+  }
+  g_devmap_next = cur + ((UINT64)n << 21);
+  return (void *)base;
 }

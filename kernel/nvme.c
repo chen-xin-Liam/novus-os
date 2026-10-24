@@ -87,8 +87,25 @@ typedef struct {
   char name[8];
 } nvme_ctrl_t;
 
+/* A namespace is what the block layer mounts; one controller can own several.
+ * The shared controller carries the queues and registers, while each entry
+ * below records its own nsid, geometry and blkdev_t. */
+typedef struct {
+  nvme_ctrl_t *ctrl;
+  UINT32 nsid;
+  UINT32 block_size;
+  UINT32 sectors_per_block;
+  UINT64 block_count;
+  blkdev_t dev;
+  char name[8];
+} nvme_ns_t;
+
+#define NVME_MAX_NS 16u
+
 static nvme_ctrl_t nvme_controllers[NVME_MAX_CONTROLLERS];
+static nvme_ns_t nvme_ns[NVME_MAX_NS];
 static UINTN nvme_controller_count;
+static UINTN nvme_ns_count;
 
 static UINT32 nvme_read32(volatile UINT8 *regs, UINT32 offset) {
   return *(volatile UINT32 *)(regs + offset);
@@ -182,8 +199,17 @@ static UINT64 nvme_bar0(const pci_dev_t *dev) {
   } else if (type != 0u) {
     return 0;
   }
-  if (base == 0 || base >= 0x100000000ULL) {
+  if (base == 0) {
     return 0;
+  }
+  /* A 64-bit BAR above 4 GiB cannot be reached through the identity map, so
+   * carve a window into the high virtual region and hand back that pointer. */
+  if (base >= 0x100000000ULL) {
+    void *m = mm_map_phys(base, 0x100000, MM_MAP_UC);
+    if (m == NULL) {
+      return 0;
+    }
+    return (UINT64)(UINTN)m;
   }
   return base;
 }
@@ -288,56 +314,122 @@ static int nvme_create_io_queues(nvme_ctrl_t *ctrl) {
   return nvme_admin(ctrl, &command);
 }
 
-static int nvme_discover_namespace(nvme_ctrl_t *ctrl) {
-  UINT32 nsid;
-  UINT64 blocks;
-  UINT32 format;
-  UINT32 metadata;
-  UINT32 data_shift;
-  UINT32 logical_bytes;
+/* Identify every active namespace on the controller and register each as its
+ * own block device. Returns the number of namespaces registered (0 on none). */
+static int nvme_xfer(nvme_ns_t *ns, UINT64 sector, UINTN count, void *buffer,
+                     int write);
+static int nvme_blk_read(void *ctx, UINT64 sector, UINTN count, void *buf);
+static int nvme_blk_write(void *ctx, UINT64 sector, UINTN count,
+                         const void *buf);
+
+static int nvme_setup_namespaces(nvme_ctrl_t *ctrl) {
+  UINT32 nslist[64];
+  UINT32 idx;
+  int registered = 0;
 
   if (nvme_identify(ctrl, 0, NVME_CNS_ACTIVE_NS) != 0) {
-    return -1;
+    return 0;
   }
-  memcpy(&nsid, ctrl->data, sizeof(nsid));
-  if (nsid == 0) {
-    return -1;
+  for (idx = 0; idx < 64; idx++) {
+    UINT32 v = 0;
+    memcpy(&v, ctrl->data + idx * 4u, sizeof(v));
+    nslist[idx] = v;
+    if (v == 0u) {
+      break;
+    }
   }
-  if (nvme_identify(ctrl, nsid, NVME_CNS_NAMESPACE) != 0) {
-    return -1;
+  for (idx = 0; idx < 64; idx++) {
+    UINT32 nsid = nslist[idx];
+    UINT64 blocks;
+    UINT32 format;
+    UINT32 metadata;
+    UINT32 data_shift;
+    UINT32 logical_bytes;
+    nvme_ns_t *ns;
+
+    if (nsid == 0u) {
+      break;
+    }
+    if (nvme_ns_count >= NVME_MAX_NS) {
+      break;
+    }
+    if (nvme_identify(ctrl, nsid, NVME_CNS_NAMESPACE) != 0) {
+      continue;
+    }
+    memcpy(&blocks, ctrl->data, sizeof(blocks));
+    format = ctrl->data[26] & 0x0Fu;
+    if (format >= 16u) {
+      continue;
+    }
+    metadata = (UINT32)ctrl->data[128u + format * 4u] |
+               ((UINT32)ctrl->data[129u + format * 4u] << 8);
+    data_shift = ctrl->data[130u + format * 4u];
+    if (metadata != 0u || data_shift >= 32u) {
+      continue;
+    }
+    logical_bytes = 1u << data_shift;
+    if (logical_bytes < BLKDEV_SECTOR_SIZE ||
+        logical_bytes > BLKDEV_BLOCK_MAX ||
+        logical_bytes % BLKDEV_SECTOR_SIZE != 0u || blocks == 0u) {
+      continue;
+    }
+    if (blocks > (~(UINT64)0) / (logical_bytes / BLKDEV_SECTOR_SIZE)) {
+      continue;
+    }
+    ns = &nvme_ns[nvme_ns_count];
+    memset(ns, 0, sizeof(*ns));
+    ns->ctrl = ctrl;
+    ns->nsid = nsid;
+    ns->block_size = logical_bytes;
+    ns->sectors_per_block = logical_bytes / BLKDEV_SECTOR_SIZE;
+    ns->block_count = blocks;
+    ns->dev.name = ns->name;
+    ns->dev.sector_count = blocks * ns->sectors_per_block;
+    ns->dev.block_size = logical_bytes;
+    ns->dev.flags = 0;
+    ns->dev.ctx = ns;
+    ns->dev.read = nvme_blk_read;
+    ns->dev.write = nvme_blk_write;
+    /* The first namespace keeps the classic "nvmeN"; extras follow the
+     * "nvmeNnM" convention. */
+    if (registered == 0) {
+      ns->name[0] = 'n'; ns->name[1] = 'v'; ns->name[2] = 'm';
+      ns->name[3] = 'e'; ns->name[4] = (char)('0' + nvme_controller_count);
+      ns->name[5] = '\0';
+    } else {
+      UINT32 sub = (UINT32)registered + 1u;
+      ns->name[0] = 'n'; ns->name[1] = 'v'; ns->name[2] = 'm';
+      ns->name[3] = 'e'; ns->name[4] = (char)('0' + nvme_controller_count);
+      ns->name[5] = 'n';
+      ns->name[6] = (char)('0' + (sub % 10u));
+      ns->name[7] = '\0';
+    }
+    if (blkdev_register(&ns->dev) == 0) {
+      nvme_ns_count++;
+      registered++;
+      if (nvme_xfer(ns, 0, 1, ctrl->data, 0) == 0) {
+        kputs("[NVMe] LBA 0 read PASS\n");
+      } else {
+        kputs("[NVMe] LBA 0 read FAIL\n");
+      }
+      kputs("[NVMe] namespace ");
+      kputs(ns->name);
+      kputs(" blocks ");
+      kputs_hex(blocks);
+      kputs(" logical block bytes ");
+      kputs_hex(logical_bytes);
+      kputs("\n");
+    }
   }
-  memcpy(&blocks, ctrl->data, sizeof(blocks));
-  format = ctrl->data[26] & 0x0Fu;
-  if (format >= 16u) {
-    return -1;
-  }
-  metadata = (UINT32)ctrl->data[128u + format * 4u] |
-             ((UINT32)ctrl->data[129u + format * 4u] << 8);
-  data_shift = ctrl->data[130u + format * 4u];
-  if (metadata != 0u || data_shift >= 32u) {
-    return -1;
-  }
-  logical_bytes = 1u << data_shift;
-  if (logical_bytes < BLKDEV_SECTOR_SIZE ||
-      logical_bytes > BLKDEV_BLOCK_MAX ||
-      logical_bytes % BLKDEV_SECTOR_SIZE != 0u || blocks == 0u) {
-    return -1;
-  }
-  ctrl->nsid = nsid;
-  ctrl->block_size = logical_bytes;
-  ctrl->sectors_per_block = logical_bytes / BLKDEV_SECTOR_SIZE;
-  if (blocks > (~(UINT64)0) / ctrl->sectors_per_block) {
-    return -1;
-  }
-  ctrl->block_count = blocks;
-  return 0;
+  return registered;
 }
 
-static int nvme_io_block(nvme_ctrl_t *ctrl, UINT64 lba, int write) {
+static int nvme_io_block(nvme_ns_t *ns, UINT64 lba, int write) {
+  nvme_ctrl_t *ctrl = ns->ctrl;
   nvme_cmd_t command;
   memset(&command, 0, sizeof(command));
   command.opcode = write ? NVME_NVM_WRITE : NVME_NVM_READ;
-  command.nsid = ctrl->nsid;
+  command.nsid = ns->nsid;
   command.prp1 = ctrl->data_phys;
   command.cdw10 = (UINT32)lba;
   command.cdw11 = (UINT32)(lba >> 32);
@@ -356,18 +448,19 @@ static int nvme_lock(nvme_ctrl_t *ctrl) {
   return -1;
 }
 
-static int nvme_xfer(nvme_ctrl_t *ctrl, UINT64 sector, UINTN count,
+static int nvme_xfer(nvme_ns_t *ns, UINT64 sector, UINTN count,
                      void *buffer, int write) {
+  nvme_ctrl_t *ctrl = ns->ctrl;
   UINT8 *user;
   UINT32 spb;
   UINT32 block_bytes;
 
-  if (ctrl == NULL || buffer == NULL) {
+  if (ns == NULL || ctrl == NULL || buffer == NULL) {
     return -1;
   }
   user = (UINT8 *)buffer;
-  spb = ctrl->sectors_per_block;
-  block_bytes = ctrl->block_size;
+  spb = ns->sectors_per_block;
+  block_bytes = ns->block_size;
   if (count == 0 || spb == 0 || nvme_lock(ctrl) != 0) {
     return -1;
   }
@@ -377,7 +470,7 @@ static int nvme_xfer(nvme_ctrl_t *ctrl, UINT64 sector, UINTN count,
     UINTN chunk;
 
     if (within != 0 || count < spb) {
-      if (nvme_io_block(ctrl, lba, 0) != 0) {
+      if (nvme_io_block(ns, lba, 0) != 0) {
         __sync_lock_release(&ctrl->locked);
         return -1;
       }
@@ -388,7 +481,7 @@ static int nvme_xfer(nvme_ctrl_t *ctrl, UINT64 sector, UINTN count,
       if (write) {
         memcpy(ctrl->data + within * BLKDEV_SECTOR_SIZE, user,
                chunk * BLKDEV_SECTOR_SIZE);
-        if (nvme_io_block(ctrl, lba, 1) != 0) {
+        if (nvme_io_block(ns, lba, 1) != 0) {
           __sync_lock_release(&ctrl->locked);
           return -1;
         }
@@ -399,12 +492,12 @@ static int nvme_xfer(nvme_ctrl_t *ctrl, UINT64 sector, UINTN count,
     } else {
       if (write) {
         memcpy(ctrl->data, user, block_bytes);
-        if (nvme_io_block(ctrl, lba, 1) != 0) {
+        if (nvme_io_block(ns, lba, 1) != 0) {
           __sync_lock_release(&ctrl->locked);
           return -1;
         }
       } else {
-        if (nvme_io_block(ctrl, lba, 0) != 0) {
+        if (nvme_io_block(ns, lba, 0) != 0) {
           __sync_lock_release(&ctrl->locked);
           return -1;
         }
@@ -421,12 +514,12 @@ static int nvme_xfer(nvme_ctrl_t *ctrl, UINT64 sector, UINTN count,
 }
 
 static int nvme_blk_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
-  return nvme_xfer((nvme_ctrl_t *)ctx, sector, count, buf, 0);
+  return nvme_xfer((nvme_ns_t *)ctx, sector, count, buf, 0);
 }
 
 static int nvme_blk_write(void *ctx, UINT64 sector, UINTN count,
                           const void *buf) {
-  return nvme_xfer((nvme_ctrl_t *)ctx, sector, count, (void *)buf, 1);
+  return nvme_xfer((nvme_ns_t *)ctx, sector, count, (void *)buf, 1);
 }
 
 static int nvme_controller_init(const pci_dev_t *pci) {
@@ -434,7 +527,6 @@ static int nvme_controller_init(const pci_dev_t *pci) {
   UINT64 bar;
   UINT32 cc;
   UINT32 doorbell_shift;
-  UINT32 nsid;
 
   if (nvme_controller_count >= NVME_MAX_CONTROLLERS) {
     return -1;
@@ -501,49 +593,22 @@ static int nvme_controller_init(const pci_dev_t *pci) {
     nvme_free_ctrl(ctrl);
     return -1;
   }
-  if (nvme_identify(ctrl, 0, NVME_CNS_CONTROLLER) != 0 ||
-      nvme_identify(ctrl, 0, NVME_CNS_ACTIVE_NS) != 0) {
+  if (nvme_identify(ctrl, 0, NVME_CNS_CONTROLLER) != 0) {
     kputs("[NVMe] admin identify failed\n");
     nvme_free_ctrl(ctrl);
     return -1;
   }
-  memcpy(&nsid, ctrl->data, sizeof(nsid));
-  if (nsid == 0 || nvme_discover_namespace(ctrl) != 0 ||
-      nvme_create_io_queues(ctrl) != 0) {
-    kputs("[NVMe] namespace or I/O queue setup failed\n");
+  if (nvme_create_io_queues(ctrl) != 0) {
+    kputs("[NVMe] I/O queue setup failed\n");
     nvme_free_ctrl(ctrl);
     return -1;
   }
-  ctrl->dev.name = ctrl->name;
-  ctrl->dev.sector_count = ctrl->block_count * ctrl->sectors_per_block;
-  ctrl->dev.block_size = ctrl->block_size;
-  ctrl->dev.flags = 0;
-  ctrl->dev.ctx = ctrl;
-  ctrl->dev.read = nvme_blk_read;
-  ctrl->dev.write = nvme_blk_write;
-  ctrl->name[0] = 'n';
-  ctrl->name[1] = 'v';
-  ctrl->name[2] = 'm';
-  ctrl->name[3] = 'e';
-  ctrl->name[4] = (char)('0' + nvme_controller_count);
-  ctrl->name[5] = '\0';
-  if (blkdev_register(&ctrl->dev) < 0) {
+  if (nvme_setup_namespaces(ctrl) <= 0) {
+    kputs("[NVMe] no usable namespace found\n");
     nvme_free_ctrl(ctrl);
     return -1;
   }
   nvme_controller_count++;
-  if (blkdev_read(&ctrl->dev, 0, 1, ctrl->data) == 0) {
-    kputs("[NVMe] LBA 0 read PASS\n");
-  } else {
-    kputs("[NVMe] LBA 0 read FAIL\n");
-  }
-  kputs("[NVMe] namespace ");
-  kputs(ctrl->name);
-  kputs(" blocks ");
-  kputs_hex(ctrl->block_count);
-  kputs(" logical block bytes ");
-  kputs_hex(ctrl->block_size);
-  kputs("\n");
   return 0;
 }
 
