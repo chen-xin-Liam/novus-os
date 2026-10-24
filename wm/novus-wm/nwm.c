@@ -57,6 +57,14 @@ typedef struct {
   nwm_shape_t shape[NWM_MAX_SHAPES];
   UINT32      text_n;
   nwm_text_t  text[NWM_MAX_TEXTS];
+  /* A frame in flight. CLEAR starts it, SHAPE/TEXT fill it and INVALIDATE
+   * commits: until then the compositor keeps replaying the previous list,
+   * so a repaint caused by another window cannot show half a frame. */
+  UINT32      pend_shape_n;
+  nwm_shape_t pend_shape[NWM_MAX_SHAPES];
+  UINT32      pend_text_n;
+  nwm_text_t  pend_text[NWM_MAX_TEXTS];
+  UINT8       frame_open;
   nd_rect_t restore; /* geometry to come back to from maximized */
 } nwm_window_t;
 
@@ -758,6 +766,11 @@ static void req_draw(const ipc_msg_t *m) {
   memcpy(d.cmd, m->payload + 8, n * sizeof(nwm_cmd_t));
   w->draw_n = n;
   memcpy(w->draw, d.cmd, n * sizeof(nwm_cmd_t));
+  /* A whole list in one message is a frame of its own; any half-built
+   * v1.1 frame is abandoned so it cannot be committed later. */
+  w->pend_shape_n = 0;
+  w->pend_text_n = 0;
+  w->frame_open = 0;
   damage(client_rect(w));
   ack(m, w->id, NWM_OK);
 }
@@ -780,11 +793,12 @@ static void req_clear(const ipc_msg_t *m) {
     return;
   }
   w->draw_n = 0;
-  w->shape_n = 0;
-  w->text_n = 0;
-  /* No damage here: the list is empty until the client finishes the frame,
-   * and repainting now would show a blank window. INVALIDATE is the end of
-   * a frame and does the damage. */
+  w->pend_shape_n = 0;
+  w->pend_text_n = 0;
+  w->frame_open = 1;
+  /* No damage here: the committed list is untouched until INVALIDATE, and
+   * repainting now would show the previous frame over the new one's
+   * background. */
   ack(m, w->id, NWM_OK);
 }
 
@@ -803,11 +817,19 @@ static void req_shape(const ipc_msg_t *m) {
     ack(m, s.win, st);
     return;
   }
-  if (w->shape_n >= NWM_MAX_SHAPES) {
-    ack(m, w->id, NWM_EFULL);
-    return;
+  if (w->frame_open) {
+    if (w->pend_shape_n >= NWM_MAX_SHAPES) {
+      ack(m, w->id, NWM_EFULL);
+      return;
+    }
+    w->pend_shape[w->pend_shape_n++] = s;
+  } else {
+    if (w->shape_n >= NWM_MAX_SHAPES) {
+      ack(m, w->id, NWM_EFULL);
+      return;
+    }
+    w->shape[w->shape_n++] = s;
   }
-  w->shape[w->shape_n++] = s;
   /* Stored, not painted: a frame is painted as a whole when the client
    * says INVALIDATE, so a half-delivered list never reaches the screen. */
   ack(m, w->id, NWM_OK);
@@ -829,7 +851,7 @@ static void req_text(const ipc_msg_t *m) {
     ack(m, t.win, st);
     return;
   }
-  if (w->text_n >= NWM_MAX_TEXTS) {
+  if ((w->frame_open ? w->pend_text_n : w->text_n) >= NWM_MAX_TEXTS) {
     if (g_full_log < 8u) {
       g_full_log++;
       kputs("[NWM] WARN display list full (text) win=");
@@ -847,7 +869,11 @@ static void req_text(const ipc_msg_t *m) {
   }
   t.text[len] = '\0';
   t.len = (UINT8)len;
-  w->text[w->text_n++] = t;
+  if (w->frame_open) {
+    w->pend_text[w->pend_text_n++] = t;
+  } else {
+    w->text[w->text_n++] = t;
+  }
   /* Stored, not painted: see req_shape. */
   ack(m, w->id, NWM_OK);
 }
@@ -868,6 +894,21 @@ static void req_invalidate(const ipc_msg_t *m) {
   if (!owned_by(w, m->hdr.sender, &st)) {
     ack(m, r.win, st);
     return;
+  }
+  /* End of frame: the list built since CLEAR becomes the one the
+   * compositor replays, in one step. */
+  if (w->frame_open) {
+    w->shape_n = w->pend_shape_n;
+    if (w->shape_n != 0u) {
+      memcpy(w->shape, w->pend_shape, w->shape_n * sizeof(nwm_shape_t));
+    }
+    w->text_n = w->pend_text_n;
+    if (w->text_n != 0u) {
+      memcpy(w->text, w->pend_text, w->text_n * sizeof(nwm_text_t));
+    }
+    w->pend_shape_n = 0;
+    w->pend_text_n = 0;
+    w->frame_open = 0;
   }
   damage(client_rect(w));
   ack(m, w->id, NWM_OK);

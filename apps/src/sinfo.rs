@@ -242,7 +242,9 @@ fn query(port: u64, ty: u16, payload: &[u8], want: u16) -> Option<ipc::Msg> {
         return None;
     }
     loop {
-        let m = ipc::recv(0, true)?;
+        let Some(m) = ipc::recv(0, true) else {
+            return None;
+        };
 
         if m.ty == want {
             return Some(m);

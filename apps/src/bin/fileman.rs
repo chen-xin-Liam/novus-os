@@ -699,7 +699,9 @@ pub extern "C" fn _start() -> ! {
         count: 1,
     };
 
-    st.reload(sys_port);
+    if !st.reload(sys_port) {
+        st.status = "无法连接系统服务";
+    }
     draw(&mut win, &mut st, accent);
 
     loop {
