@@ -104,10 +104,12 @@ pub const RSP_ERR: u16 = 0x03FF;
 pub const DIR_APPS: u8 = 0;
 pub const DIR_DEV: u8 = 1;
 pub const DIR_PROC: u8 = 2;
+pub const DIR_EXE: u8 = 3;
 
 pub const KIND_APP: u8 = 1;
 pub const KIND_DEV: u8 = 2;
 pub const KIND_VIRT: u8 = 3;
+pub const KIND_EXE: u8 = 4;
 
 pub const RECS: usize = 3;
 

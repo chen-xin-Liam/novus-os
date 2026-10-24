@@ -48,7 +48,7 @@ static void desktop_start(void) {
 static int desktop_app(const char *name) {
   return text_equal(name, "fileman") || text_equal(name, "taskman") ||
       text_equal(name, "settings") || text_equal(name, "netman") ||
-      text_equal(name, "demo");
+      text_equal(name, "demo") || text_equal(name, "hello.exe");
 }
 
 static void desktop_stop(void) {

@@ -41,6 +41,9 @@
 #include "session.h"
 #include "nksym.h"
 #include "nkm.h"
+/* M9: Win32 compatibility layer and its PE loader. */
+#include "win32.h"
+#include "pe.h"
 /* M5: NovusDisplay and the GUI widget library. */
 #include "nd.h"
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
@@ -385,6 +388,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* M10: adopt the installer payloads staged by the boot stage before the
    * shell asks whether an install is possible. */
   install_init();
+
+  /* M9: the registry needs the VFS root, which install_init has settled;
+   * the PE selftest runs its malformed images before any task slot is in
+   * use. */
+#if CONFIG_NOVUS_WIN32
+  win32_init();
+  (void)pe_selftest();
+#endif
 
   /* M5: paint the demo desktop last, so the display shows the finished
    * scene instead of being overwritten by later boot output. The timer

@@ -26,6 +26,7 @@
 #include "power.h"
 #include "session.h"
 #include "install.h"
+#include "win32.h"
 
 /* Syscall numbers (README part 8: one table, one ABI). */
 #define SYS_YIELD       1u
@@ -159,7 +160,7 @@ static void sys_write(trap_frame_t *f) {
  * the task's page table a page at a time. Returns 0, or -1 as soon as a
  * page is not mapped - a bad pointer must fail the syscall, not fault the
  * kernel. */
-static int user_copy(UINT64 cr3, UINT64 va, void *buf, UINT64 len, int to_user) {
+int user_copy(UINT64 cr3, UINT64 va, void *buf, UINT64 len, int to_user) {
   UINT8 *p = (UINT8 *)buf;
   UINT64 done = 0;
 
@@ -667,14 +668,32 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_SESSION, "session", sys_session},
     {SYS_SETUP, "setup", sys_setup},
     {SYS_EXIT, "exit", sys_exit_call},
+    {SYS_WIN32, "win32", win32_syscall},
 };
 
 /* Unknown numbers are reported once each and refused; a wrong ABI must be
  * visible in the log, not silently ignored. */
 static UINT32 g_unknown_calls;
+static UINT32 g_abi_denials;
 
 static void syscall_dispatch(trap_frame_t *f) {
   UINT32 i;
+  task_t *t = sched_current();
+
+  /* A compatibility process is confined to its own gate: only SYS_WIN32 and
+   * SYS_EXIT are reachable, so a PE image can never touch IPC, files, power
+   * or the installer even if it learns the native syscall numbers. */
+  if (t != NULL && t->abi == TASK_ABI_WIN32 &&
+      (UINT32)f->rax != SYS_WIN32 && (UINT32)f->rax != SYS_EXIT) {
+    if (g_abi_denials < 8u) {
+      g_abi_denials++;
+      kputs("[TRAP] win32 ABI denied syscall ");
+      kputs_hex(f->rax);
+      kputs("\n");
+    }
+    f->rax = (UINT64)-1;
+    return;
+  }
 
   for (i = 0; i < sizeof(g_syscalls) / sizeof(g_syscalls[0]); i++) {
     if (g_syscalls[i].num == (UINT32)f->rax) {

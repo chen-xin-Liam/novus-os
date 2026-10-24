@@ -37,4 +37,10 @@ void *NOVUS_MEMORY_ABI memcpy(void *dst, const void *src, UINT64 n);
 void *NOVUS_MEMORY_ABI memset(void *dst, int c, UINT64 n);
 int NOVUS_MEMORY_ABI memcmp(const void *a, const void *b, UINT64 n);
 
+/* Copy between user memory and a kernel buffer through a task's page
+ * tables (trap.c). Returns 0, or -1 as soon as a page is not mapped.
+ * `to_user` selects the direction. The Win32 layer uses it to read API
+ * arguments and write results. */
+int user_copy(UINT64 cr3, UINT64 va, void *buf, UINT64 len, int to_user);
+
 #endif /* NOVUS_KERNEL_H */

@@ -1,5 +1,33 @@
 # Changes
 
+## M9 Win32 兼容层原型
+
+- 新增 `kernel/pe.h` / `kernel/pe.c`：PE32+（x86-64）加载器。按文件偏移读
+  头部与节表，校验 MZ/PE 签名、Machine、Magic、节边界与重叠、入口所在节，
+  拒绝 DLL、TLS、延迟导入与序号导入；在 `0x50000000` 映射头部、各节
+  （`.bss` 清零）、thunk 页、命令行页、64 KiB 栈与返回跳板，应用
+  `IMAGE_REL_BASED_DIR64`，按名称填 IAT，最后交给
+  `sched_create_user_ex(..., TASK_ABI_WIN32)`。
+- 新增 `kernel/win32.h` / `kernel/win32.c`：API 门与模拟注册表。15 个 API
+  （控制台输出、tick、`Sleep`、错误码、命令行、模块基址、`Reg*`），每条
+  thunk 保存并恢复 RDI 后以 `syscall 40` 进入；`Sleep` 走
+  `sched_park` + `f->rip -= 2` 重放。注册表是 16 项扁平表，`REG_SZ`/
+  `REG_DWORD`，持久化到 `/registry.cfg`，live 只读根下仅内存态。
+- `task_t` 增加 `abi`、`win32_last_error`、`win32_image_base`；调度器新增
+  `sched_create_user_ex`，`syscall_dispatch` 对 `TASK_ABI_WIN32` 只放行
+  `SYS_WIN32` 与 `SYS_EXIT`。
+- 新增样例 `user/win32compat/samples/hello.c`（不用 `<windows.h>` 与 CRT），
+  `Makefile` 用 `x86_64-w64-mingw32-gcc` 生成 `out/win32/hello.exe` 并
+  `xxd -i` 成 `build/win32_blobs.h`；新增 `CONFIG_NOVUS_WIN32`（默认 y）与
+  `CONFIG_NOVUS_WIN32=y` 的 defconfig 项。
+- sysinfo 新增 `/exe` 目录（`SYSINFO_DIR_EXE`、`SYSINFO_KIND_EXE`），文件
+  管理器增加 `/exe` 标签，`KIND_EXE` 可选中运行。
+- 验证：`.reloc` 存在且为 DIR64；导入表为 KERNEL32/ADVAPI32 的 9 个函数；
+  QEMU 中从 `/exe` 运行 `hello.exe`，串口依次输出加载行、三条 Win32 输出
+  与 `task hello.exe exited with code 0`；`CONFIG_NOVUS_WIN32=n` 仍可构建。
+- 文档：新增 `docs/M9 Win32 兼容层原型.md`；README 里程碑 M9 标记完成，并把
+  原有的 Win11 桌面/中文说明限定为「M9 的 Win11 桌面/中文部分」。
+
 ## M11 阶段 1：会话、双语与安装器
 
 - live 介质启动直接进入 `live` 会话，不再要求用户名/密码；只有安装到可写

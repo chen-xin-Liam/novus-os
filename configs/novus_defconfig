@@ -62,6 +62,10 @@ CONFIG_USER_CPPCC=y
 CONFIG_NOVUS_SCHED=y
 CONFIG_NOVUS_IRQ=y
 
+# M9: Win32 compatibility prototype (PE32+ loader, SYS_WIN32, simulated
+# registry). Requires CONFIG_NOVUS_SCHED.
+CONFIG_NOVUS_WIN32=y
+
 # M5: NovusDisplay (README part 11): the linear-framebuffer HAL, the 2D
 # renderer, the built-in font, PS/2 IRQ input and the demo desktop.
 CONFIG_NOVUS_DISPLAY=y

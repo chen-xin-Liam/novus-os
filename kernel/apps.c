@@ -13,6 +13,10 @@
 #include "kernel.h"
 #include "session.h"
 #include "install.h"
+#if CONFIG_NOVUS_WIN32
+#include "win32_blobs.h"
+#include "pe.h"
+#endif
 
 typedef struct {
   const char          *name;
@@ -132,9 +136,87 @@ int apps_launch(UINT32 i) {
 
 int apps_launch_name(const char *name) {
   int i = apps_find(name);
+  int w;
 
-  if (i < 0) {
+  if (i >= 0) {
+    return apps_launch((UINT32)i);
+  }
+  w = apps_win32_find(name);
+  if (w >= 0) {
+    return apps_win32_launch((UINT32)w);
+  }
+  return -1;
+}
+
+#if CONFIG_NOVUS_WIN32
+
+/* Compatibility images are a separate table: adding one must not shift a
+ * NUC index, which the sysinfo /apps page and every spawn client rely on. */
+static const app_t g_win32[] = {
+    {"hello.exe", k_app_hello_exe, &k_app_hello_exe_len},
+};
+
+UINT32 apps_win32_count(void) {
+  return (UINT32)(sizeof(g_win32) / sizeof(g_win32[0]));
+}
+
+const char *apps_win32_name(UINT32 i) {
+  if (i >= apps_win32_count()) {
+    return 0;
+  }
+  return g_win32[i].name;
+}
+
+UINT32 apps_win32_size(UINT32 i) {
+  if (i >= apps_win32_count()) {
+    return 0;
+  }
+  return *g_win32[i].size;
+}
+
+int apps_win32_find(const char *name) {
+  UINT32 i;
+
+  for (i = 0; i < apps_win32_count(); i++) {
+    if (name_is(g_win32[i].name, name)) {
+      return (int)i;
+    }
+  }
+  return -1;
+}
+
+int apps_win32_launch(UINT32 i) {
+  int rc;
+
+  if (i >= apps_win32_count()) {
     return -1;
   }
-  return apps_launch((UINT32)i);
+  if (!session_logged_in()) {
+    return APPS_EAUTH;
+  }
+  if (sched_find_name(g_win32[i].name) != 0) {
+    return APPS_ERUNNING;
+  }
+  kputs("[APPS] launching ");
+  kputs(g_win32[i].name);
+  kputs(" (");
+  kputs_hex(*g_win32[i].size);
+  kputs(" bytes)\n");
+  rc = pe_load(g_win32[i].name, g_win32[i].data, *g_win32[i].size);
+  if (rc != 0) {
+    kputs("[APPS] win32 spawn failed: ");
+    kputs_hex((UINT64)(INT64)rc);
+    kputs("\n");
+  }
+  return rc;
 }
+
+#else /* !CONFIG_NOVUS_WIN32 */
+
+UINT32 apps_win32_count(void) { return 0; }
+const char *apps_win32_name(UINT32 i) { (void)i; return 0; }
+UINT32 apps_win32_size(UINT32 i) { (void)i; return 0; }
+int apps_win32_find(const char *name) { (void)name; return -1; }
+int apps_win32_launch(UINT32 i) { (void)i; return -1; }
+
+#endif /* CONFIG_NOVUS_WIN32 */

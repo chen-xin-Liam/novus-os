@@ -65,11 +65,13 @@ typedef struct {
 #define SYSINFO_DIR_APPS 0u
 #define SYSINFO_DIR_DEV  1u
 #define SYSINFO_DIR_PROC 2u
+#define SYSINFO_DIR_EXE  3u
 
 /* Entry kinds. */
 #define SYSINFO_KIND_APP  1u
 #define SYSINFO_KIND_DEV  2u
 #define SYSINFO_KIND_VIRT 3u
+#define SYSINFO_KIND_EXE  4u
 
 #define SYSINFO_RECS 3u
 

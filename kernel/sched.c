@@ -21,6 +21,7 @@
 #include "sysinfo.h"
 #include "net.h"
 #include "nuc.h"
+#include "win32.h"
 
 /* Written by trap.S: the stack the syscall gate switches to, and the
  * gate itself. */
@@ -358,8 +359,8 @@ void sched_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   kputs("\n");
 }
 
-task_t *sched_create_user(const char *name, const vm_space_t *space,
-                          UINT64 entry, UINT64 user_rsp) {
+task_t *sched_create_user_ex(const char *name, const vm_space_t *space,
+                             UINT64 entry, UINT64 user_rsp, UINT8 abi) {
   task_t *t = task_find_free();
   UINT8  *kstack;
   UINT32  i;
@@ -381,6 +382,7 @@ task_t *sched_create_user(const char *name, const vm_space_t *space,
   t->id = (int)g_next_id++;
   t->pid = (UINT64)t->id;
   t->state = TASK_READY;
+  t->abi = abi;
   t->cr3 = space->pml4_phys;
   t->space = *space;
   t->kstack_top = (UINT64)(UINTN)(kstack + SCHED_KSTACK_PAGES * 4096u);
@@ -405,6 +407,11 @@ task_t *sched_create_user(const char *name, const vm_space_t *space,
     g_first->next = t;
   }
   return t;
+}
+
+task_t *sched_create_user(const char *name, const vm_space_t *space,
+                          UINT64 entry, UINT64 user_rsp) {
+  return sched_create_user_ex(name, space, entry, user_rsp, TASK_ABI_NUC);
 }
 
 UINT64 sched_switch_frame(UINT64 current_frame) {
@@ -575,6 +582,13 @@ void sched_exit_current(int code) {
   /* Its inbox and any named port it owned go with it; a window whose
    * owner is gone is closed by the WM on the next tick. */
   ipc_owner_exit(g_current->pid);
+#if CONFIG_NOVUS_WIN32
+  /* Registry handles are not task-owned memory: release the slots the
+   * process left open so a relaunch does not exhaust the table. */
+  if (g_current->abi == TASK_ABI_WIN32) {
+    win32_owner_exit(g_current->pid);
+  }
+#endif
 
   kputs("[SCHED] task ");
   kputs(g_current->name);

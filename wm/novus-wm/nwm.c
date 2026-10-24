@@ -31,6 +31,7 @@
 #if CONFIG_NOVUS_WM
 
 #define NWM_SHADOW   14
+#define NWM_CORNER   10
 #define NWM_MIN_W    120
 #define NWM_MIN_H    48
 /* Windows 11 caption buttons: 46x32 hit areas, flush with the top-right
@@ -320,6 +321,65 @@ static void paint_commands(nwm_window_t *w, nd_rect_t client) {
 static UINT8 title_button(const nwm_window_t *w, INT32 x, INT32 y);
 static INT32 caption_hover(const nwm_window_t *w);
 
+/* Client content is rectangular, so its background would paint over the
+ * window's bottom arcs and leave two square corners. The four corner
+ * squares are only 10x10: keep the pixels underneath them, put them back
+ * once the content is drawn, and repaint the rounded body inside the arc.
+ * That is cheaper than clipping every client command, and it keeps the
+ * framebuffer rounds symmetric with the title band. */
+static nd_color_t g_corner[4][NWM_CORNER * NWM_CORNER];
+
+static void corner_origin(nd_rect_t r, INT32 c, INT32 *ox, INT32 *oy) {
+  *ox = (c & 1) ? r.x + r.w - NWM_CORNER : r.x;
+  *oy = (c & 2) ? r.y + r.h - NWM_CORNER : r.y;
+}
+
+/* Only the bottom pair is at risk: the title band is drawn with a rounded
+ * fill too, so the top arcs are never painted over. Restoring those would
+ * cut a notch into a hovered caption button. */
+static void save_corners(nd_surface_t *s, nd_rect_t r) {
+  INT32 c;
+
+  for (c = 2; c < 4; c++) {
+    INT32 ox;
+    INT32 oy;
+    INT32 x;
+    INT32 y;
+    INT32 i = 0;
+
+    corner_origin(r, c, &ox, &oy);
+    for (y = 0; y < NWM_CORNER; y++) {
+      for (x = 0; x < NWM_CORNER; x++) {
+        g_corner[c][i++] = nd_get_pixel(s, ox + x, oy + y);
+      }
+    }
+  }
+}
+
+static void restore_corners(nd_surface_t *s, nd_rect_t vis, nd_rect_t r,
+                            nd_color_t bottom) {
+  INT32 c;
+
+  for (c = 2; c < 4; c++) {
+    INT32 ox;
+    INT32 oy;
+    INT32 x;
+    INT32 y;
+    INT32 i = 0;
+
+    corner_origin(r, c, &ox, &oy);
+    for (y = 0; y < NWM_CORNER; y++) {
+      for (x = 0; x < NWM_CORNER; x++) {
+        nd_pixel(s, ox + x, oy + y, g_corner[c][i++]);
+      }
+    }
+    nd_surface_set_clip(s, nd_rect_intersect(
+                              vis, nd_rect(ox, oy, NWM_CORNER, NWM_CORNER)));
+    nd_round_rect(s, r, NWM_CORNER, bottom);
+  }
+  nd_surface_set_clip(s, vis);
+}
+
 static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_surface_t     *s = target();
   const ng_theme_t *t;
@@ -339,27 +399,20 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_surface_set_clip(s, vis);
 
   nd_shadow(s, w->rect, NWM_SHADOW, 42);
+  save_corners(s, w->rect);
   nd_round_rect(s, w->rect, 10, t->win_bg);
 
-  /* Title band clipped to the rounded top: fill the corner rows with the
-   * curve inset, exactly like the shell's own windows. */
+  /* Title band: the window's own rounded body, clipped to the title rows.
+   * The arc stays antialiased at every radius; the old inset table stepped
+   * in whole pixels and read as a spike at the corners. */
   title_bg = (g_focus >= 0 && &g_wins[g_focus] == w) ? t->win_title
                                                      : t->win_title_dim;
-  {
-    static const INT32 corner[10] = {10, 7, 5, 4, 3, 2, 2, 1, 1, 1};
-    INT32              k;
-
-    for (k = 0; k < NWM_TITLE_H && k < w->rect.h; k++) {
-      INT32 inset = (k < 10) ? corner[k] : 0;
-
-      nd_fill_rect(s, nd_rect(w->rect.x + inset, w->rect.y + k,
-                              w->rect.w - inset * 2, 1),
-                   title_bg);
-    }
-  }
+  nd_surface_set_clip(s, nd_rect_intersect(
+                            vis, nd_rect(w->rect.x, w->rect.y, w->rect.w,
+                                         NWM_TITLE_H)));
+  nd_round_rect(s, w->rect, 10, title_bg);
   nd_hline(s, w->rect.x + 1, w->rect.x + w->rect.w - 2,
            w->rect.y + NWM_TITLE_H - 1, t->win_border);
-  nd_round_frame(s, w->rect, 10, 1, t->win_border);
   nd_text(s, w->rect.x + 12,
           w->rect.y + (NWM_TITLE_H - (INT32)nd_text_height(w->title, 2)) / 2,
           w->title, t->text, 2);
@@ -395,6 +448,11 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
     /* Fade effect: the content is dimmed towards the background. */
     nd_blend_rect(s, client, ND_RGB(0, 0, 0), (UINT8)(255u - w->alpha));
   }
+  /* Content painted square over the bottom arcs; give the corners back and
+   * draw the hairline last so nothing can cut through it. */
+  nd_surface_set_clip(s, vis);
+  restore_corners(s, vis, w->rect, t->win_bg);
+  nd_round_frame(s, w->rect, 10, 1, t->win_border);
   nd_surface_set_clip(s, vis);
 }
 

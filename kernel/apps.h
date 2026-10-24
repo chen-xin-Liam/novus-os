@@ -44,4 +44,19 @@ int apps_find(const char *name);
  * application cannot silently shift what a table index means. */
 int apps_launch_name(const char *name);
 
+/* ---- Win32 compatibility images (M9) ---------------------------------- */
+/* Kept as a second table so the NUC indices above (and everything the
+ * sysinfo /apps listing publishes) stay unchanged. */
+
+UINT32       apps_win32_count(void);
+const char  *apps_win32_name(UINT32 i);
+UINT32       apps_win32_size(UINT32 i);
+
+/* Look a compatibility image up by name; -1 when there is none. */
+int apps_win32_find(const char *name);
+
+/* Load and start image `i` as a TASK_ABI_WIN32 process. Same return codes
+ * as apps_launch(), plus the PE_E* codes from kernel/pe.h. */
+int apps_win32_launch(UINT32 i);
+
 #endif /* NOVUS_APPS_H */

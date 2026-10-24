@@ -38,6 +38,7 @@ pub fn bg() -> u32 { pal().surface }
 pub fn canvas() -> u32 { pal().canvas_top }
 pub fn card_bg() -> u32 { pal().card }
 pub fn row_bg() -> u32 { pal().card }
+pub fn subtle() -> u32 { pal().subtle }
 pub fn row_sel() -> u32 { pal().selection }
 pub fn line() -> u32 { pal().stroke }
 pub fn text() -> u32 { pal().text }

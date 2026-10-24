@@ -146,6 +146,17 @@ config NOVUS_IRQ
 	  Route device IRQs through IOAPIC to the BSP, using ACPI MADT or
 	  the explicit QEMU fallback. Enables PS/2, COM1 and e1000 INTx.
 
+config NOVUS_WIN32
+	bool
+	default y
+	depends on NOVUS_SCHED
+	help
+	  Build the M9 Win32 compatibility prototype: the PE32+ loader, the
+	  SYS_WIN32 gate with its thunk ABI, fifteen kernel32/advapi32 calls
+	  and the simulated registry. A compatibility process is confined to
+	  SYS_WIN32 and SYS_EXIT by the syscall dispatcher. No GUI, no file
+	  APIs and no arbitrary path loading in this milestone.
+
 config NOVUS_DISPLAY
 	bool
 	default y

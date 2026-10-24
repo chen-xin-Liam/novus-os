@@ -59,6 +59,8 @@ static UINT32 dir_count(UINT8 dir) {
     return dev_count();
   case SYSINFO_DIR_PROC:
     return (UINT32)(sizeof(g_proc) / sizeof(g_proc[0]));
+  case SYSINFO_DIR_EXE:
+    return apps_win32_count();
   default:
     return 0;
   }
@@ -178,6 +180,11 @@ static void req_files(const ipc_msg_t *m) {
     case SYSINFO_DIR_PROC:
       copy_str(r.rec[k].name, sizeof(r.rec[k].name), g_proc[i].name);
       r.rec[k].kind = g_proc[i].kind;
+      break;
+    case SYSINFO_DIR_EXE:
+      copy_str(r.rec[k].name, sizeof(r.rec[k].name), apps_win32_name(i));
+      r.rec[k].size = apps_win32_size(i);
+      r.rec[k].kind = SYSINFO_KIND_EXE;
       break;
     default:
       break;

@@ -23,26 +23,30 @@
 
 #define ND_ALPHA_CHANNEL 0xFF000000u
 
+/* Bit-pair square root. The start bit is the top of the 30-bit range, so a
+ * caller may pass the scaled distances the rounded-corner rasteriser uses
+ * (radius^2 << 8) without the result collapsing to the seed. */
 static INT32 isqrt_i32(INT32 v) {
-  INT32 r = 0;
-  INT32 bit = 1 << 15;
+  UINT32 x = (UINT32)v;
+  UINT32 r = 0;
+  UINT32 bit = 1u << 30;
 
   if (v <= 0) {
     return 0;
   }
-  while (bit > v) {
+  while (bit > x) {
     bit >>= 2;
   }
   while (bit != 0) {
-    if (v >= r + bit) {
-      v -= r + bit;
+    if (x >= r + bit) {
+      x -= r + bit;
       r = (r >> 1) + bit;
     } else {
       r >>= 1;
     }
     bit >>= 2;
   }
-  return r;
+  return (INT32)r;
 }
 
 /* ---- pixel conversion ------------------------------------------------- */
@@ -143,6 +147,16 @@ void nd_pixel(nd_surface_t *s, INT32 x, INT32 y, nd_color_t c) {
     return;
   }
   s->px[(UINT32)y * s->stride + (UINT32)x] = nd_hw_pixel(s, c);
+}
+
+/* Read back in the renderer's canonical layout. The compositor uses it to
+ * keep the pixels a rounded window corner exposes, so a rectangular client
+ * cannot square off the arc. */
+nd_color_t nd_get_pixel(const nd_surface_t *s, INT32 x, INT32 y) {
+  if (s->px == 0 || x < 0 || y < 0 || x >= s->w || y >= s->h) {
+    return 0;
+  }
+  return hw_to_nd(s, s->px[(UINT32)y * s->stride + (UINT32)x]);
 }
 
 void nd_clear(nd_surface_t *s, nd_color_t c) {
@@ -289,21 +303,47 @@ void nd_circle(nd_surface_t *s, INT32 cx, INT32 cy, INT32 radius,
   }
 }
 
-/* Inset of row `y` inside a rounded rectangle, measured from both sides. */
-static INT32 round_inset(INT32 y, INT32 h, INT32 radius) {
-  INT32 dy;
+/* Left-edge inset of row `y` inside a rounded rectangle, in 1/16 px.
+ *
+ * The row is sampled at its vertical centre, so the edge moves by a
+ * fraction of a pixel per row instead of jumping several whole pixels the
+ * way the old table did. That jump is what made a small radius look like a
+ * spike rather than a curve. */
+static INT32 round_edge16(INT32 y, INT32 h, INT32 radius) {
+  INT32 dy16;
+  INT32 r16;
 
   if (radius <= 0) {
     return 0;
   }
+  r16 = radius * 16;
   if (y < radius) {
-    dy = radius - y;
+    dy16 = (radius - y) * 16 - 8;
   } else if (y >= h - radius) {
-    dy = y - (h - radius - 1);
+    dy16 = (y - (h - radius)) * 16 + 8;
   } else {
     return 0;
   }
-  return radius - isqrt_i32(radius * radius - dy * dy);
+  if (dy16 < 0) {
+    dy16 = 0;
+  }
+  if (dy16 > r16) {
+    return 0;
+  }
+  return r16 - isqrt_i32(radius * radius * 256 - dy16 * dy16);
+}
+
+/* Paint the one boundary pixel of a row that the arc only partly covers. */
+static void round_edge_pixel(nd_surface_t *s, INT32 x, INT32 y, INT32 edge16,
+                             nd_color_t c) {
+  INT32 rem = edge16 & 15;
+
+  if (rem == 0) {
+    nd_fill_rect(s, nd_rect(x, y, 1, 1), c);
+  } else {
+    nd_blend_rect(s, nd_rect(x, y, 1, 1), c,
+                  (UINT8)((16 - rem) * 255 / 16));
+  }
 }
 
 void nd_round_rect(nd_surface_t *s, nd_rect_t r, INT32 radius, nd_color_t c) {
@@ -322,8 +362,17 @@ void nd_round_rect(nd_surface_t *s, nd_rect_t r, INT32 radius, nd_color_t c) {
     return;
   }
   for (y = 0; y < r.h; y++) {
-    INT32 inset = round_inset(y, r.h, radius);
-    nd_fill_rect(s, nd_rect(r.x + inset, r.y + y, r.w - inset * 2, 1), c);
+    INT32 edge16 = round_edge16(y, r.h, radius);
+    INT32 start = (edge16 + 15) / 16;
+
+    if (start * 2 >= r.w) {
+      continue;
+    }
+    nd_fill_rect(s, nd_rect(r.x + start, r.y + y, r.w - start * 2, 1), c);
+    if (start > 0) {
+      round_edge_pixel(s, r.x + start - 1, r.y + y, edge16, c);
+      round_edge_pixel(s, r.x + r.w - start, r.y + y, edge16, c);
+    }
   }
 }
 
@@ -356,20 +405,23 @@ void nd_round_frame(nd_surface_t *s, nd_rect_t r, INT32 radius, INT32 thick,
    * Top and bottom rows have no inner span at all, so the horizontal
    * bands fall out of the same loop instead of needing a special case. */
   for (y = 0; y < r.h; y++) {
-    INT32 outer = round_inset(y, r.h, radius);
+    INT32 edge16 = round_edge16(y, r.h, radius);
+    INT32 outer = (edge16 + 15) / 16;
     INT32 inner;
 
     if (y < thick || y >= r.h - thick) {
       nd_fill_rect(s, nd_rect(r.x + outer, r.y + y, r.w - outer * 2, 1), c);
-      continue;
+    } else {
+      inner = thick + (round_edge16(y - thick, inner_h, inner_r) + 15) / 16;
+      if (inner > outer) {
+        nd_fill_rect(s, nd_rect(r.x + outer, r.y + y, inner - outer, 1), c);
+        nd_fill_rect(s,
+                     nd_rect(r.x + r.w - inner, r.y + y, inner - outer, 1), c);
+      }
     }
-    inner = thick + round_inset(y - thick, inner_h, inner_r);
-    if (inner > outer) {
-      nd_fill_rect(s, nd_rect(r.x + outer, r.y + y, inner - outer, 1), c);
-    }
-    if (inner > outer) {
-      nd_fill_rect(s,
-                   nd_rect(r.x + r.w - inner, r.y + y, inner - outer, 1), c);
+    if (outer > 0 && outer * 2 <= r.w) {
+      round_edge_pixel(s, r.x + outer - 1, r.y + y, edge16, c);
+      round_edge_pixel(s, r.x + r.w - outer, r.y + y, edge16, c);
     }
   }
 }

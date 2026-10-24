@@ -27,7 +27,7 @@
 #include "idt.h"
 #include "vm.h"
 
-#define SCHED_MAX_TASKS   8
+#define SCHED_MAX_TASKS   10
 #define SCHED_KSTACK_PAGES 16u /* 64 KiB ring-0 stack per task */
 #define SCHED_SLICE_TICKS 4u   /* timer ticks per time slice */
 #define SCHED_FOREGROUND_NONE (~0ULL)
@@ -39,6 +39,12 @@
 #define TASK_EXITED  3
 #define TASK_BLOCKED 4 /* parked on an IPC port (M6) */
 #define TASK_SUSPENDED 5 /* stopped by the task manager (M10) */
+
+/* Which user ABI the task was started under. NUC images get the full
+ * syscall table; Win32 images are held to SYS_WIN32 and SYS_EXIT by the
+ * dispatcher, which is the prototype's stand-in for a separate CAP group. */
+#define TASK_ABI_NUC   0
+#define TASK_ABI_WIN32 1
 
 typedef struct task {
   int      id;
@@ -61,6 +67,9 @@ typedef struct task {
   UINT64   wait_port;     /* IPC port a blocked task is parked on */
   UINT64   wait_deadline; /* tick at which the park expires, 0 = forever */
   int      wait_err;      /* error to hand back when the task resumes */
+  UINT8    abi;           /* TASK_ABI_*: what the task is allowed to call */
+  UINT32   win32_last_error; /* Win32 GetLastError state */
+  UINT64   win32_image_base; /* PE image base, for GetModuleHandleA */
   struct {
     UINT32 ino;
     UINT32 dir_index;
@@ -81,6 +90,12 @@ void sched_init(UINT64 mmap, UINT64 size, UINT64 stride);
  * switch to it. */
 task_t *sched_create_user(const char *name, const vm_space_t *space,
                           UINT64 entry, UINT64 user_rsp);
+
+/* Same, but records the user ABI the task runs under (TASK_ABI_*). The
+ * Win32 loader uses this so the syscall dispatcher can hold the process to
+ * its own call set; sched_create_user() is the NUC wrapper. */
+task_t *sched_create_user_ex(const char *name, const vm_space_t *space,
+                             UINT64 entry, UINT64 user_rsp, UINT8 abi);
 
 /* Load the first task and drop into ring 3. Never returns. */
 void sched_start(void) __attribute__((noreturn));

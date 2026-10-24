@@ -173,6 +173,7 @@ UINT32 nd_hw_pixel(const nd_surface_t *s, nd_color_t c);
 
 void nd_clear(nd_surface_t *s, nd_color_t c);
 void nd_pixel(nd_surface_t *s, INT32 x, INT32 y, nd_color_t c);
+nd_color_t nd_get_pixel(const nd_surface_t *s, INT32 x, INT32 y);
 void nd_fill_rect(nd_surface_t *s, nd_rect_t r, nd_color_t c);
 void nd_blend_rect(nd_surface_t *s, nd_rect_t r, nd_color_t c, UINT8 alpha);
 void nd_frame(nd_surface_t *s, nd_rect_t r, INT32 thickness, nd_color_t c);
