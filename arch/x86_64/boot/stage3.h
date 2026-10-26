@@ -16,13 +16,18 @@
  * pool memory. Must run before anything touches the filesystem. */
 void stage3_init(EFI_HANDLE image, EFI_SYSTEM_TABLE *st);
 
-/* Probe block devices, open the EFI system partition, verify a Novus
- * system partition when one is present, load the signed modules and
- * adopt the live root into reserved pages. */
+/* Probe block devices and open the EFI system partition. Runs before the
+ * menu, because the menu offers operations on what this finds. */
 void stage3_prepare(void);
 
 /* Show the live menu on the firmware console. */
 void stage3_menu(void);
+
+/* Read the medium: verify a Novus system partition when one is present,
+ * load the signed modules, the application, the wallpaper package, adopt
+ * the live root and stage the install ESP template. This is the slow half
+ * of the boot stage, and the half the boot progress bar covers. */
+void stage3_load(void);
 
 /* Publish the live root range into shared memory, restore the kernel
  * heap allocator and detach every boot-only device. Last thing before

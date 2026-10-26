@@ -181,6 +181,20 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 
   kputs("Novus OS M1 - A-core (BSP) kernel stage\n");
 
+  /* The boot stage handed over with the splash on the glass. Keep it
+   * active and keep advancing it: the user watches one progress bar from
+   * the first payload read to the desktop, not a splash followed by a
+   * black screen followed by a bar again.
+   *
+   * Before mm_init() only a framebuffer in the low 4 GiB is reachable, so
+   * a high one simply leaves the splash to nd_init() below. */
+#if CONFIG_NOVUS_DISPLAY
+  /* Boot-stage splash: drawn through the firmware's framebuffer mapping
+   * before the kernel page tables exist. Brief; the kernel re-paints it onto
+   * an uncacheable mapping once the display is bound below. */
+  (void)nd_boot_splash();
+#endif
+
   /* Spec 2.3 handoff block filled by the boot stage: verify magic and
    * version; corruption degrades with a warning, never a panic. */
   if (shared_mem_verify()) {
@@ -200,6 +214,18 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   heap_init();
   heap_selftest();
 
+#if CONFIG_NOVUS_DISPLAY
+  /* Bind the display now the heap exists and re-paint the splash onto an
+   * uncacheable framebuffer - the only mapping the panel actually reads. This
+   * also wbinvd's away the cache lines the firmware wrote through a cacheable
+   * identity alias, so every progress step from here is shown cleanly. */
+  nd_init();
+  nd_boot_splash();
+  nd_boot_stage(88, "初始化内存");
+  nd_boot_stage(90, "映射内存");
+  nd_boot_stage(91, "初始化堆");
+#endif
+
   power_init(mmap_addr, map_size, desc_size);
   (void)ahci_init();
   (void)nvme_init();
@@ -209,12 +235,11 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * machine's default disk) is gone from the firmware block-device list
    * after ExitBootServices, so drive it natively. */
   (void)ide_init();
+  nd_boot_stage(93, "检测设备");
 
-  /* M5: NovusDisplay. Bind a surface to the framebuffer the boot stage
-   * captured, then run the renderer/widget self test on an off-screen
-   * surface. Both need the heap, neither needs the scheduler. */
 #if CONFIG_NOVUS_DISPLAY
-  nd_init();
+  /* Both need the heap; neither needs the scheduler. */
+  nd_boot_stage(95, "初始化显示");
   nd_selftest();
 #endif
 
@@ -231,6 +256,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * second core touches the block layer or the WAL while the selftest
    * drives them. A failure degrades to a warning and the boot
    * continues (README 3.4 / 17). */
+  nd_boot_stage(96, "挂载文件系统");
   if (novusfs_selftest() != 0) {
     kputs("[WARN] NovusFS selftest failed, continuing degraded\n");
   }
@@ -349,6 +375,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   }
 
   /* LAPIC bring-up, then wake the B core (AP) with the kernel CR3. */
+  nd_boot_stage(97, "唤醒多核");
   lapic_init();
   smp_wake_ap(mm_get_cr3(), mmap_addr, map_size, desc_size);
 
@@ -383,6 +410,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   (void)nuc_create_spin();
   (void)nuc_nx_probe();
   /* M11: pick up the persisted language before any UI text is built. */
+  nd_boot_stage(98, "启动会话");
   lang_init();
 
   /* M10: adopt the installer payloads staged by the boot stage before the
@@ -398,9 +426,11 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 #endif
 
   /* M5: paint the demo desktop last, so the display shows the finished
-   * scene instead of being overwritten by later boot output. The timer
-   * tick drives input and partial repaints once ring 3 is running. */
+   * scene instead of being overwritten by later boot output. The desktop
+   * is composed off-screen and presented in one go, which is also the
+   * moment the boot splash leaves the screen. */
 #if CONFIG_NOVUS_DISPLAY
+  nd_boot_stage(99, "绘制桌面");
   nd_demo_init();
 #endif
 

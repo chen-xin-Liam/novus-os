@@ -26,7 +26,15 @@
 #define MMAP_RETRIES     8
 #define RAM_TOP_ALIGN    0x200000ULL   /* ram_top rounds up to 2 MiB */
 
+/* COM1, driven directly: the boot stage must not depend on the kernel's
+ * driver, and 115200 8N1 is what the runner and every log reader expect.
+ * Mirrored here so the boot log survives the quiet graphical phase. */
+#define BOOT_COM1       0x3F8
+#define BOOT_COM1_LSR   5
+#define BOOT_COM1_THRE  0x20
+
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_con = 0;
+static int g_quiet;
 
 /* CPU and memory facts gathered by the boot self-check. Collection
  * always runs (even with the A-core switch on, cpuid just stops
@@ -38,7 +46,65 @@ static UINT32 g_cpu_cores = 0;
 static UINT64 g_usable_bytes = 0;
 static UINT64 g_ram_top_bytes = 0;
 
+static void boot_serial_init(void) {
+  io_out8(BOOT_COM1 + 1, 0x00u); /* no interrupts */
+  io_out8(BOOT_COM1 + 3, 0x80u); /* DLAB */
+  io_out8(BOOT_COM1 + 0, 0x01u); /* divisor 1 -> 115200 */
+  io_out8(BOOT_COM1 + 1, 0x00u);
+  io_out8(BOOT_COM1 + 3, 0x03u); /* 8N1 */
+  io_out8(BOOT_COM1 + 2, 0xC7u); /* FIFO on, cleared */
+  io_out8(BOOT_COM1 + 4, 0x0Bu); /* DTR | RTS | OUT2 */
+}
+
+static void boot_serial_putc(char c) {
+  UINT32 spins;
+
+  /* A machine without a UART reads 0xFF from the status port, which has
+   * THRE set, so this cannot hang on missing hardware. */
+  for (spins = 0; spins < 100000u; spins++) {
+    if ((io_in8(BOOT_COM1 + BOOT_COM1_LSR) & BOOT_COM1_THRE) != 0u) {
+      break;
+    }
+  }
+  io_out8(BOOT_COM1, (UINT8)c);
+}
+
+/* The boot console is UTF-16; everything it prints is ASCII, so a byte-wise
+ * conversion is exact and does not need the kernel's serializer. */
+static void boot_serial_write(const CHAR16 *s) {
+  UINTN i;
+
+  for (i = 0; s[i] != 0; i++) {
+    char c = (char)(UINT8)(s[i] & 0xFFu);
+
+    if (c == '\n') {
+      boot_serial_putc('\r');
+    }
+    boot_serial_putc(c);
+  }
+}
+
+void boot_quiet(int on) {
+  g_quiet = on;
+  if (g_con != 0) {
+    /* The firmware caret is drawn over whatever is on screen; the splash
+     * owns the screen from here. */
+    g_con->EnableCursor(g_con, on ? FALSE : TRUE);
+  }
+}
+
 void boot_puts(CHAR16 *s) {
+  if (s == 0) {
+    return;
+  }
+  if (g_quiet) {
+    /* The screen belongs to the splash. Until then the firmware console
+     * carries the log, and sends it to COM1 itself on machines that have a
+     * serial terminal configured - writing here as well would duplicate
+     * every line. */
+    boot_serial_write(s);
+    return;
+  }
   if (g_con != 0) {
     g_con->OutputString(g_con, s);
   }
@@ -302,6 +368,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   EFI_STATUS status;
 
   g_con = SystemTable->ConOut;
+  g_quiet = 0;
+  boot_serial_init();
 
   /* Publish the spec 2.3 shared memory block before anything else.
    * The A-core switch decides whether the self-check output happens;
@@ -344,27 +412,41 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
                                g_usable_bytes, g_ram_top_bytes);
   shared_mem_get()->selfcheck_status = SHM_STATUS_PASS;
 
-  /* M3: probe devices, locate and verify the system partition, read the
-   * live root and the signed modules off the ESP, then offer the menu.
-   * All of it needs boot services, so all of it happens here. */
+  /* M3: probe the block devices and open the ESP first, because the menu
+   * operates on what they find; the payload reads come after the menu. */
   stage3_prepare();
   stage3_menu();
 
 #if CONFIG_NOVUS_DISPLAY
   /* M5: ask the firmware for the current Graphics Output mode while the
    * protocol still exists. Only the numbers are kept; the framebuffer is
-   * MMIO and stays valid after ExitBootServices. */
+   * MMIO and stays valid after ExitBootServices. Done before the payload
+   * reads so the progress bar is on screen while they run. */
   if (nd_capture_boot(SystemTable)) {
     const nd_display_t *d = nd_display();
+
     boot_puts(L"[BOOT] NovusDisplay framebuffer: ");
     boot_put_dec(d->width);
     boot_puts(L"x");
     boot_put_dec(d->height);
     boot_puts(L"\r\n");
+    if (nd_boot_splash()) {
+      /* The text phase is over: the screen now shows the splash and the
+       * rest of the boot log goes to COM1. */
+      boot_quiet(1);
+      nd_boot_stage(4, "正在启动");
+    } else {
+      boot_puts(L"[BOOT] boot splash unavailable, text console stays\r\n");
+    }
   } else {
     boot_puts(L"[BOOT] NovusDisplay: no linear framebuffer, VGA fallback\r\n");
   }
 #endif
+
+  /* The slow half of the boot stage: integrity check, modules, application,
+   * wallpaper, live root and install template. */
+  stage3_load();
+  nd_boot_stage(86, "进入内核");
 
   boot_puts(L"[BOOT] Exiting boot services, entering BSP kernel stage...\r\n");
 

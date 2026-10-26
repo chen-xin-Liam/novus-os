@@ -459,6 +459,15 @@ UINT32 novusfs_mkdir(novusfs_fs_t *fs, UINT32 dir_ino, const char *name);
 /* Remove one entry from a directory. */
 int novusfs_unlink(novusfs_fs_t *fs, UINT32 dir_ino, const char *name);
 
+/* Move a directory entry to a new name (and possibly a new parent). The
+ * source inode is preserved, so this is a true rename, not a copy. Returns
+ * 0 on success, -1 on failure. See novusfs.c for the transaction layout:
+ * the write-ahead log keeps one record per block per transaction, so the
+ * add, the target removal, and the source removal each run in their own
+ * transaction. */
+int novusfs_rename(novusfs_fs_t *fs, UINT32 old_dir, const char *old_name,
+                   UINT32 new_dir, const char *new_name);
+
 /* Write `len` bytes at `off` of `ino`; grows the file as needed.
  * The whole update runs inside one WAL transaction. Returns the number
  * of bytes written, or -1 on error. */

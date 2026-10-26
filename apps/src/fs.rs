@@ -109,3 +109,22 @@ pub fn mkdir(path: &str) -> bool {
     let _keep_alive = bytes;
     rc == 0
 }
+
+/* Remove a file or an empty directory (kernel refuses a non-empty one, so
+ * recursive delete is driven from the shell). */
+pub fn unlink(path: &str) -> bool {
+    let bytes = match path_arg(path) { Some(value) => value, None => return false };
+    let rc = sys::call(20, bytes.as_ptr() as u64, 0, 0, 0);
+    let _keep_alive = bytes;
+    rc == 0
+}
+
+/* Rename/move `from` to `to`. Returns false when the file system back end
+ * lacks rename support (e.g. an ext4 mount) or either path is invalid. */
+pub fn rename(from: &str, to: &str) -> bool {
+    let a = match path_arg(from) { Some(value) => value, None => return false };
+    let b = match path_arg(to) { Some(value) => value, None => return false };
+    let rc = sys::call(21, a.as_ptr() as u64, b.as_ptr() as u64, 0, 0);
+    let _keep_alive = (a, b);
+    rc == 0
+}

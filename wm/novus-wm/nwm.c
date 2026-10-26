@@ -94,18 +94,13 @@ static UINT32    g_full_log;
 
 static nd_surface_t *screen(void) { return nd_screen(); }
 
-/* Composite target. Painting straight into the framebuffer forces the
- * scene into two passes - the shell first, which covers any window in the
- * damage rectangle, then the window again - and the screen shows that
- * intermediate state for as long as the second pass takes. With a back
- * buffer the damage rectangle is composed off-screen and copied in one
- * blit, so the visible screen only ever holds finished frames. */
-static nd_surface_t g_frame;
-static int          g_frame_ok;
-
-static nd_surface_t *target(void) {
-  return g_frame_ok ? &g_frame : nd_screen();
-}
+/* Composite target: the display stack's off-screen buffer. Painting
+ * straight into the framebuffer forces the scene into two passes - the
+ * shell first, which covers any window in the damage rectangle, then the
+ * window again - and the screen shows that intermediate state for as long
+ * as the second pass takes. Composing off-screen and presenting once means
+ * the visible screen only ever holds finished frames. */
+static nd_surface_t *target(void) { return nd_canvas(); }
 
 static void damage(nd_rect_t r) { g_damage = nd_rect_union(g_damage, r); }
 
@@ -467,10 +462,9 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
 
 static void paint(nd_rect_t clip) {
   nd_surface_t *dst = target();
-  nd_surface_t *scr = screen();
   UINT32        i;
 
-  if (dst == 0 || scr == 0) {
+  if (dst == 0 || dst->px == 0) {
     return;
   }
   /* Shell underlay first: it owns the desktop gradient and the M5 scene. */
@@ -482,22 +476,14 @@ static void paint(nd_rect_t clip) {
   }
   /* The shell's overlay layer (start menu, IME popup) goes above the
    * client windows, the way a start menu does on a real desktop. */
-  {
-    nd_surface_t *ov = target();
-
-    if (ov != 0) {
-      ng_render_overlay(clip);
-    }
-  }
+  ng_render_overlay(clip);
   nd_surface_reset_clip(dst);
 
-  if (g_frame_ok) {
-    nd_surface_set_clip(scr, clip);
-    nd_blit(scr, clip.x, clip.y, dst, clip);
-    nd_surface_reset_clip(scr);
-  }
-  /* A second display shows the same picture: copy what was just drawn. */
-  nd_mirror_rect(clip);
+  /* One present per composed frame. The display layer copies this
+   * rectangle to the glass (phased to the vertical blank when the hardware
+   * exposes one), refreshes the mirror outputs from the same buffer, and
+   * repaints the software pointer on top. */
+  nd_present(clip);
 }
 
 /* ---- protocol --------------------------------------------------------- */
@@ -1312,6 +1298,7 @@ UINT32 nwm_window_count(void) {
 void nwm_tick(void) {
   nd_event_t ev;
   nd_rect_t  d;
+  nd_rect_t  cd;
 
   if (!g_ready) {
     return;
@@ -1328,6 +1315,12 @@ void nwm_tick(void) {
   if (nd_demo_take_damage(&d)) {
     damage(d);
   }
+  /* Where the pointer was and where it went: composing those rectangles
+   * repaints the scene under the old arrow, and nd_present() draws the new
+   * one on top of the finished frame. */
+  if (nd_cursor_take_damage(&cd)) {
+    damage(cd);
+  }
   if (!nd_rect_empty(g_damage)) {
     nd_surface_t *s = screen();
     nd_rect_t     clip = g_damage;
@@ -1337,11 +1330,9 @@ void nwm_tick(void) {
       clip = nd_rect_intersect(clip, nd_rect(0, 0, s->w, s->h));
     }
     if (!nd_rect_empty(clip)) {
-      nd_cursor_hide();
       paint(clip);
     }
   }
-  nd_cursor_draw();
 }
 
 /* ---- boot ------------------------------------------------------------- */
@@ -1365,25 +1356,23 @@ void nwm_init(void) {
     return;
   }
 
-  /* Back buffer the size of the screen, and point the widget library at
-   * it: from here on the shell composes off-screen like the windows do. */
+  /* The compositor buffer belongs to NovusDisplay (nd_init), so the shell
+   * and the WM share one; nothing to allocate here. Point the widget
+   * library at it and repaint everything once, because the scene it holds
+   * was built before the WM existed. */
   {
-    nd_surface_t *scr = screen();
+    nd_surface_t *scr = target();
 
-    g_frame_ok = 0;
-    if (scr != 0 && nd_surface_create(&g_frame, scr->w, scr->h) == 0) {
+    if (scr != 0 && scr->px != 0) {
       ng_ctx_t *ctx = ng_ctx_get();
 
       if (ctx != 0) {
-        ctx->surf = &g_frame;
-        g_frame_ok = 1;
+        ctx->surf = scr;
       }
-      /* The scene was painted straight to the screen before the buffer
-       * existed; repaint everything into it on the first tick. */
       g_damage = nd_rect(0, 0, scr->w, scr->h);
     }
-    kputs(g_frame_ok ? "[NWM] compositor: double buffered\n"
-                     : "[NWM] compositor: direct to framebuffer\n");
+    kputs(nd_canvas_buffered() ? "[NWM] compositor: double buffered\n"
+                              : "[NWM] compositor: direct to framebuffer\n");
   }
 
   g_ready = 1;

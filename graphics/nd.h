@@ -12,10 +12,11 @@
  * firmware handed out (BGR or RGB byte order) at draw time, so the rest
  * of the stack never thinks about the hardware.
  *
- * There is no back buffer: every draw goes straight into the target
- * surface. The GUI keeps a damage rectangle per state change and redraws
- * only that region, which is both cheaper than a 4 MiB blit per frame and
- * the same code path a future WM will use for dirty windows.
+ * Drawing is damage driven: the GUI keeps one rectangle per state change
+ * and redraws only that region. Since M11 the stack also composes
+ * off-screen (nd_frame) and shows the result with a single nd_present, so
+ * the visible screen only ever holds finished frames - the model Windows
+ * uses, and the reason a drag or a theme switch does not flicker.
  */
 
 #ifndef NOVUS_ND_H
@@ -158,13 +159,67 @@ int nd_init(void);
 const nd_display_t *nd_display(void);
 nd_surface_t *nd_screen(void);
 
-/* Software mouse pointer. Save-under: the 24x24 pixels below the arrow
- * are copied out before it is drawn and put back before the next frame,
- * so moving the pointer never repaints the scene. */
+/* ---- presentation ----------------------------------------------------- */
+
+/* The surface a compositor draws into. It is an off-screen buffer the size
+ * of the primary output when one could be allocated, and the framebuffer
+ * itself when it could not (no heap yet, or a screen too large): callers
+ * draw into whatever this returns and never care which. */
+nd_surface_t *nd_canvas(void);
+
+/* 1 when nd_canvas() is a separate buffer, i.e. a present is one short copy
+ * rather than every drawing call landing on the glass. */
+int nd_canvas_buffered(void);
+
+/* Copy one finished rectangle from nd_canvas() to the visible screen and to
+ * every mirror output, then repaint the software pointer on top.
+ *
+ * Every pixel a user sees goes through here. Composing off-screen and
+ * presenting once keeps a half-painted frame off the glass (the flicker a
+ * direct-to-framebuffer renderer shows while a window is dragged), waiting
+ * for the vertical blank keeps a present from crossing the scanout (the
+ * tear line a long blit leaves), and the pointer being an overlay rather
+ * than save-under means it never blinks out between two draws. */
+void nd_present(nd_rect_t r);
+
+/* 1 when presents are synchronised to the display's vertical blank. */
+int nd_present_vsync(void);
+
+/* Software mouse pointer, composited on top of a present.
+ *
+ * `nd_cursor_set` only moves it and records the damage the move exposes;
+ * the arrow itself is painted onto the framebuffer at the end of every
+ * present, so no caller has to hide it before drawing and restore it
+ * afterwards. A compositor merges nd_cursor_take_damage() into its own
+ * damage rectangle, which is what erases the old arrow. */
 void nd_cursor_hide(void);
 void nd_cursor_set(INT32 x, INT32 y);
 void nd_cursor_draw(void);
 void nd_cursor_get(INT32 *x, INT32 *y);
+
+/* Pending pointer damage (old and new position), 1 when there is some. */
+int nd_cursor_take_damage(nd_rect_t *out);
+
+/* ---- boot splash ------------------------------------------------------ */
+
+/* Paint the boot screen: mark, wordmark and an empty progress bar centred
+ * on the primary output, on a dark backdrop. Safe in the boot stage (it
+ * only needs the framebuffer nd_capture_boot() found) and in the kernel
+ * before nd_init(); returns 0 when there is no drawable output. */
+int nd_boot_splash(void);
+
+/* Advance the bar. `percent` is clamped and never goes backwards; `text`
+ * replaces the stage label under the bar when it is not NULL. Only the bar
+ * and the label are repainted, so the splash never flickers. */
+void nd_boot_stage(UINT32 percent, const char *text);
+
+/* 1 while the splash owns the screen: nd_init() then leaves the pixels
+ * alone instead of clearing them. */
+int nd_boot_splash_active(void);
+
+/* The desktop is about to be presented: the splash stops owning the
+ * screen. */
+void nd_boot_splash_end(void);
 
 /* Convert one canonical colour to what the framebuffer expects. */
 UINT32 nd_hw_pixel(const nd_surface_t *s, nd_color_t c);

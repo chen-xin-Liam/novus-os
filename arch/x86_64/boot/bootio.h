@@ -22,4 +22,12 @@ void boot_put_dec(UINT64 v);
  * the first NUL. */
 void boot_put_ascii(const CHAR8 *s, UINTN max_len);
 
+/* Give the screen to the graphical boot splash.
+ *
+ * From this point on the firmware console is no longer written: the text
+ * console paints over the framebuffer, so a single log line would cut
+ * through the splash. The same text still goes to COM1, which is where the
+ * boot log is read from anyway. `on` = 0 restores the console. */
+void boot_quiet(int on);
+
 #endif /* NOVUS_BOOTIO_H */

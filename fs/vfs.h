@@ -70,6 +70,11 @@ struct vfs_fs {
   int    (*readdir)(vfs_fs_t *fs, UINT32 dir, vfs_readdir_cb cb, void *arg);
   /* Flush metadata; 0 on success. */
   int    (*sync)(vfs_fs_t *fs);
+  /* Move a directory entry. Both parents are already resolved by the caller;
+   * back ends leave this NULL when they cannot implement an atomic rename
+   * (e.g. a read-only or foreign file system). */
+  int    (*rename)(vfs_fs_t *fs, UINT32 olddir, const char *oldname,
+                   UINT32 newdir, const char *newname);
 };
 
 /* ---- the root the syscalls talk to ------------------------------------ */
@@ -98,6 +103,16 @@ UINT32 vfs_lookup_path(vfs_fs_t *fs, const char *path);
 /* Split a path into the parent directory and the leaf name, in place:
  * the byte at the last '/' becomes NUL and *leaf points after it. */
 int vfs_parent_path(vfs_fs_t *fs, char *path, UINT32 *parent, char **leaf);
+
+/* Remove a file, or an empty directory, by path. Returns 0 on success and
+ * -1 on failure (including a non-empty directory, which is refused so the
+ * shell's `rm` has to recurse explicitly). */
+int vfs_unlink_path(vfs_fs_t *fs, const char *path);
+
+/* Rename `old_path` to `new_path` (either absolute or relative to the
+ * root). Returns 0 on success, -1 when the back end lacks rename support or
+ * either path cannot be split. */
+int vfs_rename_path(vfs_fs_t *fs, const char *old_path, const char *new_path);
 
 /* Read or write a whole small file by path. The file is created when it
  * is missing (write only). Both return 0 on success and -1 on failure;

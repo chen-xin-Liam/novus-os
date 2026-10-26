@@ -24,6 +24,15 @@ if [ ! -f out/NOVUS.EFI ]; then
 fi
 cp out/NOVUS.EFI esp/EFI/BOOT/BOOTX64.EFI
 
+# Stage the wallpaper package on the ESP so the live desktop shows a photo
+# rather than a flat colour. The boot stage reads WPAPERS.PKG off the ESP
+# before ExitBootServices; without it the loader falls back to a solid fill.
+if [ -f out/wallpapers.pkg ]; then
+    cp out/wallpapers.pkg esp/WPAPERS.PKG
+else
+    echo "warning: out/wallpapers.pkg not built; desktop will be a flat colour" >&2
+fi
+
 # Copy pristine OVMF non-volatile variables on first use only, so boot
 # entries and firmware state persist across runs.
 if [ ! -f out/OVMF_VARS.fd ]; then

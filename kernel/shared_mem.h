@@ -104,12 +104,9 @@ typedef struct {
    * The installer refuses to write over the medium that is running. ---- */
   UINT32 boot_usb_port;            /* 0x304: xHCI root port number      */
 
-  /* ---- Wallpaper package (WPAPERS.PKG) staged off the ESP. The
-   * photos are not in the loader: the boot stage reads the package into
-   * reserved pages, exactly like the module and the application images,
-   * and graphics/nd_wallpaper.c indexes into them. base == 0 means the
-   * medium carries no package, and the desktop paints a flat colour
-   * instead. tail carve-out only: no field above moves. ---- */
+  /* ---- Wallpaper package staged off the ESP: same trick as the live
+   * root, because the kernel cannot read the ESP after ExitBootServices.
+   * Tail carve-out only: no field above moves. ---- */
   UINT64 wpkg_img_base;            /* 0x308: reserved pages (physical)  */
   UINT64 wpkg_img_size;            /* 0x310: bytes, 0 = none staged     */
 

@@ -477,10 +477,17 @@ void nd_shadow(nd_surface_t *s, nd_rect_t r, INT32 spread, UINT8 alpha) {
   }
 }
 
+/* Does this surface keep red and blue swapped relative to 0xAARRGGBB?
+ * Only a framebuffer can, and only when the firmware names RGB order. */
+static int surface_swapped(const nd_surface_t *s) {
+  return s->fb != 0 && s->bgr == 0;
+}
+
 void nd_blit(nd_surface_t *dst, INT32 x, INT32 y, const nd_surface_t *src,
              nd_rect_t area) {
   nd_rect_t clip;
   INT32     row;
+  int       swap;
 
   if (dst->px == 0 || src->px == 0) {
     return;
@@ -493,16 +500,24 @@ void nd_blit(nd_surface_t *dst, INT32 x, INT32 y, const nd_surface_t *src,
   if (nd_rect_empty(clip)) {
     return;
   }
+  /* Two off-screen surfaces (a wallpaper onto the compositor buffer, a
+   * window buffer onto the frame) hold the same word order, so a row is a
+   * memcpy. This is the hot path of every repaint. */
+  swap = (surface_swapped(dst) != surface_swapped(src));
   for (row = 0; row < clip.h; row++) {
     INT32     sy = area.y + (clip.y - y) + row;
     const UINT32 *srow = src->px + (UINT32)sy * src->stride +
                          (UINT32)(area.x + (clip.x - x));
     UINT32   *drow = dst->px + (UINT32)(clip.y + row) * dst->stride +
                      (UINT32)clip.x;
-    INT32     i;
 
-    for (i = 0; i < clip.w; i++) {
-      drow[i] = nd_hw_pixel(dst, srow[i]);
+    if (!swap) {
+      memcpy(drow, srow, (UINT64)clip.w * 4u);
+    } else {
+      INT32 i;
+      for (i = 0; i < clip.w; i++) {
+        drow[i] = nd_hw_pixel(dst, srow[i]);
+      }
     }
   }
 }

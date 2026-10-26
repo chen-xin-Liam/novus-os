@@ -26,6 +26,14 @@ static inline void io_out8(UINT16 port, UINT8 val) {
   __asm__ volatile("outb %0,%1" : : "a"(val), "Nd"(port));
 }
 
+/* Flush and invalidate every level of the processor caches. Used once the
+ * framebuffer is re-mapped uncacheable, so writes the firmware/early boot
+ * made through a cacheable identity alias do not linger and confuse the
+ * display's uncached reads of the same physical pages. */
+static inline void cpu_wbinvd(void) {
+  __asm__ volatile("wbinvd" : : : "memory");
+}
+
 static inline UINT8 io_in8(UINT16 port) {
   UINT8 v;
   __asm__ volatile("inb %1,%0" : "=a"(v) : "Nd"(port));

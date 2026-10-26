@@ -106,6 +106,7 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_ime.c \
        graphics/nd_core.c \
        graphics/nd_hal.c \
+       graphics/nd_boot.c \
        graphics/nd_input.c \
        graphics/nd_jpeg.c \
        graphics/nd_wallpaper.c \
@@ -253,7 +254,7 @@ banner:
 # Wallpaper photos (assets/backgrounds)
 # ---------------------------------------------------------------------------
 # The photos do NOT go into the EFI image. They are packed into one file,
-# WPAPERS.PKG, by tools/wpkg (see tools/tools.mk); the boot stage reads
+# WALLPAPERS.PKG, by tools/wpkg (see tools/tools.mk); the boot stage reads
 # that file off the ESP into reserved pages before ExitBootServices and the
 # kernel's wallpaper layer indexes into those pages. Keeping ~3.7 MB of JPEG
 # out of the loader is what lets the live ESP stay under the 32 MB ceiling of
@@ -275,6 +276,7 @@ WP_IMGS := $(WP_DIR)/pexels-snapsbyclark-12981877.jpg \
            $(WP_DIR)/pexels-thales13-40360883.jpg \
            $(WP_DIR)/pexels-tu-n-vu-2153773491-40278712.jpg \
            $(WP_DIR)/treptoweralex-usa-9889580.jpg
+
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
 # embedded trampoline binary.
@@ -414,7 +416,7 @@ out build:
 theme:
 	python3 tools/themegen/themegen.py
 
-run: all $(CPPCC_RUN_DEP)
+run: all $(CPPCC_RUN_DEP) out/wallpapers.pkg
 	@if [ "$(CONFIG_USER_CPPCC)" = "y" ]; then \
         mkdir -p esp; \
         cp out/cppcc/hello.nuc esp/DEMO.NUC; \

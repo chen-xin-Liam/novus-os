@@ -53,6 +53,12 @@ static int nv_sync(vfs_fs_t *fs) {
   return novusfs_super_flush((novusfs_fs_t *)fs->ctx);
 }
 
+static int nv_rename(vfs_fs_t *fs, UINT32 olddir, const char *oldname,
+                     UINT32 newdir, const char *newname) {
+  return novusfs_rename((novusfs_fs_t *)fs->ctx, olddir, oldname, newdir,
+                        newname);
+}
+
 static void nv_fill(vfs_fs_t *v, novusfs_fs_t *n) {
   memset(v, 0, sizeof(*v));
   v->kind = VFS_KIND_NOVUSFS;
@@ -67,6 +73,7 @@ static void nv_fill(vfs_fs_t *v, novusfs_fs_t *n) {
   v->stat = nv_stat;
   v->readdir = nv_readdir;
   v->sync = nv_sync;
+  v->rename = nv_rename;
   v->persistent = (UINT8)(novusfs_root_persistent() ? 1u : 0u);
 }
 
@@ -272,6 +279,95 @@ int vfs_parent_path(vfs_fs_t *fs, char *path, UINT32 *parent, char **leaf) {
     *parent = vfs_lookup_path(fs, path);
   }
   return (*parent == 0u) ? -1 : 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Path-level remove / rename                                          */
+/* ------------------------------------------------------------------ */
+
+/* Count the entries of a directory; NovusFS has no "." / ".." entries, so
+ * any entry at all means the directory is non-empty. */
+typedef struct {
+  UINT32 count;
+} vfs_emp_ctx_t;
+
+static void vfs_emp_count(void *arg, UINT32 ino, const char *name) {
+  (void)ino;
+  (void)name;
+  ((vfs_emp_ctx_t *)arg)->count++;
+}
+
+int vfs_unlink_path(vfs_fs_t *fs, const char *path) {
+  char          copy[VFS_NAME_MAX + 4u];
+  UINT32        parent = 0;
+  char         *leaf = NULL;
+  UINT32        ino;
+  UINT64        size = 0;
+  UINT16        mode = 0;
+  vfs_emp_ctx_t emp;
+  UINTN         n = 0;
+
+  if (fs == NULL || path == NULL) {
+    return -1;
+  }
+  while (path[n] != '\0' && n < sizeof(copy) - 1u) {
+    copy[n] = path[n];
+    n++;
+  }
+  copy[n] = '\0';
+  if (vfs_parent_path(fs, copy, &parent, &leaf) != 0) {
+    return -1;
+  }
+  ino = fs->lookup(fs, parent, leaf);
+  if (ino == 0u) {
+    return -1;
+  }
+  if (fs->stat(fs, ino, &size, &mode) != 0) {
+    return -1;
+  }
+  if (mode == VFS_MODE_DIR) {
+    emp.count = 0u;
+    if (fs->readdir(fs, ino, vfs_emp_count, &emp) != 0) {
+      return -1;
+    }
+    if (emp.count != 0u) {
+      return -1; /* refuse to delete a non-empty directory */
+    }
+  }
+  return fs->unlink(fs, parent, leaf);
+}
+
+int vfs_rename_path(vfs_fs_t *fs, const char *old_path, const char *new_path) {
+  char   oc[VFS_NAME_MAX + 4u];
+  char   nc[VFS_NAME_MAX + 4u];
+  UINT32 oparent = 0;
+  UINT32 nparent = 0;
+  char  *oleaf = NULL;
+  char  *nleaf = NULL;
+  UINTN  n = 0;
+
+  if (fs == NULL || old_path == NULL || new_path == NULL) {
+    return -1;
+  }
+  if (fs->rename == NULL) {
+    return -1; /* back end does not support rename */
+  }
+  while (old_path[n] != '\0' && n < sizeof(oc) - 1u) {
+    oc[n] = old_path[n];
+    n++;
+  }
+  oc[n] = '\0';
+  n = 0;
+  while (new_path[n] != '\0' && n < sizeof(nc) - 1u) {
+    nc[n] = new_path[n];
+    n++;
+  }
+  nc[n] = '\0';
+  if (vfs_parent_path(fs, oc, &oparent, &oleaf) != 0 ||
+      vfs_parent_path(fs, nc, &nparent, &nleaf) != 0) {
+    return -1;
+  }
+  return fs->rename(fs, oparent, oleaf, nparent, nleaf);
 }
 
 /* ------------------------------------------------------------------ */

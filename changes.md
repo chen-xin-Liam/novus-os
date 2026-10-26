@@ -1,5 +1,56 @@
 # Changes
 
+## 显示呈现重构：消除闪烁与撕裂，启动进度条
+
+- **真实硬件花屏/卡顿的根因修复**：帧缓冲被当作可缓存(WB)内存访问。`nd_init()`
+  此前对低 4 GiB 帧缓冲直接用了恒等虚拟地址，而恒等映射对低内存是 WB 写回；
+  只有高 4 GiB 帧缓冲才走 `mm_map_phys(...,MM_MAP_UC)`（置 PCD=不可缓存）。
+  QEMU(TCG) 不区分缓存属性所以模拟器里看不出问题，但真机上 CPU 把呈现写入
+  留在缓存里、显示器做 UC 读取，看到的是陈旧/乱序的像素 = 花屏；大块 memcpy
+  进缓存又让显示更新滞后 = 不流畅。现改为**主屏与镜像帧缓冲一律经
+  `mm_map_phys(...,MM_MAP_UC)` 映射**（新增 `nd_map_framebuffer`，并补偿 2 MiB
+  大页对齐的页内偏移），`nd_init()` 在映射后 `wbinvd` 冲刷掉启动阶段经 WB 恒等
+  映射留下的陈旧缓存行，消除 WB/UC 别名。内核阶段的进度条也相应提前到 `nd_init()`
+  之后绘制，使其落在不可缓存的帧缓冲上。
+- **回扫等待收紧**：`ND_BLANK_SPINS` 由 3000 降到 600（约 0.4~0.8 ms），
+  `ND_BLANK_MIN_AREA` 提到 0x50000，缓解该等待在关中断定时器 tick 内对输入的
+  阻塞（"不流畅"的另一来源）。
+- 显示层由"直接画显存"改为 Windows 式合成再呈现：`nd_init()` 分配与主屏等大
+  的离屏缓冲，`nd_canvas()` 是唯一绘制目标，`nd_present()` 把一次完成的矩形
+  拷贝到屏幕。半成品帧不再出现在玻璃上——拖动窗口、切换主题、重建壳层都不会
+  再闪。
+- `nd_present()` 在拷贝前做有界垂直回扫等待：探测 VGA 状态口 `0x3DA` 的
+  retrace 位（可用则 `[ND] compositor: ..., vsync available`），大块呈现尽量
+  落在消隐区；等待上限约 1.2 ms，因为它运行在关中断的时钟 tick 里，等满一帧
+  会拖垮输入。彻底免撕裂仍需硬件 flip 或 vblank 中断，代码与日志均如实说明。
+- 呈现与镜像改为整行 `memcpy`（字节序一致时），`nd_blit()` 同样走该快路径：
+  壁纸贴图与全屏呈现从逐像素循环变成逐行拷贝。
+- 镜像输出改为从合成缓冲拷贝，不再从主屏显存回读——此前每次呈现会对第二块
+  屏幕做数百万次 uncached MMIO 读，是双屏卡顿的主因。
+- 鼠标指针从 save-under 改为合成覆盖层：`nd_cursor_set()` 只记录新旧位置
+  damage，箭头在每次 present 末尾画到帧上。绘制前 hide、绘制后 draw 的"闪一下"
+  没有了，保存的像素也不会过期（旧实现会在下方内容重绘后把它盖回去）。
+  `nd_cursor_take_damage()` 把旧位置交给合成器重绘。
+- `nd_demo_init()` 先把桌面画进合成缓冲再一次呈现，启动时不再出现半张桌面；
+  `nd_demo_theme_sync()` 之前会把控件上下文重新绑到显存（主题切换后逐控件直画，
+  即最明显的那次闪烁），已改为绑回合成缓冲。
+- 新增 `graphics/nd_boot.c`：启动画面（深色渐变、N 标记、Novus OS 字样、圆角
+  进度条与阶段文案）。状态放在 `.data`，因为 `kernel_entry` 会清 `.bss`；绘制
+  只用渲染原语，不依赖堆，因此在 UEFI 阶段即可画。进度条只重绘自己的矩形。
+- 启动阶段重排：`stage3_prepare()` 只做块设备探测与 ESP 打开，菜单之后由新的
+  `stage3_load()` 读取负载，并在 `nd_capture_boot()` 之后切到图形启动画面
+  （`boot_quiet()` 关掉文字控制台与固件光标，日志改走 COM1，不再与画面互相
+  覆盖）。内核阶段继续同一条进度条：内存 → 页表 → 堆 → 设备 → 显示 → 文件
+  系统 → 多核 → 会话 → 桌面，到 `nd_demo_init()` 呈现首帧时结束。
+- 顺带修复 `kernel/shared_mem.h`：`wpkg_img_base/size` 的静态断言早已存在、字段
+  却缺失，导致整个镜像无法编译；按既有布局补上（0x308/0x310，`reserved` 相应
+  缩短 16 字节，块仍为 8 KiB）。
+- 验证：`make` 通过（无新增告警）；`CONFIG_NOVUS_DISPLAY/WM/GUI=n` 时相关文件
+  单独编译通过；QEMU q35 + OVMF 启动，串口可见
+  `[ND] compositor: off-screen buffer, vsync available` 与
+  `[ND] boot splash kept until the desktop presents`；截图确认进度条（86% 进入
+  内核、96% 挂载文件系统）、桌面首帧、光标移动无残影。
+
 ## M9 Win32 兼容层原型
 
 - 新增 `kernel/pe.h` / `kernel/pe.c`：PE32+（x86-64）加载器。按文件偏移读

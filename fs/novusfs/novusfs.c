@@ -207,6 +207,78 @@ int novusfs_unlink(novusfs_fs_t *fs, UINT32 dir_ino, const char *name) {
   return 0;
 }
 
+int novusfs_rename(novusfs_fs_t *fs, UINT32 old_dir, const char *old_name,
+                   UINT32 new_dir, const char *new_name) {
+  novusfs_inode_t odin;
+  novusfs_inode_t ndin;
+  UINT64          txid;
+  UINT32          ino;
+
+  if (fs == NULL || !fs->mounted || old_name == NULL || new_name == NULL) {
+    return -1;
+  }
+  ino = novusfs_dir_lookup(fs, old_dir, old_name);
+  if (ino == 0u) {
+    return -1; /* source does not exist */
+  }
+
+  /* The write-ahead log records a given block at most once per
+   * transaction (fs/novusfs/dir.c). Adding the new name and removing the
+   * old one can both touch the same directory block, so running them in
+   * one transaction would collapse the two edits into one record and lose
+   * one of them. Each edit therefore gets its own transaction. A crash
+   * between them leaves the file under both names - recoverable - rather
+   * than losing it. */
+
+  /* Step 1: if the destination already exists, remove it first. */
+  if (novusfs_dir_lookup(fs, new_dir, new_name) != 0u) {
+    if (novusfs_inode_read(fs, new_dir, &ndin) != 0) {
+      return -1;
+    }
+    txid = wal_begin(fs);
+    if (txid == 0u) {
+      return -1;
+    }
+    if (novusfs_dir_remove(fs, &ndin, new_name, txid) != 0 ||
+        novusfs_inode_write_tx(fs, &ndin, txid) != 0 ||
+        wal_commit(fs, txid) != 0) {
+      wal_abort(fs, txid);
+      return -1;
+    }
+  }
+
+  /* Step 2: add the new name. */
+  if (novusfs_inode_read(fs, new_dir, &ndin) != 0) {
+    return -1;
+  }
+  txid = wal_begin(fs);
+  if (txid == 0u) {
+    return -1;
+  }
+  if (novusfs_dir_add(fs, &ndin, new_name, ino, txid) != 0 ||
+      novusfs_inode_write_tx(fs, &ndin, txid) != 0 ||
+      wal_commit(fs, txid) != 0) {
+    wal_abort(fs, txid);
+    return -1;
+  }
+
+  /* Step 3: remove the old name. */
+  if (novusfs_inode_read(fs, old_dir, &odin) != 0) {
+    return -1;
+  }
+  txid = wal_begin(fs);
+  if (txid == 0u) {
+    return -1;
+  }
+  if (novusfs_dir_remove(fs, &odin, old_name, txid) != 0 ||
+      novusfs_inode_write_tx(fs, &odin, txid) != 0 ||
+      wal_commit(fs, txid) != 0) {
+    wal_abort(fs, txid);
+    return -1;
+  }
+  return 0;
+}
+
 UINT32 novusfs_mkdir(novusfs_fs_t *fs, UINT32 dir_ino, const char *name) {
   novusfs_inode_t pdin;
   novusfs_inode_t ndin;

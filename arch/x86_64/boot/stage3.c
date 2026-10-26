@@ -29,6 +29,7 @@
 #include "bootio.h"
 #include "uefi.h"
 #include "kernel.h"
+#include "nd.h"
 #include "shared_mem.h"
 #include "blkdev.h"
 #include "gpt.h"
@@ -1463,8 +1464,9 @@ static void report_block_devices(UINTN ndev) {
   }
 }
 
-/* Probe devices, open the ESP, verify a system partition if one exists,
- * and load the live root. Safe to call when any of those are missing. */
+/* Probe devices and open the ESP. This is the part the menu needs, so it
+ * runs before the menu; the payload reads below are the slow part and run
+ * after it, under the progress bar. Safe to call when either is missing. */
 void stage3_prepare(void) {
   shared_mem_t *shm = shared_mem_get();
   UINTN         ndev;
@@ -1479,24 +1481,38 @@ void stage3_prepare(void) {
   }
 
   shm->boot_mode = SHM_BOOT_MODE_LIVE;
+}
 
+/* Everything that reads the medium: the integrity check, the signed
+ * modules, the application, the wallpaper package, the live root and the
+ * install ESP template. Each step advances the boot progress bar, because
+ * this is where a live boot spends its time.
+ *
+ * The log still goes out on COM1; the screen belongs to the splash by now,
+ * so nothing here may write the firmware console. */
+void stage3_load(void) {
+  nd_boot_stage(12, "校验系统");
 #if CONFIG_NOVUS_MERKLE
   (VOID)syspart_verify();
 #endif
 
 #if CONFIG_NOVUS_NKM
+  nd_boot_stage(26, "加载内核模块");
   modules_load();
 #endif
 
   /* M4: stage the NUC application next to the module. */
+  nd_boot_stage(38, "加载应用程序");
   app_load();
 
   /* The photo package: one file, same staging path as everything else. */
+  nd_boot_stage(50, "加载壁纸");
   wpkg_load();
 
   /* Live root: adopt the NovusFS image off the ESP into reserved pages.
    * Without it the kernel has no filesystem at all, so a failure here is
    * worth saying loudly - but it is still not fatal. */
+  nd_boot_stage(64, "挂载系统镜像");
   if (esp_read_reserved(L"SYSTEM.IMG", &g_live_base, &g_live_size) ==
       0) {
     say(L"[BOOT] live root: ");
@@ -1514,6 +1530,7 @@ void stage3_prepare(void) {
    * its template has to come off the live medium while the firmware file
    * protocol still exists. Without it the graphical installer still runs
    * and says so, instead of failing halfway through a disk. */
+  nd_boot_stage(78, "准备安装介质");
   if (esp_read_reserved(L"ESP.IMG", &g_esp_tpl_base, &g_esp_tpl_size) == 0) {
     say(L"[BOOT] install ESP template: ");
     boot_put_dec(g_esp_tpl_size / 1024u);

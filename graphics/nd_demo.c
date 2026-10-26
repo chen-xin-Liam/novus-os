@@ -928,6 +928,7 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
 
 void nd_demo_init(void) {
   nd_surface_t *screen = nd_screen();
+  nd_surface_t *frame = nd_canvas();
   ng_ctx_t     *ctx;
 
   g_demo_ready = 0;
@@ -938,7 +939,10 @@ void nd_demo_init(void) {
    * failure just leaves the gradient in place. */
   nd_wallpaper_init(screen->w, screen->h);
   nd_input_init();
-  ctx = ng_init(screen);
+  /* The desktop is composed into the off-screen buffer, not painted onto
+   * the glass: the boot splash stays visible until the first frame is
+   * complete. */
+  ctx = ng_init(frame);
   if (ctx == 0) {
     kputs("[ND] demo: GUI init failed\n");
     return;
@@ -951,6 +955,11 @@ void nd_demo_init(void) {
   g_demo_ready = 1;
   g_theme_seen = nd_theme_version();
   g_lang_seen = nd_lang_version();
+
+  /* One present for the whole desktop: the boot splash is replaced by a
+   * finished picture, never by a half-built one. */
+  nd_boot_splash_end();
+  nd_present(nd_rect(0, 0, screen->w, screen->h));
   kputs("[ND] demo desktop painted\n");
 }
 
@@ -960,10 +969,10 @@ void nd_demo_init(void) {
  * both simpler and more predictable than walking 80 widgets to recolour
  * them. */
 void nd_demo_theme_sync(void) {
-  nd_surface_t *screen = nd_screen();
+  nd_surface_t *canvas = nd_canvas();
   ng_ctx_t     *ctx;
 
-  if (!g_demo_ready || screen == 0) {
+  if (!g_demo_ready || canvas == 0) {
     return;
   }
   g_win_demo = 0;
@@ -974,13 +983,16 @@ void nd_demo_theme_sync(void) {
   g_status_label = 0;
   memset(g_run_dot, 0, sizeof(g_run_dot));
 
-  ctx = ng_init(screen);
+  /* Rebuild into the compositor buffer, never onto the framebuffer: a
+   * theme change repaints every widget, and doing that on the glass is
+   * precisely the flicker the off-screen path exists to prevent. */
+  ctx = ng_init(canvas);
   if (ctx == 0) {
     g_demo_ready = 0;
     return;
   }
   nd_ime_init();
-  build_desktop(screen, ctx);
+  build_desktop(canvas, ctx);
   ng_render_all();
   g_theme_seen = nd_theme_version();
   g_lang_seen = nd_lang_version();
@@ -1022,12 +1034,16 @@ void nd_demo_paint(nd_rect_t clip) {
   }
 }
 
-/* Input bytes are decoded into events before this loop; damage is painted
- * only after queued events have updated widget state. Hiding the save-under
- * pointer first prevents its saved pixels from being restored over the new
- * scene, and the final draw puts it back above that scene. */
+/* Input bytes are decoded into events before this loop; damage is composed
+ * and presented only after queued events have updated widget state.
+ *
+ * The pointer contributes damage of its own (the rectangle it left and the
+ * one it moved into). Merging that into the widget damage is what erases
+ * the old arrow: it is repainted from the scene, not patched over. */
 void nd_demo_tick(void) {
   nd_rect_t  d;
+  nd_rect_t  cd;
+  int        have = 0;
   nd_event_t ev;
 
   if (!g_demo_ready) {
@@ -1036,17 +1052,24 @@ void nd_demo_tick(void) {
   nd_input_poll();
   while (nd_input_pop(&ev) != 0) {
     if (ev.type == ND_EV_MOUSE_MOVE) {
-      nd_cursor_set(ev.x, ev.y); /* restores the pixels under the old one */
+      nd_cursor_set(ev.x, ev.y);
     }
     nd_demo_dispatch(&ev);
   }
   if (nd_demo_take_damage(&d)) {
-    nd_cursor_hide();
-    nd_demo_paint(d);
+    have = 1;
   }
-  /* Idempotent: draws only when the pointer was hidden by a move or by
-   * the repaint above. */
-  nd_cursor_draw();
+  if (nd_cursor_take_damage(&cd)) {
+    d = have ? nd_rect_union(d, cd) : cd;
+    have = 1;
+  }
+  if (have) {
+    d = nd_rect_intersect(d, nd_rect(0, 0, nd_canvas()->w, nd_canvas()->h));
+    if (!nd_rect_empty(d)) {
+      nd_demo_paint(d);
+      nd_present(d);
+    }
+  }
 }
 
 #else /* !CONFIG_NOVUS_GUI */

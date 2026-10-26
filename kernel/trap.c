@@ -44,6 +44,8 @@
 #define SYS_OPENDIR     13u
 #define SYS_READDIR     14u
 #define SYS_MKDIR       15u
+#define SYS_UNLINK      20u
+#define SYS_RENAME      21u
 #define SYS_POWEROFF    16u
 #define SYS_REBOOT      17u
 #define SYS_SESSION     18u
@@ -376,6 +378,38 @@ static void sys_fs_mkdir(trap_frame_t *f) {
   f->rax = fs->mkdir(fs, parent, leaf) == 0 ? (UINT64)-1 : 0;
 }
 
+/* Remove a file or an empty directory by path. vfs_unlink_path refuses a
+ * non-empty directory, which is what the shell's `rm` wants: recursion is
+ * explicit, not implicit. */
+static void sys_fs_unlink(trap_frame_t *f) {
+  task_t *t = sched_current();
+  vfs_fs_t *fs = vfs_root();
+  char path[FS_PATH_MAX];
+  if (t == NULL || !session_logged_in() || fs == NULL ||
+      user_path(t, f->rdi, path) != 0 || vfs_unlink_path(fs, path) != 0) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  f->rax = 0;
+}
+
+/* Rename (move) a path. Atomicity is best-effort in the back end; on the
+ * NovusFS root it is a true rename that preserves the inode, on an ext4
+ * mount it returns -1 until that back end grows a rename. */
+static void sys_fs_rename(trap_frame_t *f) {
+  task_t *t = sched_current();
+  vfs_fs_t *fs = vfs_root();
+  char from[FS_PATH_MAX];
+  char to[FS_PATH_MAX];
+  if (t == NULL || !session_logged_in() || fs == NULL ||
+      user_path(t, f->rdi, from) != 0 || user_path(t, f->rsi, to) != 0 ||
+      vfs_rename_path(fs, from, to) != 0) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  f->rax = 0;
+}
+
 /* Installer control. The pid check is the capability: only the process
  * apps_launch() started as "setup" can ask for a disk to be written, and
  * no other app can inherit it because the value is set at spawn time. */
@@ -663,6 +697,8 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_OPENDIR, "opendir", sys_fs_opendir},
     {SYS_READDIR, "readdir", sys_fs_readdir},
     {SYS_MKDIR, "mkdir", sys_fs_mkdir},
+    {SYS_UNLINK, "unlink", sys_fs_unlink},
+    {SYS_RENAME, "rename", sys_fs_rename},
     {SYS_POWEROFF, "power_off", sys_power_off},
     {SYS_REBOOT, "power_reboot", sys_power_reboot},
     {SYS_SESSION, "session", sys_session},
