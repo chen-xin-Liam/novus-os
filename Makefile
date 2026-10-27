@@ -125,8 +125,13 @@ SRC := arch/x86_64/boot/main.c \
        kernel/net.c \
        kernel/net_dhcp.c \
        kernel/net_tcp.c \
+       kernel/net_dns.c \
+       kernel/net_ncsi.c \
+       kernel/net_ids.c \
        kernel/net_e1000.c \
        kernel/net_igb.c \
+       kernel/net_virtio.c \
+       kernel/net_rtl8139.c \
        kernel/net_wifi.c \
        wm/novus-wm/nwm.c \
        wm/novus-wm/nwm_demo.c \

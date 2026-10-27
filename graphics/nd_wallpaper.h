@@ -38,6 +38,6 @@ int         nd_wallpaper_init(INT32 screen_w, INT32 screen_h);
  * while no image is decoded: no package on the medium, or a decode
  * failure. */
 void        nd_wallpaper_paint(nd_surface_t *s, const nd_rect_t *area,
-                               nd_color_t fallback);
+                               nd_color_t top, nd_color_t bottom);
 
 #endif /* NOVUS_ND_WALLPAPER_H */

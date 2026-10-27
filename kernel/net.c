@@ -244,22 +244,40 @@ void net_arp_tick(void) {
 
 static UINT16 g_ip_id;
 
+/*
+ * Off-link destinations are reached through the router, so the ARP lookup
+ * must name the gateway rather than the final address. Without this an
+ * internet host is simply unreachable: nothing on the local wire owns its
+ * IP, so the ARP request goes unanswered forever.
+ */
+static UINT32 ip_next_hop(UINT32 dst) {
+  if (g_cfg.gw == 0u) {
+    return dst;
+  }
+  if ((dst & g_cfg.mask) == (g_cfg.ip & g_cfg.mask)) {
+    return dst;
+  }
+  return g_cfg.gw;
+}
+
 int net_send_ip(UINT32 dst, UINT8 proto, const UINT8 *payload, UINT32 len) {
   UINT8 *f = g_tx;
   UINT8 *ip = f + ETH_HDR;
   UINT32 i;
   UINT8  dstmac[6];
   UINT32 total = 20u + len;
+  UINT32 hop;
 
   if (g_active == 0 || len > 1400u) {
     return -1;
   }
+  hop = (dst == 0xFFFFFFFFu) ? dst : ip_next_hop(dst);
   if (dst == 0xFFFFFFFFu) {
     for (i = 0; i < 6u; i++) {
       dstmac[i] = 0xFFu;
     }
-  } else if (!net_arp_lookup(dst, dstmac)) {
-    net_arp_request(dst);
+  } else if (!net_arp_lookup(hop, dstmac)) {
+    net_arp_request(hop);
     return -2; /* caller retries once the ARP reply lands */
   }
   for (i = 0; i < 6u; i++) {
@@ -473,6 +491,10 @@ void net_udp_input(const UINT8 *p, UINT32 len, UINT32 src) {
     net_dhcp_input(p + 8, len - 8u);
     return;
   }
+  if (dport == NET_DNS_LOCAL_PORT) { /* our one DNS query socket */
+    net_dns_input(p + 8, len - 8u, src);
+    return;
+  }
   (void)src;
 }
 
@@ -522,6 +544,8 @@ void net_tick(void) {
   net_dhcp_tick();
   net_icmp_tick();
   net_tcp_tick();
+  net_dns_tick();
+  net_ncsi_tick();
 }
 
 void net_dhcp_apply(UINT32 ip, UINT32 mask, UINT32 gw) {
@@ -552,6 +576,10 @@ void net_dhcp_apply(UINT32 ip, UINT32 mask, UINT32 gw) {
   kputs(".");
   kputs_hex((UINT64)((gw >> 24) & 0xFFu));
   kputs("\n");
+  /* The lease is the first moment the stack can do anything: run the NCSI
+   * probe once, so the boot log says whether the internet is actually
+   * reachable and the network app starts with a verdict instead of "idle". */
+  (void)net_ncsi_check();
 }
 
 /* ---- boot ------------------------------------------------------------- */
@@ -562,6 +590,11 @@ void net_log(void) {
   for (i = 0; i < g_ndev; i++) {
     kputs("[NET] ");
     kputs(g_devs[i].name);
+    if (g_devs[i].model[0] != '\0') {
+      kputs(" (");
+      kputs(g_devs[i].model);
+      kputs(")");
+    }
     kputs(" link=");
     kputs(net_link_name(g_devs[i].link));
     kputs(" state=");
@@ -592,6 +625,10 @@ int net_init(void) {
   g_dhcp_state = NET_DHCP_IDLE;
 
   pci_log();
+  /* Paravirtual first: in a VM it is the fastest link, and the first device
+   * that reports UP becomes the active one. */
+  (void)net_virtio_probe();
+  (void)net_rtl8139_probe();
   (void)net_e1000_probe();
   (void)net_igb_probe();
   (void)net_wifi_probe();

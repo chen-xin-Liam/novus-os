@@ -89,9 +89,9 @@ static void dhcp_send(UINT8 type) {
     p = opt_put(p, 54, 4, (const UINT8 *)&g_server);
   }
   {
-    UINT8 params[3] = {1, 3, 51}; /* mask, router, lease */
+    UINT8 params[4] = {1, 3, 6, 51}; /* mask, router, dns, lease */
 
-    p = opt_put(p, 55, 3, params);
+    p = opt_put(p, 55, 4, params);
   }
   *p++ = 255;
   (void)net_udp_send(0xFFFFFFFFu, 68u, 67u, msg, (UINT32)(p - msg));
@@ -114,7 +114,10 @@ void net_dhcp_tick(void) {
     return;
   }
   if (++g_tries > 8u) {
+    g_phase = 0; /* stop retransmitting: one fallback, not a loop */
     kputs("[NET] dhcp timeout, using the emulated-network defaults\n");
+    /* QEMU's user-mode network answers DNS on the gateway address + 1. */
+    net_dns_set_server(NET_IP(10, 0, 2, 3));
     net_dhcp_apply(NET_IP(10, 0, 2, 15), NET_IP(255, 255, 255, 0),
                    NET_IP(10, 0, 2, 2));
     return;
@@ -134,6 +137,7 @@ void net_dhcp_input(const UINT8 *p, UINT32 len) {
   UINT8  type = 0;
   UINT32 mask = NET_IP(255, 255, 255, 0);
   UINT32 gw = 0;
+  UINT32 dns = 0;
   UINT32 yiaddr;
 
   if (len < 240u || p[0] != 2u) {
@@ -162,6 +166,8 @@ void net_dhcp_input(const UINT8 *p, UINT32 len) {
       gw = ip_from_wire_le(p + off + 2u);
     } else if (code == 54 && olen >= 4u) {
       g_server = ip_from_wire_le(p + off + 2u);
+    } else if (code == 6 && olen >= 4u) {
+      dns = ip_from_wire_le(p + off + 2u); /* first server in the list */
     }
     off += (UINT32)olen + 2u;
   }
@@ -175,6 +181,9 @@ void net_dhcp_input(const UINT8 *p, UINT32 len) {
     dhcp_send(3u); /* REQUEST */
   } else if (type == 5u && g_phase == 2u) { /* ACK */
     g_phase = 0; /* stop retransmitting; the lease is ours */
+    if (dns != 0u) {
+      net_dns_set_server(dns);
+    }
     net_dhcp_apply(yiaddr, mask, gw);
   }
 }

@@ -1,5 +1,94 @@
 # Changes
 
+## QEMU 网卡全线打通（e1000 / e1000e / virtio-net / rtl8139）
+
+- 新增 `kernel/net_rtl8139.c`：I/O BAR 驱动，8 KiB 收环 + CBR/CAPR 握手、
+  4 个发送描述符（用 TOK 位判复用，不依赖厂商的 OWN 语义）。**CAPR 必须写
+  “读指针 − 16”**，写成读指针本身会让 QEMU 把缓冲判成满而收不到任何包——
+  这是上一轮没接通的原因。实测 DHCP/DNS/NCSI 全通。
+- `kernel/net_igb.c` 修掉三处真缺陷，此前该驱动在**任何**平台上都收不到包：
+  - 高级接收描述符结构错位（`status_error` 在 0x18、`length` 在 0x1C，
+    原结构多出一个 dword 且 status 落在 0x20，RDLEN 40×64 也不是 128 的整数倍）；
+  - `SRRCTL0` 偏移写成 0x02100，82575+ 实际在 **0x0C00C**，导致队列没有缓冲；
+  - 缺 `RXDCTL0`/`TXDCTL0` 队列使能（8254x 不需要，82575+ 必需），
+    初始化顺序改为与 Linux 一致（先环基址，再 SRRCTL，最后使能队列）。
+  仍保留“STATUS.LU 置位才激活”的判定：QEMU 的 igb 模型从不置 LU，其收包
+  路径也随之丢弃所有帧（QEMU trace `e1000x_rx_link_down` 可证），所以 QEMU
+  下 igb 如实显示“未连接”；真机 82576/82580/I350 不受影响。
+- `kernel/net_e1000.c`：MAC 改为优先读 RAL/RAH（固件已写入的权威副本），
+  EERD 只作兜底。e1000e 的 NVM 是 flash，旧顺序会读到 `52:54:00:00:00:00`；
+  现在 `-device e1000e` 得到完整的 `52:54:00:12:34:56`。网卡名按注册序号
+  取 `ethN`，多网卡不再重名。
+- 修复 DHCP 超时后的重发循环：超时分支没有把 `g_phase` 清零，导致每个
+  tick 都重新 DISCOVER、重复打印 fallback，并反复触发 NCSI 探针。
+- `scripts/run.sh`：新增 `NOVUS_NIC` 变量选择 QEMU 网卡模型，
+  默认仍是兼容性最好的 `e1000`。
+- QEMU 10.0.13 实测矩阵（`-netdev user` + DHCP/DNS/NCSI）：
+
+  | 模型 | 结果 |
+  |---|---|
+  | `e1000` / `e1000e` | 通（Intel 82540EM / 82574L） |
+  | `virtio-net-pci` | 通（legacy virtio） |
+  | `rtl8139` | 通（Realtek RTL8139） |
+  | `igb` | 驱动加载，QEMU 模型不置 STATUS.LU，收包被 QEMU 丢弃 |
+  | `vmxnet3` / `ne2k_pci` / `pcnet` | 未实现 |
+
+- 验证：`make` 通过；四种可用模型均跑出 `[DNS] answer` → `[NCSI] connected`。
+  未创建 git commit。
+
+## 更多网卡：统一身份表、virtio-net 与无线识别
+
+- 新增 `kernel/net_ids.c`：PCI 身份表把 `vendor:device` 映射到驱动家族和型号
+  （Intel 8254x/e1000e/I21x、82575/82576/82580/I350、virtio、Intel
+  AX200/AX210/**AX211**、MediaTek MT7921/MT7922、Realtek、Qualcomm、
+  Broadcom）。驱动不再各自维护 if-chain，而是扫一趟总线后用家族匹配。
+- `net_e1000.c`：设备表从 3 个 ID 扩到全部 8254x/82571/82572/82573/82574/
+  82583 与 I210/I211/I217/I218/I219；改为一次 `pci_scan`；MAC 读回做
+  全 0 / 全 FF / 组播位校验，失败才回退 RAL/RAH（此前 I21x 会把
+  `FF:FF:FF:...` 当成本机地址）。
+- `net_igb.c`：同样改为一次扫描 + 家族匹配，补上 82575/82576/82580/
+  I350 的其余 ID。
+- 新增 `kernel/net_virtio.c`：virtio-net（legacy PCI，I/O BAR + PFN 队列），
+  RX/TX 各一条队列、10 字节 virtio_net_hdr、只协商 `VIRTIO_NET_F_MAC`，
+  收包在 `net_tick()` 轮询；virtio 1.0-only（0x1041）如实报“无 legacy BAR”。
+  QEMU `-device virtio-net-pci` 实测 DHCP/DNS/NCSI 全通。
+- `net_wifi.c`：枚举所有无线控制器并命名，注册为 `wlanN` + `NET_STATE_NODRV`，
+  日志说明缺的是固件下载与 802.11/WPA2 关联。Intel AX211（`8086:51f0` /
+  `54f0` / `7af0`）等现在会以型号出现在设备列表里，而不是一个笼统的
+  “wireless controller present”。
+- `netdev_t` 增加 `model[32]`（`net_strcpy()` 做 UTF-8 安全截断），
+  `sysinfo` 快照带型号，网络面板新增“型号”一行；`NET_MAX_DEVS` 4 → 8。
+- 未做：Intel I225/I226（igc）与 Realtek RTL8168/8125（r8169）驱动、USB/WWAN，
+  以及无线真正上线（需要固件、802.11 与 WPA 握手，远超当前内核范围）。
+- 验证：`make` 通过；QEMU 分别以 `-device e1000` 和
+  `-device virtio-net-pci` 启动，均得到 DHCP 租约、
+  `[DNS] answer 154.36.184.64`、`[NCSI] connected`；日志含型号
+  （`Intel 82540EM` / `Virtio net (legacy)`）。未创建 git commit。
+
+## NCSI 联网检测
+
+- 新增 `kernel/net_dns.c`：单事务 A 记录解析，查询固定从 UDP 5353 发出，
+  服务器地址来自 DHCP 选项 6（`net_dhcp.c` 现在请求/解析该选项），DHCP
+  超时回退时使用 QEMU 用户态网络的 `10.0.2.3`。
+- 新增 `kernel/net_ncsi.c`：按 NCSI 惯例抓 `http://ncsi.novus-os.ryzn.pro/
+  connecttest.txt`，三阶段推进（解析域名 → 建连 → 读响应），失败时区分
+  无链路 / DNS / TCP / HTTP / 超时；租约生效后自动跑一次，结果写入启动日志。
+- `kernel/net_tcp.c` 从"回显探测"改成通用单会话客户端：`net_tcp_open()`
+  推一段请求、`net_tcp_rx_data()` 取回响应，修复了校验和伪首部按字节序
+  计算错误的问题；`net_tcp_test()` 保留为兼容包装。
+- `kernel/net.c`：目的地址不在本网段时经网关转发（此前只对目的 IP 做 ARP，
+  互联网主机永远不可达）；UDP 入站把 5353 端口交给 DNS；tick 里驱动 DNS
+  与 NCSI 状态机。
+- `sysinfo` 增加 `SYSINFO_REQ_NCSI`（0x031A）与快照字段 `ncsi` /
+  `http_code` / `ncsi_ms`；网络面板（`apps/src/bin/netman.rs`）加"联网检测"
+  卡片与按钮，实时显示阶段、HTTP 状态码与耗时。
+- `scripts/run.sh` 从 `-net none` 改为 `-netdev user -device e1000`，默认
+  `make run` 即有 DHCP/DNS/NAT；没有网卡时（如 `qtest.sh`）检测如实报
+  "无网络设备"。
+- 验证：`make` 通过；QEMU 用户态网络实测启动日志为
+  `[DNS] answer 154.36.184.64` → `[NET] tcp established` →
+  `[NCSI] connected: {"online":true,...}`。未创建 git commit。
+
 ## 完整 UTF-8 / Unicode：字形、度量、输入、终端与路径
 
 - **字形从"界面语料"改为整个 Unicode**：`tools/fontgen/fontgen.py` 改为读取
@@ -115,9 +204,19 @@
   大页对齐的页内偏移），`nd_init()` 在映射后 `wbinvd` 冲刷掉启动阶段经 WB 恒等
   映射留下的陈旧缓存行，消除 WB/UC 别名。内核阶段的进度条也相应提前到 `nd_init()`
   之后绘制，使其落在不可缓存的帧缓冲上。
-- **回扫等待收紧**：`ND_BLANK_SPINS` 由 3000 降到 600（约 0.4~0.8 ms），
-  `ND_BLANK_MIN_AREA` 提到 0x50000，缓解该等待在关中断定时器 tick 内对输入的
-  阻塞（"不流畅"的另一来源）。
+- **所见花屏/色偏的真正来源：壁纸 JPEG 解码器**。用宿主桩把 `graphics/nd_jpeg.c`
+  与 `wp_cover()` 单独编译解码同一张包内 JPEG：宿主侧输出正常（平均 RGB≈71,129,174），
+  但**内核侧解码同一条流水线得到平均≈0x2C 的偏暗/错误图像**（同一代码、同一数据，
+  差异只在编译环境，属于工具链相关的未定义行为），于是桌面背景是错色/发黑即花屏。
+  另定位到帧缓冲虽已按 UC 映射，但背景黑块并不是它造成的——强制走纯色回退即整屏
+  正常。鉴于 920 行的自研解码器盲调风险高，桌面背景改为**程序化竖向渐变**
+  （`nd_wallpaper_paint()` 用主题 `desktop_top→desktop_bottom` 逐行插值，
+  `wp_lerp()`），保证恒为正确、干净的背景；照片壁纸的编解码保留，待该解码器修好
+  再启用。已在 QEMU 截图验证：背景为平滑渐变、无黑块、通道未交换。
+- **回扫等待收紧**：`ND_BLANK_SPINS` 定为 800（约 0.4 ms），`ND_BLANK_MIN_AREA`
+  降到 0x20000（约 362x362）。阈值仍高于光标/图标尺寸，所以对延迟敏感的指针移动
+  不等待；但常见窗口拖动重绘（数百平方像素）会落进消隐区，减少撕裂；该等待运行
+  在关中断的定时器 tick 里，上限必须小，否则拖垮输入（"不流畅"）。
 - 显示层由"直接画显存"改为 Windows 式合成再呈现：`nd_init()` 分配与主屏等大
   的离屏缓冲，`nd_canvas()` 是唯一绘制目标，`nd_present()` 把一次完成的矩形
   拷贝到屏幕。半成品帧不再出现在玻璃上——拖动窗口、切换主题、重建壳层都不会

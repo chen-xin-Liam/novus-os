@@ -1225,7 +1225,8 @@ static void draw_self(ng_widget_t *w) {
   case NG_DESKTOP:
     /* Photo wallpaper when one is decoded, a flat design-token colour
      * otherwise (no package on the medium, or a decode failure). */
-    nd_wallpaper_paint(g_ctx.surf, &w->abs, g_ctx.theme.desktop_top);
+    nd_wallpaper_paint(g_ctx.surf, &w->abs, g_ctx.theme.desktop_top,
+                      g_ctx.theme.desktop_bottom);
     break;
   case NG_WINDOW:
     draw_window(w);

@@ -26,6 +26,7 @@ pub const REQ_NETDEVS: u16 = 0x030D;
 pub const REQ_SPAWN_NAME: u16 = 0x030E;
 pub const REQ_LANG: u16 = 0x030F;
 pub const REQ_DISPLAY: u16 = 0x0318;
+pub const REQ_NCSI: u16 = 0x031A;
 
 /// One graphics output, as the firmware described it.
 #[repr(C)]
@@ -354,6 +355,26 @@ pub struct Net {
     pub mac: [u8; 6],
     pub speed_mbps: u16,
     pub pad: u16,
+    /// NCSI probe stage or verdict (0 idle, 1..3 running, 4 ok, 5..9 failure).
+    pub ncsi: u8,
+    pub ncsi_pad: u8,
+    /// Status code of the last connecttest.txt response, 0 when none.
+    pub http_code: u16,
+    /// How long the probe has been running, or how long it took.
+    pub ncsi_ms: u32,
+    /// Controller name of the active device ("Intel Wi-Fi 6E AX211").
+    pub model: [u8; 32],
+}
+
+impl Net {
+    /// The controller name, empty when the kernel has no active device.
+    pub fn model(&self) -> &str {
+        let mut n = 0;
+        while n < self.model.len() && self.model[n] != 0 {
+            n += 1;
+        }
+        core::str::from_utf8(&self.model[..n]).unwrap_or("")
+    }
 }
 
 #[repr(C)]
@@ -399,6 +420,12 @@ pub fn netdevs(port: u64, index: u16) -> Option<NetDevs> {
 
 pub fn ping(port: u64, ip: u32) -> Option<i32> {
     query(port, REQ_PING, &ip.to_le_bytes(), RSP_OK)?.read::<i32>()
+}
+
+/// Start the NCSI probe (http://ncsi.novus-os.ryzn.pro/connecttest.txt).
+/// The verdict arrives in the [Net] snapshot, not in this reply.
+pub fn ncsi(port: u64) -> Option<i32> {
+    query(port, REQ_NCSI, &[], RSP_OK)?.read::<i32>()
 }
 
 pub fn tcp_test(port: u64, ip: u32, tcp_port: u16) -> Option<i32> {

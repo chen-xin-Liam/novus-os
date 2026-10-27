@@ -57,10 +57,12 @@
  * common large present (a dragged window, a theme switch) lands inside
  * the blank whenever its phase allows, and the row-wise blit that
  * follows is short enough to stay there. */
-#define ND_BLANK_SPINS   600u
-/* Presents smaller than this skip the wait: a pointer-sized rect cannot
- * tear enough to be worth delaying the tick for. ~565x565 pixels. */
-#define ND_BLANK_MIN_AREA 0x50000
+#define ND_BLANK_SPINS   800u
+/* Presents smaller than this skip the wait. Kept above the cursor/icon size so
+ * latency-sensitive pointer moves are not delayed, but low enough that the
+ * common window drag repaint (a few hundred squared pixels) lands in the blank.
+ * ~362x362 pixels. */
+#define ND_BLANK_MIN_AREA 0x20000
 
 /* .data, not .bss: kernel_entry zeroes .bss on the way into kmain, which
  * would erase exactly the mode the boot stage captured a moment earlier.

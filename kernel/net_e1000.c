@@ -158,6 +158,27 @@ static void e1000_irq(void *ctx) {
  * but the descriptor is still cleared and returned to the NIC so RX can
  * continue without waiting for the consumer.
  */
+/* Unicast, not all zeros, not all ones: the three ways a bad EEPROM read
+ * shows up on real hardware. */
+static int mac_ok(const UINT8 *mac) {
+  UINT32 i;
+  int    any = 0;
+  int    all_ff = 1;
+
+  for (i = 0; i < 6u; i++) {
+    if (mac[i] != 0u) {
+      any = 1;
+    }
+    if (mac[i] != 0xFFu) {
+      all_ff = 0;
+    }
+  }
+  if (!any || all_ff) {
+    return 0;
+  }
+  return (mac[0] & 1u) == 0u; /* the group bit must be clear */
+}
+
 static void eeprom_mac(e1000_t *c, UINT8 *mac) {
   UINT32 i;
 
@@ -232,17 +253,33 @@ static int e1000_poll(netdev_t *d, UINT8 *buf, UINT32 cap, UINT32 *out_len) {
 }
 
 int net_e1000_probe(void) {
-  pci_dev_t pci;
-  netdev_t  dev;
-  irq_info_t route_info;
-  e1000_t  *c = &g_card;
-  UINT32    i;
-  UINT32    status;
+  pci_dev_t     list[PCI_MAX_DEVICES];
+  pci_dev_t     pci;
+  netdev_t      dev;
+  irq_info_t    route_info;
+  e1000_t      *c = &g_card;
+  const char   *model;
+  UINT32        i;
+  UINT32        status;
+  int           n;
+  int           found = 0;
 
-  if (!pci_find(0x8086u, 0x100Eu, &pci) && !pci_find(0x8086u, 0x100Fu, &pci) &&
-      !pci_find(0x8086u, 0x10D3u, &pci)) {
+  /* One bus scan, then the identity table decides ownership: every 8254x /
+   * e1000e / I21x part shares this legacy register layout, so the driver
+   * does not carry its own vendor/device if-chain. */
+  n = pci_scan(list, PCI_MAX_DEVICES);
+  for (i = 0; i < (UINT32)n; i++) {
+    if (list[i].class_code == 0x02u &&
+        net_id_family(list[i].vendor, list[i].device) == NET_FAMILY_E1000) {
+      pci = list[i];
+      found = 1;
+      break;
+    }
+  }
+  if (!found) {
     return -1;
   }
+  model = net_id_name(pci.vendor, pci.device);
   if (pci.bar[0] == 0u) {
     kputs("[NET] e1000: no MMIO BAR\n");
     return -1;
@@ -272,7 +309,10 @@ int net_e1000_probe(void) {
     ((UINT8 *)&dev)[i] = 0;
   }
   memcpy(dev.name, "eth0", 4);
+  dev.name[3] = (char)('0' + (net_count() % 10));
   dev.name[4] = '\0';
+  net_strcpy(dev.model, sizeof(dev.model),
+             (model != 0) ? model : net_vendor_name(pci.vendor));
   dev.link = NET_LINK_ETHER;
   dev.state = NET_STATE_DOWN;
   dev.mtu = 1500;
@@ -280,10 +320,11 @@ int net_e1000_probe(void) {
   dev.send = e1000_send;
   dev.poll = e1000_poll;
   dev.priv = c;
-  eeprom_mac(c, dev.mac);
-  /* A MAC of all zeros means the EEPROM path failed (some emulated
-   * variants only expose RAL/RAH): take the one the firmware left there. */
-  if (dev.mac[0] == 0u && dev.mac[1] == 0u && dev.mac[2] == 0u) {
+  /* Firmware (or the device itself) already left the address in RAR0, and
+   * that is the authoritative copy on e1000e/I21x parts whose NVM is flash
+   * rather than an 8254x-style EEPROM. Only fall back to EERD when the
+   * register is empty. */
+  {
     UINT32 lo = rd(c, E1000_RAL);
     UINT32 hi = rd(c, E1000_RAH);
 
@@ -293,6 +334,12 @@ int net_e1000_probe(void) {
     dev.mac[3] = (UINT8)(lo >> 24);
     dev.mac[4] = (UINT8)hi;
     dev.mac[5] = (UINT8)(hi >> 8);
+  }
+  if (!mac_ok(dev.mac)) {
+    eeprom_mac(c, dev.mac);
+  }
+  if (!mac_ok(dev.mac)) {
+    kputs("[NET] e1000: no usable MAC in RAL/RAH or EEPROM\n");
   }
   wr(c, E1000_RAL, (UINT32)dev.mac[0] | ((UINT32)dev.mac[1] << 8) |
                        ((UINT32)dev.mac[2] << 16) |
@@ -373,7 +420,9 @@ int net_e1000_probe(void) {
   status = rd(c, E1000_STATUS);
   dev.state = ((status & 0x2u) != 0u) ? NET_STATE_UP : NET_STATE_DOWN;
   net_register(&dev);
-  kputs("[NET] e1000 up, MAC ");
+  kputs("[NET] e1000 up, ");
+  kputs(dev.model);
+  kputs(", MAC ");
   for (i = 0; i < 6u; i++) {
     kputs_hex((UINT64)dev.mac[i]);
     if (i != 5u) {

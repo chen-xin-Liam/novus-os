@@ -312,10 +312,14 @@ static void req_net(const ipc_msg_t *m) {
   n.gw = c->gw;
   n.rtt_ms = net_ping_rtt_ms();
   n.tcp_bytes = net_tcp_bytes();
+  n.ncsi = (UINT8)net_ncsi_status();
+  n.http_code = net_ncsi_http_code();
+  n.ncsi_ms = net_ncsi_elapsed_ms();
   if (d != 0) {
     n.link = d->link;
     n.state = d->state;
     n.speed_mbps = (UINT16)d->speed_mbps;
+    copy_str(n.model, sizeof(n.model), d->model);
     n.rx_pkts = d->rx_pkts;
     n.tx_pkts = d->tx_pkts;
     n.rx_err = d->rx_err;
@@ -383,6 +387,13 @@ static void req_tcp_test(const ipc_msg_t *m) {
     memcpy(&port, m->payload + 4, 2);
   }
   rc = (INT32)net_tcp_test(ip, port);
+  answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
+}
+
+/* Starts the probe; the verdict shows up in the next SYSINFO_REQ_NET. */
+static void req_ncsi(const ipc_msg_t *m) {
+  INT32 rc = (INT32)net_ncsi_check();
+
   answer(m, SYSINFO_RSP_OK, &rc, sizeof(rc));
 }
 
@@ -569,6 +580,9 @@ static void handle(const ipc_msg_t *m) {
     break;
   case SYSINFO_REQ_TCP:
     req_tcp_test(m);
+    break;
+  case SYSINFO_REQ_NCSI:
+    req_ncsi(m);
     break;
   case SYSINFO_REQ_TASKS2:
     req_tasks2(m);

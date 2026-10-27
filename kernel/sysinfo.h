@@ -37,6 +37,7 @@
 #define SYSINFO_REQ_SPAWN_NAME 0x030Eu /* start a built-in app by name */
 #define SYSINFO_REQ_LANG      0x030Fu /* get / set the UI language */
 #define SYSINFO_REQ_DISPLAY   0x0318u /* the graphics outputs of the machine */
+#define SYSINFO_REQ_NCSI      0x031Au /* start an NCSI connectivity probe */
 
 typedef struct {
   UINT32 lang;    /* 0 zh, 1 en */
@@ -194,6 +195,13 @@ typedef struct {
   UINT8  mac[6];
   UINT16 speed_mbps;
   UINT16 pad;
+  UINT8  ncsi;      /* NET_NCSI_* stage or verdict */
+  UINT8  ncsi_pad;
+  UINT16 http_code; /* status code of the last NCSI response, 0 = none */
+  UINT32 ncsi_ms;   /* probe duration so far / total */
+  /* Controller name of the active device, e.g. "Intel Wi-Fi 6E AX211";
+   * empty when there is no active device or the ID is unknown. */
+  char   model[32];
 } sysinfo_net_t;
 
 typedef struct {

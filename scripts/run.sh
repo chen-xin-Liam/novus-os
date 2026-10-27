@@ -49,8 +49,17 @@ fi
 
 # The vvfat drive is mounted read-write so the EFI application can
 # persist state on the ESP if it wants to.
+#
+# Networking: QEMU's user-mode stack gives the guest DHCP (10.0.2.2), DNS
+# (10.0.2.3) and NAT to the real internet, which is what the NCSI probe in
+# kernel/net_ncsi.c needs to reach ncsi.novus-os.ryzn.pro.
+#
+# NIC models the kernel drives: e1000, e1000e, virtio-net-pci, rtl8139.
+# Pick one with NOVUS_NIC, e.g.  NOVUS_NIC=virtio-net-pci make run
+NIC="${NOVUS_NIC:-e1000}"
 exec qemu-system-x86_64 -machine q35 -smp 2 -m "$MEM" \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=out/OVMF_VARS.fd \
     -drive format=raw,file=fat:rw:esp \
-    -serial stdio -no-reboot $DISPLAY_ARGS -net none
+    -serial stdio -no-reboot $DISPLAY_ARGS \
+    -netdev user,id=novusnet -device "$NIC",netdev=novusnet

@@ -268,14 +268,37 @@ int nd_wallpaper_set(UINT32 index) {
   return wp_decode();
 }
 
+static UINT32 wp_lerp(UINT32 a, UINT32 b, UINT32 t) {
+  /* t is 0..1024; interpolate the three colour channels of 0xAARRGGBB. */
+  INT32 ar = (INT32)((a >> 16) & 0xFFu), ag = (INT32)((a >> 8) & 0xFFu),
+        ab = (INT32)(a & 0xFFu);
+  INT32 br = (INT32)((b >> 16) & 0xFFu), bg = (INT32)((b >> 8) & 0xFFu),
+        bb = (INT32)(b & 0xFFu);
+  INT32 r = ar + (br - ar) * (INT32)t / 1024;
+  INT32 g = ag + (bg - ag) * (INT32)t / 1024;
+  INT32 bl = ab + (bb - ab) * (INT32)t / 1024;
+  return ((UINT32)0xFFu << 24) | (((UINT32)r & 0xFFu) << 16) |
+         (((UINT32)g & 0xFFu) << 8) | ((UINT32)bl & 0xFFu);
+}
+
 void nd_wallpaper_paint(nd_surface_t *s, const nd_rect_t *area,
-                        nd_color_t fallback) {
-  if (!g_ready || g_img.px == 0) {
-    /* No package, or the decode failed: one flat colour, never a hole. */
-    nd_fill_rect(s, *area, fallback);
+                        nd_color_t top, nd_color_t bottom) {
+  nd_rect_t a = *area;
+  INT32     y;
+
+  /* A generated vertical gradient. The photo pipeline (JPEG decode -> cover
+   * scale) is currently unreliable across toolchains - it decodes to a
+   * systematically wrong/dark image, which showed up as a garbled, wrong
+   * coloured desktop (the "花屏"). A gradient is always correct and clean, so
+   * it is the default background until that decoder is fixed. The area handed
+   * in is always the full desktop rect, so the gradient stays continuous
+   * across partial repaints. */
+  if (a.h <= 1) {
+    nd_fill_rect(s, a, bottom);
     return;
   }
-  /* The cached image is screen-sized and anchored at (0,0); nd_blit clips
-   * against both the area and the surface's scissor. */
-  nd_blit(s, 0, 0, &g_img, *area);
+  for (y = a.y; y < a.y + a.h; y++) {
+    UINT32 t = (UINT32)(y - a.y) * 1024u / (UINT32)(a.h - 1);
+    nd_fill_rect(s, nd_rect(a.x, y, a.w, 1), wp_lerp(top, bottom, t));
+  }
 }

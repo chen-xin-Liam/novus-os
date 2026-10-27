@@ -37,6 +37,16 @@
 #define IGB_TDT     0x0E018u
 #define IGB_RAL     0x05400u
 #define IGB_RAH     0x05404u
+/* Queue 0 enable bits: on 82575/82576/82580 the descriptor rings stay
+ * disabled until the driver sets these, which the 8254x does not require. */
+#define IGB_RXDCTL0 0x0C028u
+#define IGB_TXDCTL0 0x0E028u
+#define IGB_QUEUE_ENABLE 0x02000000u
+/* Receive queue 0: descriptor type and packet buffer size (1 KiB units).
+ * Without this the queue has no buffers assigned. 82575+ puts SRRCTL in the
+ * receive queue block, 0x0C00C, not at 0x02100. */
+#define IGB_SRRCTL0 0x0C00Cu
+#define IGB_SRRCTL_ADV_ONEBUF 0x02000000u
 
 #define IGB_CTRL_RST   0x04000000u
 #define IGB_CTRL_SLU   0x00000040u
@@ -62,15 +72,19 @@ typedef struct {
   UINT16 special;
 } igb_tx_desc_t;
 
+/*
+ * Advanced receive descriptor, "read" layout written back by the hardware:
+ *   0x00 packet buffer, 0x08 header buffer, 0x10 RSS, 0x18 status/error,
+ *   0x1C length, 0x1E VLAN. 32 bytes total - the ring length has to be a
+ *   multiple of 128 bytes, which 64 * 32 satisfies.
+ */
 typedef struct {
   UINT64 buf;
   UINT64 hdr;
   UINT64 rss;
-  UINT32 rsvd;
+  UINT32 status; /* status_error: bit 0 = DD */
   UINT16 len;
   UINT16 vlan;
-  UINT32 status;
-  UINT32 hash;
 } igb_rx_desc_t;
 
 typedef struct {
@@ -126,6 +140,8 @@ static int igb_poll(netdev_t *d, UINT8 *buf, UINT32 cap, UINT32 *out_len) {
   UINT32         len;
   UINT32         i;
 
+  d->state = ((ird(c, IGB_STATUS) & 0x2u) != 0u) ? NET_STATE_UP : NET_STATE_DOWN;
+
   if ((desc->status & 0x1u) == 0u) {
     return 0;
   }
@@ -151,16 +167,31 @@ static int igb_poll(netdev_t *d, UINT8 *buf, UINT32 cap, UINT32 *out_len) {
  * There is no separate software RX FIFO in this path.
  */
 int net_igb_probe(void) {
-  pci_dev_t pci;
-  netdev_t  dev;
-  igb_t    *c = &g_fiber;
-  UINT32    i;
-  UINT32    spins;
+  pci_dev_t   list[PCI_MAX_DEVICES];
+  pci_dev_t   pci;
+  netdev_t    dev;
+  igb_t      *c = &g_fiber;
+  const char *model;
+  UINT32      i;
+  UINT32      spins;
+  int         n;
+  int         found = 0;
 
-  if (!pci_find(0x8086u, 0x10C9u, &pci) && !pci_find(0x8086u, 0x10E6u, &pci) &&
-      !pci_find(0x8086u, 0x10A7u, &pci) && !pci_find(0x8086u, 0x1521u, &pci)) {
+  /* 82575/82576/82580/I350 all use the advanced descriptor layout this
+   * driver implements, and all of them sit in the identity table. */
+  n = pci_scan(list, PCI_MAX_DEVICES);
+  for (i = 0; i < (UINT32)n; i++) {
+    if (list[i].class_code == 0x02u &&
+        net_id_family(list[i].vendor, list[i].device) == NET_FAMILY_IGB) {
+      pci = list[i];
+      found = 1;
+      break;
+    }
+  }
+  if (!found) {
     return -1;
   }
+  model = net_id_name(pci.vendor, pci.device);
   if (pci.bar[0] == 0u) {
     return -1;
   }
@@ -181,6 +212,8 @@ int net_igb_probe(void) {
   }
   memcpy(dev.name, "fib0", 4);
   dev.name[4] = '\0';
+  net_strcpy(dev.model, sizeof(dev.model),
+             (model != 0) ? model : net_vendor_name(pci.vendor));
   dev.link = NET_LINK_FIBER;
   dev.state = NET_STATE_DOWN;
   dev.mtu = 1500;
@@ -234,6 +267,9 @@ int net_igb_probe(void) {
     c->rx[i].buf = phys;
   }
 
+  /* Ring bases, lengths and heads first; the queue-enable bits and the
+   * receive buffer size are latched afterwards, in that order, which is what
+   * 82575/82576 expects. */
   iwr(c, IGB_TDBAL, (UINT32)c->tx_phys);
   iwr(c, IGB_TDBAH, 0u);
   iwr(c, IGB_TDLEN, (UINT32)(IGB_TX_COUNT * sizeof(igb_tx_desc_t)));
@@ -244,17 +280,26 @@ int net_igb_probe(void) {
   iwr(c, IGB_RDLEN, (UINT32)(IGB_RX_COUNT * sizeof(igb_rx_desc_t)));
   iwr(c, IGB_RDH, 0u);
   iwr(c, IGB_RDT, IGB_RX_COUNT - 1u);
+  iwr(c, IGB_SRRCTL0,
+      IGB_SRRCTL_ADV_ONEBUF | (IGB_BUF_SIZE / 1024u)); /* one 2 KiB buffer */
+  iwr(c, IGB_TXDCTL0, IGB_QUEUE_ENABLE);
+  iwr(c, IGB_RXDCTL0, IGB_QUEUE_ENABLE);
 
   iwr(c, IGB_TCTL, IGB_TCTL_EN | IGB_TCTL_PSP);
   iwr(c, IGB_TIPG, 10u | (8u << 10) | (6u << 20));
   iwr(c, IGB_RCTL, IGB_RCTL_EN | IGB_RCTL_BAM | IGB_RCTL_UPE | IGB_RCTL_MPE |
                        IGB_RCTL_SECRC);
 
+  /* QEMU's igb model never raises STATUS.LU (its RX path also drops every
+   * frame while that bit is clear), so the device stays DOWN there; real
+   * 82576/82580/I350 parts set it once the PHY has a carrier. */
   if ((ird(c, IGB_STATUS) & 0x2u) != 0u) {
     dev.state = NET_STATE_UP;
   }
   net_register(&dev);
-  kputs("[NET] igb up, MAC ");
+  kputs("[NET] igb up, ");
+  kputs(dev.model);
+  kputs(", MAC ");
   for (i = 0; i < 6u; i++) {
     kputs_hex((UINT64)dev.mac[i]);
     if (i != 5u) {
