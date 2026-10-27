@@ -63,4 +63,10 @@ void nd_input_push(const nd_event_t *ev);
 
 void nd_input_mouse(INT32 *x, INT32 *y, UINT8 *buttons);
 
+/* Feed a relative mouse update from an external source (USB HID). `buttons`
+ * is the ND_BUTTON_* mask; dy is positive downwards. Applies the same clamping
+ * and button-edge detection as the PS/2 path, so USB and PS/2 mice share one
+ * queue. `dx`/`dy` are the per-sample deltas (already sign-applied). */
+void nd_input_feed_mouse(INT32 dx, INT32 dy, UINT8 buttons);
+
 #endif /* NOVUS_ND_INPUT_H */

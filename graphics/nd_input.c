@@ -14,6 +14,7 @@
 #include "nd.h"
 #include "nd_input.h"
 #include "irq.h"
+#include "usb.h"
 
 #define PS2_DATA   0x60
 #define PS2_STATUS 0x64
@@ -378,10 +379,6 @@ static void kbd_byte(UINT8 b) {
 }
 
 static void mouse_byte(UINT8 b) {
-  INT32 w = 1024;
-  INT32 h = 768;
-  const nd_display_t *d = nd_display();
-
   if (g_mouse_bytes == 0 && (b & 0x08u) == 0u) {
     return; /* out of sync: wait for a packet start */
   }
@@ -390,16 +387,11 @@ static void mouse_byte(UINT8 b) {
     return;
   }
   g_mouse_bytes = 0;
-  if (d != 0 && d->available) {
-    w = (INT32)d->width;
-    h = (INT32)d->height;
-  }
   {
     UINT8  flags = g_mouse_packet[0];
     INT32  dx = (INT32)g_mouse_packet[1];
     INT32  dy = (INT32)g_mouse_packet[2];
     UINT8  buttons = (UINT8)(flags & 0x07u);
-    nd_event_t ev;
 
     if ((flags & 0x10u) != 0u) {
       dx -= 256; /* sign bit lives in the flags byte */
@@ -407,46 +399,63 @@ static void mouse_byte(UINT8 b) {
     if ((flags & 0x20u) != 0u) {
       dy -= 256;
     }
-    g_mx += dx;
-    g_my -= dy; /* PS/2 counts up, the screen counts down */
-    if (g_mx < 0) {
-      g_mx = 0;
-    }
-    if (g_my < 0) {
-      g_my = 0;
-    }
-    if (g_mx > w - 1) {
-      g_mx = w - 1;
-    }
-    if (g_my > h - 1) {
-      g_my = h - 1;
-    }
+    /* PS/2 counts Y upward; nd_input_feed_mouse counts it downward. */
+    nd_input_feed_mouse(dx, -dy, buttons);
+  }
+}
 
-    memset(&ev, 0, sizeof(ev));
-    ev.x = (INT16)g_mx;
-    ev.y = (INT16)g_my;
-    ev.dx = (INT16)dx;
-    ev.dy = (INT16)dy;
-    if (dx != 0 || dy != 0) {
-      ev.type = ND_EV_MOUSE_MOVE;
+/* Shared pointer update used by both the PS/2 path (above) and USB HID mice.
+ * Applies the same screen clamping and button-edge detection, so every mouse
+ * source feeds one queue and the rest of the system is source-agnostic. */
+void nd_input_feed_mouse(INT32 dx, INT32 dy, UINT8 buttons) {
+  INT32 w = 1024;
+  INT32 h = 768;
+  const nd_display_t *d = nd_display();
+  nd_event_t ev;
+
+  if (d != 0 && d->available) {
+    w = (INT32)d->width;
+    h = (INT32)d->height;
+  }
+  g_mx += dx;
+  g_my += dy; /* dy positive = down */
+  if (g_mx < 0) {
+    g_mx = 0;
+  }
+  if (g_my < 0) {
+    g_my = 0;
+  }
+  if (g_mx > w - 1) {
+    g_mx = w - 1;
+  }
+  if (g_my > h - 1) {
+    g_my = h - 1;
+  }
+
+  memset(&ev, 0, sizeof(ev));
+  ev.x = (INT16)g_mx;
+  ev.y = (INT16)g_my;
+  ev.dx = (INT16)dx;
+  ev.dy = (INT16)dy;
+  if (dx != 0 || dy != 0) {
+    ev.type = ND_EV_MOUSE_MOVE;
+    nd_input_push(&ev);
+  }
+  if ((buttons ^ g_buttons) != 0u) {
+    UINT8 changed = (UINT8)(buttons ^ g_buttons);
+    UINT8 i;
+
+    for (i = 0; i < 3u; i++) {
+      UINT8 mask = (UINT8)(1u << i);
+
+      if ((changed & mask) == 0u) {
+        continue;
+      }
+      ev.type = ((buttons & mask) != 0u) ? ND_EV_MOUSE_DOWN : ND_EV_MOUSE_UP;
+      ev.button = mask;
       nd_input_push(&ev);
     }
-    if ((buttons ^ g_buttons) != 0u) {
-      UINT8 changed = (UINT8)(buttons ^ g_buttons);
-      UINT8 i;
-
-      for (i = 0; i < 3u; i++) {
-        UINT8 mask = (UINT8)(1u << i);
-        if ((changed & mask) == 0u) {
-          continue;
-        }
-        ev.type = ((buttons & mask) != 0u) ? ND_EV_MOUSE_DOWN
-                                           : ND_EV_MOUSE_UP;
-        ev.button = mask;
-        nd_input_push(&ev);
-      }
-      g_buttons = buttons;
-    }
+    g_buttons = buttons;
   }
 }
 
@@ -480,4 +489,5 @@ void nd_input_poll(void) {
       kbd_byte(data);
     }
   }
+  usb_hid_poll(); /* collect USB keyboard/mouse reports, if any */
 }

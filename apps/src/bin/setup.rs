@@ -839,7 +839,7 @@ pub extern "C" fn _start() -> ! {
                     }
                     draw(&mut app);
                 }
-                wm::Ev::Key(key) => {
+                wm::Ev::Key(key, _mods) => {
                     match key {
                         0x100 => go_back(&mut app),
                         0x109 => advance(&mut app),

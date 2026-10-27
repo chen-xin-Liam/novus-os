@@ -1,13 +1,15 @@
 /**
- * Novus OS - xHCI + bulk-only transport storage (M11).
+ * Novus OS - xHCI host controller (M11).
  *
- * The installer has to see a USB stick the same way it sees a SATA disk,
- * so this file ends at the block layer: one controller, one addressed
- * device, one LUN. Everything is polled with a hard bound - a dead
- * controller must cost a log line, not the boot.
+ * One xHCI root can drive several devices at once - a mass-storage disk, a
+ * keyboard and a mouse - so the controller state (rings, DCBAA, scratch
+ * buffers) is kept separate from per-device state. Storage uses the
+ * bulk-only transport; keyboards and mice use the HID boot protocol over an
+ * interrupt endpoint, polled from the input tick. Everything is polled with a
+ * hard bound - a dead controller must cost a log line, not the boot.
  *
  * Reference: xHCI 1.1 chapters 4-6 (rings, slots, ports, transfers) and
- * USB Mass Storage Class Bulk-Only Transport 1.0 (CBW/CSW).
+ * USB Mass Storage Class Bulk-Only Transport 1.0 (CBW/CSW) / HID 1.11.
  */
 
 #include "usb.h"
@@ -17,6 +19,7 @@
 #include "mm.h"
 #include "blkdev.h"
 #include "shared_mem.h"
+#include "nd_input.h"
 #include <stddef.h>
 
 #define USB_MAX_PORTS   8
@@ -53,6 +56,10 @@ typedef struct {
   UINT32 p[4];
 } trb_t;
 
+/* Controller-wide state shared by every device behind one xHCI root. The
+ * command/event rings, DCBAA, scratch contexts and the shared DMA staging
+ * buffers live here; they are reused serially because all transfers are
+ * polled one at a time. */
 typedef struct {
   volatile UINT32 *cap;
   volatile UINT32 *op;
@@ -60,7 +67,6 @@ typedef struct {
   volatile UINT32 *rt;
   UINT32 max_slots;
   UINT32 max_ports;
-  UINT32 csz;
   UINT32 ctx_size;
 
   UINT64 *dcbaa;
@@ -78,6 +84,24 @@ typedef struct {
 
   UINT8  *in_ctx;
   UINT64  in_ctx_phys;
+  UINT8  *aux;
+  UINT64  aux_phys;
+  UINT8  *data;
+  UINT64  data_phys;
+} xhci_t;
+
+/* One attached USB device: a disk, a keyboard, or a mouse. Each device owns
+ * its slot, endpoint rings and (per-slot) device context. Splitting this from
+ * xhci_t lets one controller drive a keyboard, a mouse and a disk at once -
+ * the old single-device model could only keep the last-attached device. */
+typedef struct usb_dev {
+  xhci_t *hc;
+  UINT32  slot;
+  UINT32  port;
+  UINT32  speed;
+  UINT8   kind;     /* USB_KIND_* */
+  UINT8   iface;    /* HID interface number */
+
   UINT8  *dev_ctx;
   UINT64  dev_ctx_phys;
 
@@ -85,6 +109,8 @@ typedef struct {
   UINT64  ep0_phys;
   UINT32  ep0_idx;
   UINT8   ep0_cycle;
+
+  /* storage (bulk) endpoints */
   trb_t  *ep_in;
   UINT64  ep_in_phys;
   UINT32  ep_in_idx;
@@ -93,27 +119,34 @@ typedef struct {
   UINT64  ep_out_phys;
   UINT32  ep_out_idx;
   UINT8   ep_out_cycle;
-
-  UINT8  *aux;
-  UINT64  aux_phys;
-  UINT8  *data;
-  UINT64  data_phys;
-
-  UINT32 slot;
-  UINT32 port;
-  UINT32 speed;
-  UINT8  ep_in_num;
-  UINT8  ep_out_num;
-  UINT8  ep_in_dci;
-  UINT8  ep_out_dci;
-  UINT16 ep_in_mps;
-  UINT16 ep_out_mps;
-  UINT64 sectors;
-  UINT32 tag;
-  UINT8  lun;
-
+  UINT8   ep_in_num;
+  UINT8   ep_out_num;
+  UINT8   ep_in_dci;
+  UINT8   ep_out_dci;
+  UINT16  ep_in_mps;
+  UINT16  ep_out_mps;
+  UINT64  sectors;
+  UINT32  tag;
+  UINT8   lun;
   blkdev_t dev;
   char     name[8];
+
+  /* HID interrupt endpoint + boot-protocol report-decode state */
+  UINT8   hid_kind;   /* USB_HID_KEYBOARD / USB_HID_MOUSE */
+  trb_t  *hid_in;
+  UINT64  hid_in_phys;
+  UINT32  hid_in_idx;
+  UINT8   hid_in_cycle;
+  UINT8   hid_in_num;
+  UINT8   hid_in_dci;
+  UINT16  hid_in_mps;
+  UINT8  *hid_buf;     /* dedicated DMA staging buffer (not hc->data) */
+  UINT64  hid_buf_phys;
+  UINT8   hid_report[8];
+  UINT8   hid_prev[6];
+  UINT8   hid_prev_buttons;
+  UINT8   hid_pending; /* 1 while an interrupt transfer is outstanding */
+  UINT8   hid_caps;    /* caps-lock toggle */
 } usb_t;
 
 /* One registered USB disk may be a LUN on a multi-LUN device, or a device on a
@@ -127,12 +160,65 @@ typedef struct {
   char     name[8];
 } usb_disk_t;
 
+#define USB_KIND_NONE    0u
+#define USB_KIND_STORAGE 1u
+#define USB_KIND_HID     2u
+
+#define USB_HID_KEYBOARD 1u
+#define USB_HID_MOUSE    2u
+
 #define USB_MAX_CONTROLLERS 8u
+#define USB_MAX_DEVICES    16u
 #define USB_MAX_DISKS      16u
 
-static usb_t g_usb[USB_MAX_CONTROLLERS];
+static xhci_t g_hc[USB_MAX_CONTROLLERS];
+static usb_t  g_dev[USB_MAX_DEVICES];
+static UINTN  g_ndev;
 static usb_disk_t g_usb_disks_ctx[USB_MAX_DISKS];
 static UINTN g_usb_disks;
+
+/* Transfer events that arrived on an endpoint we were not actively waiting for
+ * (e.g. a HID report delivered while a disk read was draining the event ring)
+ * are parked here so the HID poll can pick them up instead of losing them. */
+#define USB_DEFER_MAX 8u
+typedef struct {
+  UINT8  dci;
+  UINT8  code;
+  UINT32 resid;
+  UINT8  valid;
+} usb_defer_t;
+static usb_defer_t g_defer[USB_DEFER_MAX];
+
+/* Park a transfer completion that arrived on an endpoint nobody is waiting on
+ * right now; usb_hid_poll reclaims it later keyed by its endpoint DCI. */
+static void usb_defer_push(UINT8 dci, UINT8 code, UINT32 resid) {
+  UINT32 k;
+
+  for (k = 0; k < USB_DEFER_MAX; k++) {
+    if (g_defer[k].valid == 0u) {
+      g_defer[k].dci = dci;
+      g_defer[k].code = code;
+      g_defer[k].resid = resid;
+      g_defer[k].valid = 1u;
+      return;
+    }
+  }
+}
+
+/* Reclaim a previously parked transfer for endpoint dci. */
+static int usb_defer_take(UINT8 dci, UINT8 *code_out, UINT32 *resid_out) {
+  UINT32 k;
+
+  for (k = 0; k < USB_DEFER_MAX; k++) {
+    if (g_defer[k].valid != 0u && g_defer[k].dci == dci) {
+      *code_out = g_defer[k].code;
+      *resid_out = g_defer[k].resid;
+      g_defer[k].valid = 0u;
+      return 1;
+    }
+  }
+  return 0;
+}
 
 static inline void mfence(void) { __asm__ volatile("mfence" ::: "memory"); }
 
@@ -174,21 +260,21 @@ static void ring_link(trb_t *ring, UINT64 phys, UINT8 cycle) {
 }
 
 static int event_pop(usb_t *u, trb_t *out) {
-  trb_t *t = &u->ev[u->ev_idx];
+  trb_t *t = &u->hc->ev[u->hc->ev_idx];
 
-  if ((t->p[3] & 1u) != (UINT32)u->ev_cycle) {
+  if ((t->p[3] & 1u) != (UINT32)u->hc->ev_cycle) {
     return 0;
   }
   *out = *t;
-  u->ev_idx++;
-  if (u->ev_idx >= USB_RING_TRBS) {
-    u->ev_idx = 0;
-    u->ev_cycle ^= 1u;
+  u->hc->ev_idx++;
+  if (u->hc->ev_idx >= USB_RING_TRBS) {
+    u->hc->ev_idx = 0;
+    u->hc->ev_cycle ^= 1u;
   }
-  uwr(u->rt, 0x20 + 0x18,
-      (UINT32)(u->ev_phys + (UINT64)u->ev_idx * 16u) | (1u << 3));
-  uwr(u->rt, 0x20 + 0x1C,
-      (UINT32)((u->ev_phys + (UINT64)u->ev_idx * 16u) >> 32));
+  uwr(u->hc->rt, 0x20 + 0x18,
+      (UINT32)(u->hc->ev_phys + (UINT64)u->hc->ev_idx * 16u) | (1u << 3));
+  uwr(u->hc->rt, 0x20 + 0x1C,
+      (UINT32)((u->hc->ev_phys + (UINT64)u->hc->ev_idx * 16u) >> 32));
   return 1;
 }
 
@@ -221,17 +307,17 @@ static int cmd_submit(usb_t *u, UINT32 type, UINT32 p0, UINT32 p1,
   trb_t *t;
   UINT32 control;
 
-  if (u->cmd_idx >= USB_RING_TRBS - 1u) {
-    ring_link(u->cmd, u->cmd_phys, u->cmd_cycle);
-    u->cmd_idx = 0;
-    u->cmd_cycle ^= 1u;
+  if (u->hc->cmd_idx >= USB_RING_TRBS - 1u) {
+    ring_link(u->hc->cmd, u->hc->cmd_phys, u->hc->cmd_cycle);
+    u->hc->cmd_idx = 0;
+    u->hc->cmd_cycle ^= 1u;
   }
-  t = &u->cmd[u->cmd_idx];
-  control = (type << 10) | (slot << 24) | (UINT32)u->cmd_cycle;
+  t = &u->hc->cmd[u->hc->cmd_idx];
+  control = (type << 10) | (slot << 24) | (UINT32)u->hc->cmd_cycle;
   trb_write(t, p0, p1, p2, control);
-  u->cmd_idx++;
+  u->hc->cmd_idx++;
   mfence();
-  u->db[0] = 0;
+  u->hc->db[0] = 0;
   return wait_cmd(u, slot_out);
 }
 
@@ -256,6 +342,11 @@ static int wait_transfer(usb_t *u, UINT8 ep, UINT32 *code_out) {
       UINT32 want = (ep == 0u) ? 1u : (UINT32)ep;
 
       if (epid != want) {
+        /* A transfer finished on an endpoint we are not waiting for (e.g. a
+         * HID report while a disk read is draining the ring). Park it so the
+         * HID poll can collect it instead of dropping the keystroke. */
+        usb_defer_push((UINT8)epid, (UINT8)((ev.p[2] >> 24) & 0xFFu),
+                       ev.p[2] & 0xFFFFFFu);
         continue;
       }
     }
@@ -301,10 +392,10 @@ static int control_xfer(usb_t *u, const UINT8 setup[8], UINT8 *buf,
   u->ep0_idx++;
 
   if (len != 0u) {
-    UINT64 addr = (dir_in != 0) ? u->data_phys : u->data_phys;
+    UINT64 addr = (dir_in != 0) ? u->hc->data_phys : u->hc->data_phys;
 
     if (dir_in == 0 && buf != NULL) {
-      memcpy(u->data, buf, len);
+      memcpy(u->hc->data, buf, len);
     }
     if (u->ep0_idx >= USB_RING_TRBS - 1u) {
       ring_link(u->ep0, u->ep0_phys, u->ep0_cycle);
@@ -327,7 +418,7 @@ static int control_xfer(usb_t *u, const UINT8 setup[8], UINT8 *buf,
             (dir_in ? 0u : (1u << 16)) | (UINT32)u->ep0_cycle);
   u->ep0_idx++;
   mfence();
-  u->db[u->slot] = 1; /* endpoint 1 is EP0 on this slot */
+  u->hc->db[u->slot] = 1; /* endpoint 1 is EP0 on this slot */
 
   {
     UINT32 code = 0;
@@ -343,7 +434,7 @@ static int control_xfer(usb_t *u, const UINT8 setup[8], UINT8 *buf,
     }
   }
   if (dir_in != 0 && buf != NULL && len != 0u) {
-    memcpy(buf, u->data, len);
+    memcpy(buf, u->hc->data, len);
   }
   return 0;
 }
@@ -371,7 +462,7 @@ static int bulk_send(usb_t *u, int in, UINT64 dma_phys, UINT32 len) {
                  (in ? (1u << 16) : 0u) | (UINT32)*cycle);
   (*idx)++;
   mfence();
-  u->db[u->slot] = ep;
+  u->hc->db[u->slot] = ep;
 
   {
     UINT32 code = 0;
@@ -394,6 +485,7 @@ static int bulk_send(usb_t *u, int in, UINT64 dma_phys, UINT32 len) {
 static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
   UINT32 i = 0;
   int ms_if = 0;
+  int hid_if = 0;
 
   while (i + 2u <= len) {
     UINT8 dlen = cfg[i];
@@ -403,16 +495,31 @@ static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
       break;
     }
     if (dtype == 4u && dlen >= 9u) {
-      /* Only a mass-storage (0x08) interface drives our BOT path. */
-      if (cfg[i + 5u] == 0x08u) {
+      UINT8 cls = cfg[i + 5u];
+
+      if (cls == 0x08u) {
         ms_if = 1;
+      } else if (cls == 0x03u) {
+        /* HID: remember the interface and its boot subclass. Boot-protocol
+         * keyboards/mice (subclass 1/2) use a fixed report layout, so we can
+         * skip the HID report descriptor entirely. */
+        u->iface = cfg[i + 2u];
+        if (cfg[i + 6u] == 0x01u) {
+          u->hid_kind = USB_HID_KEYBOARD;
+        } else if (cfg[i + 6u] == 0x02u) {
+          u->hid_kind = USB_HID_MOUSE;
+        } else {
+          u->hid_kind = 0u;
+        }
+        hid_if = 1;
       }
     } else if (dtype == 5u && dlen >= 7u) {
       UINT8 addr = cfg[i + 2u];
       UINT8 attr = cfg[i + 3u];
       UINT16 mps = (UINT16)(cfg[i + 4u] | (cfg[i + 5u] << 8));
+      UINT8 xfer = (UINT8)(attr & 0x3u);
 
-      if ((attr & 0x3u) == 0x2u) { /* bulk */
+      if (ms_if && xfer == 0x2u) { /* bulk, storage */
         if ((addr & 0x80u) != 0u) {
           u->ep_in_num = (UINT8)(addr & 0x0Fu);
           u->ep_in_mps = (UINT16)(mps & 0x7FFu);
@@ -420,28 +527,41 @@ static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
           u->ep_out_num = (UINT8)(addr & 0x0Fu);
           u->ep_out_mps = (UINT16)(mps & 0x7FFu);
         }
+      } else if (hid_if && xfer == 0x3u && (addr & 0x80u) != 0u) {
+        /* interrupt IN endpoint: the HID report source. */
+        u->hid_in_num = (UINT8)(addr & 0x0Fu);
+        u->hid_in_mps = (UINT16)(mps & 0x7FFu);
+        u->hid_in_dci = (UINT8)(u->hid_in_num * 2u + 1u);
       }
     }
     i += dlen;
   }
-  return (ms_if && u->ep_in_num != 0u && u->ep_out_num != 0u) ? 0 : -1;
+  if (ms_if && u->ep_in_num != 0u && u->ep_out_num != 0u) {
+    u->kind = USB_KIND_STORAGE;
+    return 0;
+  }
+  if (hid_if && u->hid_in_num != 0u && u->hid_kind != 0u) {
+    u->kind = USB_KIND_HID;
+    return 0;
+  }
+  return -1;
 }
 
 static int address_device(usb_t *u, UINT32 port, UINT32 speed) {
   /* Input Context: a fixed 32-byte control context, then the slot and
    * endpoint contexts at CSZ-sized strides. */
   UINT32 slot_off = 0x20u;
-  UINT32 ep_off = slot_off + u->ctx_size;
+  UINT32 ep_off = slot_off + u->hc->ctx_size;
   UINT32 ep0_mps = (speed == 4u) ? 512u : (speed == 1u ? 8u : 64u);
-  UINT32 *icc = (UINT32 *)u->in_ctx;
-  UINT32 *slot = (UINT32 *)(u->in_ctx + slot_off);
-  UINT32 *ep0 = (UINT32 *)(u->in_ctx + ep_off);
+  UINT32 *icc = (UINT32 *)u->hc->in_ctx;
+  UINT32 *slot = (UINT32 *)(u->hc->in_ctx + slot_off);
+  UINT32 *ep0 = (UINT32 *)(u->hc->in_ctx + ep_off);
   UINT32 slot_out = 0;
   int rc;
 
   u->port = port;
   u->speed = speed;
-  memset(u->in_ctx, 0, 4096);
+  memset(u->hc->in_ctx, 0, 4096);
   /* dword0 = drop flags, dword1 = add flags. The controller (and QEMU)
    * rejects the command unless this pair is exactly 0 / slot+EP0. */
   icc[0] = 0u;
@@ -453,8 +573,8 @@ static int address_device(usb_t *u, UINT32 port, UINT32 speed) {
   ep0[3] = (UINT32)(u->ep0_phys >> 32);
   ep0[4] = 8u;
 
-  rc = cmd_submit(u, TRB_ADDRESS_DEV, (UINT32)u->in_ctx_phys,
-                  (UINT32)(u->in_ctx_phys >> 32), 0, u->slot, &slot_out);
+  rc = cmd_submit(u, TRB_ADDRESS_DEV, (UINT32)u->hc->in_ctx_phys,
+                  (UINT32)(u->hc->in_ctx_phys >> 32), 0, u->slot, &slot_out);
   if (rc == 0 && slot_out != 0u) {
     u->slot = slot_out;
   }
@@ -463,17 +583,17 @@ static int address_device(usb_t *u, UINT32 port, UINT32 speed) {
 
 static int configure_endpoints(usb_t *u) {
   UINT32 slot_off = 0x20u;
-  UINT32 ep_off = slot_off + u->ctx_size;
-  UINT32 *icc = (UINT32 *)u->in_ctx;
-  UINT32 *slot = (UINT32 *)(u->in_ctx + slot_off);
+  UINT32 ep_off = slot_off + u->hc->ctx_size;
+  UINT32 *icc = (UINT32 *)u->hc->in_ctx;
+  UINT32 *slot = (UINT32 *)(u->hc->in_ctx + slot_off);
   /* Context index = DCI - 1: EP1 OUT is 1, EP1 IN is 2, EP2 OUT is 3... */
   UINT32 out_idx = (UINT32)u->ep_out_num * 2u - 1u;
   UINT32 in_idx = (UINT32)u->ep_in_num * 2u;
   UINT32 entries = (in_idx > out_idx) ? in_idx : out_idx;
-  UINT32 *ep_in = (UINT32 *)(u->in_ctx + ep_off + in_idx * u->ctx_size);
-  UINT32 *ep_out = (UINT32 *)(u->in_ctx + ep_off + out_idx * u->ctx_size);
+  UINT32 *ep_in = (UINT32 *)(u->hc->in_ctx + ep_off + in_idx * u->hc->ctx_size);
+  UINT32 *ep_out = (UINT32 *)(u->hc->in_ctx + ep_off + out_idx * u->hc->ctx_size);
 
-  memset(u->in_ctx, 0, 4096);
+  memset(u->hc->in_ctx, 0, 4096);
   icc[0] = 0u;
   /* Configure Endpoint adds the slot plus the new endpoints; EP0 is
    * already present and must not be in the add mask. */
@@ -491,8 +611,8 @@ static int configure_endpoints(usb_t *u) {
   u->ep_out_dci = (UINT8)(u->ep_out_num * 2u);
   u->ep_in_dci = (UINT8)(u->ep_in_num * 2u + 1u);
 
-  return cmd_submit(u, TRB_CONFIG_EP, (UINT32)u->in_ctx_phys,
-                    (UINT32)(u->in_ctx_phys >> 32), 0, u->slot, NULL);
+  return cmd_submit(u, TRB_CONFIG_EP, (UINT32)u->hc->in_ctx_phys,
+                    (UINT32)(u->hc->in_ctx_phys >> 32), 0, u->slot, NULL);
 }
 
 /* ------------------------------------------------------------------ */
@@ -501,8 +621,8 @@ static int configure_endpoints(usb_t *u) {
 
 static int bot_command(usb_t *u, const UINT8 *cb, UINT8 cb_len, int data_in,
                        UINT32 data_len, UINT8 *buf) {
-  UINT8 *cbw = u->aux;
-  UINT8 *csw = u->aux + 64;
+  UINT8 *cbw = u->hc->aux;
+  UINT8 *csw = u->hc->aux + 64;
   UINT32 i;
 
   memset(cbw, 0, 32);
@@ -521,27 +641,27 @@ static int bot_command(usb_t *u, const UINT8 *cb, UINT8 cb_len, int data_in,
 
   /* The command block wrapper and the data phase need separate buffers:
    * sharing one would overwrite the payload with the wrapper. */
-  if (bulk_send(u, 0, u->aux_phys, 31) != 0) {
+  if (bulk_send(u, 0, u->hc->aux_phys, 31) != 0) {
     return -1;
   }
   if (data_len != 0u) {
     if (data_in) {
-      if (bulk_send(u, 1, u->data_phys, data_len) != 0) {
+      if (bulk_send(u, 1, u->hc->data_phys, data_len) != 0) {
         return -1;
       }
-      if (buf != u->data) {
-        memcpy(buf, u->data, data_len);
+      if (buf != u->hc->data) {
+        memcpy(buf, u->hc->data, data_len);
       }
     } else {
-      if (buf != u->data) {
-        memcpy(u->data, buf, data_len);
+      if (buf != u->hc->data) {
+        memcpy(u->hc->data, buf, data_len);
       }
-      if (bulk_send(u, 0, u->data_phys, data_len) != 0) {
+      if (bulk_send(u, 0, u->hc->data_phys, data_len) != 0) {
         return -1;
       }
     }
   }
-  if (bulk_send(u, 1, u->aux_phys + 64u, 13) != 0) {
+  if (bulk_send(u, 1, u->hc->aux_phys + 64u, 13) != 0) {
     return -1;
   }
   if (csw[0] != 'U' || csw[1] != 'S' || csw[2] != 'B' || csw[3] != 'S' ||
@@ -573,10 +693,10 @@ static int usb_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
     cb[10] = (UINT8)(n >> 24); cb[11] = (UINT8)(n >> 16);
     cb[12] = (UINT8)(n >> 8);  cb[13] = (UINT8)n;
     u->lun = d->lun;
-    if (bot_command(u, cb, 16, 1, (UINT32)n * 512u, u->data) != 0) {
+    if (bot_command(u, cb, 16, 1, (UINT32)n * 512u, u->hc->data) != 0) {
       return -1;
     }
-    memcpy(out, u->data, (UINTN)n * 512u);
+    memcpy(out, u->hc->data, (UINTN)n * 512u);
     out += (UINTN)n * 512u;
     sector += n;
     count -= n;
@@ -597,7 +717,7 @@ static int usb_write(void *ctx, UINT64 sector, UINTN count, const void *buf) {
     UINT8 cb[16];
     UINT64 lba = sector;
 
-    memcpy(u->data, in, (UINTN)n * 512u);
+    memcpy(u->hc->data, in, (UINTN)n * 512u);
     memset(cb, 0, sizeof(cb));
     cb[0] = 0x8a; /* WRITE(16) */
     cb[2] = (UINT8)(lba >> 56); cb[3] = (UINT8)(lba >> 48);
@@ -607,7 +727,7 @@ static int usb_write(void *ctx, UINT64 sector, UINTN count, const void *buf) {
     cb[10] = (UINT8)(n >> 24); cb[11] = (UINT8)(n >> 16);
     cb[12] = (UINT8)(n >> 8);  cb[13] = (UINT8)n;
     u->lun = d->lun;
-    if (bot_command(u, cb, 16, 0, (UINT32)n * 512u, u->data) != 0) {
+    if (bot_command(u, cb, 16, 0, (UINT32)n * 512u, u->hc->data) != 0) {
       return -1;
     }
     in += (UINTN)n * 512u;
@@ -626,23 +746,23 @@ static int read_capacity(usb_t *u) {
   cb[0] = 0x9e; /* READ CAPACITY(16) */
   cb[1] = 0x10; /* service action */
   cb[13] = 32;  /* allocation length */
-  if (bot_command(u, cb, 16, 1, 32, u->data) == 0) {
-    last = ((UINT64)u->data[0] << 56) | ((UINT64)u->data[1] << 48) |
-           ((UINT64)u->data[2] << 40) | ((UINT64)u->data[3] << 32) |
-           ((UINT64)u->data[4] << 24) | ((UINT64)u->data[5] << 16) |
-           ((UINT64)u->data[6] << 8)  | (UINT64)u->data[7];
-    bs = ((UINT32)u->data[8] << 24) | ((UINT32)u->data[9] << 16) |
-         ((UINT32)u->data[10] << 8)  | (UINT32)u->data[11];
+  if (bot_command(u, cb, 16, 1, 32, u->hc->data) == 0) {
+    last = ((UINT64)u->hc->data[0] << 56) | ((UINT64)u->hc->data[1] << 48) |
+           ((UINT64)u->hc->data[2] << 40) | ((UINT64)u->hc->data[3] << 32) |
+           ((UINT64)u->hc->data[4] << 24) | ((UINT64)u->hc->data[5] << 16) |
+           ((UINT64)u->hc->data[6] << 8)  | (UINT64)u->hc->data[7];
+    bs = ((UINT32)u->hc->data[8] << 24) | ((UINT32)u->hc->data[9] << 16) |
+         ((UINT32)u->hc->data[10] << 8)  | (UINT32)u->hc->data[11];
   } else {
     memset(cb, 0, sizeof(cb));
     cb[0] = 0x25; /* READ CAPACITY(10) fallback for older devices */
-    if (bot_command(u, cb, 10, 1, 8, u->data) != 0) {
+    if (bot_command(u, cb, 10, 1, 8, u->hc->data) != 0) {
       return -1;
     }
-    last = ((UINT64)u->data[0] << 24) | ((UINT64)u->data[1] << 16) |
-           ((UINT64)u->data[2] << 8)  | (UINT64)u->data[3];
-    bs = ((UINT32)u->data[4] << 24) | ((UINT32)u->data[5] << 16) |
-         ((UINT32)u->data[6] << 8)  | (UINT32)u->data[7];
+    last = ((UINT64)u->hc->data[0] << 24) | ((UINT64)u->hc->data[1] << 16) |
+           ((UINT64)u->hc->data[2] << 8)  | (UINT64)u->hc->data[3];
+    bs = ((UINT32)u->hc->data[4] << 24) | ((UINT32)u->hc->data[5] << 16) |
+         ((UINT32)u->hc->data[6] << 8)  | (UINT32)u->hc->data[7];
   }
   if (bs == 0u || bs > 4096u) {
     return -1;
@@ -656,66 +776,311 @@ static int read_capacity(usb_t *u) {
 /* Controller bring-up                                                 */
 /* ------------------------------------------------------------------ */
 
-static int controller_start(usb_t *u) {
+static int controller_start(xhci_t *hc) {
   UINT32 i;
 
   /* Halt, reset, wait for the reset to finish. */
-  uwr(u->op, 0x00, 0);
-  for (i = 0; i < USB_TIMEOUT && (urd(u->op, 0x04) & 1u) == 0u; i++) { }
-  uwr(u->op, 0x00, 2u);
+  uwr(hc->op, 0x00, 0);
+  for (i = 0; i < USB_TIMEOUT && (urd(hc->op, 0x04) & 1u) == 0u; i++) { }
+  uwr(hc->op, 0x00, 2u);
   for (i = 0; i < USB_TIMEOUT; i++) {
-    if ((urd(u->op, 0x00) & 2u) == 0u) {
+    if ((urd(hc->op, 0x00) & 2u) == 0u) {
       break;
     }
   }
-  for (i = 0; i < USB_TIMEOUT && (urd(u->op, 0x04) & 1u) == 0u; i++) { }
+  for (i = 0; i < USB_TIMEOUT && (urd(hc->op, 0x04) & 1u) == 0u; i++) { }
 
-  uwr(u->op, 0x08, 1u);          /* 4 KiB page size */
-  uwr(u->op, 0x38, u->max_slots); /* CONFIG */
-  uwr(u->op, 0x30, (UINT32)u->dcbaa_phys);
-  uwr(u->op, 0x34, (UINT32)(u->dcbaa_phys >> 32));
-  uwr(u->op, 0x18, (UINT32)(u->cmd_phys | 1u));
-  uwr(u->op, 0x1C, (UINT32)(u->cmd_phys >> 32));
+  uwr(hc->op, 0x08, 1u);          /* 4 KiB page size */
+  uwr(hc->op, 0x38, hc->max_slots); /* CONFIG */
+  uwr(hc->op, 0x30, (UINT32)hc->dcbaa_phys);
+  uwr(hc->op, 0x34, (UINT32)(hc->dcbaa_phys >> 32));
+  uwr(hc->op, 0x18, (UINT32)(hc->cmd_phys | 1u));
+  uwr(hc->op, 0x1C, (UINT32)(hc->cmd_phys >> 32));
 
-  uwr(u->rt, 0x20 + 0x08, XHCI_EVT_RING); /* ERSTSZ */
-  uwr(u->rt, 0x20 + 0x10, (UINT32)u->erst_phys);
-  uwr(u->rt, 0x20 + 0x14, (UINT32)(u->erst_phys >> 32));
-  uwr(u->rt, 0x20 + 0x18, (UINT32)u->ev_phys);
-  uwr(u->rt, 0x20 + 0x1C, (UINT32)(u->ev_phys >> 32));
-  uwr(u->rt, 0x20 + 0x00, 2u);           /* IMAN: interrupt enable */
-  uwr(u->rt, 0x20 + 0x04, 0u);           /* IMOD */
+  uwr(hc->rt, 0x20 + 0x08, XHCI_EVT_RING); /* ERSTSZ */
+  uwr(hc->rt, 0x20 + 0x10, (UINT32)hc->erst_phys);
+  uwr(hc->rt, 0x20 + 0x14, (UINT32)(hc->erst_phys >> 32));
+  uwr(hc->rt, 0x20 + 0x18, (UINT32)hc->ev_phys);
+  uwr(hc->rt, 0x20 + 0x1C, (UINT32)(hc->ev_phys >> 32));
+  uwr(hc->rt, 0x20 + 0x00, 2u);           /* IMAN: interrupt enable */
+  uwr(hc->rt, 0x20 + 0x04, 0u);           /* IMOD */
 
-  uwr(u->op, 0x04, (1u << 3));            /* clear EINT */
-  uwr(u->op, 0x00, (1u << 2) | 1u);       /* INTE + RS */
+  uwr(hc->op, 0x04, (1u << 3));            /* clear EINT */
+  uwr(hc->op, 0x00, (1u << 2) | 1u);       /* INTE + RS */
 
   for (i = 0; i < USB_TIMEOUT; i++) {
-    if ((urd(u->op, 0x04) & 1u) == 0u) {
+    if ((urd(hc->op, 0x04) & 1u) == 0u) {
       break; /* HCH clear: running */
     }
   }
   return 0;
 }
 
-static int port_reset(usb_t *u, UINT32 port, UINT32 *speed_out) {
+static int port_reset(xhci_t *hc, UINT32 port, UINT32 *speed_out) {
   UINT32 off = 0x400u + (port - 1u) * 0x10u;
-  UINT32 sc = urd(u->op, off);
+  UINT32 sc = urd(hc->op, off);
   UINT32 i;
 
   if ((sc & 1u) == 0u) {
     return -1;
   }
-  uwr(u->op, off, (sc & ~0x00FE0000u) | (1u << 9) | (1u << 4));
+  uwr(hc->op, off, (sc & ~0x00FE0000u) | (1u << 9) | (1u << 4));
   for (i = 0; i < USB_TIMEOUT; i++) {
-    sc = urd(u->op, off);
+    sc = urd(hc->op, off);
     if ((sc & (1u << 21)) != 0u) {
       break;
     }
   }
-  sc = urd(u->op, off);
+  sc = urd(hc->op, off);
   *speed_out = (sc >> 10) & 0xFu;
   /* Clear every change bit, keep the port enabled. */
-  uwr(u->op, off, (sc & ~0x00FE0000u) | 0x00FE0000u);
+  uwr(hc->op, off, (sc & ~0x00FE0000u) | 0x00FE0000u);
   return ((sc & 1u) != 0u) ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* HID (keyboard / mouse) over the boot protocol                        */
+/* ------------------------------------------------------------------ */
+
+/* Unshifted and shifted ASCII for USB HID keyboard usages 0x04..0x38. */
+static const char g_hid_base[53] = {
+    'a','b','c','d','e','f','g','h','i','j','k','l','m',
+    'n','o','p','q','r','s','t','u','v','w','x','y','z',
+    '1','2','3','4','5','6','7','8','9','0',
+    0,   0,   0,   0,                 /* 0x28 Enter, 0x29 Esc, 0x2A Bksp, 0x2B Tab */
+    ' ','-','=','[',']','\\', 0, ';','\'','`',',','.','/'   /* 0x2C..0x38 */
+};
+static const char g_hid_shift[53] = {
+    'A','B','C','D','E','F','G','H','I','J','K','L','M',
+    'N','O','P','Q','R','S','T','U','V','W','X','Y','Z',
+    '!','@','#','$','%','^','&','*','(',')',
+    0,   0,   0,   0,
+    ' ','_','+','{','}','|', 0, ':','"','~','<','>','?'
+};
+
+/* Translate a HID key usage into an nd key (ASCII or ND_KEY_*), applying the
+ * shift state. Caps Lock is folded in by the caller. */
+static UINT32 hid_key(UINT8 usage, UINT8 mods, UINT8 caps) {
+  int shift = (mods & ND_MOD_SHIFT) ? 1 : 0;
+
+  switch (usage) {
+  case 0x28: return ND_KEY_ENTER;
+  case 0x29: return ND_KEY_ESC;
+  case 0x2A: return ND_KEY_BACK;
+  case 0x2B: return ND_KEY_TAB;
+  case 0x4A: return ND_KEY_HOME;
+  case 0x4C: return ND_KEY_DELETE;
+  case 0x4D: return ND_KEY_END;
+  case 0x50: return ND_KEY_LEFT;
+  case 0x51: return ND_KEY_RIGHT;
+  case 0x52: return ND_KEY_UP;
+  case 0x53: return ND_KEY_DOWN;
+  default: break;
+  }
+  if (usage >= 0x04u && usage <= 0x38u) {
+    UINT8 c = (UINT8)(shift ? g_hid_shift[usage - 0x04u]
+                            : g_hid_base[usage - 0x04u]);
+    if (c == 0u) {
+      return 0u;
+    }
+    if (caps != 0u && c >= 'a' && c <= 'z') {
+      c = (UINT8)(c - 'a' + 'A');
+    } else if (caps != 0u && c >= 'A' && c <= 'Z') {
+      c = (UINT8)(c - 'A' + 'a');
+    }
+    return (UINT32)c;
+  }
+  return 0u;
+}
+
+/* Set_Protocol = 0 selects the boot protocol, giving the fixed 8-byte keyboard
+ * / 3-to-4-byte mouse reports without parsing the HID report descriptor. */
+static int hid_set_protocol(usb_t *u) {
+  UINT8 setup[8];
+
+  memset(setup, 0, sizeof(setup));
+  setup[0] = 0x21; /* host-to-device, class, interface */
+  setup[1] = 0x0B; /* SET_PROTOCOL */
+  setup[2] = 0x00; /* 0 = boot protocol */
+  setup[4] = u->iface;
+  return control_xfer(u, setup, NULL, 0, 0);
+}
+
+/* Configure the HID interrupt IN endpoint context and reset its ring. */
+static int hid_configure(usb_t *u) {
+  UINT32 slot_off = 0x20u;
+  UINT32 ep_off = slot_off + u->hc->ctx_size;
+  UINT32 *icc = (UINT32 *)u->hc->in_ctx;
+  UINT32 *slot = (UINT32 *)(u->hc->in_ctx + slot_off);
+  UINT32 in_idx = (UINT32)u->hid_in_dci - 1u; /* context index = DCI - 1 */
+  UINT32 *ep = (UINT32 *)(u->hc->in_ctx + ep_off + in_idx * u->hc->ctx_size);
+
+  memset(u->hc->in_ctx, 0, 4096);
+  icc[0] = 0u;
+  icc[1] = 1u | (1u << (in_idx + 1u));
+  slot[0] = (u->speed << 20) | (1u << 27);
+  slot[1] = (u->port << 16);
+  ep[1] = (3u << 1) | (3u << 3) | ((UINT32)u->hid_in_mps << 16); /* intr IN */
+  ep[2] = (UINT32)(u->hid_in_phys | 1u);
+  ep[3] = (UINT32)(u->hid_in_phys >> 32);
+  ep[4] = 8u;
+  return cmd_submit(u, TRB_CONFIG_EP, (UINT32)u->hc->in_ctx_phys,
+                    (UINT32)(u->hc->in_ctx_phys >> 32), 0, u->slot, NULL);
+}
+
+/* Submit one interrupt IN transfer and leave it outstanding; the device
+ * answers when a key is pressed or the mouse moves. usb_hid_poll re-arms a
+ * fresh one after each completion. */
+static int hid_intr_submit(usb_t *u) {
+  trb_t *ring = u->hid_in;
+  UINT64 phys = u->hid_in_phys;
+  UINT32 *idx = &u->hid_in_idx;
+  UINT8 *cycle = &u->hid_in_cycle;
+  UINT64 addr = u->hid_buf_phys;
+  UINT16 len = (u->hid_kind == USB_HID_KEYBOARD) ? 8u : 4u;
+
+  if (*idx >= USB_RING_TRBS - 1u) {
+    ring_link(ring, phys, *cycle);
+    *idx = 0;
+    *cycle ^= 1u;
+  }
+  trb_write(&ring[*idx], (UINT32)addr, (UINT32)(addr >> 32), len,
+            (TRB_NORMAL << 10) | (1u << 5) | (1u << 16) | (UINT32)*cycle);
+  (*idx)++;
+  mfence();
+  u->hc->db[u->slot] = u->hid_in_dci;
+  u->hid_pending = 1u;
+  return 0;
+}
+
+static void hid_decode_keyboard(usb_t *u) {
+  UINT8 mods = 0;
+  int k;
+  int i;
+  const UINT8 *rep = u->hid_report;
+  int shift = ((rep[0] & 0x22u) != 0u); /* L/R Shift */
+  int ctrl  = ((rep[0] & 0x11u) != 0u); /* L/R Ctrl  */
+  int alt   = ((rep[0] & 0x44u) != 0u); /* L/R Alt   */
+  INT32 mx = 0;
+  INT32 my = 0;
+
+  if (shift) { mods |= ND_MOD_SHIFT; }
+  if (ctrl)  { mods |= ND_MOD_CTRL; }
+  if (alt)   { mods |= ND_MOD_ALT; }
+
+  nd_input_mouse(&mx, &my, NULL);
+  for (k = 2; k < 8; k++) {
+    UINT8 code = rep[k];
+
+    if (code == 0u) {
+      continue;
+    }
+    for (i = 0; i < 6; i++) {
+      if (u->hid_prev[i] == code) {
+        break; /* already down: no repeat */
+      }
+    }
+    if (i < 6) {
+      continue;
+    }
+    if (code == 0x39u) { /* Caps Lock: toggle on press */
+      u->hid_caps ^= 1u;
+    } else {
+      UINT32 key = hid_key(code, mods, u->hid_caps);
+
+      if (key != 0u) {
+        nd_event_t ev;
+
+        memset(&ev, 0, sizeof(ev));
+        ev.type = ND_EV_KEY;
+        ev.key = key;
+        ev.mods = mods;
+        ev.x = (INT16)mx;
+        ev.y = (INT16)my;
+        nd_input_push(&ev);
+      }
+    }
+  }
+  for (i = 0; i < 6; i++) {
+    u->hid_prev[i] = rep[2u + (UINT8)i];
+  }
+}
+
+static void hid_decode_mouse(usb_t *u) {
+  const UINT8 *rep = u->hid_report;
+  UINT8 buttons = (UINT8)(rep[0] & 0x07u);
+  INT32 dx = (INT32)(INT8)rep[1];
+  INT32 dy = (INT32)(INT8)rep[2];
+
+  /* Movement and button edges go through the shared feed path; a wheel
+   * delta (byte 3, present on wheel mice) is a separate wheel event. */
+  u->hid_prev_buttons = buttons;
+  nd_input_feed_mouse(dx, dy, buttons);
+  if (rep[1] == 0 && rep[2] == 0 && rep[3] != 0) {
+    nd_event_t ev;
+
+    memset(&ev, 0, sizeof(ev));
+    ev.type = ND_EV_WHEEL;
+    ev.dy = (INT16)(INT8)rep[3];
+    nd_input_push(&ev);
+  }
+}
+
+/* Called from the input tick. Collect a completed HID report (from the deferral
+ * buffer first, then the live event ring), decode it and re-arm the endpoint.
+ * This is non-blocking: a transfer with no data simply stays outstanding. */
+void usb_hid_poll(void) {
+  UINT32 d;
+
+  for (d = 0; d < g_ndev; d++) {
+    usb_t *u = &g_dev[d];
+    UINT8 code = 0;
+    UINT32 resid = 0;
+    int got = 0;
+
+    if (u->kind != USB_KIND_HID || u->slot == 0u) {
+      continue;
+    }
+    if (usb_defer_take(u->hid_in_dci, &code, &resid)) {
+      got = 1;
+    } else {
+      trb_t ev;
+
+      if (event_pop(u, &ev)) {
+        if (((ev.p[3] >> 10) & 0x3Fu) == TRB_TRANSFER) {
+          UINT32 epid = (ev.p[3] >> 16) & 0x1Fu;
+
+          if (epid == (UINT32)u->hid_in_dci) {
+            code = (UINT8)((ev.p[2] >> 24) & 0xFFu);
+            resid = ev.p[2] & 0xFFFFFFu;
+            got = 1;
+          } else {
+            usb_defer_push((UINT8)epid, (UINT8)((ev.p[2] >> 24) & 0xFFu),
+                           ev.p[2] & 0xFFFFFFu);
+          }
+        }
+      }
+    }
+    if (got) {
+      UINT16 len = (u->hid_kind == USB_HID_KEYBOARD) ? 8u : 4u;
+      UINT16 done = (UINT16)(len - (UINT16)(resid & 0xFFFFu));
+
+      if (code == USB_CC_SUCCESS || code == USB_CC_SHORT) {
+        if (done > 8u) { done = 8u; }
+        memset(u->hid_report, 0, sizeof(u->hid_report));
+        memcpy(u->hid_report, u->hid_buf, done);
+        if (u->hid_kind == USB_HID_KEYBOARD) {
+          hid_decode_keyboard(u);
+        } else {
+          hid_decode_mouse(u);
+        }
+      }
+      u->hid_pending = 0u;
+      hid_intr_submit(u); /* re-arm for the next report */
+    } else if (u->hid_pending == 0u) {
+      hid_intr_submit(u); /* initial arm / recovery */
+    }
+  }
 }
 
 static int attach_device(usb_t *u, UINT32 port, UINT32 speed) {
@@ -730,7 +1095,7 @@ static int attach_device(usb_t *u, UINT32 port, UINT32 speed) {
     return -1;
   }
   u->slot = slot_out;
-  u->dcbaa[slot_out] = u->dev_ctx_phys;
+  u->hc->dcbaa[slot_out] = u->dev_ctx_phys;
 
   ep_ring_reset(u->ep0, u->ep0_phys, &u->ep0_idx, &u->ep0_cycle);
   rc = address_device(u, port, speed);
@@ -762,8 +1127,8 @@ static int attach_device(usb_t *u, UINT32 port, UINT32 speed) {
     return -1;
   }
 
-  /* Select the configuration: the device will not answer its bulk
-   * endpoints while it is still in the Address state. */
+  /* Select the configuration: the device will not answer its endpoints while
+   * it is still in the Address state. */
   memset(setup, 0, sizeof(setup));
   setup[0] = 0x00;
   setup[1] = 0x09; /* SET_CONFIGURATION */
@@ -773,6 +1138,24 @@ static int attach_device(usb_t *u, UINT32 port, UINT32 speed) {
     return -1;
   }
 
+  if (u->kind == USB_KIND_HID) {
+    rc = hid_set_protocol(u);
+    if (rc != 0) {
+      return -1;
+    }
+    rc = hid_configure(u);
+    if (rc != 0) {
+      return -1;
+    }
+    rc = hid_intr_submit(u); /* arm the first interrupt IN transfer */
+    if (rc != 0) {
+      return -1;
+    }
+    kputs("[USB] HID device attached\n");
+    return 0;
+  }
+
+  /* Mass-storage: bring up the bulk endpoints. */
   ep_ring_reset(u->ep_in, u->ep_in_phys, &u->ep_in_idx, &u->ep_in_cycle);
   ep_ring_reset(u->ep_out, u->ep_out_phys, &u->ep_out_idx, &u->ep_out_cycle);
   rc = configure_endpoints(u);
@@ -831,166 +1214,187 @@ int usb_init(void) {
   int       ci = 0;
 
   n = pci_scan(devices, PCI_MAX_DEVICES);
-  for (i = 0; i < n; i++) {
-    usb_t *u;
-    UINT32 hcs1;
-    UINT32 hcc1;
+  g_ndev = 0;
+  g_usb_disks = 0;
+  memset(g_defer, 0, sizeof(g_defer));
 
-    if (g_usb_disks >= USB_MAX_DISKS) {
+  for (i = 0; i < n; i++) {
+    xhci_t *hc;
+    UINT32  hcs1;
+    UINT32  hcc1;
+    UINT64  bar;
+
+    if (ci >= (int)USB_MAX_CONTROLLERS) {
       break;
     }
     if (devices[i].class_code != 0x0Cu || devices[i].subclass != 0x03u ||
         devices[i].prog_if != 0x30u) {
       continue;
     }
-    if (ci >= (int)USB_MAX_CONTROLLERS) {
+    hc = &g_hc[ci];
+    ci++;
+    memset(hc, 0, sizeof(*hc));
+    bar = devices[i].bar[0];
+
+    /* A 64-bit BAR above 4 GiB is unreachable; give the controller a window
+     * the kernel can map instead. */
+    if (bar == 0u && devices[i].bar64[0] != 0u) {
+      bar = relocate_bar0(&devices[i]);
+      if (bar != 0u) {
+        kputs("[USB] BAR0 moved to ");
+        kputs_hex(bar);
+        kputs("\n");
+      }
+    }
+    if (bar == 0u) {
+      kputs("[USB] no reachable BAR0\n");
       continue;
     }
-    u = &g_usb[ci];
-    ci++;
-    memset(u, 0, sizeof(*u));
-    memset(u, 0, sizeof(*u));
-    {
-      UINT64 bar = devices[i].bar[0];
+    hc->cap = (volatile UINT32 *)(UINTN)bar;
 
-      /* A 64-bit BAR above 4 GiB is unreachable; give the controller a
-       * window the kernel can map instead. */
-      if (bar == 0u && devices[i].bar64[0] != 0u) {
-        bar = relocate_bar0(&devices[i]);
-        if (bar != 0u) {
-          kputs("[USB] BAR0 moved to ");
-          kputs_hex(bar);
-          kputs("\n");
-        }
-      }
-      if (bar == 0u) {
-        kputs("[USB] no reachable BAR0\n");
-        continue;
-      }
-      u->cap = (volatile UINT32 *)(UINTN)bar;
-    }
     pci_enable_device(&devices[i]);
+    hcs1 = urd(hc->cap, 0x04);
+    hcc1 = urd(hc->cap, 0x10);
+    hc->max_slots = hcs1 & 0xFFu;
+    hc->max_ports = (hcs1 >> 24) & 0xFFu;
+    hc->ctx_size = ((hcc1 >> 2) & 1u) ? 64u : 32u;
 
-    hcs1 = urd(u->cap, 0x04);
-    hcc1 = urd(u->cap, 0x10);
-    u->max_slots = hcs1 & 0xFFu;
-    u->max_ports = (hcs1 >> 24) & 0xFFu;
-    u->csz = (hcc1 >> 2) & 1u;
-    u->ctx_size = u->csz ? 64u : 32u;
+    hc->op = (volatile UINT32 *)((volatile UINT8 *)hc->cap + urd8(hc->cap, 0x00));
+    hc->db = (volatile UINT32 *)((volatile UINT8 *)hc->cap +
+                                (urd(hc->cap, 0x14) & ~3u));
+    hc->rt = (volatile UINT32 *)((volatile UINT8 *)hc->cap +
+                                (urd(hc->cap, 0x18) & ~3u));
 
-    u->op = (volatile UINT32 *)((volatile UINT8 *)u->cap + urd8(u->cap, 0x00));
-    u->db = (volatile UINT32 *)((volatile UINT8 *)u->cap +
-                                (urd(u->cap, 0x14) & ~3u));
-    u->rt = (volatile UINT32 *)((volatile UINT8 *)u->cap +
-                                (urd(u->cap, 0x18) & ~3u));
-
-    u->dcbaa = (UINT64 *)dma_contig(1, &u->dcbaa_phys);
-    u->cmd = (trb_t *)dma_contig(XHCI_CMD_RING, &u->cmd_phys);
-    u->ev = (trb_t *)dma_contig(XHCI_EVT_RING, &u->ev_phys);
-    u->erst = (UINT64 *)dma_contig(1, &u->erst_phys);
-    u->in_ctx = (UINT8 *)dma_contig(XHCI_IN_CTX, &u->in_ctx_phys);
-    u->dev_ctx = (UINT8 *)dma_contig(XHCI_DEV_CTX, &u->dev_ctx_phys);
-    u->ep0 = (trb_t *)dma_contig(XHCI_EP0_RING, &u->ep0_phys);
-    u->ep_in = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_in_phys);
-    u->ep_out = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_out_phys);
-    u->aux = (UINT8 *)dma_contig(XHCI_AUX, &u->aux_phys);
-    u->data = (UINT8 *)dma_contig(XHCI_DATA_PAGES, &u->data_phys);
-    if (u->dcbaa == NULL || u->cmd == NULL || u->ev == NULL ||
-        u->erst == NULL || u->in_ctx == NULL || u->dev_ctx == NULL ||
-        u->ep0 == NULL || u->ep_in == NULL || u->ep_out == NULL ||
-        u->aux == NULL || u->data == NULL) {
+    hc->dcbaa = (UINT64 *)dma_contig(1, &hc->dcbaa_phys);
+    hc->cmd = (trb_t *)dma_contig(XHCI_CMD_RING, &hc->cmd_phys);
+    hc->ev = (trb_t *)dma_contig(XHCI_EVT_RING, &hc->ev_phys);
+    hc->erst = (UINT64 *)dma_contig(1, &hc->erst_phys);
+    hc->in_ctx = (UINT8 *)dma_contig(XHCI_IN_CTX, &hc->in_ctx_phys);
+    hc->aux = (UINT8 *)dma_contig(XHCI_AUX, &hc->aux_phys);
+    hc->data = (UINT8 *)dma_contig(XHCI_DATA_PAGES, &hc->data_phys);
+    if (hc->dcbaa == NULL || hc->cmd == NULL || hc->ev == NULL ||
+        hc->erst == NULL || hc->in_ctx == NULL || hc->aux == NULL ||
+        hc->data == NULL) {
       kputs("[USB] no DMA memory for xHCI\n");
-      return 0;
+      continue;
     }
 
-    u->cmd_idx = 0;
-    u->cmd_cycle = 1u;
-    ring_link(u->cmd, u->cmd_phys, 1u);
-    u->ev_idx = 0;
-    u->ev_cycle = 1u;
-    u->erst[0] = u->ev_phys;
-    *(UINT32 *)((UINT8 *)u->erst + 8) = USB_RING_TRBS;
-    ep_ring_reset(u->ep0, u->ep0_phys, &u->ep0_idx, &u->ep0_cycle);
-    ep_ring_reset(u->ep_in, u->ep_in_phys, &u->ep_in_idx, &u->ep_in_cycle);
-    ep_ring_reset(u->ep_out, u->ep_out_phys, &u->ep_out_idx, &u->ep_out_cycle);
+    hc->cmd_idx = 0;
+    hc->cmd_cycle = 1u;
+    ring_link(hc->cmd, hc->cmd_phys, 1u);
+    hc->ev_idx = 0;
+    hc->ev_cycle = 1u;
+    hc->erst[0] = hc->ev_phys;
+    *(UINT32 *)((UINT8 *)hc->erst + 8) = USB_RING_TRBS;
 
-    controller_start(u);
+    controller_start(hc);
 
     {
       UINT32 port;
 
-      for (port = 1; port <= u->max_ports && port <= USB_MAX_PORTS; port++) {
+      for (port = 1; port <= hc->max_ports && port <= USB_MAX_PORTS; port++) {
         UINT32 speed = 0;
-        int max_lun;
-        int lun;
+        usb_t *u;
 
-        if (port_reset(u, port, &speed) != 0) {
+        if (g_ndev >= USB_MAX_DEVICES) {
+          break;
+        }
+        if (port_reset(hc, port, &speed) != 0) {
           continue;
         }
+        u = &g_dev[g_ndev];
+        memset(u, 0, sizeof(*u));
+        u->hc = hc;
+        u->dev_ctx = (UINT8 *)dma_contig(XHCI_DEV_CTX, &u->dev_ctx_phys);
+        u->ep0 = (trb_t *)dma_contig(XHCI_EP0_RING, &u->ep0_phys);
+        u->ep_in = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_in_phys);
+        u->ep_out = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_out_phys);
+        u->hid_in = (trb_t *)dma_contig(XHCI_BULK_RING, &u->hid_in_phys);
+        u->hid_buf = (UINT8 *)dma_contig(1, &u->hid_buf_phys);
+        if (u->dev_ctx == NULL || u->ep0 == NULL || u->ep_in == NULL ||
+            u->ep_out == NULL || u->hid_in == NULL || u->hid_buf == NULL) {
+          kputs("[USB] no DMA memory for device\n");
+          continue;
+        }
+        ep_ring_reset(u->ep0, u->ep0_phys, &u->ep0_idx, &u->ep0_cycle);
+
         if (attach_device(u, port, speed) != 0) {
           kputs("[USB] enumeration failed\n");
           continue;
         }
-        max_lun = usb_max_lun(u);
-        for (lun = 0; lun <= max_lun; lun++) {
-          usb_disk_t *d;
 
-          if (g_usb_disks >= USB_MAX_DISKS) {
-            break;
-          }
-          u->lun = (UINT8)lun;
-          if (read_capacity(u) != 0) {
-            continue;
-          }
-          d = &g_usb_disks_ctx[g_usb_disks];
-          memset(d, 0, sizeof(*d));
-          d->u = u;
-          d->lun = (UINT8)lun;
+        if (u->kind == USB_KIND_HID) {
+          kputs("[USB] HID device ready\n");
+          g_ndev++;
+          continue;
+        }
 
-          d->name[0] = 'u'; d->name[1] = 's'; d->name[2] = 'b';
-          d->name[3] = (char)('0' + (g_usb_disks / 10));
-          d->name[4] = (char)('0' + (g_usb_disks % 10));
-          d->name[5] = '\0';
+        /* Mass-storage: register one block device per LUN. */
+        {
+          int max_lun = usb_max_lun(u);
+          int lun;
 
-          d->dev.name = d->name;
-          d->dev.sector_count = u->sectors;
-          d->dev.block_size = (u->dev.block_size == 0u) ? 512u : u->dev.block_size;
-          d->dev.flags = BLKDEV_FLAG_REMOVABLE;
-          /* The medium the system was booted from must never be a target.
-           * The boot stage publishes the USB port it came from; the port
-           * number in the device path and the xHCI root hub port can differ
-           * by one, so both are accepted. When several USB volumes were
-           * present the running one could not be identified, and every USB
-           * disk is refused instead of guessing. */
-          {
-            shared_mem_t *shm = shared_mem_get();
+          for (lun = 0; lun <= max_lun; lun++) {
+            usb_disk_t *d;
 
-            if (shm != NULL &&
-                (shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB) != 0u) {
-              UINT32 raw = shm->boot_usb_port;
+            if (g_usb_disks >= USB_MAX_DISKS) {
+              break;
+            }
+            u->lun = (UINT8)lun;
+            if (read_capacity(u) != 0) {
+              continue;
+            }
+            d = &g_usb_disks_ctx[g_usb_disks];
+            memset(d, 0, sizeof(*d));
+            d->u = u;
+            d->lun = (UINT8)lun;
 
-              if ((shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB_AMBIGUOUS)
-                      != 0u ||
-                  (UINT32)port == raw || (UINT32)port == raw + 1u) {
-                d->dev.flags |= BLKDEV_FLAG_BOOT_ONLY;
-                kputs("[USB] disk ");
-                kputs(d->name);
-                kputs(" is the boot medium\n");
+            d->name[0] = 'u'; d->name[1] = 's'; d->name[2] = 'b';
+            d->name[3] = (char)('0' + (g_usb_disks / 10));
+            d->name[4] = (char)('0' + (g_usb_disks % 10));
+            d->name[5] = '\0';
+
+            d->dev.name = d->name;
+            d->dev.sector_count = u->sectors;
+            d->dev.block_size = (u->dev.block_size == 0u) ? 512u : u->dev.block_size;
+            d->dev.flags = BLKDEV_FLAG_REMOVABLE;
+            /* The medium the system was booted from must never be a target.
+             * The boot stage publishes the USB port it came from; the port
+             * number in the device path and the xHCI root hub port can differ
+             * by one, so both are accepted. When several USB volumes were
+             * present the running one could not be identified, and every USB
+             * disk is refused instead of guessing. */
+            {
+              shared_mem_t *shm = shared_mem_get();
+
+              if (shm != NULL &&
+                  (shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB) != 0u) {
+                UINT32 raw = shm->boot_usb_port;
+
+                if ((shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB_AMBIGUOUS)
+                        != 0u ||
+                    (UINT32)port == raw || (UINT32)port == raw + 1u) {
+                  d->dev.flags |= BLKDEV_FLAG_BOOT_ONLY;
+                  kputs("[USB] disk ");
+                  kputs(d->name);
+                  kputs(" is the boot medium\n");
+                }
               }
             }
-          }
-          d->dev.ctx = d;
-          d->dev.read = usb_read;
-          d->dev.write = usb_write;
-          if (blkdev_register(&d->dev) == 0) {
-            g_usb_disks++;
-            kputs("[USB] disk ");
-            kputs(d->name);
-            kputs(" capacity ");
-            kputs_hex(u->sectors);
-            kputs(" sectors\n");
+            d->dev.ctx = d;
+            d->dev.read = usb_read;
+            d->dev.write = usb_write;
+            if (blkdev_register(&d->dev) == 0) {
+              g_usb_disks++;
+              kputs("[USB] disk ");
+              kputs(d->name);
+              kputs(" capacity ");
+              kputs_hex(u->sectors);
+              kputs(" sectors\n");
+            }
           }
         }
+        g_ndev++;
       }
     }
   }
@@ -999,4 +1403,5 @@ int usb_init(void) {
 
 #if !CONFIG_NOVUS_PCI
 int usb_init(void) { return 0; }
+void usb_hid_poll(void) {}
 #endif

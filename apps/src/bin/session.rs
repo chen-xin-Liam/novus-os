@@ -122,7 +122,7 @@ pub extern "C" fn _start() -> ! {
                     }
                     draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
                 }
-                wm::Ev::Key(key) => {
+                wm::Ev::Key(key, _mods) => {
                     if key == KEY_ENTER {
                         focus = 1 - focus;
                     } else if key == KEY_BACK {

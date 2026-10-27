@@ -27,6 +27,7 @@ pub mod lang_dict;
 pub mod ui;
 pub mod wm;
 pub mod install;
+pub mod shell;
 
 use core::panic::PanicInfo;
 

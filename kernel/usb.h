@@ -17,4 +17,8 @@
  * registered. */
 int usb_init(void);
 
+/* Poll attached USB HID devices (keyboard/mouse) for new reports. Non-blocking:
+ * call it from the input tick. A no-op build provides an empty stub. */
+void usb_hid_poll(void);
+
 #endif /* NOVUS_USB_H */

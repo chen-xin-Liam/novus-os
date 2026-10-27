@@ -127,7 +127,7 @@ pub const MOUSE_UP: u8 = 3;
 
 pub enum Ev {
     Mouse(MouseEvent),
-    Key(u32),
+    Key(u32, u8),
     Focus(u32),
     Close,
     Other(u16),
@@ -342,7 +342,7 @@ impl Win {
                 EV_KEY => {
                     if let Some(e) = m.read::<KeyEvent>() {
                         if e.win == self.id {
-                            return Some(Ev::Key(e.key));
+                            return Some(Ev::Key(e.key, e.mods));
                         }
                     }
                 }

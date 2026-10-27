@@ -1162,6 +1162,13 @@ static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
     nd_line(s, cx + 5, cy + 2, cx, cy + h - 3, c);
     nd_fill_rect(s, nd_rect(cx - h, cy + h - 1, b, 2), c);
     break;
+  case NG_ICON_TERM:
+    /* A terminal window: rounded outline with a `>` prompt and a baseline. */
+    nd_round_rect(s, nd_rect(cx - h, cy - h + 1, b, b - 2), 3, c);
+    nd_line(s, cx - h + 3, cy - 1, cx - 1, cy + h - 5, c);
+    nd_line(s, cx - 1, cy + h - 5, cx + h - 5, cy - 1, c);
+    nd_hline(s, cx - h + 3, cx + h - 5, cy + h - 2, c);
+    break;
   case NG_ICON_CHECK:
     nd_line(s, cx - h + 2, cy, cx - 2, cy + h - 3, c);
     nd_line(s, cx - 2, cy + h - 3, cx + h - 1, cy - h + 2, c);

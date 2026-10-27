@@ -752,7 +752,7 @@ pub extern "C" fn _start() -> ! {
                         draw(&mut win, &mut st, accent);
                     }
                 }
-                wm::Ev::Key(k) => {
+                wm::Ev::Key(k, _mods) => {
                     let mut redraw = true;
 
                     match k {

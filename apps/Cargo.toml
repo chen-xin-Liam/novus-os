@@ -25,6 +25,10 @@ path = "src/bin/netman.rs"
 name = "session"
 path = "src/bin/session.rs"
 
+[[bin]]
+name = "nsh"
+path = "src/bin/nsh.rs"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

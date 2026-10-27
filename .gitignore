@@ -82,3 +82,11 @@ dkms.conf
 
 # debug information files
 *.dwo
+
+# u-boot
+*.u-
+*-e u-
+
+# 
+apps/target/
+target/
