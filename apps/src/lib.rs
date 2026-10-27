@@ -24,6 +24,7 @@ pub mod sys;
 pub mod theme;
 pub mod lang;
 pub mod lang_dict;
+pub mod unicode_data;
 pub mod ui;
 pub mod wm;
 pub mod install;

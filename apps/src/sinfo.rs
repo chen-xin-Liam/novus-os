@@ -473,8 +473,12 @@ pub fn spawn(port: u64, which: u8) -> Option<i32> {
 /// table gained the installer, so indices are no longer a stable ABI.
 pub fn spawn_name(port: u64, name: &str) -> Option<i32> {
     let mut p = [0u8; 16];
-    let n = name.len().min(p.len() - 1);
+    let bytes = name.as_bytes();
+    let mut n = bytes.len().min(p.len() - 1);
 
-    p[..n].copy_from_slice(&name.as_bytes()[..n]);
+    while n > 0 && n < bytes.len() && (bytes[n] & 0xC0) == 0x80 {
+        n -= 1;
+    }
+    p[..n].copy_from_slice(&bytes[..n]);
     query(port, REQ_SPAWN_NAME, &p, RSP_OK)?.read::<i32>()
 }

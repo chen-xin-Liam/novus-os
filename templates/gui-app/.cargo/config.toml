@@ -1,0 +1,12 @@
+[build]
+target = "x86_64-unknown-none"
+
+[target.x86_64-unknown-none]
+# link.ld 把 _start 固定在 0x400000：nuc_spawn_blob() 按这个地址映射镜像，
+# 代码里的绝对地址因此不需要重定位。
+rustflags = [
+    "-C", "link-arg=-Tlink.ld",
+    "-C", "link-arg=-nostdlib",
+    "-C", "relocation-model=static",
+    "-C", "panic=abort",
+]

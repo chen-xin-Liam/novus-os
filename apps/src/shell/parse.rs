@@ -107,6 +107,12 @@ fn finish_word(
     append_flag: &mut bool,
 ) {
     if *wlen > 0 {
+        /* The word buffer is capped in bytes; a multi-byte character may
+         * have been cut at the cap. Drop the partial tail so every argv
+         * entry is valid UTF-8. */
+        if let Err(e) = core::str::from_utf8(&w[..*wlen]) {
+            *wlen = e.valid_up_to();
+        }
         if *redir_mode == 0 {
             add_arg_with_glob(shell, &w[..*wlen], scratch, spos, offs, argc);
         } else {

@@ -7,8 +7,8 @@ use novus_apps::{ipc, sinfo, sys, ui, wm};
 
 const CW: i16 = 420;
 const CH: i16 = 252;
-const KEY_BACK: u32 = 0x10A;
-const KEY_ENTER: u32 = 0x109;
+const KEY_BACK: u32 = wm::KEY_BACK;
+const KEY_ENTER: u32 = wm::KEY_ENTER;
 
 fn as_str(bytes: &[u8], len: usize) -> &str {
     core::str::from_utf8(&bytes[..len]).unwrap_or("")
@@ -41,15 +41,25 @@ fn draw(w: &mut wm::Win, username: &[u8; 32], user_len: usize,
 }
 
 fn add_char(buf: &mut [u8], len: &mut usize, key: u32, cap: usize) {
-    if key >= 0x20 && key <= 0x7E && *len < cap {
-        buf[*len] = key as u8;
-        *len += 1;
+    if key < 0x20 || key > 0x10FFFF {
+        return;
+    }
+    let Some(ch) = core::char::from_u32(key) else { return };
+    let mut enc = [0u8; 4];
+    let s = ch.encode_utf8(&mut enc);
+
+    if *len + s.len() <= cap {
+        buf[*len..*len + s.len()].copy_from_slice(s.as_bytes());
+        *len += s.len();
     }
 }
 
 fn erase(buf: &mut [u8], len: &mut usize) {
     if *len > 0 {
         *len -= 1;
+        while *len > 0 && (buf[*len] & 0xC0) == 0x80 {
+            *len -= 1;
+        }
         buf[*len] = 0;
     }
 }

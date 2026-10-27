@@ -260,19 +260,25 @@ void nd_blit_alpha(nd_surface_t *dst, INT32 x, INT32 y,
 #define ND_FONT_ADV 6
 #define ND_FONT_LINE 9
 
-/* CJK text is a 16x16 bitmap font: one advance, one height, independent of
- * the ASCII scale. Mixed lines take the taller cell and share a baseline,
- * so a Chinese label next to a number sits on the same line. */
+/* Everything outside ASCII is a 16x16 (full width) or 8x16 (half width)
+ * bitmap from the generated Unicode table: one height, independent of the
+ * ASCII scale. Mixed lines take the taller cell and share a baseline, so a
+ * Chinese label next to a number sits on the same line. */
 #define ND_CJK_W 16
 #define ND_CJK_H 16
 #define ND_CJK_ADV 16
 
-/* Decode one UTF-8 codepoint and advance the cursor past it. Invalid bytes
- * decode as 0xFFFD and consume one byte, so a broken string still renders
- * something and cannot loop. */
+/* Decode one UTF-8 codepoint and advance the cursor past it. Overlong
+ * forms, surrogates and values above U+10FFFF decode as 0xFFFD and consume
+ * one byte, so a broken string still renders something and cannot loop. */
 UINT32 nd_utf8_next(const char **text);
 
-/* Advance of one codepoint at `scale` (ASCII scales, CJK does not). */
+/* Encode one codepoint into `out` (at least four bytes). Returns 1..4, or 0
+ * when `cp` is not a Unicode scalar value. */
+UINT32 nd_utf8_encode(UINT32 cp, char out[4]);
+
+/* Advance of one codepoint at `scale`: 0 for control and combining marks,
+ * 6 for printable ASCII, 8/16 for the rest of Unicode. */
 UINT32 nd_char_adv(UINT32 cp, UINT32 scale);
 
 UINT32 nd_text_width(const char *text, UINT32 scale);

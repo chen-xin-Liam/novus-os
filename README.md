@@ -401,6 +401,8 @@ novus-os/
 ├── wm/novus-wm/        # 窗口管理器+IPC
 ├── lib/                # 内核通用库（C/Rust混合）
 ├── tools/              # 主机端镜像工具（mkfat/mkiso/mkfsnovus/mkdisk/nkmgen）
+├── apps/               # 用户态内置应用（Rust no_std，编进内核镜像）
+├── templates/          # 开发模板：GUI 应用 / nsh 内建命令 / Nuomi 脚本
 ├── user/
 │   ├── shell/          # novus shell
 │   ├── cppcc/          # C++98编译器（Rust编写，主机端工具）

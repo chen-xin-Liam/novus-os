@@ -1,0 +1,36 @@
+; 最小示例：在 nsh 里运行 `nuomi hello.nuomi`
+; 字符串用 "..." 或 ❝...❞ 都可以，`;` 之后是注释。
+
+(println "hello, novus")
+
+; 递归函数
+(define (fact n)
+  (if (< n 2) 1 (* n (fact (- n 1)))))
+(println "fact(10) =" (fact 10))
+
+; 列表与高阶函数
+(define squares (map (lambda (x) (* x x)) (range 1 6)))
+(println "squares =" squares)
+(println "sum =" (reduce + 0 squares))
+
+; 向量可以原地修改：set 的第二个参数是下标
+(define v [10 20 30])
+(set v 0 99)
+(println "v =" v "len =" (length v))
+
+; 闭包：let 里的 n 被 lambda 捕获
+(define counter
+  (let ((n 0))
+    (lambda () (set! n (+ n 1)) n)))
+(println "counter:" (counter) (counter) (counter))
+
+; 循环：while 是特殊形式，body 可有任意多条
+(define i 0)
+(define total 0)
+(while (< i 5)
+  (set! total (+ total i))
+  (set! i (+ i 1)))
+(println "0+1+2+3+4 =" total)
+
+; println 按 C 版语义给字符串加引号；要原样输出用 draw（不自动换行）
+(draw "raw text, no quotes\n")

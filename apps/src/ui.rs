@@ -121,38 +121,34 @@ pub fn set_palette(dark: bool) {
 // Text helpers
 // ---------------------------------------------------------------------------
 
-/// Advance of one character, mirroring nd_char_adv(): ASCII is 6 px at the
-/// UI scale, a CJK glyph is a 16 px cell.
+/// Advance of one character, mirroring nd_char_adv(): printable ASCII is the
+/// 5x7 face at 6 px, everything else comes from the generated full-Unicode
+/// table (0 for combining marks, 8 half width, 16 full width).
 pub fn char_adv(c: char) -> i16 {
-    if (c as u32) < 0x80 { 6 } else { 16 }
+    crate::unicode_data::adv(c)
 }
 
-/// Painted width of `s`, matching nd_text_width(): the last cell has no
-/// inter-character gap.
+/// Painted width of `s`, matching nd_text_width().
 pub fn width(s: &str) -> i16 {
     let s = lang::tr(s);
     let mut w = 0;
-    let mut n = 0;
 
     for c in s.chars() {
         w += char_adv(c);
-        n += 1;
     }
-    if n == 0 { 0 } else { w - 1 }
+    w
 }
 
-/// Width at text scale 2 (used by `text_big`).
+/// Width at text scale 2 (used by `text_big`). Every cell scales, including
+/// the 16 px CJK/Unicode cells, because the renderer scales the bitmap.
 pub fn width_big(s: &str) -> i16 {
     let s = lang::tr(s);
     let mut w = 0;
-    let mut n = 0;
 
     for c in s.chars() {
-        let a = char_adv(c);
-        w += if (c as u32) < 0x80 { a * 2 } else { a };
-        n += 1;
+        w += char_adv(c) * 2;
     }
-    if n == 0 { 0 } else { w - 1 }
+    w
 }
 
 /// Longest prefix of `s` that fits in `max_px`, cut on a codepoint edge.
@@ -172,12 +168,14 @@ pub fn fit<'a>(s: &'a str, max_px: i16) -> &'a str {
     target
 }
 
-/// A fixed-width text line. The font is monospaced at 6 px per column, so
-/// padding with spaces is what aligns the columns - and one text run per
-/// row keeps a full list inside the window's display list.
+/// A fixed-width text line. A column is 6 px, the ASCII cell; wide glyphs
+/// occupy several columns, so padding is computed from the painted width
+/// instead of from the byte count. Only whole codepoints are ever appended,
+/// which keeps `str()` valid UTF-8.
 pub struct Buf {
     b: [u8; 96],
     n: usize,
+    w: i16,
 }
 
 impl Buf {
@@ -185,16 +183,25 @@ impl Buf {
         Buf {
             b: [0u8; 96],
             n: 0,
+            w: 0,
+        }
+    }
+
+    fn push_str(&mut self, s: &str) {
+        for c in s.chars() {
+            let mut enc = [0u8; 4];
+            for &byte in c.encode_utf8(&mut enc).as_bytes() {
+                if self.n < 95 {
+                    self.b[self.n] = byte;
+                    self.n += 1;
+                }
+            }
+            self.w += char_adv(c);
         }
     }
 
     pub fn s(&mut self, s: &str) -> &mut Buf {
-        for &c in s.as_bytes() {
-            if self.n < 95 {
-                self.b[self.n] = c;
-                self.n += 1;
-            }
-        }
+        self.push_str(s);
         self
     }
 
@@ -202,26 +209,22 @@ impl Buf {
         let mut tmp = [0u8; 12];
         let s = fmt_u32(v, &mut tmp);
 
-        for &c in s.as_bytes() {
-            if self.n < 95 {
-                self.b[self.n] = c;
-                self.n += 1;
-            }
-        }
+        self.push_str(s);
         self
     }
 
-    /// Pad with spaces up to column `c`.
+    /// Pad with spaces up to column `c` (a column is 6 px).
     pub fn col(&mut self, c: usize) -> &mut Buf {
-        while self.n < c && self.n < 95 {
+        while self.w < (c as i16) * 6 && self.n + 1 < 96 {
             self.b[self.n] = b' ';
             self.n += 1;
+            self.w += 6;
         }
         self
     }
 
     pub fn str(&self) -> &str {
-        unsafe { core::str::from_utf8_unchecked(&self.b[..self.n]) }
+        core::str::from_utf8(&self.b[..self.n]).unwrap_or("")
     }
 }
 

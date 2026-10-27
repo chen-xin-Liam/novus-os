@@ -18,7 +18,7 @@
 #include "heap.h"
 #include "nd.h"
 #include "nd_internal.h"
-#include "nd_font_cjk.h"
+#include "nd_font_uni.h"
 #include "nd_lang.h"
 
 #define ND_ALPHA_CHANNEL 0xFF000000u
@@ -590,27 +590,32 @@ static void draw_ascii(nd_surface_t *s, INT32 x, INT32 y, UINT8 ch,
   }
 }
 
-/* Draw one 16x16 CJK glyph, MSB leftmost, one fill per run, scaled the
- * same way as draw_ascii so Chinese and Latin stay proportional at 2x. */
-static void draw_cjk_bits(nd_surface_t *s, INT32 x, INT32 y,
-                          const UINT16 *rows, nd_color_t c, UINT32 scale) {
+/* Draw one Unicode glyph from the packed table: 16 rows of two bytes,
+ * MSB leftmost, one fill per run. `wide` is 8 or 16 and only limits how
+ * many columns are painted; the rows are always stored left-aligned. */
+static void draw_uni_bits(nd_surface_t *s, INT32 x, INT32 y,
+                          const UINT8 *rows, UINT32 wide, nd_color_t c,
+                          UINT32 scale) {
   UINT32 gy;
 
   if (scale == 0u) {
     scale = 1u;
   }
+  if (wide > ND_CJK_W) {
+    wide = ND_CJK_W;
+  }
   for (gy = 0; gy < ND_CJK_H; gy++) {
-    UINT16 bits = rows[gy];
+    UINT16 bits = (UINT16)(((UINT16)rows[gy * 2u] << 8) | rows[gy * 2u + 1u]);
     UINT32 gx = 0;
 
-    while (gx < ND_CJK_W) {
+    while (gx < wide) {
       UINT32 start;
 
-      while (gx < ND_CJK_W && (bits & (1u << (15u - gx))) == 0u) {
+      while (gx < wide && (bits & (UINT16)(1u << (15u - gx))) == 0u) {
         gx++;
       }
       start = gx;
-      while (gx < ND_CJK_W && (bits & (1u << (15u - gx))) != 0u) {
+      while (gx < wide && (bits & (UINT16)(1u << (15u - gx))) != 0u) {
         gx++;
       }
       if (gx > start) {
@@ -629,6 +634,7 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
   const char *p;
   INT32       cx = x;
   UINT32      cell;
+  UINT32      prev_adv = 0;
 
   text = nd_lang_tr(text);
   if (text == 0 || s->px == 0) {
@@ -637,7 +643,7 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
   if (scale == 0u) {
     scale = 1u;
   }
-  /* One cell height for the whole line, so ASCII glyphs and CJK glyphs
+  /* One cell height for the whole line, so ASCII glyphs and Unicode glyphs
    * share a bottom edge even though their ink boxes differ. */
   cell = nd_text_height(text, scale);
 
@@ -645,28 +651,44 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
   while (*p != '\0') {
     UINT32 cp = nd_utf8_next(&p);
     UINT32 adv = nd_char_adv(cp, scale);
+    INT32  gx = cx;
 
     if (max_px != 0u && (UINT32)(cx - x) + adv > max_px + 1u) {
       break; /* clip at a character boundary, never mid-glyph */
     }
+    if (cp < 0x20u) {
+      continue; /* control codes carry no shape and no advance */
+    }
     if (cp < 0x80u) {
-      draw_ascii(s, cx, y + (INT32)(cell - ND_GLYPH_H * scale), (UINT8)cp, c,
+      draw_ascii(s, gx, y + (INT32)(cell - ND_GLYPH_H * scale), (UINT8)cp, c,
                  scale);
     } else {
-      const UINT16 *rows = nd_cjk_find(cp);
+      UINT32       wide = 8u;
+      const UINT8 *rows;
 
+      /* Combining marks advance by zero and stack on the previous glyph,
+       * which is how Unifont's 8x16/16x16 combining cells are designed. */
+      if (adv == 0u && prev_adv != 0u) {
+        gx = cx - (INT32)prev_adv;
+      }
+      rows = nd_glyph_find(cp, &wide);
       if (rows == 0) {
+        UINT32 w = (adv != 0u) ? adv : wide * scale;
+
         /* Missing glyph: a hollow box keeps the layout honest and makes
          * the gap in the glyph set obvious instead of invisible. */
-        nd_frame(s, nd_rect(cx + (INT32)scale,
+        nd_frame(s, nd_rect(gx + (INT32)scale,
                             y + (INT32)(cell - ND_CJK_H * scale) + (INT32)scale,
-                            ND_CJK_W * scale - 2u * scale,
+                            w - 2u * scale,
                             ND_CJK_H * scale - 2u * scale),
                  1, c);
       } else {
-        draw_cjk_bits(s, cx, y + (INT32)(cell - ND_CJK_H * scale), rows, c,
-                      scale);
+        draw_uni_bits(s, gx, y + (INT32)(cell - ND_CJK_H * scale), rows, wide,
+                      c, scale);
       }
+    }
+    if (adv != 0u) {
+      prev_adv = adv;
     }
     cx += (INT32)adv;
   }

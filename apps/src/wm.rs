@@ -125,6 +125,21 @@ struct KeyEvent {
 pub const MOUSE_DOWN: u8 = 2;
 pub const MOUSE_UP: u8 = 3;
 
+// Key values that are not text. Text keys carry their Unicode codepoint, so
+// these live above U+10FFFF and can never collide with a character.
+pub const KEY_BASE: u32 = 0x11_0000;
+pub const KEY_ESC: u32 = KEY_BASE;
+pub const KEY_UP: u32 = KEY_BASE + 1;
+pub const KEY_DOWN: u32 = KEY_BASE + 2;
+pub const KEY_LEFT: u32 = KEY_BASE + 3;
+pub const KEY_RIGHT: u32 = KEY_BASE + 4;
+pub const KEY_DELETE: u32 = KEY_BASE + 5;
+pub const KEY_HOME: u32 = KEY_BASE + 6;
+pub const KEY_END: u32 = KEY_BASE + 7;
+pub const KEY_TAB: u32 = KEY_BASE + 8;
+pub const KEY_ENTER: u32 = KEY_BASE + 9;
+pub const KEY_BACK: u32 = KEY_BASE + 10;
+
 pub enum Ev {
     Mouse(MouseEvent),
     Key(u32, u8),
@@ -154,11 +169,24 @@ fn send(port: u64, ty: u16, flags: u16, payload: &[u8]) {
     }
 }
 
+/// Longest prefix of `s` that fits in `max` bytes without splitting a
+/// codepoint. Every buffer the protocol fills goes through this, so a
+/// Chinese title or text run can never end in U+FFFD.
+fn fit_bytes(s: &str, max: usize) -> &[u8] {
+    let bytes = s.as_bytes();
+    let mut n = bytes.len().min(max);
+
+    while n > 0 && n < bytes.len() && (bytes[n] & 0xC0) == 0x80 {
+        n -= 1;
+    }
+    &bytes[..n]
+}
+
 fn copy_title(title: &str) -> [u8; TITLE_MAX] {
     let mut out = [0u8; TITLE_MAX];
-    let n = title.len().min(TITLE_MAX - 1);
+    let src = fit_bytes(title, TITLE_MAX - 1);
 
-    out[..n].copy_from_slice(&title.as_bytes()[..n]);
+    out[..src.len()].copy_from_slice(src);
     out
 }
 
@@ -269,9 +297,10 @@ impl Win {
             color,
             text: [0u8; TEXT_MAX],
         };
-        let n = s.len().min(TEXT_MAX - 1);
+        let src = fit_bytes(s, TEXT_MAX - 1);
+        let n = src.len();
 
-        t.text[..n].copy_from_slice(&s.as_bytes()[..n]);
+        t.text[..n].copy_from_slice(src);
         t.len = n as u8;
         self.texts = self.texts.saturating_add(1);
         if self.texts == MAX_TEXTS + 1 {

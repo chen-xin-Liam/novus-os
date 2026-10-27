@@ -38,9 +38,19 @@ void nd_ime_init(void);
  * `edit` must be the focused text box. */
 int nd_ime_key(void *edit, UINT32 key);
 
+/* Same state machine without a widget: used by the window manager, which
+ * forwards the committed codepoint to the focused client as a key event.
+ * Returns 1 when consumed; *commit is 0 unless this key completed a
+ * composition. */
+int nd_ime_key_ex(UINT32 key, UINT32 *commit);
+
 /* Draw the candidate window if composing. Called by ng_render() so it is
  * composited above everything else in the damage area. */
 void nd_ime_draw(nd_surface_t *s);
+
+/* Draw the candidate window at a caller-chosen position (top-left of the
+ * popup). The WM uses this for client windows, which have no widget caret. */
+void nd_ime_draw_at(nd_surface_t *s, INT32 x, INT32 y);
 
 /* True while composing, and the area the popup occupied last time (for
  * damage bookkeeping). */

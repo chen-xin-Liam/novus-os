@@ -11,6 +11,15 @@
 
 use novus_apps::{fs, ipc, sinfo, sys, ui, wm};
 
+/// Longest prefix that fits without splitting a codepoint.
+fn fit_utf8(b: &[u8], max: usize) -> usize {
+    let mut n = b.len().min(max);
+    while n > 0 && n < b.len() && (b[n] & 0xC0) == 0x80 {
+        n -= 1;
+    }
+    n
+}
+
 const CW: i16 = 560;
 const CH: i16 = 322;
 const ROW_CAP: usize = 24; /* entries kept per view */
@@ -39,10 +48,10 @@ const OPEN_X: i16 = 486;
 const OPEN_W: i16 = 66;
 const HIST: usize = 8;
 
-const KEY_UP: u32 = 0x101;
-const KEY_DOWN: u32 = 0x102;
-const KEY_ENTER: u32 = 0x109;
-const KEY_BACK: u32 = 0x10A;
+const KEY_UP: u32 = wm::KEY_UP;
+const KEY_DOWN: u32 = wm::KEY_DOWN;
+const KEY_ENTER: u32 = wm::KEY_ENTER;
+const KEY_BACK: u32 = wm::KEY_BACK;
 
 #[derive(Clone, Copy)]
 struct Row {
@@ -175,7 +184,7 @@ impl State {
                     size: 0,
                     kind: if entry.mode == fs::MODE_DIR { 2 } else { 1 },
                 };
-                let len = name.len().min(row.name.len() - 1);
+                let len = fit_utf8(name.as_bytes(), row.name.len() - 1);
 
                 row.name[..len].copy_from_slice(&name.as_bytes()[..len]);
                 if row.kind != 2 {
@@ -209,7 +218,7 @@ impl State {
             p[len] = b'/';
             len += 1;
         }
-        let n = name.len().min(p.len() - 1 - len);
+        let n = fit_utf8(name.as_bytes(), p.len() - 1 - len);
 
         p[len..len + n].copy_from_slice(&name.as_bytes()[..n]);
         let Some(full) = core::str::from_utf8(&p[..len + n]).ok() else {

@@ -66,11 +66,22 @@ static UINT32 dir_count(UINT8 dir) {
   }
 }
 
+/* Copy at most cap-1 bytes, backing off to a codepoint boundary so a UTF-8
+ * task or application name never reaches user space half a character. */
 static void copy_str(char *dst, UINT32 cap, const char *src) {
-  UINT32 i;
+  UINT32 i = 0;
 
-  for (i = 0; i + 1u < cap && src[i] != '\0'; i++) {
+  if (cap == 0u) {
+    return;
+  }
+  while (i + 1u < cap && src[i] != '\0') {
     dst[i] = src[i];
+    i++;
+  }
+  if (src[i] != '\0') {
+    while (i > 0u && ((UINT8)src[i] & 0xC0u) == 0x80u) {
+      i--;
+    }
   }
   dst[i] = '\0';
 }

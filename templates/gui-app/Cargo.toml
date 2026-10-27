@@ -1,0 +1,20 @@
+[package]
+name = "hello-app"
+version = "0.1.0"
+edition = "2021"
+
+# 用户态运行时：syscall、IPC、Novus-WM 客户端、Fluent 控件库。
+# 模板放在仓库内，因此直接用相对路径依赖 apps/；复制到别处时改成实际路径。
+[dependencies]
+novus-apps = { path = "../../apps" }
+
+[[bin]]
+name = "hello-app"
+path = "src/main.rs"
+
+[profile.release]
+panic = "abort"
+opt-level = "s"
+lto = true
+codegen-units = 1
+strip = true

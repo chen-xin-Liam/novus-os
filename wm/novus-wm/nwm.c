@@ -25,6 +25,7 @@
 #include "nd_theme.h"
 #include "nd_wallpaper.h"
 #include "nd_input.h"
+#include "nd_ime.h"
 #include "nvgui.h"
 #include "nwm.h"
 #include "nwm_proto.h"
@@ -89,6 +90,10 @@ static UINT32    g_dropped;
 static UINT32    g_liveness_tick;
 static UINT32    g_next_stats;
 static UINT32    g_full_log;
+/* Client-window IME mode: 0 passes keys straight through (English), 1
+ * composes pinyin and forwards the committed codepoint. Ctrl+Space toggles
+ * it; the shell's own text boxes keep their independent mode. */
+static int       g_ime_client;
 
 /* ---- small helpers ---------------------------------------------------- */
 
@@ -131,6 +136,16 @@ static nwm_window_t *win_get(UINT32 id) {
 static nd_rect_t client_rect(const nwm_window_t *w) {
   return nd_rect(w->rect.x + 1, w->rect.y + NWM_TITLE_H, w->rect.w - 2,
                  w->rect.h - NWM_TITLE_H - 1);
+}
+
+/* Shrink a byte count until it ends on a UTF-8 codepoint boundary. Titles
+ * and display-list text are byte strings with a fixed cap; cutting one in
+ * the middle of a Chinese character would render U+FFFD. */
+static UINT32 utf8_prefix_len(const char *s, UINT32 n) {
+  while (n > 0u && ((UINT8)s[n] & 0xC0u) == 0x80u) {
+    n--;
+  }
+  return n;
 }
 
 static void z_take_out(int idx) {
@@ -474,6 +489,14 @@ static void paint(nd_rect_t clip) {
   for (i = 0; i < g_zcount; i++) {
     paint_window(&g_wins[g_z[i]], clip);
   }
+  /* Pinyin candidates for a client window sit inside that window, above
+   * its content but below the shell's overlay layer. */
+  if (g_ime_client != 0 && g_focus >= 0 && g_wins[g_focus].used &&
+      nd_ime_active()) {
+    nd_rect_t c = client_rect(&g_wins[g_focus]);
+
+    nd_ime_draw_at(dst, c.x + 12, c.y + c.h - 64);
+  }
   /* The shell's overlay layer (start menu, IME popup) goes above the
    * client windows, the way a start menu does on a real desktop. */
   ng_render_overlay(clip);
@@ -534,6 +557,7 @@ static void req_create(const ipc_msg_t *m) {
   for (i = 0; i + 1u < NWM_TITLE_MAX && c.title[i] != '\0'; i++) {
     w->title[i] = c.title[i];
   }
+  i = utf8_prefix_len(c.title, i);
   w->title[i] = '\0';
   z_raise((int)(w - g_wins));
   /* A new window takes focus: the client asked to be seen, and the shell
@@ -852,7 +876,7 @@ static void req_text(const ipc_msg_t *m) {
    * and terminate the copy so a client cannot run off the array. */
   len = t.len;
   if (len >= NWM_TEXT_MAX) {
-    len = NWM_TEXT_MAX - 1u;
+    len = utf8_prefix_len(t.text, NWM_TEXT_MAX - 1u);
   }
   t.text[len] = '\0';
   t.len = (UINT8)len;
@@ -918,6 +942,7 @@ static void req_title(const ipc_msg_t *m) {
   }
   memset(w->title, 0, sizeof(w->title));
   memcpy(w->title, t.title, NWM_TITLE_MAX - 1u);
+  w->title[utf8_prefix_len(t.title, NWM_TITLE_MAX - 1u)] = '\0';
   damage_frame(nd_rect(w->rect.x, w->rect.y, w->rect.w, NWM_TITLE_H));
   ack(m, w->id, NWM_OK);
 }
@@ -1168,7 +1193,30 @@ static void route(const nd_event_t *ev) {
 
   case ND_EV_KEY:
     if (g_focus >= 0 && g_wins[g_focus].used && g_wins[g_focus].state != 1u) {
-      deliver_key(&g_wins[g_focus], ev);
+      nwm_window_t *w = &g_wins[g_focus];
+
+      /* Ctrl+Space switches client input between English and pinyin. */
+      if (ev->key == ' ' && (ev->mods & ND_MOD_CTRL) != 0u) {
+        g_ime_client = (g_ime_client == 0) ? 1 : 0;
+        nd_ime_set_en(!g_ime_client);
+        damage(w->rect);
+        break;
+      }
+      if (g_ime_client != 0) {
+        UINT32 cp = 0;
+
+        if (nd_ime_key_ex(ev->key, &cp)) {
+          if (cp != 0u) {
+            nd_event_t out = *ev;
+
+            out.key = cp;
+            deliver_key(w, &out);
+          }
+          damage(w->rect); /* candidate popup lives inside the client */
+          break;
+        }
+      }
+      deliver_key(w, ev);
     } else {
       nd_demo_dispatch(ev);
     }

@@ -159,9 +159,10 @@ UINT32 vfs_lookup_path(vfs_fs_t *fs, const char *path) {
     UINTN n = 0;
 
     while (*p != '\0' && *p != '/') {
-      if (n < VFS_NAME_MAX) {
-        comp[n++] = *p;
+      if (n >= VFS_NAME_MAX) {
+        return 0; /* over-long component: not a name this VFS can hold */
       }
+      comp[n++] = *p;
       p++;
     }
     comp[n] = '\0';
@@ -199,7 +200,7 @@ int vfs_write_file(vfs_fs_t *fs, const char *path, const void *buf,
   UINT32 ino;
   UINT32 parent;
   char  *leaf;
-  char   copy[VFS_NAME_MAX + 2u];
+  char   copy[VFS_PATH_MAX];
   UINTN  n = 0;
   INT64  w;
 
@@ -298,7 +299,7 @@ static void vfs_emp_count(void *arg, UINT32 ino, const char *name) {
 }
 
 int vfs_unlink_path(vfs_fs_t *fs, const char *path) {
-  char          copy[VFS_NAME_MAX + 4u];
+  char          copy[VFS_PATH_MAX];
   UINT32        parent = 0;
   char         *leaf = NULL;
   UINT32        ino;
@@ -310,7 +311,10 @@ int vfs_unlink_path(vfs_fs_t *fs, const char *path) {
   if (fs == NULL || path == NULL) {
     return -1;
   }
-  while (path[n] != '\0' && n < sizeof(copy) - 1u) {
+  while (path[n] != '\0') {
+    if (n + 1u >= sizeof(copy)) {
+      return -1; /* path too long: refuse instead of deleting a prefix */
+    }
     copy[n] = path[n];
     n++;
   }
@@ -338,8 +342,8 @@ int vfs_unlink_path(vfs_fs_t *fs, const char *path) {
 }
 
 int vfs_rename_path(vfs_fs_t *fs, const char *old_path, const char *new_path) {
-  char   oc[VFS_NAME_MAX + 4u];
-  char   nc[VFS_NAME_MAX + 4u];
+  char   oc[VFS_PATH_MAX];
+  char   nc[VFS_PATH_MAX];
   UINT32 oparent = 0;
   UINT32 nparent = 0;
   char  *oleaf = NULL;
@@ -352,13 +356,19 @@ int vfs_rename_path(vfs_fs_t *fs, const char *old_path, const char *new_path) {
   if (fs->rename == NULL) {
     return -1; /* back end does not support rename */
   }
-  while (old_path[n] != '\0' && n < sizeof(oc) - 1u) {
+  while (old_path[n] != '\0') {
+    if (n + 1u >= sizeof(oc)) {
+      return -1;
+    }
     oc[n] = old_path[n];
     n++;
   }
   oc[n] = '\0';
   n = 0;
-  while (new_path[n] != '\0' && n < sizeof(nc) - 1u) {
+  while (new_path[n] != '\0') {
+    if (n + 1u >= sizeof(nc)) {
+      return -1;
+    }
     nc[n] = new_path[n];
     n++;
   }

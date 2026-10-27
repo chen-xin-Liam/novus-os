@@ -1,0 +1,25 @@
+; 文件与目录：路径语义和 nsh 内置命令一致（单根 /，cwd 是 nsh 的 cwd）。
+; 下面统一用绝对路径，避免依赖从哪个目录启动脚本。
+
+(define dir "/nuomi-demo")
+(define file (str dir "/notes.txt"))
+
+(println "mkdir" (mkdir dir))
+(println "is-dir?" (is-dir? dir))
+
+(println "write" (write-file file "first line\nsecond line\n"))
+(println "read:" (read-file file))
+(println "size" (file-size file) "bytes")
+
+(println "append" (append-file file "third line\n"))
+(println "entries" (length (ls dir)))
+
+; 复制、改名、删除
+(define copy (str dir "/copy.txt"))
+(println "cp" (cp file copy))
+(println "mv" (mv copy (str dir "/renamed.txt")))
+(println "ls" (ls dir))
+
+(println "delete" (delete file) (delete (str dir "/renamed.txt")))
+(println "rmdir" (rmdir dir))
+(println "gone?" (exists? dir))

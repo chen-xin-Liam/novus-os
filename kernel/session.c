@@ -161,14 +161,16 @@ static int write_record(void) {
   return vfs_write_file(fs, "/users.db", &g_record, sizeof(g_record));
 }
 
+/* A user name is any printable UTF-8 text that is not a path component
+ * separator. The old ASCII-only rule made a Chinese or accented name
+ * impossible even though the whole UI can render it. */
 static int username_valid(const session_req_t *req) {
   UINTN i;
   if (req->name_len == 0 || req->name_len > SESSION_NAME_MAX ||
       req->username[req->name_len] != '\0') return 0;
   for (i = 0; i < req->name_len; i++) {
-    char c = req->username[i];
-    if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-          (c >= '0' && c <= '9') || c == '_' || c == '-')) return 0;
+    UINT8 c = (UINT8)req->username[i];
+    if (c < 0x20u || c == 0x7Fu || c == '/') return 0;
   }
   return 1;
 }

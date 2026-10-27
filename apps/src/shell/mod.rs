@@ -113,6 +113,7 @@ pub struct Shell {
     aliases: [Alias; 16],
     acount: usize,
     hist: [[u8; 128]; HIST_MAX],
+    hist_len: [usize; HIST_MAX],
     hcount: usize,
     sdepth: usize,
 }
@@ -140,6 +141,7 @@ impl Shell {
             }; 16],
             acount: 0,
             hist: [[0u8; 128]; HIST_MAX],
+            hist_len: [0usize; HIST_MAX],
             hcount: 0,
             sdepth: 0,
         };
@@ -160,33 +162,19 @@ impl Shell {
         // Update an existing variable when present.
         for v in self.vars.iter_mut().take(self.vcount) {
             if v.nlen == name.len() && &v.name[..v.nlen] == name {
-                v.vlen = 0;
-                for &b in val.iter().take(64) {
-                    if v.vlen < 64 {
-                        v.val[v.vlen] = b;
-                        v.vlen += 1;
-                    }
-                }
+                let n = fit_bytes(val, 64);
+                v.val[..n].copy_from_slice(&val[..n]);
+                v.vlen = n;
                 return;
             }
         }
         if self.vcount < VAR_MAX {
             let i = self.vcount;
-            let mut n = 0;
-            for &b in name.iter().take(16) {
-                if n < 16 {
-                    self.vars[i].name[n] = b;
-                    n += 1;
-                }
-            }
+            let n = fit_bytes(name, 16);
+            self.vars[i].name[..n].copy_from_slice(&name[..n]);
             self.vars[i].nlen = n;
-            let mut m = 0;
-            for &b in val.iter().take(64) {
-                if m < 64 {
-                    self.vars[i].val[m] = b;
-                    m += 1;
-                }
-            }
+            let m = fit_bytes(val, 64);
+            self.vars[i].val[..m].copy_from_slice(&val[..m]);
             self.vars[i].vlen = m;
             self.vcount += 1;
         }
@@ -216,33 +204,19 @@ impl Shell {
     pub fn set_alias(&mut self, name: &[u8], val: &[u8]) {
         for a in self.aliases.iter_mut().take(self.acount) {
             if a.nlen == name.len() && &a.name[..a.nlen] == name {
-                a.vlen = 0;
-                for &b in val.iter().take(64) {
-                    if a.vlen < 64 {
-                        a.val[a.vlen] = b;
-                        a.vlen += 1;
-                    }
-                }
+                let n = fit_bytes(val, 64);
+                a.val[..n].copy_from_slice(&val[..n]);
+                a.vlen = n;
                 return;
             }
         }
         if self.acount < 16 {
             let i = self.acount;
-            let mut n = 0;
-            for &b in name.iter().take(16) {
-                if n < 16 {
-                    self.aliases[i].name[n] = b;
-                    n += 1;
-                }
-            }
+            let n = fit_bytes(name, 16);
+            self.aliases[i].name[..n].copy_from_slice(&name[..n]);
             self.aliases[i].nlen = n;
-            let mut m = 0;
-            for &b in val.iter().take(64) {
-                if m < 64 {
-                    self.aliases[i].val[m] = b;
-                    m += 1;
-                }
-            }
+            let m = fit_bytes(val, 64);
+            self.aliases[i].val[..m].copy_from_slice(&val[..m]);
             self.aliases[i].vlen = m;
             self.acount += 1;
         }
@@ -273,18 +247,18 @@ impl Shell {
             }
             HIST_MAX - 1
         };
-        let mut n = 0;
-        for &b in line.iter().take(128) {
-            self.hist[i][n] = b;
-            n += 1;
-        }
+        /* Record the real length: callers index the entry as a byte slice,
+         * and a full 128-byte array would hand them trailing zeros. */
+        let n = fit_bytes(line, 128);
+        self.hist[i][..n].copy_from_slice(&line[..n]);
+        self.hist_len[i] = n;
     }
 
     pub fn history(&self, idx: usize) -> Option<&[u8]> {
         if idx < self.hcount {
             // History is stored oldest..newest in the first `hcount` slots;
             // callers pass a 0-based offset from the start.
-            Some(&self.hist[idx])
+            Some(&self.hist[idx][..self.hist_len[idx]])
         } else {
             None
         }
@@ -473,6 +447,16 @@ impl Shell {
 /// not valid UTF-8 (file names are expected to be UTF-8).
 pub fn to_str(b: &[u8]) -> &str {
     core::str::from_utf8(b).unwrap_or("<?>")
+}
+
+/// Byte length of the longest prefix of `b` that fits in `max` bytes without
+/// splitting a codepoint. Every fixed-size name buffer uses this.
+pub fn fit_bytes(b: &[u8], max: usize) -> usize {
+    let mut n = b.len().min(max);
+    while n > 0 && n < b.len() && (b[n] & 0xC0) == 0x80 {
+        n -= 1;
+    }
+    n
 }
 
 pub fn trim(b: &[u8]) -> &[u8] {

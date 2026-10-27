@@ -11,7 +11,7 @@
  */
 
 #include "nd_internal.h"
-#include "nd_font_cjk.h"
+#include "nd_font_uni.h"
 #include "nd_lang.h"
 
 static const UINT8 g_font[95][ND_GLYPH_H] = {
@@ -119,15 +119,21 @@ const UINT8 *nd_font_rows(UINT8 ch) {
   return g_font[ch - 32u];
 }
 
-/* ---- UTF-8 and mixed metrics ------------------------------------------ */
+/* ---- UTF-8 ------------------------------------------------------------ */
 
 /* The caller owns the byte cursor: successful decoding advances by one
  * complete UTF-8 sequence, while malformed input consumes one byte and
- * returns U+FFFD so a bad byte cannot make a text walk loop forever. */
+ * returns U+FFFD so a bad byte cannot make a text walk loop forever.
+ *
+ * Strictness matters now that every codepoint can be rendered: overlong
+ * forms, UTF-16 surrogates and anything above U+10FFFF are rejected rather
+ * than turned into a glyph or a width that no font table agrees on. */
 UINT32 nd_utf8_next(const char **text) {
   const UINT8 *p = (const UINT8 *)*text;
   UINT32       cp;
   UINT32       extra;
+  UINT32       min;
+  UINT32       i;
 
   if (p == 0 || p[0] == 0u) {
     return 0;
@@ -139,44 +145,144 @@ UINT32 nd_utf8_next(const char **text) {
   if ((p[0] & 0xE0u) == 0xC0u) {
     cp = (UINT32)(p[0] & 0x1Fu);
     extra = 1u;
+    min = 0x80u;
   } else if ((p[0] & 0xF0u) == 0xE0u) {
     cp = (UINT32)(p[0] & 0x0Fu);
     extra = 2u;
+    min = 0x800u;
   } else if ((p[0] & 0xF8u) == 0xF0u) {
     cp = (UINT32)(p[0] & 0x07u);
     extra = 3u;
+    min = 0x10000u;
   } else {
     *text += 1;
-    return 0xFFFDu; /* stray continuation byte */
+    return 0xFFFDu; /* stray continuation byte or 0xF8..0xFF */
   }
-  {
-    UINT32 i;
-
-    for (i = 1; i <= extra; i++) {
-      if ((p[i] & 0xC0u) != 0x80u) {
-        *text += 1;
-        return 0xFFFDu; /* truncated sequence */
-      }
-      cp = (cp << 6) | (UINT32)(p[i] & 0x3Fu);
+  for (i = 1; i <= extra; i++) {
+    if ((p[i] & 0xC0u) != 0x80u) {
+      *text += 1;
+      return 0xFFFDu; /* truncated sequence */
     }
+    cp = (cp << 6) | (UINT32)(p[i] & 0x3Fu);
+  }
+  if (cp < min || cp > 0x10FFFFu ||
+      (cp >= 0xD800u && cp <= 0xDFFFu)) {
+    *text += 1;
+    return 0xFFFDu; /* overlong, surrogate or out of range */
   }
   *text += (INT32)(extra + 1u);
   return cp;
+}
+
+/* Encode one codepoint; returns the byte count, or 0 when `cp` is not a
+ * Unicode scalar value. The caller provides at least four bytes. */
+UINT32 nd_utf8_encode(UINT32 cp, char out[4]) {
+  if (cp < 0x80u) {
+    out[0] = (char)cp;
+    return 1u;
+  }
+  if (cp < 0x800u) {
+    out[0] = (char)(0xC0u | (cp >> 6));
+    out[1] = (char)(0x80u | (cp & 0x3Fu));
+    return 2u;
+  }
+  if (cp < 0x10000u) {
+    if (cp >= 0xD800u && cp <= 0xDFFFu) {
+      return 0u;
+    }
+    out[0] = (char)(0xE0u | (cp >> 12));
+    out[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+    out[2] = (char)(0x80u | (cp & 0x3Fu));
+    return 3u;
+  }
+  if (cp <= 0x10FFFFu) {
+    out[0] = (char)(0xF0u | (cp >> 18));
+    out[1] = (char)(0x80u | ((cp >> 12) & 0x3Fu));
+    out[2] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+    out[3] = (char)(0x80u | (cp & 0x3Fu));
+    return 4u;
+  }
+  return 0u;
+}
+
+/* ---- glyph lookup and metrics ----------------------------------------- */
+
+static UINT32 popcount8(UINT8 v) {
+  v = (UINT8)(v - ((v >> 1) & 0x55u));
+  v = (UINT8)((v & 0x33u) + ((v >> 2) & 0x33u));
+  return (UINT32)((v + (v >> 4)) & 0x0Fu);
+}
+
+const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide) {
+  UINT16       slot;
+  UINT32       byte;
+  UINT32       bit;
+  UINT32       rank;
+  UINT32       i;
+  const UINT8 *valid;
+
+  if (cp < 0x80u || cp > 0x10FFFFu) {
+    return 0;
+  }
+  slot = g_uni_page[cp >> 8];
+  if (slot == ND_UNI_EMPTY) {
+    return 0;
+  }
+  byte = (cp & 0xFFu) >> 3;
+  bit = cp & 7u;
+  valid = &g_uni_valid[(UINT32)slot * 32u];
+  if ((valid[byte] & (UINT8)(1u << bit)) == 0u) {
+    return 0;
+  }
+  rank = 0;
+  for (i = 0; i < byte; i++) {
+    rank += popcount8(valid[i]);
+  }
+  rank += popcount8((UINT8)(valid[byte] & (UINT8)((1u << bit) - 1u)));
+  if (wide != 0) {
+    *wide = ((g_uni_wide[(UINT32)slot * 32u + byte] & (UINT8)(1u << bit)) != 0u)
+                ? ND_CJK_ADV
+                : 8u;
+  }
+  return g_font_data + (g_uni_base[slot] + rank) * ND_UNI_GLYPH_BYTES;
+}
+
+/* Binary search over the generated advance ranges. The table starts at
+ * U+0080; ASCII keeps its own 5x7 face and 6 pixel cell. */
+UINT32 nd_uni_adv(UINT32 cp) {
+  UINT32 lo = 0;
+  UINT32 hi = g_uni_width_count;
+
+  if (cp < 0x20u) {
+    return 0u;
+  }
+  if (cp < 0x80u) {
+    return ND_FONT_ADV;
+  }
+  while (lo < hi) {
+    UINT32 mid = (lo + hi) / 2u;
+
+    if (cp < g_uni_width[mid].start) {
+      hi = mid;
+    } else if (cp > g_uni_width[mid].end) {
+      lo = mid + 1u;
+    } else {
+      return g_uni_width[mid].adv;
+    }
+  }
+  return 8u;
 }
 
 UINT32 nd_char_adv(UINT32 cp, UINT32 scale) {
   if (scale == 0u) {
     scale = 1u;
   }
-  /* Both cell widths scale; ASCII advances by its 6-column cell, CJK by
-   * its 16-column cell, so a line stays proportional at 1x and 2x. */
-  return (cp < 0x80u) ? ND_FONT_ADV * scale : ND_CJK_ADV * scale;
+  return nd_uni_adv(cp) * scale;
 }
 
 UINT32 nd_text_width(const char *text, UINT32 scale) {
   const char *p = nd_lang_tr(text);
   UINT32      w = 0;
-  UINT32      n = 0;
 
   if (text == 0 || scale == 0u) {
     return 0;
@@ -185,19 +291,14 @@ UINT32 nd_text_width(const char *text, UINT32 scale) {
     UINT32 cp = nd_utf8_next(&p);
 
     w += nd_char_adv(cp, scale);
-    n++;
   }
-  /* The last cell carries no advance: a glyph is 5 columns wide and the
-   * 6th is the inter-character gap (CJK the same, one column of padding).
-   * At scale s the gap is s pixels wide. */
-  return (n == 0u) ? 0u : (w - scale);
+  return w;
 }
 
 UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
   const char *p = text;
   const char *end = text + bytes;
   UINT32      w = 0;
-  UINT32      n = 0;
 
   if (text == 0 || scale == 0u) {
     return 0;
@@ -209,18 +310,18 @@ UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
       break; /* the range ended inside a sequence: stop before it */
     }
     w += nd_char_adv(cp, scale);
-    n++;
   }
-  return (n == 0u) ? 0u : (w - scale);
+  return w;
 }
 
-/* Height is chosen for the whole line: any non-ASCII codepoint selects the
- * taller CJK cell, so mixed Latin/CJK text can share a consistent baseline.
- * One vertical origin avoids per-glyph jumps within the same string. */
+/* Height is chosen for the whole line: any codepoint that actually takes
+ * space and lives outside ASCII selects the 16 pixel cell, so mixed
+ * Latin/CJK text shares one baseline. Combining marks advance by zero and
+ * therefore never raise the line on their own. */
 UINT32 nd_text_height(const char *text, UINT32 scale) {
   const char *p = nd_lang_tr(text);
   UINT32      h = (scale != 0u) ? ND_GLYPH_H * scale : ND_GLYPH_H;
-  UINT32      cjk = (scale != 0u) ? ND_CJK_H * scale : ND_CJK_H;
+  UINT32      uni = (scale != 0u) ? ND_CJK_H * scale : ND_CJK_H;
 
   if (p == 0) {
     return h;
@@ -228,30 +329,11 @@ UINT32 nd_text_height(const char *text, UINT32 scale) {
   while (p != 0 && *p != '\0') {
     UINT32 cp = nd_utf8_next(&p);
 
-    if (cp >= 0x80u) {
-      return (h > cjk) ? h : cjk;
+    if (cp >= 0x80u && nd_uni_adv(cp) != 0u) {
+      return (h > uni) ? h : uni;
     }
   }
   return h;
-}
-
-const UINT16 *nd_cjk_find(UINT32 cp) {
-  UINT32 lo = 0;
-  UINT32 hi = g_cjk_count;
-
-  while (lo < hi) {
-    UINT32 mid = (lo + hi) / 2u;
-
-    if (g_cjk_cp[mid] == cp) {
-      return &g_cjk_bits[mid * ND_CJK_H];
-    }
-    if (g_cjk_cp[mid] < cp) {
-      lo = mid + 1u;
-    } else {
-      hi = mid;
-    }
-  }
-  return 0;
 }
 
 UINT32 nd_font_height(UINT32 scale) { return (scale != 0u) ? ND_GLYPH_H * scale : 0u; }

@@ -841,8 +841,8 @@ pub extern "C" fn _start() -> ! {
                 }
                 wm::Ev::Key(key, _mods) => {
                     match key {
-                        0x100 => go_back(&mut app),
-                        0x109 => advance(&mut app),
+                        wm::KEY_ESC => go_back(&mut app),
+                        wm::KEY_ENTER => advance(&mut app),
                         0x20 => {
                             if app.page == Page::Confirm {
                                 app.confirmed = !app.confirmed;
@@ -850,7 +850,7 @@ pub extern "C" fn _start() -> ! {
                                 app.accepted = !app.accepted;
                             }
                         }
-                        0x101 => {
+                        wm::KEY_UP => {
                             if app.page == Page::Disk {
                                 let mut i = app.sel;
                                 while i > 0 {
@@ -862,7 +862,7 @@ pub extern "C" fn _start() -> ! {
                                 }
                             }
                         }
-                        0x102 => {
+                        wm::KEY_DOWN => {
                             if app.page == Page::Disk {
                                 let mut i = app.sel + 1;
                                 while i < app.n_disks {

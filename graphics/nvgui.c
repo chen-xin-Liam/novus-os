@@ -643,29 +643,20 @@ static UINT32 edit_prev(ng_widget_t *w, UINT32 off) {
   return off;
 }
 
-/* Insert one codepoint at the caret. Returns 0 when the buffer is full. */
+/* Insert one codepoint at the caret. Returns 0 when the buffer is full or
+ * `cp` is not a Unicode scalar value. Four-byte sequences are supported, so
+ * supplementary-plane characters and emoji insert like any other glyph. */
 int ng_edit_insert_cp(ng_widget_t *w, UINT32 cp) {
-  UINT8  enc[4];
+  char   enc[4];
   UINT32 i;
-  UINT32 len = 0;
+  UINT32 len;
   UINT32 off;
 
   if (w == 0 || w->type != NG_TEXTBOX) {
     return 0;
   }
-  if (cp < 0x80u) {
-    enc[0] = (UINT8)cp;
-    len = 1;
-  } else if (cp < 0x800u) {
-    enc[0] = (UINT8)(0xC0u | (cp >> 6));
-    enc[1] = (UINT8)(0x80u | (cp & 0x3Fu));
-    len = 2;
-  } else if (cp < 0x10000u) {
-    enc[0] = (UINT8)(0xE0u | (cp >> 12));
-    enc[1] = (UINT8)(0x80u | ((cp >> 6) & 0x3Fu));
-    enc[2] = (UINT8)(0x80u | (cp & 0x3Fu));
-    len = 3;
-  } else {
+  len = nd_utf8_encode(cp, enc);
+  if (len == 0u) {
     return 0;
   }
   if (w->u.edit.len + len + 1u > w->u.edit.cap) {
@@ -1493,9 +1484,9 @@ static void textbox_key(ng_widget_t *w, UINT32 key) {
     break;
   }
 
-  /* Printable ASCII goes straight in; anything else arrives through the
-   * IME (ng_edit_insert_cp) or is ignored. */
-  if (key >= 0x20u && key <= 0x7Eu) {
+  /* Any printable codepoint goes straight in. Control keys live above the
+   * Unicode range, so the test does not need to enumerate them. */
+  if (key >= 0x20u && key <= 0x10FFFFu) {
     (void)ng_edit_insert_cp(w, key);
   }
 }

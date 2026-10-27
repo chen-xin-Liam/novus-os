@@ -1,5 +1,77 @@
 # Changes
 
+## 完整 UTF-8 / Unicode：字形、度量、输入、终端与路径
+
+- **字形从"界面语料"改为整个 Unicode**：`tools/fontgen/fontgen.py` 改为读取
+  GNU Unifont 的 `unifont.hex` + `unifont_upper.hex`，生成
+  `graphics/nd_font_data.bin`（3.5 MB，114,397 个字形，每字 32 字节）、
+  `graphics/nd_font_uni.c`（稀疏页索引 + 步进区间表）和
+  `apps/src/unicode_data.rs`（同一份步进表）。旧的
+  `graphics/nd_font_cjk.c` / `nd_font_cjk.h`（2451 个语料字）删除。
+- 存储是稀疏页：`g_uni_page[cp >> 8]` → 槽号，槽内 `valid`/`wide` 位图 +
+  密集字形块，查找为页 → 位 → popcount rank。点阵用
+  `graphics/nd_font_blob.S` 的 `.incbin` 嵌入，C 编译器不处理 3.5 MB 数组；
+  `NOVUS.EFI` 由 2.5 MB 增至 6.4 MB，仍在 El Torito 32 MB 上限内。
+  Unifont 源文件不入库，脚本头部给出下载地址。
+- 度量改为查字形宽度：ASCII 仍 5x7/6px，其余 8px 半角、16px 全角；
+  Mn/Me/Cf 组合记号步进 0，画在前一个字形上；行高按"有正宽的非 ASCII"
+  取 16。`nd_utf8_next()` 现在拒绝超长编码、代理区与 >U+10FFFF；新增
+  `nd_utf8_encode()`（1–4 字节）。绘制统一走 `nd_glyph_find()`。
+- 事件 ABI：`ND_KEY_*` 移到 `0x110000` 之上（`ND_KEY_BASE`），字符键直接
+  携带 Unicode 码点，控制键不再与 `U+0100..U+010A` 冲突；Rust 侧改为
+  `wm::KEY_*` 常量。`nd_input.c` 增加 Alt 修饰与 `Ctrl+Shift+U` 码点直输
+  （1–6 位十六进制 + 回车/空格，Esc 取消），提交前校验代理区与上限。
+- 输入法服务化：`nd_ime_key_ex()` 把拼音状态机从文本框解耦，
+  `nwm` 在转发按键前先交给 IME，组合完成时把码点作为按键事件投递给焦点
+  窗口；`Ctrl+Space` 切换客户端中/英，候选窗用 `nd_ime_draw_at()` 画在
+  焦点窗口内。`ng_edit_insert_cp()` 改用 `nd_utf8_encode()`，文本框可以
+  直接键入并编辑 4 字节码点（原先 `>= U+10000` 被拒绝）。
+- 终端 `nsh`：窗口改用 1x 文字（ASCII 6px、中文 16px，144 列 × 26 行），
+  换行/滚动/光标全部按**像素宽度**；退格、Delete、左右键按码点移动；
+  接受任意可打印码点并编码插入；滚动缓冲在码点边界折行，历史载入不再带
+  尾随零字节。顺手修掉 `Drawer::flush` 用段尾 `x` 作起点导致整行右移的
+  缺陷。
+- Rust 侧同步度量：`ui::char_adv()` 查 `unicode_data`，`width()` 去掉
+  "最后一格无间隔"的 `-1`，`width_big()` 对所有字符乘 scale（CJK 也放大），
+  定宽列 `Buf` 按显示宽度补齐并用安全 `from_utf8`；`wm::copy_title`/
+  `text_at` 按码点截断（新增 `fit_bytes`），`nwm` 服务端对标题与文本再做
+  一次边界回退。
+- 终端/文件：`shell::glob_match` 的 `?` 匹配一个码点、`*` 只在码点边界
+  对齐；`push_history`、别名/变量、`ls` 名称、`parse` 的单词缓冲、`fileman`
+  行名、`sinfo::spawn_name`、`session` 输入都退到码点边界；`fs.rs`/VFS
+  路径复制改用 `VFS_PATH_MAX`（256）而不是组件上限 56，超长组件与超长
+  路径返回失败而不再静默截断；`kernel/trap.c` 的 `user_path()` 拒绝非法
+  UTF-8 路径；`kernel/sysinfo.c` 的 `copy_str` 截到码点边界；用户名接受
+  任意非控制 UTF-8。
+- 验证：`make` 全量通过（无新增告警）。QEMU/OVMF 无头启动截图确认桌面、
+  文件管理器、设置、任务管理器与中文水印正常，临时水印测试串
+  `Ελληνικά Русский é ñ ← ⚙ 😀` 全部有字形且 8/16 宽混排正确。临时让
+  会话自动启动 `nsh` 做交互验证：`Ctrl+Shift+U 0410 Enter` 在提示符后
+  出现 `А`；`Ctrl+Space` 后输入 `nihao`，候选窗出现在终端窗口内，空格
+  上屏"鸟"，显示为 `user@novus:/$ А鸟`。验证用的临时改动（水印文案、
+  自动启动、调试日志、截图脚本）均已还原或删除。
+
+## 开发者模板目录 `templates/`
+
+- 新增 `templates/`：三条扩展路径的最小骨架，复制即可开工，不必先读内核。
+  `templates/README.md` 是索引，含完整接入步骤、每帧绘制预算（40 图形 / 48 段
+  文字）、`no_std` 无分配器约束和调试手段（COM1）。
+- `templates/gui-app/`：一个完整的桌面窗口应用（页面/卡片/按钮/点击计数/Esc
+  关闭/主题跟随），自带 `Cargo.toml`、`.cargo/config.toml`、`link.ld` 和
+  `verify.sh`，可以脱离主仓单独 `cargo build` 并检查入口地址；接进系统只需复制
+  `src/main.rs` 并按文档改 4 处（`apps/src/bin/`、`apps/Cargo.toml`、`Makefile`
+  的 `APPS_NAMES`、`kernel/apps.c` 的 `g_apps[]`）。
+- `templates/shell-command/`：给 `nsh` 加内建命令的片段，含参数/退出码、读
+  `Shell` 状态、读管道 stdin 三个例子；接入只需粘贴函数并在 `BUILTINS` 加一行，
+  `help`/`which`/管道/重定向/命令替换自动生效。
+- `templates/nuomi/`：两个脚本示例 —— 语言特性（递归、`map/reduce`、向量、
+  闭包、`while`、`draw` 裸输出）与文件操作（建目录、读写追加、复制改名、删除），
+  直接用 `nuomi <脚本>` 运行。
+- 验证：模板 app 单独编译通过（入口 0x400000，blob 30,700 字节），并临时接入
+  `apps/` + `Makefile` + `kernel/apps.c` 完整 `make` 通过（NOVUS.EFI 链接成功，
+  验证后已撤销）；命令模板临时粘进 `cmds.rs` 编译通过；两个 `.nuomi` 脚本用
+  同一份 `apps/src/nuomi.rs`（mock fs/shell）跑通并核对输出。
+
 ## nsh 集成 Nuomi（糯米）语言：`nuomi` 指令
 
 - 新增 `apps/src/nuomi.rs`：把 `user/Nuomi_pl` 的 C 解释器移植成 `no_std`、

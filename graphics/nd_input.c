@@ -87,6 +87,14 @@ static UINT8 g_extended;
 static int g_shift;
 static int g_caps;
 static int g_ctrl;
+static int g_alt;
+
+/* Unicode codepoint entry: Ctrl+Shift+U, then 1..6 hex digits, then Enter or
+ * Space. This is the escape hatch that reaches codepoints no keyboard layout
+ * can type (arrow symbols, Cyrillic, CJK outside the IME dictionary, ...). */
+static int    g_uni_mode;
+static UINT32 g_uni_cp;
+static UINT8  g_uni_digits;
 
 /* ---- queue ------------------------------------------------------------ */
 
@@ -274,12 +282,61 @@ static void push_key(UINT32 key) {
   ev.x = (INT16)g_mx;
   ev.y = (INT16)g_my;
   ev.mods = (UINT8)((g_shift ? ND_MOD_SHIFT : 0u) |
-                    (g_ctrl ? ND_MOD_CTRL : 0u));
+                    (g_ctrl ? ND_MOD_CTRL : 0u) |
+                    (g_alt ? ND_MOD_ALT : 0u));
   nd_input_push(&ev);
 }
 
 static void key_down(UINT8 code) {
   char ch;
+
+  /* Unicode codepoint entry owns the keyboard while it is active. */
+  if (g_uni_mode != 0) {
+    UINT32 v = 0;
+
+    if (code == 0x01) { /* Esc cancels */
+      g_uni_mode = 0;
+      g_uni_digits = 0;
+      return;
+    }
+    if (code == 0x0E) { /* Backspace drops the last hex digit */
+      if (g_uni_digits > 0u) {
+        g_uni_digits--;
+        g_uni_cp >>= 4;
+      }
+      return;
+    }
+    if (code == 0x1C || code == 0x39) { /* Enter or Space commits */
+      if (g_uni_digits > 0u && g_uni_cp <= 0x10FFFFu &&
+          !(g_uni_cp >= 0xD800u && g_uni_cp <= 0xDFFFu)) {
+        push_key(g_uni_cp);
+      }
+      g_uni_mode = 0;
+      g_uni_digits = 0;
+      return;
+    }
+    ch = g_keymap[code];
+    if (ch >= '0' && ch <= '9') {
+      v = (UINT32)(ch - '0');
+    } else if (ch >= 'a' && ch <= 'f') {
+      v = (UINT32)(ch - 'a' + 10);
+    } else if (ch >= 'A' && ch <= 'F') {
+      v = (UINT32)(ch - 'A' + 10);
+    } else {
+      return;
+    }
+    if (g_uni_digits < 6u) {
+      g_uni_cp = (g_uni_cp << 4) | v;
+      g_uni_digits++;
+    }
+    return;
+  }
+  if (g_ctrl != 0 && g_shift != 0 && code == 0x16) { /* Ctrl+Shift+U */
+    g_uni_mode = 1;
+    g_uni_cp = 0;
+    g_uni_digits = 0;
+    return;
+  }
 
   switch (code) {
   case 0x2A:
@@ -288,6 +345,9 @@ static void key_down(UINT8 code) {
     return;
   case 0x1D:
     g_ctrl = 1;
+    return;
+  case 0x38:
+    g_alt = 1;
     return;
   case 0x3A:
     g_caps = !g_caps;
@@ -357,6 +417,8 @@ static void key_up(UINT8 code) {
     g_shift = 0;
   } else if (code == 0x1D) {
     g_ctrl = 0;
+  } else if (code == 0x38) {
+    g_alt = 0;
   } else if (code == 0xE0) {
     g_extended = 0;
   }

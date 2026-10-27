@@ -112,9 +112,19 @@ pub fn normalize(cwd: &[u8], input: &[u8], out: &mut [u8]) -> usize {
 }
 
 /// True when `name` matches the glob `pattern` (`*` matches any run, `?`
-/// matches a single byte). Both are matched byte-wise (no locale rules).
+/// matches one codepoint). Literal bytes compare byte-wise (no locale
+/// rules), but a `?` never lands in the middle of a UTF-8 sequence.
 pub fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
     return glob_match_impl(pattern, name);
+
+    /// Next codepoint boundary after `i`.
+    fn step(n: &[u8], i: usize) -> usize {
+        let mut k = i + 1;
+        while k < n.len() && (n[k] & 0xC0) == 0x80 {
+            k += 1;
+        }
+        k
+    }
 
     fn glob_match_impl(p: &[u8], n: &[u8]) -> bool {
         let mut pi = 0;
@@ -129,14 +139,17 @@ pub fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
                     if pi + 1 == p.len() {
                         return true; // trailing '*' matches the rest
                     }
-                    // Try every alignment for the remainder.
+                    // Try every codepoint alignment for the remainder.
                     let tail = &p[pi + 1..];
                     let mut k = ni;
                     while k <= n.len() {
                         if glob_match_impl(tail, &n[k..]) {
                             return true;
                         }
-                        k += 1;
+                        if k == n.len() {
+                            break;
+                        }
+                        k = step(n, k);
                     }
                     return false;
                 }
@@ -145,7 +158,7 @@ pub fn glob_match(pattern: &[u8], name: &[u8]) -> bool {
                         return false;
                     }
                     pi += 1;
-                    ni += 1;
+                    ni = step(n, ni);
                 }
                 other => {
                     if ni >= n.len() || n[ni] != other {

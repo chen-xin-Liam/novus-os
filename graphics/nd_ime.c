@@ -10,7 +10,7 @@
 #include "kernel.h"
 #include "nd_internal.h"
 #include "nd_ime.h"
-#include "nd_font_cjk.h"
+#include "nd_font_uni.h"
 #include "nvgui.h"
 
 #if CONFIG_NOVUS_GUI
@@ -129,18 +129,20 @@ static void damage_popup(void) {
   }
 }
 
-/* A selection is a Unicode codepoint, not a byte from the candidate table.
- * The widget encoder inserts it at a UTF-8 boundary; the uncommitted pinyin
- * and popup state are then cleared without disturbing earlier text. */
-static void commit(ng_widget_t *edit) {
-  if (edit != 0 && g_ime.n != 0u && g_ime.sel < g_ime.n) {
-    (void)ng_edit_insert_cp(edit, g_ime.cand[g_ime.sel]);
+/* Finish the composition and hand back the selected codepoint (0 when the
+ * candidate list was empty). A selection is a Unicode codepoint, not a byte
+ * from the candidate table. */
+static UINT32 take_commit(void) {
+  UINT32 cp = 0;
+
+  if (g_ime.n != 0u && g_ime.sel < g_ime.n) {
+    cp = g_ime.cand[g_ime.sel];
   }
   damage_popup();
   g_ime.active = 0;
   g_ime.n = 0;
   g_ime.py[0] = '\0';
-  ng_damage(nd_rect(0, 0, 0, 0)); /* force the caret to repaint */
+  return cp;
 }
 
 void nd_ime_init(void) {
@@ -187,14 +189,13 @@ void nd_ime_bounds(INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
   }
 }
 
-int nd_ime_key(void *editw, UINT32 key) {
-  ng_widget_t *edit = (ng_widget_t *)editw;
-  UINT32       len;
+/* One keystroke through the composition state machine. Returns 1 when the
+ * IME consumed the key, and stores a codepoint in *commit when that key
+ * completed a composition. The caller decides where the text goes: a text
+ * box (nd_ime_key) or a window over the WM protocol (nd_ime_key_ex). */
+static int ime_step(UINT32 key, UINT32 *commit) {
+  UINT32 len = 0;
 
-  if (edit == 0 || edit->type != NG_TEXTBOX) {
-    return 0;
-  }
-  len = 0;
   while (g_ime.py[len] != '\0') {
     len++;
   }
@@ -234,7 +235,7 @@ int nd_ime_key(void *editw, UINT32 key) {
 
     if (idx < g_ime.n) {
       g_ime.sel = (UINT8)idx;
-      commit(edit);
+      *commit = take_commit();
     }
     return 1;
   }
@@ -242,7 +243,7 @@ int nd_ime_key(void *editw, UINT32 key) {
   case ' ':
   case ND_KEY_ENTER:
     if (g_ime.n != 0u) {
-      commit(edit);
+      *commit = take_commit();
     } else {
       damage_popup();
       g_ime.active = 0;
@@ -284,34 +285,42 @@ int nd_ime_key(void *editw, UINT32 key) {
   }
 }
 
+int nd_ime_key(void *editw, UINT32 key) {
+  ng_widget_t *edit = (ng_widget_t *)editw;
+  UINT32       cp = 0;
+  int          consumed;
+
+  if (edit == 0 || edit->type != NG_TEXTBOX) {
+    return 0;
+  }
+  consumed = ime_step(key, &cp);
+  if (consumed && cp != 0u) {
+    (void)ng_edit_insert_cp(edit, cp);
+  }
+  if (consumed) {
+    ng_damage(nd_rect(0, 0, 0, 0)); /* force the caret to repaint */
+  }
+  return consumed;
+}
+
+int nd_ime_key_ex(UINT32 key, UINT32 *commit) {
+  UINT32 cp = 0;
+  int    consumed = ime_step(key, &cp);
+
+  if (commit != 0) {
+    *commit = cp;
+  }
+  return consumed;
+}
+
 /* ---- drawing ---------------------------------------------------------- */
 
-void nd_ime_draw(nd_surface_t *s) {
+static void draw_popup(nd_surface_t *s, INT32 bx, INT32 by) {
   const ng_theme_t *t = &ng_ctx_get()->theme;
-  nd_rect_t         caret;
-  INT32             bx;
-  INT32             by;
   INT32             bw = 236;
   INT32             bh = 52;
   UINT32            i;
 
-  if (!g_ime.active || s == 0) {
-    return;
-  }
-  if (!ng_focus_caret(&caret)) {
-    return;
-  }
-  bx = caret.x - 6;
-  by = caret.y + 24;
-  if (bx + bw > (INT32)s->w - 8) {
-    bx = (INT32)s->w - bw - 8;
-  }
-  if (bx < 8) {
-    bx = 8;
-  }
-  if (by + bh > (INT32)s->h - 8) {
-    by = caret.y - bh - 8; /* flip above the caret near the bottom */
-  }
   g_ime.box = nd_rect(bx, by, bw, bh);
 
   nd_shadow(s, g_ime.box, 8, 60);
@@ -323,9 +332,10 @@ void nd_ime_draw(nd_surface_t *s) {
 
   /* Candidates: digit + glyph, highlighted cell for the selected one. */
   for (i = 0; i < g_ime.n; i++) {
-    INT32         cx = bx + 8 + (INT32)i * 36;
-    char          num[2];
-    const UINT16 *rows = nd_cjk_find(g_ime.cand[i]);
+    INT32  cx = bx + 8 + (INT32)i * 36;
+    char   num[2];
+    char   utf8[5];
+    UINT32 len = nd_utf8_encode(g_ime.cand[i], utf8);
 
     if (i == g_ime.sel) {
       nd_round_rect(s, nd_rect(cx - 2, by + 24, 34, 22), 4, t->accent);
@@ -334,20 +344,57 @@ void nd_ime_draw(nd_surface_t *s) {
     num[1] = '\0';
     nd_text(s, cx, by + 30, num,
             (i == g_ime.sel) ? t->accent_text : t->text_dim, 1);
-    if (rows != 0) {
+    if (len != 0u) {
       /* Reuse the text path so the glyph is drawn exactly like a label. */
-      char utf8[4];
-      UINT32 cp = g_ime.cand[i];
-
-      utf8[0] = (char)(0xE0u | ((cp >> 12) & 0x0Fu));
-      utf8[1] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
-      utf8[2] = (char)(0x80u | (cp & 0x3Fu));
-      utf8[3] = '\0';
+      utf8[len] = '\0';
       nd_text(s, cx + 12, by + 24,
               utf8, (i == g_ime.sel) ? t->accent_text : t->text, 1);
     }
   }
   g_ime.drawn = 1;
+}
+
+static void clamp_popup(nd_surface_t *s, INT32 *bx, INT32 *by) {
+  if (*bx + 236 > (INT32)s->w - 8) {
+    *bx = (INT32)s->w - 236 - 8;
+  }
+  if (*bx < 8) {
+    *bx = 8;
+  }
+  if (*by + 52 > (INT32)s->h - 8) {
+    *by = (INT32)s->h - 52 - 8;
+  }
+  if (*by < 8) {
+    *by = 8;
+  }
+}
+
+void nd_ime_draw(nd_surface_t *s) {
+  nd_rect_t caret;
+  INT32     bx;
+  INT32     by;
+
+  if (!g_ime.active || s == 0) {
+    return;
+  }
+  if (!ng_focus_caret(&caret)) {
+    return;
+  }
+  bx = caret.x - 6;
+  by = caret.y + 24;
+  if (by + 52 > (INT32)s->h - 8) {
+    by = caret.y - 52 - 8; /* flip above the caret near the bottom */
+  }
+  clamp_popup(s, &bx, &by);
+  draw_popup(s, bx, by);
+}
+
+void nd_ime_draw_at(nd_surface_t *s, INT32 x, INT32 y) {
+  if (!g_ime.active || s == 0) {
+    return;
+  }
+  clamp_popup(s, &x, &y);
+  draw_popup(s, x, y);
 }
 
 #else /* !CONFIG_NOVUS_GUI */
@@ -359,6 +406,18 @@ int  nd_ime_key(void *edit, UINT32 key) {
   return 0;
 }
 void nd_ime_draw(nd_surface_t *s) { (void)s; }
+void nd_ime_draw_at(nd_surface_t *s, INT32 x, INT32 y) {
+  (void)s;
+  (void)x;
+  (void)y;
+}
+int nd_ime_key_ex(UINT32 key, UINT32 *commit) {
+  (void)key;
+  if (commit != 0) {
+    *commit = 0;
+  }
+  return 0;
+}
 int  nd_ime_active(void) { return 0; }
 void nd_ime_bounds(INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
   (void)x;

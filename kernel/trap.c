@@ -202,6 +202,55 @@ int user_copy(UINT64 cr3, UINT64 va, void *buf, UINT64 len, int to_user) {
   return 0;
 }
 
+/* A path is a UTF-8 string. Rejecting malformed input here keeps invalid
+ * byte sequences out of the VFS, where they would become file names that
+ * no application can round-trip or display. */
+static int utf8_path_ok(const char *s, UINTN n) {
+  UINTN i = 0;
+
+  while (i < n) {
+    UINT8  b = (UINT8)s[i];
+    UINT32 cp;
+    UINT32 extra;
+    UINT32 min;
+    UINTN  k;
+
+    if (b < 0x80u) {
+      i++;
+      continue;
+    }
+    if ((b & 0xE0u) == 0xC0u) {
+      cp = (UINT32)(b & 0x1Fu);
+      extra = 1u;
+      min = 0x80u;
+    } else if ((b & 0xF0u) == 0xE0u) {
+      cp = (UINT32)(b & 0x0Fu);
+      extra = 2u;
+      min = 0x800u;
+    } else if ((b & 0xF8u) == 0xF0u) {
+      cp = (UINT32)(b & 0x07u);
+      extra = 3u;
+      min = 0x10000u;
+    } else {
+      return 0;
+    }
+    if (i + extra >= n) {
+      return 0;
+    }
+    for (k = 1; k <= extra; k++) {
+      if (((UINT8)s[i + k] & 0xC0u) != 0x80u) {
+        return 0;
+      }
+      cp = (cp << 6) | (UINT32)((UINT8)s[i + k] & 0x3Fu);
+    }
+    if (cp < min || cp > 0x10FFFFu || (cp >= 0xD800u && cp <= 0xDFFFu)) {
+      return 0;
+    }
+    i += extra + 1u;
+  }
+  return 1;
+}
+
 static int user_path(task_t *t, UINT64 va, char path[FS_PATH_MAX]) {
   UINTN i;
   memset(path, 0, FS_PATH_MAX);
@@ -210,7 +259,10 @@ static int user_path(task_t *t, UINT64 va, char path[FS_PATH_MAX]) {
       return -1;
     }
     if (path[i] == '\0') {
-      return i == 0 ? -1 : 0;
+      if (i == 0) {
+        return -1;
+      }
+      return utf8_path_ok(path, i) ? 0 : -1;
     }
   }
   return -1;

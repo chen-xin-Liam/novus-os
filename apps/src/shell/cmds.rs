@@ -169,7 +169,7 @@ fn cmd_ls(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i3
                             }
                             if ec < entries.len() {
                                 let mut buf = [0u8; 57];
-                                let l = nm.len().min(56);
+                                let l = super::fit_bytes(nm.as_bytes(), 56);
                                 buf[..l].copy_from_slice(&nm.as_bytes()[..l]);
                                 entries[ec] = (buf, e.mode, l);
                                 ec += 1;

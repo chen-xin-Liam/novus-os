@@ -43,6 +43,11 @@ typedef enum {
  * name is never silently truncated on the way down. */
 #define VFS_NAME_MAX NOVUSFS_NAME_MAX
 
+/* Longest whole path. Must match FS_PATH_MAX in kernel/trap.c, the size of
+ * the buffer the syscall layer fills; a path copy must never be sized by
+ * the component limit, or a deep path is silently cut in half. */
+#define VFS_PATH_MAX 256u
+
 typedef struct vfs_fs vfs_fs_t;
 
 /* Directory enumeration callback: one call per entry, in directory order. */

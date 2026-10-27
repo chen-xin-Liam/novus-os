@@ -11,73 +11,126 @@
 
 use novus_apps::{ipc, shell, sinfo, sys, ui, wm};
 
-const COLS: usize = 72;
+// A row is 864 px wide (144 ASCII cells) and 16 px tall, which is exactly
+// the Unicode cell height: ASCII keeps its 6x9 face, Chinese and other
+// 8/16 px glyphs fit without overlap. Wrapping and the caret use painted
+// width, not byte or character counts.
+const COLS: usize = 144;
+const TEXT_PX: i16 = (COLS as i16) * 6;
 const ROWS: usize = 26;
 const LEFT: i16 = 6;
 const TOP: i16 = 6;
-const CW: i16 = LEFT + (COLS as i16) * 12 + LEFT;
+const CW: i16 = LEFT + TEXT_PX + LEFT;
 const CH: i16 = (ROWS as i16) * 16 + TOP * 2;
 
 const BG: u32 = 0x0E1117;
 const FG: u32 = 0xD4D4D4;
 const DIM: u32 = 0x7A8290;
 
-const KEY_ENTER: u32 = 0x109;
-const KEY_BACK: u32 = 0x10A;
-const KEY_TAB: u32 = 0x108;
-const KEY_LEFT: u32 = 0x103;
-const KEY_RIGHT: u32 = 0x104;
-const KEY_UP: u32 = 0x101;
-const KEY_DOWN: u32 = 0x102;
-const KEY_HOME: u32 = 0x106;
-const KEY_END: u32 = 0x107;
-const KEY_DELETE: u32 = 0x105;
-const KEY_ESC: u32 = 0x100;
+const KEY_ENTER: u32 = wm::KEY_ENTER;
+const KEY_BACK: u32 = wm::KEY_BACK;
+const KEY_TAB: u32 = wm::KEY_TAB;
+const KEY_LEFT: u32 = wm::KEY_LEFT;
+const KEY_RIGHT: u32 = wm::KEY_RIGHT;
+const KEY_UP: u32 = wm::KEY_UP;
+const KEY_DOWN: u32 = wm::KEY_DOWN;
+const KEY_HOME: u32 = wm::KEY_HOME;
+const KEY_END: u32 = wm::KEY_END;
+const KEY_DELETE: u32 = wm::KEY_DELETE;
+const KEY_ESC: u32 = wm::KEY_ESC;
 const MOD_CTRL: u8 = 0x02;
 
-const LINE_MAX: usize = 160;
+const LINE_MAX: usize = 320;
 const SCROLL_CAP: usize = 512;
-const INPUT_MAX: usize = 128;
+const INPUT_MAX: usize = 192;
 
 fn utf8_len(b: u8) -> usize {
     if b < 0x80 {
         1
-    } else if b < 0xE0 {
+    } else if (b & 0xE0) == 0xC0 {
         2
-    } else if b < 0xF0 {
+    } else if (b & 0xF0) == 0xE0 {
         3
-    } else {
+    } else if (b & 0xF8) == 0xF0 {
         4
+    } else {
+        1 /* stray continuation or invalid lead: consume one byte */
     }
 }
 
-fn total_chars(text: &[u8]) -> usize {
-    let mut n = 0;
-    let mut i = 0;
-    while i < text.len() {
-        i += utf8_len(text[i]);
-        n += 1;
+/// Byte offset just past the codepoint at `i`, never inside a sequence.
+fn next_char(text: &[u8], i: usize) -> usize {
+    if i >= text.len() {
+        return text.len();
     }
-    n
+    let end = (i + utf8_len(text[i])).min(text.len());
+    if core::str::from_utf8(&text[i..end]).is_ok() {
+        end
+    } else {
+        i + 1
+    }
+}
+
+/// Byte offset of the codepoint that ends just before `i`.
+fn prev_char(text: &[u8], i: usize) -> usize {
+    if i == 0 {
+        return 0;
+    }
+    let mut p = i - 1;
+    while p > 0 && (text[p] & 0xC0) == 0x80 {
+        p -= 1;
+    }
+    if core::str::from_utf8(&text[p..i]).is_ok() {
+        p
+    } else {
+        i - 1
+    }
+}
+
+fn char_of(text: &[u8], i: usize) -> char {
+    let end = next_char(text, i);
+    core::str::from_utf8(&text[i..end])
+        .ok()
+        .and_then(|s| s.chars().next())
+        .unwrap_or('\u{FFFD}')
+}
+
+/// End of the row that starts at `start`: the last codepoint boundary whose
+/// painted width still fits in TEXT_PX.
+fn row_end(text: &[u8], start: usize) -> usize {
+    let mut i = start;
+    let mut w = 0i16;
+    while i < text.len() {
+        let a = ui::char_adv(char_of(text, i));
+        if w + a > TEXT_PX && w > 0 {
+            break;
+        }
+        w += a;
+        i = next_char(text, i);
+    }
+    i
 }
 
 fn vis_rows(text: &[u8]) -> usize {
-    let n = total_chars(text);
-    if n == 0 {
-        1
-    } else {
-        (n + COLS - 1) / COLS
+    let mut i = 0;
+    let mut rows = 1;
+    while i < text.len() {
+        let e = row_end(text, i);
+        i = if e == i { i + 1 } else { e };
+        if i < text.len() {
+            rows += 1;
+        }
     }
+    rows
 }
 
-fn byte_at_char(text: &[u8], ch: usize) -> usize {
-    let mut ci = 0;
-    let mut i = 0;
-    while i < text.len() && ci < ch {
-        i += utf8_len(text[i]);
-        ci += 1;
+/// Drop trailing bytes that would split a codepoint.
+fn truncate_utf8(text: &[u8], max: usize) -> usize {
+    let mut n = text.len().min(max);
+    while n > 0 && n < text.len() && (text[n] & 0xC0) == 0x80 {
+        n -= 1;
     }
-    i
+    n
 }
 
 /// Append a byte to the scrollback, splitting on `'\n'`.
@@ -105,7 +158,14 @@ impl Scroll {
     fn push_byte(&mut self, b: u8) {
         if b == b'\n' {
             self.commit();
-        } else if self.cur_len < LINE_MAX {
+            return;
+        }
+        /* Wrap before a line fills up, and only at a codepoint start, so a
+         * long UTF-8 sequence is never split across two scrollback rows. */
+        if self.cur_len + 4 > LINE_MAX && (b & 0xC0) != 0x80 {
+            self.commit();
+        }
+        if self.cur_len < LINE_MAX {
             self.cur[self.cur_len] = b;
             self.cur_len += 1;
         }
@@ -159,8 +219,8 @@ struct Drawer<'a> {
     win: &'a mut wm::Win,
     y: i16,
     x: i16,
-    col: usize,
-    run: [u8; COLS * 4],
+    run_x: i16,
+    run: [u8; 320],
     run_len: usize,
     run_color: u32,
 }
@@ -168,9 +228,8 @@ struct Drawer<'a> {
 impl<'a> Drawer<'a> {
     fn flush(&mut self) {
         if self.run_len > 0 {
-            let s = unsafe { core::str::from_utf8_unchecked(&self.run[..self.run_len]) };
-            self.win.text_big(self.x, self.y, self.run_color, s);
-            self.x += (self.run_len as i16) * 12;
+            let s = core::str::from_utf8(&self.run[..self.run_len]).unwrap_or("");
+            self.win.text(self.run_x, self.y, self.run_color, s);
             self.run_len = 0;
         }
     }
@@ -179,46 +238,57 @@ impl<'a> Drawer<'a> {
         self.flush();
         self.y += 16;
         self.x = LEFT;
-        self.col = 0;
     }
 
     fn push(&mut self, text: &[u8], color: u32) {
         let mut i = 0;
         while i < text.len() {
-            let clen = utf8_len(text[i]);
-            if self.col == COLS {
+            let end = next_char(text, i);
+            let a = ui::char_adv(char_of(text, i));
+
+            if self.x + a > LEFT + TEXT_PX {
                 self.newline();
             }
             if self.run_len > 0 && color != self.run_color {
                 self.flush();
             }
-            let mut k = 0;
-            while k < clen && self.run_len < self.run.len() {
-                self.run[self.run_len] = text[i + k];
+            if self.run_len == 0 {
+                self.run_x = self.x;
+            }
+            let mut k = i;
+            while k < end && self.run_len < self.run.len() {
+                self.run[self.run_len] = text[k];
                 self.run_len += 1;
                 k += 1;
             }
             self.run_color = color;
-            self.col += 1;
-            i += clen;
+            self.x += a;
+            i = end;
         }
     }
 }
 
 fn render_line(win: &mut wm::Win, text: &[u8], color: u32, skip: &mut usize, y: &mut i16) {
     let rows = vis_rows(text);
-    for r in 0..rows {
+    let mut pos = 0usize;
+
+    for _ in 0..rows {
+        let end = if pos < text.len() {
+            row_end(text, pos)
+        } else {
+            pos
+        };
         if *skip > 0 {
             *skip -= 1;
-            continue;
+        } else {
+            if end > pos {
+                if let Ok(slice) = core::str::from_utf8(&text[pos..end]) {
+                    win.text(LEFT, *y, color, slice);
+                }
+            }
+            *y += 16;
         }
-        let s = byte_at_char(text, r * COLS);
-        let e = byte_at_char(text, (r + 1) * COLS);
-        if e > s {
-            let slice = unsafe { core::str::from_utf8_unchecked(&text[s..e]) };
-            win.text_big(LEFT, *y, color, slice);
-        }
-        *y += 16;
+        pos = if end == pos { pos + 1 } else { end };
     }
 }
 
@@ -230,7 +300,8 @@ fn build_prompt(shell: &shell::Shell, buf: &mut [u8]) -> usize {
             n += 1;
         }
     }
-    for &b in &shell.cwd[..shell.cwd_len] {
+    let cwd = truncate_utf8(&shell.cwd[..shell.cwd_len], buf.len() - n - 1);
+    for &b in &shell.cwd[..cwd] {
         if n + 1 < buf.len() {
             buf[n] = b;
             n += 1;
@@ -250,16 +321,21 @@ fn render(win: &mut wm::Win, shell: &shell::Shell, scroll: &Scroll, input: &[u8]
     win.fill(0, 0, CW, CH, BG);
 
     let mut y = TOP;
-    let prompt_len = {
-        let mut p = [0u8; 192];
-        build_prompt(shell, &mut p)
+    // The prompt and the edit buffer wrap together, measured in pixels.
+    let mut input_rows = {
+        let mut line = [0u8; 384];
+        let mut ln = build_prompt(shell, &mut line);
+        for k in 0..ilen {
+            if ln + 1 < line.len() {
+                line[ln] = input[k];
+                ln += 1;
+            }
+        }
+        vis_rows(&line[..ln])
     };
-    let input_total = prompt_len + ilen;
-    let input_rows = if input_total == 0 {
-        1
-    } else {
-        (input_total + COLS - 1) / COLS
-    };
+    if input_rows == 0 {
+        input_rows = 1;
+    }
     let avail = if ROWS > input_rows { ROWS - input_rows } else { 0 };
 
     let mut t = 0usize;
@@ -280,8 +356,8 @@ fn render(win: &mut wm::Win, shell: &shell::Shell, scroll: &Scroll, input: &[u8]
         win,
         y,
         x: LEFT,
-        col: 0,
-        run: [0u8; COLS * 4],
+        run_x: LEFT,
+        run: [0u8; 320],
         run_len: 0,
         run_color: FG,
     };
@@ -361,34 +437,34 @@ pub extern "C" fn _start() -> ! {
                 }
                 KEY_BACK => {
                     if cursor > 0 {
-                        let mut k = cursor;
-                        while k < ilen {
-                            input[k - 1] = input[k];
+                        let start = prev_char(&input[..ilen], cursor);
+                        let cut = cursor - start;
+                        let mut k = start;
+                        while k + cut < ilen {
+                            input[k] = input[k + cut];
                             k += 1;
                         }
-                        ilen -= 1;
-                        cursor -= 1;
+                        ilen -= cut;
+                        cursor = start;
                     }
                 }
                 KEY_DELETE => {
                     if cursor < ilen {
+                        let end = next_char(&input[..ilen], cursor);
+                        let cut = end - cursor;
                         let mut k = cursor;
-                        while k < ilen - 1 {
-                            input[k] = input[k + 1];
+                        while k + cut < ilen {
+                            input[k] = input[k + cut];
                             k += 1;
                         }
-                        ilen -= 1;
+                        ilen -= cut;
                     }
                 }
                 KEY_LEFT => {
-                    if cursor > 0 {
-                        cursor -= 1;
-                    }
+                    cursor = prev_char(&input[..ilen], cursor);
                 }
                 KEY_RIGHT => {
-                    if cursor < ilen {
-                        cursor += 1;
-                    }
+                    cursor = next_char(&input[..ilen], cursor);
                 }
                 KEY_HOME => cursor = 0,
                 KEY_END => cursor = ilen,
@@ -398,7 +474,7 @@ pub extern "C" fn _start() -> ! {
                             hist_idx -= 1;
                         }
                         if let Some(h) = shell.history(hist_idx) {
-                            let l = h.len().min(INPUT_MAX);
+                            let l = truncate_utf8(&h, INPUT_MAX);
                             input[..l].copy_from_slice(&h[..l]);
                             ilen = l;
                             cursor = l;
@@ -413,7 +489,7 @@ pub extern "C" fn _start() -> ! {
                         ilen = 0;
                         cursor = 0;
                     } else if let Some(h) = shell.history(hist_idx) {
-                        let l = h.len().min(INPUT_MAX);
+                        let l = truncate_utf8(&h, INPUT_MAX);
                         input[..l].copy_from_slice(&h[..l]);
                         ilen = l;
                         cursor = l;
@@ -422,16 +498,24 @@ pub extern "C" fn _start() -> ! {
                 KEY_TAB => {}
                 KEY_ESC => {}
                 _ => {
-                    if (mods & MOD_CTRL) == 0 && key >= 0x20 && key <= 0x7e {
-                        if ilen < INPUT_MAX {
-                            let mut k = ilen;
-                            while k > cursor {
-                                input[k] = input[k - 1];
-                                k -= 1;
+                    if (mods & MOD_CTRL) == 0 && key >= 0x20 && key <= 0x10FFFF {
+                        if let Some(ch) = core::char::from_u32(key) {
+                            let mut enc = [0u8; 4];
+                            let s = ch.encode_utf8(&mut enc);
+                            let add = s.len();
+
+                            if ilen + add <= INPUT_MAX {
+                                let mut k = ilen;
+                                while k > cursor {
+                                    input[k + add - 1] = input[k - 1];
+                                    k -= 1;
+                                }
+                                for (j, &b) in s.as_bytes().iter().enumerate() {
+                                    input[cursor + j] = b;
+                                }
+                                ilen += add;
+                                cursor += add;
                             }
-                            input[cursor] = key as u8;
-                            ilen += 1;
-                            cursor += 1;
                         }
                     } else if (mods & MOD_CTRL) != 0 {
                         if key == b'c' as u32 {

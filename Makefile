@@ -101,7 +101,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/gpt.c \
        kernel/nksym.c \
        graphics/nd_font.c \
-       graphics/nd_font_cjk.c \
+       graphics/nd_font_uni.c \
        graphics/nd_ime_dict.c \
        graphics/nd_ime.c \
        graphics/nd_core.c \
@@ -149,7 +149,8 @@ SRC := arch/x86_64/boot/main.c \
 
 # Assembly sources. Uppercase .S (case-sensitive) makes gcc run the C
 # preprocessor over the file first; gcc invokes the assembler itself.
-ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S arch/x86_64/kernel/chkstk.S
+ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S arch/x86_64/kernel/chkstk.S \
+           graphics/nd_font_blob.S
 
 INC := -Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs -Ifs \
        -Isecurity/nkm -Ibuild
