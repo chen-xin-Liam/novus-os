@@ -1,0 +1,82 @@
+;; ============================================================
+;;   JSON 原语测试（糯米解释执行）
+;;   运行：nuomi jt.nuomi
+;; ============================================================
+
+(define fails 0)
+(define (check name got want)
+  (if (equal? got want) 0 (begin
+    (println "FAIL " name "  得到 " got "  期望 " want)
+    (set! fails (+ fails 1)))))
+
+;; ---- 标量 ----
+(check "数字" (json-parse "42") 42)
+(check "小数" (json-parse "3.14") 3.14)
+(check "负数" (json-parse "-17") -17)
+(check "true" (json-parse "true") true)
+(check "false" (json-parse "false") false)
+(check "null" (json-parse "null") nil)
+(check "字符串" (json-parse "\"hi\"") "hi")
+
+;; ---- 对象与取值（alist 结构）----
+(define obj (json-parse "{\"name\":\"fabric\",\"id\":123}"))
+(check "对象取字符串" (json-get obj "name") "fabric")
+(check "对象取数字" (json-get obj "id") 123)
+(check "对象取不存在的键" (json-get obj "nope") nil)
+
+;; ---- 数组 ----
+(check "数组下标" (json-get (json-parse "[10,20,30]") 1) 20)
+(check "数组负索引" (json-get (json-parse "[10,20,30]") -1) 30)
+(check "数组越界" (json-get (json-parse "[10,20]") 9) nil)
+(check "嵌套数组" (json-get (json-parse "[1,[2,3]]") 1 1) 3)
+
+;; ---- 多层路径（启动器最常用：Mojang 版本元数据那种形状）----
+(define piston-like "{\"id\":\"1.21.4\",\"type\":\"release\",\"downloads\":{\"client\":{\"url\":\"http://x/c.jar\",\"sha1\":\"ab12\",\"size\":1234}},\"javaVersion\":{\"majorVersion\":21}}")
+(check "深层 client.url" (json-get (json-parse piston-like) "downloads" "client" "url") "http://x/c.jar")
+(check "深层 client.sha1" (json-get (json-parse piston-like) "downloads" "client" "sha1") "ab12")
+(check "深层 client.size" (json-get (json-parse piston-like) "downloads" "client" "size") 1234)
+(check "深层 javaVersion" (json-get (json-parse piston-like) "javaVersion" "majorVersion") 21)
+(check "顶层 id" (json-get (json-parse piston-like) "id") "1.21.4")
+
+;; ---- 数组里的对象（Modrinth 搜索结果的形状）----
+(define search "{\"hits\":[{\"project_id\":\"AANobbMI\",\"title\":\"Sodium\",\"downloads\":5000},{\"project_id\":\"P7dR8mSH\",\"title\":\"Lithium\",\"downloads\":3000}]}")
+(check "结果0 标题" (json-get (json-parse search) "hits" 0 "title") "Sodium")
+(check "结果1 标题" (json-get (json-parse search) "hits" 1 "title") "Lithium")
+(check "结果数量" (length (json-get (json-parse search) "hits")) 2)
+
+;; ---- 转义 ----
+(check "换行转义" (json-get (json-parse "{\"s\":\"a\\nb\"}") "s") "a\nb")
+(check "制表转义" (json-get (json-parse "{\"s\":\"a\\tb\"}") "s") "a\tb")
+(check "引号转义" (json-get (json-parse "{\"s\":\"say \\\"hi\\\"\"}") "s") "say \"hi\"")
+(check "反斜杠转义" (json-get (json-parse "{\"s\":\"c:\\\\dir\"}") "s") "c:\\dir")
+(check "斜杠转义" (json-get (json-parse "{\"s\":\"a\\/b\"}") "s") "a/b")
+(check "中文Unicode转义" (json-get (json-parse "{\"s\":\"\\u4f60\\u597d\"}") "s") "你好")
+(check "代理对emoji" (json-get (json-parse "{\"e\":\"\\ud83d\\ude00\"}") "e") "😀")
+(check "原生UTF8直读" (json-get (json-parse "{\"s\":\"中文\"}") "s") "中文")
+
+;; ---- 错误处理（软错误：返回 nil，程序继续）----
+(check "非法JSON" (json-parse "{bad") nil)
+(check "未闭合对象" (json-parse "{\"a\":1") nil)
+(check "尾部残留" (json-parse "{\"a\":1} junk") nil)
+(check "空对象" (json-get (json-parse "{}") "x") nil)
+(check "空数组长度" (length (json-parse "[]")) 0)
+(check "空对象序列化" (json-stringify (json-parse "{}")) "null")  ;; {} → nil → null（既定取舍）
+
+;; ---- 序列化往返 ----
+(check "序列化对象" (json-stringify (json-parse "{\"a\":1,\"b\":\"x\"}")) "{\"a\":1,\"b\":\"x\"}")
+(check "序列化数组" (json-stringify (json-parse "[1,2,3]")) "[1,2,3]")
+(check "序列化嵌套" (json-stringify (json-parse "{\"a\":[1,{\"b\":null}]}")) "{\"a\":[1,{\"b\":null}]}")
+(check "往返一致" (json-stringify (json-parse piston-like)) piston-like)
+(check "序列化转义" (json-stringify (json-parse "{\"s\":\"a\\nb\"}")) "{\"s\":\"a\\nb\"}")
+(check "点对alist序列化" (json-stringify (list (cons "x" 1) (cons "y" 2))) "{\"x\":1,\"y\":2}")
+(check "json-obj取值x" (json-get (json-obj "x" 1 "y" 2) "x") 1)
+(check "json-obj取值y" (json-get (json-obj "x" 1 "y" 2) "y") 2)
+(check "json-obj嵌套取值" (json-get (json-obj "name" "Ryan" "lang" (json-obj "en" 1)) "lang" "en") 1)
+(check "json-obj序列化" (json-stringify (json-obj "name" "Ryan" "port" 25565)) "{\"name\":\"Ryan\",\"port\":25565}")
+(check "json-obj往返" (json-stringify (json-parse (json-stringify (json-obj "a" 1 "b" (json-obj "c" "d"))))) "{\"a\":1,\"b\":{\"c\":\"d\"}}")
+(check "json-obj奇数参数" (json-obj "x") nil)
+
+(println "")
+(if (= fails 0)
+    (println "==== JSON 全部测试通过 ====")
+    (println "==== 失败 " fails " 项 ===="))

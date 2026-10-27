@@ -1,5 +1,36 @@
 # Changes
 
+## nsh 集成 Nuomi（糯米）语言：`nuomi` 指令
+
+- 新增 `apps/src/nuomi.rs`：把 `user/Nuomi_pl` 的 C 解释器移植成 `no_std`、
+  无堆分配的 Rust 版本。语法（`❝…❞`/`"…"` 字符串、`'` 引用、`[...]` 向量、
+  `;` 注释）、特殊形式（`quote/if/while/define/set!/lambda/let/let*/letrec/
+  begin/and/or`）和内置函数名与 C 版一致；`print` 对字符串加引号、`str`/`draw`
+  按原样输出，也与 C 版一致。
+- `apps/src/shell/cmds.rs` 增加 `nuomi` 内建命令：`nuomi 脚本.nuomi` 执行脚本，
+  `nuomi -e 表达式` 求值单条表达式（`nuomi` 不带参数打印用法）。`help`/`which`
+  会自动列出该命令。
+- 存储用一块随命令栈帧分配、按对象切分的 bump arena，没有垃圾回收：脚本能用到
+  的容量就是 arena 的容量，用完报 `out of memory`。环境单独放在可回收区，
+  函数调用/`let` 返回时回卷；闭包捕获了环境时保守地不回卷，保证闭包仍有效。
+- 相对 C 版的**有意差异**：不提供 JSON/HTTP/进程/窗口原语；脚本在终端里不阻塞
+  取键，`key` 恒为 `nil`、没有 `input`；`sqrt`/`pow` 由本移植实现（core 无 libm），
+  `pow` 只接受整数指数；递归深度按 eval 层数限制（约 500 层函数调用），超出报
+  `maximum recursion depth exceeded` 而不是撞穿栈；`reverse` 真正反转、`assoc`
+  保持表序（C 版 `reverse` 实际不反转、`assoc` 会把表颠倒）。
+- 资源上限（都在文件头的常量里）：对象 256 KiB（其中环境 128 KiB 可回收）、
+  源码 6 KiB、单次调用 24 个实参、列表/向量字面量 64 个元素。
+- 内核配合两处：`nuc_spawn_blob()` 的镜像缓冲 64 KiB → 128 KiB（nsh 带解释器后
+  约 69 KiB，超了原来的上限会静默拒绝启动）；内建应用的栈由 64 KiB 提到
+  `NUC_STACK_MAX` = 4 MiB——nsh 的滚动缓冲、Nuomi arena 和解释器递归本来就远超
+  64 KiB，文件加载的 `.nuc` 仍按自身头部申请栈。
+- 验证：在 host 上把 `nuomi.rs` 与 mock 的 `fs`/`shell`/`sys` 一起编译成测试程序，
+  与 C 版（`user/Nuomi_pl` 源码编出的 `nuomi_ref`）对拍 `samples/` 的
+  closures/factorial/fib/lists/logic/scope/stdlib/strings/strings2/vectors/while，
+  除上面列的差异（深递归上限、`reverse`、`assoc` 表序）外输出逐字节相同；
+  另覆盖了文件原语、`-e`、语法错误/未绑定变量/参数个数错误路径。`make` 全量
+  构建通过。尚未做 QEMU 里点开终端的交互验证。
+
 ## 显示呈现重构：消除闪烁与撕裂，启动进度条
 
 - **真实硬件花屏/卡顿的根因修复**：帧缓冲被当作可缓存(WB)内存访问。`nd_init()`

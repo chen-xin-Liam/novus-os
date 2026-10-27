@@ -1,0 +1,169 @@
+;; ============================================================
+;;   贪吃蛇 · Nuomi 窗口版
+;;   运行：nuomi samples/snake-wm.nuomi
+;;   操作：方向键 / WASD 移动，Esc 退出；结束后按 R 重开
+;;   后端：Windows 走 Win32 真窗口（src/wm.c），将来 novus 走 Novus-WM IPC
+;;   依赖窗口原语：window-create / fill / shape / text / invalidate / event
+;;   （逻辑沿用命令行版 snake.nuomi 的 step/eat/move/wall?/self-hit?，只换渲染与输入）
+;; ============================================================
+
+;; ---------- 常量 ----------
+(define FW 24)       ;; 场地宽（格）
+(define FH 16)       ;; 场地高（格）
+(define CELL 16)     ;; 每格像素
+(define TOP 26)      ;; 顶部信息条高度（像素）
+(define TICK 110)    ;; 帧间隔（毫秒）
+(define WINW (* FW CELL))
+(define WINH (+ TOP (* FH CELL)))
+
+;; 颜色（十进制 = 0xRRGGBB；Nuomi 不支持 0x 字面量，故用十进制）
+(define C_BG 14808574)     ;; 0xE1F5FE 浅蓝底
+(define C_BG2 11789820)    ;; 0xB3E5FC 棋盘格
+(define C_BAR 6953882)     ;; 0x6A1B9A 紫信息条
+(define C_BORDER 33679)    ;; 0x00838F 青边框
+(define C_HEAD 16011550)   ;; 0xF4511E 深橙蛇头
+(define C_FOOD 16717636)   ;; 0xFF1744 亮红食物
+(define C_TEXT 16777215)   ;; 0xFFFFFF 信息条白字
+(define C_TEXT2 3622735)   ;; 0x37474F 深灰蓝（备用）
+;; 蛇身彩虹七色
+(define RAINBOW [16727296 16748800 16771584 58998 45311 5467646 13959417])
+(define (seg-color i) (get RAINBOW (% i 7)))
+
+;; ---------- 全局状态 ----------
+(define snake '())
+(define dir 'right)
+(define food [0 0])
+(define score 0)
+(define alive true)
+(define quit false)
+(define frame-key nil)
+(define w 0)
+
+;; ---------- 工具 ----------
+(define (drop-last lst) (if (null? (cdr lst)) '() (cons (car lst) (drop-last (cdr lst)))))
+(define (pos= a b) (and (= (get a 0) (get b 0)) (= (get a 1) (get b 1))))
+(define (delta d)
+  (if (equal? d 'up) [0 -1]
+  (if (equal? d 'down) [0 1]
+  (if (equal? d 'left) [-1 0] [1 0]))))
+(define (on-snake? p)
+  (define cur snake) (define hit false)
+  (while (not (null? cur)) (if (pos= (car cur) p) (set! hit true) 0) (set! cur (cdr cur)))
+  hit)
+(define (place-food)
+  (define x (random FW)) (define y (random FH))
+  (if (on-snake? [x y]) (place-food) (set! food [x y])))
+(define (die) (set! alive false))
+(define (eat nh) (set! snake (cons nh snake)) (set! score (+ score 10)) (place-food))
+(define (move nh) (set! snake (cons nh (drop-last snake))))
+(define (next-head)
+  (define h (car snake)) (define d (delta dir))
+  [(+ (get h 0) (get d 0)) (+ (get h 1) (get d 1))])
+(define (wall? nh) (or (< (get nh 0) 0) (>= (get nh 0) FW) (< (get nh 1) 0) (>= (get nh 1) FH)))
+(define (self-hit? nh)
+  (define body (if (null? (cdr snake)) '() (drop-last snake)))
+  (define cur body) (define hit false)
+  (while (not (null? cur)) (if (pos= (car cur) nh) (set! hit true) 0) (set! cur (cdr cur)))
+  hit)
+(define (step)
+  (define nh (next-head))
+  (if (wall? nh) (die)
+  (if (self-hit? nh) (die)
+  (if (pos= nh food) (eat nh) (move nh)))))
+
+;; ---------- 渲染（窗口） ----------
+(define (fill-rect x y ww hh color) (window-fill w x y ww hh color))
+(define (draw-cell gx gy color)
+  (fill-rect (* gx CELL) (+ TOP (* gy CELL)) CELL CELL color))
+(define (draw-snake)
+  (define cur snake) (define idx 0)
+  (while (not (null? cur))
+    (draw-cell (get (car cur) 0) (get (car cur) 1) (if (= idx 0) C_HEAD (seg-color idx)))
+    (set! idx (+ idx 1))
+    (set! cur (cdr cur))))
+(define (draw-checker)
+  (define gy 0) (define gx 0)
+  (while (< gy FH)
+    (set! gx 0)
+    (while (< gx FW)
+      (if (= (% (+ gx gy) 2) 0) (draw-cell gx gy C_BG2) 0)
+      (set! gx (+ gx 1)))
+    (set! gy (+ gy 1))))
+
+(define (render)
+  (window-clear w)
+  (fill-rect 0 0 WINW WINH C_BG)
+  (draw-checker)
+  (fill-rect 0 0 WINW TOP C_BAR)
+  (window-text w 8 5 1 (str "Score: " score) C_TEXT)
+  (window-shape w 2 0 TOP WINW (* FH CELL) C_BORDER)
+  (draw-snake)
+  (draw-cell (get food 0) (get food 1) C_FOOD)
+  (window-invalidate w))
+
+;; ---------- 输入 ----------
+(define (opposite? a b)
+  (or (and (equal? a 'up) (equal? b 'down)) (and (equal? a 'down) (equal? b 'up))
+      (and (equal? a 'left) (equal? b 'right)) (and (equal? a 'right) (equal? b 'left))))
+(define (key-dir k)
+  (if (equal? k 'up) 'up
+  (if (equal? k 'down) 'down
+  (if (equal? k 'left) 'left
+  (if (equal? k 'right) 'right
+  (if (equal? k "w") 'up
+  (if (equal? k "s") 'down
+  (if (equal? k "a") 'left
+  (if (equal? k "d") 'right
+  (if (equal? k "W") 'up
+  (if (equal? k "S") 'down
+  (if (equal? k "A") 'left
+  (if (equal? k "D") 'right nil)))))))))))))
+(define (handle-key k)
+  (define nd (key-dir k))
+  (if (and nd (not (opposite? nd dir))) (set! dir nd) 0))
+
+;; ---------- 一局 ----------
+(define (init)
+  (set! snake (list [7 5] [6 5] [5 5] [4 5]))
+  (set! dir 'right) (set! score 0) (set! alive true) (set! quit false)
+  (place-food))
+(define (play)
+  (while (and (not quit) alive)
+    (set! frame-key (window-event))
+    (if (equal? frame-key 'esc) (set! quit true) (handle-key frame-key))
+    (if (and (not quit) alive) (step) 0)
+    (render)
+    (sleep TICK)))
+(define (game-over-render)
+  (window-clear w)
+  (fill-rect 0 0 WINW WINH C_BG)
+  (draw-checker)
+  (fill-rect 52 60 280 168 C_BAR)
+  (window-text w 130 78 2 "GAME OVER" C_TEXT)
+  (window-text w 150 130 1 (str "Score: " score) C_TEXT)
+  (window-text w 78 176 1 "Press R restart / Esc quit" C_TEXT)
+  (window-invalidate w))
+(define (wait-restart)
+  (define k nil)
+  (while (not (or (equal? k "r") (equal? k "R") (equal? k 'esc)))
+    (set! k (window-event))
+    (sleep 50))
+  (not (equal? k 'esc)))
+
+;; ---------- 主流程 ----------
+(define (main)
+  (set! w (window-create 80 80 WINW WINH "Nuomi Snake"))
+  (window-title w "Nuomi Snake")
+  (define again true)
+  (while again
+    (init)
+    (render)
+    (play)
+    (if quit
+        (set! again false)
+        (begin
+          (game-over-render)
+          (set! again (wait-restart)))))
+  (window-close w))
+
+(main)

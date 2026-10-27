@@ -1,0 +1,29 @@
+# ===== 构建产物 =====
+*.exe
+*.o
+*.obj
+nuomi_dbg.exe
+# make 在 Linux/macOS 上产出的无后缀二进制（勿提交）
+/nuomi
+/nucutil
+# Windows 快捷方式（本机生成，勿提交）
+*.lnk
+
+# ===== 测试/中间产物 =====
+*.nuc
+*.map
+
+# ===== Nuomi IDE 运行时工作区（首次启动自动预载示例，勿入库） =====
+ide/workspace/
+
+# ===== 编辑器/OS =====
+Thumbs.db
+.DS_Store
+*.swp
+*~
+
+# ===== 不追踪 ISO / 系统镜像（在父目录 E:/novus-os/system） =====
+*.iso
+
+# ===== WorkBuddy 内部项目记忆/数据（非 Nuomi 模块本身，不进远程仓库） =====
+.workbuddy/

@@ -1,0 +1,4 @@
+; 逻辑（and / or 短路求值）
+(println (and true (< 3 5) "yes"))   ; 打印 "yes"
+(println (or false false true))       ; 打印 true
+(println (not false))                 ; 打印 true

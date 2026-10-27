@@ -1,0 +1,36 @@
+;; ============================================================
+;; Nuomi 编译模式 I/O 示例
+;;   编译：nuomi -c samples/io.nuomi -o io.nuc
+;;   真机运行（novus）：把 io.nuc 加载执行
+;;   本机验证：nucrun.py io.nuc   （用模拟器模拟内核，见 tools/）
+;;
+;; 编译模式的 I/O 走 novus 系统调用：
+;;   print / println / print-int  →  write 系统调用（号 1）
+;;   字符串字面量在 RODATA 段；整数经内置 itoa 转换后写入 BSS 缓冲区。
+;; ============================================================
+
+(println "=== Nuomi 编译模式 I/O ===")
+(println "整数:" 42)
+(println "负数:" -17)
+(println "零:" 0)
+(println "大数:" 1234567890)
+(println "表达式:" (+ 3 4))
+(println "字符串:" "hello")
+(println "混合:" 1 "two" 3)
+
+;; 用到 let / 局部函数
+(let ((x 6) (y 7))
+  (println "let:" (* x y)))
+
+(define (fact n)
+  (if (< n 2) 1 (* n (fact (- n 1)))))
+(println "fact(10) =" (fact 10))
+
+;; 循环
+(define (sum-to n)
+  (let ((i 0) (acc 0))
+    (while (< i n)
+      (set! acc (+ acc i))
+      (set! i (+ i 1)))
+    acc))
+(println "sum 0..99 =" (sum-to 100))

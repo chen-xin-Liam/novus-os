@@ -1,0 +1,20 @@
+# Nuomi 语言模块配置（供 novus-os 顶层 Kconfig source）
+# 合并位置：user/nuomi/（编译器+运行时）与 tools/nucutil/（主机端 NUC 工具）。
+
+config USER_NUOMI
+	bool "Nuomi language (Lisp-style, C impl) + NUC toolchain"
+	default n
+	help
+	  Nuomi 是一门 Lisp 风格编程语言（树遍历解释器 + 引用计数 GC），
+	  附带 novus-os NUC 原生格式（V1.0）的读写/校验/dump 工具链。
+	  作为用户态语言模块，可将 .nuomi 源码编译为 NUC 原生可执行
+	  （x86_64 机器码，对齐 NUC 规范 V1.0 的 .text 段）。
+	  Windows 上 nucutil run 可做真机执行验证；其它平台仅 dump/validate。
+
+config USER_NUOMI_NUCUTIL
+	bool "nucutil (NUC format host tool)"
+	default n
+	depends on USER_NUOMI
+	help
+	  主机端工具：emit-demo / validate / dump / run NUC 文件。
+	  用于构建期生成与校验 .nuc，便于打包进 novus-os 镜像。

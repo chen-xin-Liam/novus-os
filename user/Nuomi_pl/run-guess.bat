@@ -1,0 +1,6 @@
+@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+nuomi.exe samples\guess-play.nuomi
+echo.
+pause

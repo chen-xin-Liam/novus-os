@@ -1,0 +1,4 @@
+; 字符串与拼接（str 把任意值拼成字符串）
+(define name "Nuomi")
+(println "Hello, " name "!")
+(println (str "version " 1.0 " ok"))

@@ -36,7 +36,12 @@
 #define NUC_STACK_TOP    0x00000000A0000000ULL /* 2.5 GiB, clear of the image */
 #define NUC_TRAMPOLINE   0x0000000090000000ULL /* 2.25 GiB */
 #define NUC_STACK_MIN    0x0000000000010000ULL /* 64 KiB */
-#define NUC_STACK_MAX    0x0000000000040000ULL /* 256 KiB */
+/* Cap for a stack_size a .nuc asks for. 4 MiB: the built-in apps are Rust
+ * images whose frames are large (nsh keeps its scrollback, the Nuomi arena
+ * and the interpreter's recursion on the stack), and the interpreter needs
+ * room for a few hundred nested calls. A user image still gets exactly what
+ * its header asks for, clamped to this. */
+#define NUC_STACK_MAX    0x0000000000400000ULL /* 4 MiB */
 
 typedef struct {
   UINT8  magic[4];
@@ -439,10 +444,11 @@ int nuc_spawn_blob(const char *name, const UINT8 *blob, UINT32 size,
                    UINT32 entry) {
   /* Header + one segment entry + the blob. The image is built in a
    * static buffer: the loader copies it into the new address space
-   * before returning, so nothing has to outlive this call. The buffer
-   * covers the largest built-in application (M8: ~6 KB, 64 KB here so a
-   * growing app is a build-time size check, not a runtime surprise). */
-  static UINT8 img[NUC_HDR_SIZE + NUC_SEG_SIZE + 65536u];
+   * before returning, so nothing has to outlive this call. 128 KB covers
+   * the largest built-in application (nsh, which carries the shell and the
+   * Nuomi interpreter), so a growing app is a build-time size check, not a
+   * runtime surprise. */
+  static UINT8 img[NUC_HDR_SIZE + NUC_SEG_SIZE + 131072u];
   UINT32       strtab = NUC_HDR_SIZE + NUC_SEG_SIZE;
 
   if (blob == 0 || size == 0u || entry >= size ||
@@ -458,7 +464,11 @@ int nuc_spawn_blob(const char *name, const UINT8 *blob, UINT32 size,
   img[12] = 1; /* one segment */
   put32(img + 16, strtab);
   put32(img + 20, strtab);
-  put32(img + 24, NUC_STACK_MIN);
+  /* Built-in apps are Rust images with sizeable frames: nsh keeps its
+   * scrollback, source buffer and the Nuomi arena on the stack. Give them
+   * the loader's ceiling instead of the minimum; a file-loaded .nuc still
+   * gets exactly the stack its header asks for. */
+  put32(img + 24, NUC_STACK_MAX);
   put32(img + 28, 0);
 
   put32(img + NUC_HDR_SIZE + 0, NUC_SEG_TEXT);

@@ -1094,6 +1094,12 @@ fn cmd_alias(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) ->
     0
 }
 
+/// Run a Nuomi (糯米) script. The interpreter lives in [`crate::nuomi`]; this
+/// builtin only exists so the language is reachable as `nuomi script.nuomi`.
+fn cmd_nuomi(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    crate::nuomi::command(shell, cmd, out)
+}
+
 fn cmd_drives(_shell: &mut Shell, _cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
     puts(out, "Mounts (single root, see design notes):\n");
     puts(out, "  /   NovusFS root\n");
@@ -1181,4 +1187,5 @@ const BUILTINS: &[(&str, Bfn)] = &[
     ("tree", cmd_tree),
     ("alias", cmd_alias),
     ("drives", cmd_drives),
+    ("nuomi", cmd_nuomi),
 ];

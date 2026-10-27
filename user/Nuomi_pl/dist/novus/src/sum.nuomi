@@ -1,0 +1,2 @@
+(define (sum-to n) (define i 0) (define s 0) (while (< i n) (set! s (+ s i)) (set! i (+ i 1))) s)
+(sum-to 100)

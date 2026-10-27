@@ -1,0 +1,6 @@
+; 列表操作
+(define xs (list 1 2 3 4 5))
+(println "len =" (length xs))
+(println "car =" (car xs))
+(println "cdr =" (cdr xs))
+(println "nth2=" (nth xs 2))

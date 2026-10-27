@@ -1,0 +1,129 @@
+;; ============================================================
+;; Nuomi HTTP 示例 —— 用糯米干启动器真会干的活
+;;   · 拉 Mojang 版本清单（真网络）
+;;   · 挑版本、读元数据
+;;   · 断点续传下载
+;;   · 生成实例配置
+;;
+;; 运行：nuomi samples/http.nuomi
+;; 需要网络；本机若走代理，HTTP 层会自动处理。
+;;
+;; 注意：解释器的 println 会给每个参数加引号，所以显示文字统一用
+;;       (str ...) 拼成一条再打印。
+;; ============================================================
+
+(define manifest-url
+  "https://piston-meta.mojang.com/mc/game/version_manifest_v2.json")
+
+(define target "1.21.4")
+
+;; ---------- 小工具 ----------
+
+(define (title t)
+  (println (str "=== " t " ===")))
+
+(define (kv k v)
+  (println (str "  " k ": " v)))
+
+;; json-get 已经是变参多路径，直接用它，不需要额外的 pick
+
+;; ---------- 1. 拉清单 ----------
+
+(println "")
+(println "=== 1. 拉取 Mojang 版本清单 ===")
+(println (str "  URL: " manifest-url))
+
+(define body (http-get manifest-url "Nuomi-Sample/0.1"))
+(define manifest (json-parse body))
+
+(if (null? manifest)
+    (println "  ✘ 拉取失败（检查网络/代理）")
+    (begin
+
+      ;; ---------- 2. 版本信息 ----------
+      (println "")
+      (println "=== 2. 清单概览 ===")
+      (kv "清单字节数" (length body))
+      (kv "最新正式版" (json-get manifest "latest" "release"))
+      (kv "最新快照版" (json-get manifest "latest" "snapshot"))
+      (kv "版本总数" (length (json-get manifest "versions")))
+
+      ;; ---------- 3. 找目标版本 ----------
+      (println "")
+      (println (str "=== 3. 找到版本 " target " ==="))
+      (define versions (json-get manifest "versions"))
+      (define hit (filter (lambda (x) (equal? (json-get x "id") target)) versions))
+
+      (if (null? hit)
+          (println "  没找到该版本")
+          (begin
+
+            (define vmeta-url (json-get (car hit) "url"))
+            (kv "版本 id" (json-get (car hit) "id"))
+            (kv "类型" (json-get (car hit) "type"))
+            (kv "元数据 URL" vmeta-url)
+
+            ;; ---------- 4. 拉版本元数据 ----------
+            (println "")
+            (println "=== 4. 版本元数据（含下载信息）===")
+            (define vmeta (json-parse (http-get vmeta-url "Nuomi-Sample/0.1")))
+
+            (if (null? vmeta)
+                (println "  ✘ 元数据拉取失败")
+                (begin
+
+                  (kv "客户端 jar 大小" (json-get vmeta "downloads" "client" "size"))
+                  (kv "客户端 jar sha1" (json-get vmeta "downloads" "client" "sha1"))
+                  (kv "客户端 jar URL" (json-get vmeta "downloads" "client" "url"))
+                  (kv "需要 Java 主版本" (json-get vmeta "javaVersion" "majorVersion"))
+                  (kv "依赖库数量" (length (json-get vmeta "libraries")))
+
+                  ;; ---------- 5. 依赖库路径 ----------
+                  (println "")
+                  (println "=== 5. 依赖库（Maven 坐标 -> jar 路径）===")
+                  ;; Mojang 的库对象用 "group:artifact:version" 冒号格式存在 name 字段里，
+                  ;; 这里先拆成三段再拼路径。
+                  (define (coord-of lib)
+                    (string-search (json-get lib "name") ":"))
+                  (define (maven-path lib)
+                    (define nm (json-get lib "name"))
+                    (define p1 (string-search nm ":"))
+                    (define p2 (string-search nm ":" (+ p1 1)))
+                    (define g (substring nm 0 p1))
+                    (define a (substring nm (+ p1 1) p2))
+                    (define v (substring nm (+ p2 1) (length nm)))
+                    (str g "/" a "/" v "/" a "-" v ".jar"))
+                  (map (lambda (lib)
+                         (println (str "  "
+                                       (json-get lib "name")
+                                       " -> "
+                                       (maven-path lib))))
+                       (json-get vmeta "libraries"))
+
+                  ;; ---------- 6. 断点续传 ----------
+                  (println "")
+                  (println "=== 6. 断点续传下载 ===")
+                  (define dest "nuomi-manifest.json")
+                  (if (exists? dest)
+                      (begin
+                        (kv "本地已有" (file-size dest))
+                        (kv "本次续传写入"
+                            (http-download-from manifest-url dest (file-size dest)))
+                        (kv "续传后大小" (file-size dest)))
+                      (begin
+                        (kv "首次下载写入" (http-download manifest-url dest))
+                        (kv "落盘大小" (file-size dest))))
+                  (kv "落盘内容与网络一致"
+                      (if (equal? (read-file dest) body) "一致 ✓" "不一致 ✘"))
+
+                  ;; ---------- 7. 生成实例配置 ----------
+                  (println "")
+                  (println "=== 7. 生成实例配置 ===")
+                  (define config
+                    (json-obj
+                      "name" (str "Nuomi 实例 " target)
+                      "version" target
+                      "javaMajor" (json-get vmeta "javaVersion" "majorVersion")
+                      "clientJar" (json-get vmeta "downloads" "client" "url")
+                      "clientSha1" (json-get vmeta "downloads" "client" "sha1")))
+                  (println (str "  " (json-stringify config)))))))))

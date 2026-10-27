@@ -1,0 +1,6 @@
+; 向量（数组）：用 [a b c] 语法，随机访问，可原地修改
+(define v [10 20 30])
+(println "v[1] =" (get v 1))
+(set v 1 99)
+(println "v[1] =" (get v 1))
+(println "len  =" (length v))

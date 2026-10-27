@@ -1,0 +1,21 @@
+;; 糯米窗口原语演示（宿主假 WM；真机走 Novus-WM IPC，见 include/novus_wm.h）
+;; 跑法：nuomi samples/wm-demo.nuomi
+;; 说明：宿主上没有 novus 内核，窗口调用由内存"假 WM"顶替，消息摘要打到 stderr；
+;;       真机上这些原语改走 ipc_lookup("nwm") + ipc_send/ipc_recv。
+(window-trace 1)
+
+(define w (window-create 100 100 320 200 "糯米窗口"))
+(window-title w "Hello Novus-WM")
+
+;; 一帧：CLEAR 开帧 -> 逐条 SHAPE/TEXT -> INVALIDATE 收尾重绘
+(window-clear w)
+(window-fill  w 0 0 320 24 2736507)      ; 标题条 #29C17B
+(window-text  w 8 6 1 "你好，Novus-WM！")
+(window-fill  w 8 40 304 140 1058080)    ; 客户区背景 #102520
+(window-shape w 6 8 40 96 96 16729766 12) ; 圆角填充 op=6 半径12 #FF46A6
+(window-text  w 16 96 1 "圆角图元 OK")
+(window-invalidate w)
+
+(println "win =" w "，一帧画完")
+
+(window-close w)

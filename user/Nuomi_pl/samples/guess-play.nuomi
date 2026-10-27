@@ -1,0 +1,47 @@
+; ============================================================
+;  猜数字 · 真能玩版（你敲数字，猜电脑想的数）
+;  运行：nuomi.exe samples/guess-play.nuomi
+;  依赖：Nuomi 的 input-int 内置（读取键盘输入）
+; ============================================================
+
+; --- 简单 LCG 伪随机（Nuomi 没有 random 内置）---
+(define rng-state 13579)
+(define (rng-step)
+  (set! rng-state (% (+ (* rng-state 1103515245) 12345) 2147483648))
+  rng-state)
+(define (rng-float)
+  (/ (rng-step) 2147483648.0))
+(define (rng-int n)
+  (define r (* (rng-float) n))
+  (define i 0)
+  (while (< (+ i 1) r)
+    (set! i (+ i 1)))
+  i)
+
+(println "========== 猜数字 ==========")
+(println "我想了一个 1 到 100 之间的整数，你来猜!")
+(define secret (+ (rng-int 100) 1))
+(define tries 0)
+(define done false)
+(define guess 0)
+
+(while (not done)
+  (set! guess (input-int "你的猜测> "))
+  (if (and (> guess 0) (< guess 101))
+      (begin
+        (set! tries (+ tries 1))
+        (if (= guess secret)
+            (begin
+              (println "猜中了! 答案就是" secret "，你用了" tries "次!")
+              (set! done true))
+            (begin
+              (if (< guess secret)
+                  (println "太小了，再大一点~")
+                  (println "太大了，再小一点~"))
+              (if (>= tries 12)
+                  (begin
+                    (println "次数用完啦! 答案是" secret)
+                    (set! done true))))))
+      (println "请输入 1 到 100 之间的数字!")))
+
+(println "游戏结束，谢谢游玩!")

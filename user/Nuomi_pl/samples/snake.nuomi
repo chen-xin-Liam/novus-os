@@ -1,0 +1,212 @@
+;; ============================================================
+;;   贪吃蛇 · Nuomi 脚本
+;;   运行：nuomi snake.nuomi（或拖到桌面「运行Nuomi脚本.bat」上）
+;;   操作：方向键 或 WASD 移动，Esc 退出；游戏结束后按 R 重开
+;; ------------------------------------------------------------
+;;   本脚本依赖 2026-10-21 新加的实时游戏原语：
+;;     cls 清屏（只用于开局/结束的一次性清场）
+;;     home 光标归位 + 隐光标（不清屏——每帧抹全屏就是闪瞎眼的根因）
+;;     draw 把整个画面拼成一个大字符串一次写出（控制台整帧呈现，不撕裂）
+;;     sleep 毫秒延时 / key 非阻塞键盘 / random 随机数
+;;   画面每帧全量重绘，边框与角色用 ASCII，任何代码页下都不乱码。
+;; ============================================================
+
+;; ---------- 常量 ----------
+(define FW 30)     ;; 场地宽（不含边框）
+(define FH 18)     ;; 场地高（不含边框）
+(define TICK 110)  ;; 帧间隔（毫秒），越小蛇越快
+
+;; ---------- 全局状态（必须定义在用它的函数之前） ----------
+(define snake '())   ;; 蛇身：([x y] [x y] ...) 列表，头在前（注意用 list 不用向量——
+                     ;; car/cdr/cons/drop-last 都是列表操作；向量是另一套 get/set）
+(define dir 'right)  ;; 当前方向
+(define food [0 0])  ;; 食物位置（向量，坐标用 get 读）
+(define score 0)     ;; 得分（每颗 10 分）
+(define alive true)  ;; 是否存活
+
+;; ---------- 基础工具 ----------
+(define (drop-last lst)
+  (if (null? (cdr lst)) '() (cons (car lst) (drop-last (cdr lst)))))
+
+(define (pos= a b) (and (= (get a 0) (get b 0)) (= (get a 1) (get b 1))))
+
+;; 方向 → 位移量
+(define (delta d)
+  (if (equal? d 'up) [0 -1]
+  (if (equal? d 'down) [0 1]
+  (if (equal? d 'left) [-1 0] [1 0]))))
+
+;; 整条蛇是否经过坐标 p
+(define (on-snake? p)
+  (define cur snake)
+  (define hit false)
+  (while (not (null? cur))
+    (if (pos= (car cur) p) (set! hit true) 0)
+    (set! cur (cdr cur)))
+  hit)
+
+;; ---------- 食物 ----------
+;; 随机落点，避开蛇身（递归重抽，场地大时几乎一次中）
+(define (place-food)
+  (define x (random FW))
+  (define y (random FH))
+  (if (on-snake? [x y]) (place-food) (set! food [x y])))
+
+;; ---------- 一步游戏逻辑（与渲染分离，可单测） ----------
+(define (die) (set! alive false))
+
+(define (eat nh)
+  (set! snake (cons nh snake))   ;; 头接上，尾巴不动 → 变长
+  (set! score (+ score 10))
+  (place-food))
+
+(define (move nh)
+  (set! snake (cons nh (drop-last snake))))
+
+;; 新蛇头坐标
+(define (next-head)
+  (define h (car snake))
+  (define d (delta dir))
+  [(+ (get h 0) (get d 0)) (+ (get h 1) (get d 1))])
+
+;; 撞墙判定
+(define (wall? nh)
+  (or (< (get nh 0) 0) (>= (get nh 0) FW)
+      (< (get nh 1) 0) (>= (get nh 1) FH)))
+
+;; 撞自己判定。尾巴尖那一格不算——它这一步就要移走。
+;; （食物永不落在蛇身上，所以「吃」与「撞尾」不会同时发生，排除尾巴是安全的。）
+(define (self-hit? nh)
+  (define body (if (null? (cdr snake)) '() (drop-last snake)))
+  (define cur body)
+  (define hit false)
+  (while (not (null? cur))
+    (if (pos= (car cur) nh) (set! hit true) 0)
+    (set! cur (cdr cur)))
+  hit)
+
+;; 推进一步
+(define (step)
+  (define nh (next-head))
+  (if (wall? nh) (die)
+  (if (self-hit? nh) (die)
+  (if (pos= nh food) (eat nh) (move nh)))))
+
+;; ---------- 渲染 ----------
+;; 上/下边框，如 +------------------------------+
+(define (hbar)
+  (define s "+")
+  (define i 0)
+  (while (< i FW)
+    (set! s (str s "-"))
+    (set! i (+ i 1)))
+  (str s "+"))
+
+;; 单格字符：@ 蛇头 / o 蛇身 / * 食物 / 空格
+(define (cell-char x y)
+  (if (pos= (car snake) [x y]) "@"
+  (if (on-snake? [x y]) "o"
+  (if (pos= food [x y]) "*" " "))))
+
+(define (build-row y)
+  (define s "|")
+  (define x 0)
+  (while (< x FW)
+    (set! s (str s (cell-char x y)))
+    (set! x (+ x 1)))
+  (str s "|"))
+
+;; 整个画面拼成**一个**大字符串（行间用 \n 分隔，末行不带 \n）
+(define (frame-string)
+  (define s (str "  贪吃蛇 · Nuomi        得分: " score "\n" (hbar) "\n"))
+  (define y 0)
+  (while (< y FH)
+    (set! s (str s (build-row y) "\n"))
+    (set! y (+ y 1)))
+  (str s (hbar) "\n  方向键/WASD 移动 · Esc 退出"))
+
+;; 每帧：光标归位 + 整帧一次写出。
+;; 不清屏（cls 抹全屏就是闪瞎眼的根因），所有行等宽，旧画面自然被覆盖；
+;; draw 一次 fwrite 写完，控制台整帧呈现，不会看到画到一半的半成品。
+(define (render)
+  (home)
+  (draw (frame-string)))
+
+;; ---------- 输入 ----------
+(define (opposite? a b)
+  (or (and (equal? a 'up) (equal? b 'down))
+      (and (equal? a 'down) (equal? b 'up))
+      (and (equal? a 'left) (equal? b 'right))
+      (and (equal? a 'right) (equal? b 'left))))
+
+;; 按键 → 方向符号（不匹配返回 nil）
+(define (key-dir k)
+  (if (equal? k 'up) 'up
+  (if (equal? k 'down) 'down
+  (if (equal? k 'left) 'left
+  (if (equal? k 'right) 'right
+  (if (equal? k "w") 'up
+  (if (equal? k "s") 'down
+  (if (equal? k "a") 'left
+  (if (equal? k "d") 'right
+  (if (equal? k "W") 'up
+  (if (equal? k "S") 'down
+  (if (equal? k "A") 'left
+  (if (equal? k "D") 'right nil)))))))))))))
+
+;; 处理一次按键：不能 180° 掉头
+(define (handle-key k)
+  (define nd (key-dir k))
+  (if (and nd (not (opposite? nd dir))) (set! dir nd) 0))
+
+;; 每帧轮询一次键盘（无按键时 key 返回 nil，不阻塞）
+(define (poll-input)
+  (define k (key))
+  (if k (handle-key k) 0))
+
+;; ---------- 一局游戏 ----------
+(define (init)
+  (set! snake (list [7 5] [6 5] [5 5] [4 5]))
+  (set! dir 'right)
+  (set! score 0)
+  (set! alive true)
+  (place-food))
+
+(define (game-loop)
+  (while alive
+    (poll-input)
+    (step)
+    (render)
+    (sleep TICK)))
+
+(define (game-over)
+  (show-cursor)
+  (cls)   ;; 一次性清场（静态画面，无所谓闪）
+  (draw (str "\n  ========================\n"
+             "       游戏结束！\n"
+             "       最终得分: " score "\n"
+             "  ========================\n"
+             "  按 R 重开一局，按 Esc 退出\n")))
+
+;; 等重开/退出。返回 true = 重开，false = 退出。
+(define (wait-restart)
+  (define k nil)
+  (while (not (or (equal? k "r") (equal? k "R") (equal? k 'esc)))
+    (set! k (key))
+    (sleep 50))
+  (not (equal? k 'esc)))
+
+;; ---------- 主流程 ----------
+(define (main)
+  (cls)      ;; 开局清一次场（清掉启动器回显等残留），之后每帧只归位重绘
+  (init)
+  (render)
+  (define again true)
+  (while again
+    (game-loop)
+    (game-over)
+    (set! again (wait-restart))
+    (if again (init) 0))
+  (show-cursor))
+
+(main)

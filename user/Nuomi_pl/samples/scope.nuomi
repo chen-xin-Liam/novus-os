@@ -1,0 +1,74 @@
+;; ============================================================
+;; Nuomi 作用域与局部绑定示例
+;;   运行：nuomi samples/scope.nuomi
+;; ============================================================
+
+;; ---------- let：局部变量 ----------
+;; let 是「并行绑定」：所有 init 先在外层求值，再一起绑定进新作用域。
+;; 所以 (let ((x 1) (y x)) ...) 里的 y 取到的是**外层**的 x。
+(define ox 10)
+(println "let并行绑定:" (let ((x 1) (y ox)) (+ x y)))
+;; => 1 + 10 = 11（y 拿到外层的 ox=10，不是同一个 let 里的 x=1）
+
+;; let 建立独立作用域，不污染全局
+(define g 100)
+(let ((g 1))
+  (println "let内:" g))
+(println "let外:" g)
+;; => let内: 1 / let外: 100
+
+;; ---------- let*：顺序绑定 ----------
+;; 后面的绑定能看到前面已定义的变量
+(println "let*顺序:"
+         (let* ((a 1)
+                (b (+ a 10))
+                (c (* b 2)))
+           (+ a b c)))
+;; => 1 + 11 + 22 = 34
+
+;; ---------- let：闭包捕获 ----------
+;; let 里的绑定可以被内部 lambda 捕获，形成带状态的闭包
+(define (adder n)
+  (let ((x n))
+    (lambda (y) (+ x y))))
+
+(define add5 (adder 5))
+(println "闭包捕获:" (add5 10))
+;; => 15
+
+;; ---------- let + set!：可变状态 ----------
+(define (make-counter)
+  (let ((n 0))
+    (lambda ()
+      (set! n (+ n 1))
+      n)))
+
+(define c1 (make-counter))
+(define c2 (make-counter))
+(println "独立状态:" (c1) (c1) (c1) "| c2:" (c2))
+;; 各自独立：c1 递增，c2 从1 开始
+
+;; ---------- letrec：互相递归 ----------
+;; letrec 先把所有名字绑为 nil 再求值，因此可以互相引用
+(letrec ((even? (lambda (n) (if (= n 0) true  (odd?  (- n 1)))))
+         (odd?  (lambda (n) (if (= n 0) false (even? (- n 1))))))
+  (println "互递归 even?/odd?:"
+           (even? 10) (odd? 10) (even? 7) (odd? 7)))
+;; => true false false true
+
+;; ---------- 试除法判素数（letrec + 局部递归） ----------
+(define (prime? n)
+  (if (< n 2)
+      false
+      (letrec ((check (lambda (d)
+                        (if (> (* d d) n)
+                            true
+                            (if (= (% n d) 0) false (check (+ d 1)))))))
+        (check 2))))
+
+(println "素数:" (prime? 7) (prime? 8) (prime? 97))
+
+;; ---------- 深递归 ----------
+;; 旧版本递归约 500 层就栈溢出；现在可支持数千层
+(define (depth n) (if (< n 1) 0 (+ 1 (depth (- n 1)))))
+(println "递归 2000 层:" (depth 2000))

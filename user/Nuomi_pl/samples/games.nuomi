@@ -1,0 +1,135 @@
+; ============================================================
+;  Nuomi 游戏合集  (Nuomi Games Collection)
+;  说明：Nuomi 当前没有 input / random 内置函数，所以本文件
+;        1) 自带一个 LCG 伪随机数发生器 (rng-*)
+;        2) 游戏均为"自动演示 / AI 对战"型，无需玩家输入
+;  运行：./nuomi.exe samples/games.nuomi
+; ============================================================
+
+; ---------- 伪随机数发生器 (LCG) ----------
+; 经典 Numerical-Recipes 最小发生器：state = (state*9301+49297) % 233280
+; 乘积上限约 2.17e9，远小于 double 的 2^53 精确范围，不会丢精度。
+(define rng-state 13579)
+
+(define (rng-next)
+  (set! rng-state (% (+ (* rng-state 9301) 49297) 233280))
+  rng-state)
+
+; 返回 [0,1) 区间的浮点数
+(define (rng-float)
+  (/ (rng-next) 233280))
+
+; 返回 [0,n) 之间的整数（用计数法求 floor，绕开没有 floor 内置的限制）
+(define (rng-int n)
+  (define r (* (rng-float) n))
+  (define i 0)
+  (while (<= (+ i 1) r)
+    (set! i (+ i 1)))
+  i)
+
+; 求两个数中较大的（Nuomi 没有 max 内置）
+(define (max a b)
+  (if (> a b) a b))
+
+; 整数二分中点：floor((a+b)/2)
+; 用奇偶特判，避免计数法在偶数和时少算 1 的偏差
+(define (avg2 a b)
+  (define s (+ a b))
+  (if (= (% s 2) 0)
+      (/ s 2)
+      (/ (- s 1) 2)))
+
+; ============================================================
+;  游戏一：勇者斗恶龙 —— 自动回合制战斗
+;  实体用向量表示：[名字 HP 攻击 防御]，下标 0/1/2/3
+; ============================================================
+
+(define (ent-name e) (get e 0))
+(define (ent-hp   e) (get e 1))
+(define (set-hp   e v) (set e 1 v))
+(define (ent-atk  e) (get e 2))
+(define (ent-def  e) (get e 3))
+
+(define (make-entity name hp atk def)
+  (vec name hp atk def))
+
+; 一次攻击：攻方打守方，含随机浮动与 15% 暴击
+(define (attack! attacker defender)
+  (define variance (- (rng-int 7) 3))          ; 浮动 -3 .. +3
+  (define raw (+ (ent-atk attacker) variance))
+  (define dmg (max 1 (- raw (ent-def defender))))
+  (define crit (< (rng-float) 0.15))            ; 15% 暴击
+  (if crit (set! dmg (* dmg 2)) nil)
+  (set-hp defender (- (ent-hp defender) dmg))
+  (println (ent-name attacker) "对" (ent-name defender) "造成" dmg "点伤害")
+  (if crit (println "    暴击!") nil)
+  (println (ent-name defender) "剩余 HP:" (ent-hp defender)))
+
+(define (battle! hero dragon)
+  (println "===== 战斗开始 =====")
+  (println (ent-name hero) "  VS  " (ent-name dragon))
+  (define round 1)
+  (while (and (> (ent-hp hero) 0) (> (ent-hp dragon) 0))
+    (println "--- 第" round "回合 ---")
+    (attack! hero dragon)
+    (if (> (ent-hp dragon) 0)
+        (attack! dragon hero)
+        (println (ent-name dragon) "已倒下，无法反击"))
+    (set! round (+ round 1)))
+  (println "===== 战斗结束 =====")
+  (if (> (ent-hp hero) 0)
+      (println (ent-name hero) "胜利!")
+      (println (ent-name dragon) "胜利!")))
+
+; ============================================================
+;  游戏二：二分法神机妙算 —— 电脑猜你心里想的数
+;  电脑用二分查找在 0..99 中找出随机数，统计用了几步
+; ============================================================
+
+(define (guess-game!)
+  (define secret (rng-int 100))     ; 0..99 之间的"答案"
+  (define low 0)
+  (define high 99)
+  (define guess (avg2 0 99))
+  (define tries 1)                   ; 第一次猜测算 1 步
+  (println "我想了一个 0 到 99 之间的数，看我用二分法几步猜中")
+  (while (and (not (= guess secret)) (< tries 100))
+    (if (< guess secret)
+        (set! low (+ guess 1))
+        (set! high (- guess 1)))
+    (set! guess (avg2 low high))
+    (set! tries (+ tries 1)))
+  (println "猜中了! 答案是" secret "，用了" tries "步"))
+
+; ============================================================
+;  主程序：三局两胜系列赛 + 猜数字
+;  每局结束后 RNG 状态已推进，所以三局战斗各不相同
+; ============================================================
+(define hero  (make-entity "勇者" 150 20 5))
+(define dragon (make-entity "恶龙" 180 20 5))
+
+(define (tournament! hero dragon rounds)
+  (define h-wins 0)
+  (define d-wins 0)
+  (define r 1)
+  (while (<= r rounds)
+    (println "")
+    (println "##### 第" r "局 #####")
+    (set-hp hero 150)
+    (set-hp dragon 180)
+    (battle! hero dragon)
+    (if (> (ent-hp hero) 0)
+        (set! h-wins (+ h-wins 1))
+        (set! d-wins (+ d-wins 1)))
+    (set! r (+ r 1)))
+  (println "")
+  (println "=== 系列赛战绩：" (ent-name hero) h-wins "胜，" (ent-name dragon) d-wins "胜 ===")
+  (if (> h-wins d-wins)
+      (println (ent-name hero) "赢得系列赛!")
+      (if (> d-wins h-wins)
+          (println (ent-name dragon) "赢得系列赛!")
+          (println "系列赛平局!"))))
+
+(tournament! hero dragon 3)
+(println "")
+(guess-game!)

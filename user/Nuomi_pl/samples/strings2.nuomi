@@ -1,0 +1,42 @@
+;; ============================================================
+;; Nuomi 字符串 ——独特定界符❝ ... ❞ 与编译支持
+;;   解释：nuomi samples/strings2.nuomi
+;;   编译：nuomi -c samples/strings2.nuomi -o strings2.nuc
+;;         nucutil validate strings2.nuc && nucutil run strings2.nuc
+;; ============================================================
+
+;; ---- 独特定界符 ❝ ... ❞ ----
+;; 主流语言用 " 或 '（而 Lisp 家族里 ' 还得让位给 quote），
+;; Nuomi 用一对排版引号 ❝U+275D / ❞U+275E 作首选字符串定界符。
+;; 好处：' 一心一意只做 quote，语义不打架；❝ 看到就知道是 Nuomi，辨识度高。
+(println ❝hello❞)
+(println ❝用 ❝ 不需要转义双引号："这样直接写就行"❞)   ; ❝ 内无需转义 "
+
+;; 传统 " 定界符仍完全可用（向后兼容）
+(println "legacy 写法依然有效")
+
+;; 两种定界符语义完全一致
+(println (equal? ❝same❞ "same"))      ;=> true
+
+;; ---- 字符串操作 ----
+(println (str ❝Nuomi❞ " " 0.1))          ;=> "Nuomi 0.1"
+(println (length ❝abcdef❞))               ;=> 6
+(println (get ❝abcdef❞ 0))                ;=> "a"
+(println (nth [10 20 30] 2))               ;=> 30
+
+;; ---- 字符串在编译产物里的表示 ----
+;; 编译时字符串字面量进入只读数据段（RODATA），运行时值 = 它的地址。
+;; 每个字符串的自描述布局（8字节对齐）：
+;;   [int64 长度][int64 内容哈希][字节数据...]
+;; 相同字面量自动去重（编译期只存一份）；比较时先比哈希再逐字节。
+;;
+;; ⚠️ 编译模式当前尚无 I/O（println 属内置函数，-c 暂不支持），
+;;    所以下面这段要单独编译演示（见文件末尾说明）。
+(define (main)
+  (let* ((g ❝hello❞)
+         (same ❝hello❞)
+         (other ❝world❞))
+    g))
+
+;; 单独编译这个文件时，上面 main 的返回值 = ❝hello❞ 在 RODATA 里的地址；
+;; RODATA 段里 ❝hello❞ 虽出现两次，仍只占一份（去重生效）。

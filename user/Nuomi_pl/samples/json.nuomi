@@ -1,0 +1,129 @@
+;; ============================================================
+;;   JSON 与启动器数据 · Nuomi 示例
+;;   运行：nuomi samples/json.nuomi
+;; ------------------------------------------------------------
+;;   启动器成天跟 JSON 打交道：Mojang 版本清单、版本元数据、
+;;   Modrinth 搜索结果、实例配置…… 这一组原语就是给它们用的。
+;;
+;;   本示例用一段「仿 Mojang 版本清单」的数据，演示启动器在下载前
+;;   必须从 JSON 里刨出来的那些东西：
+;;     最新正式版号 → 版本元数据 URL → 客户端 jar 的 url/sha1/size → Java 版本
+;;
+;;   注：糯米暂无 HTTP 原语（下一块就补），所以这里用本地数据；
+;;   等 http-get 到位，把数据源换成真实 API 即可，本段解析代码一行不用改。
+;; ============================================================
+
+;; ---- 仿 Mojang Piston 的 version_manifest_v2（截取，只留两个版本）----
+(define manifest ❝
+{
+  "latest": { "release": "1.21.4", "snapshot": "26w14a" },
+  "versions": [
+    {
+      "id": "26w14a",
+      "type": "snapshot",
+      "url": "https://piston-meta.mojang.com/mc/game/version/26w14a.json",
+      "time": "2026-04-02T18:00:00+00:00",
+      "releaseTime": "2026-04-02T18:00:00+00:00",
+      "sha1": "1111111111111111111111111111111111111111"
+    },
+    {
+      "id": "1.21.4",
+      "type": "release",
+      "url": "https://piston-meta.mojang.com/mc/game/version/1.21.4.json",
+      "time": "2026-04-01T12:00:00+00:00",
+      "releaseTime": "2026-04-01T12:00:00+00:00",
+      "sha1": "2222222222222222222222222222222222222222"
+    }
+  ]
+}❞)
+
+;; ---- 仿 1.21.4 的版本元数据（启动器下载前要看的部分）----
+(define meta ❝
+{
+  "id": "1.21.4",
+  "mainClass": "net.minecraft.client.main.Main",
+  "javaVersion": { "component": "java-runtime-gamma", "majorVersion": 21 },
+  "downloads": {
+    "client": {
+      "sha1": "8d0f5b7a1a4a1b2c3d4e5f60718293a4b5c6d7e",
+      "size": 22841734,
+      "url": "https://piston-data.mojang.com/v/objects/8d/8d0f5b7a.../client.jar"
+    }
+  },
+  "libraries": [
+    { "name": "com.mojang:authlib:6.0.54" },
+    { "name": "org.lwjgl:lwjgl:3.3.3", "downloads": { "artifact": { "path": "org/lwjgl/lwjgl/3.3.3/lwjgl-3.3.3.jar" } } }
+  ],
+  "assetIndex": { "id": "19", "sha1": "abcdef0123456789", "totalSize": 3714500 }
+}❞)
+
+;; ============================================================
+;;   主流程
+;; ============================================================
+
+(define m (json-parse manifest))
+(define ver (json-parse meta))
+
+(println "========== 从版本清单里找版本 ==========")
+(println "最新正式版: " (json-get m "latest" "release"))
+(println "最新快照:   " (json-get m "latest" "snapshot"))
+
+;; 版本清单的 versions 是数组 —— 遍历找目标版本
+(define versions (json-get m "versions"))
+(define total (length versions))
+(println "清单里共 " total " 个版本")
+
+(define (find-version vid)
+  (define vs (json-get m "versions"))
+  (define i 0)
+  (define found nil)
+  (while (< i (length vs))
+    (if (equal? (json-get (get vs i) "id") vid)
+        (set! found (get vs i))
+        0)
+    (set! i (+ i 1)))
+  found)
+
+(define target (json-get m "latest" "release"))
+(define entry (find-version target))
+(println "")
+(println "找到版本 " target)
+(println "  类型: " (json-get entry "type"))
+(println "  元数据 URL: " (json-get entry "url"))
+(println "  清单 sha1: " (json-get entry "sha1"))
+
+(println "")
+(println "========== 启动游戏前要从元数据里拿的东西 ==========")
+(println "主类 mainClass: " (json-get ver "mainClass"))
+(println "需要 Java 主版本: " (json-get ver "javaVersion" "majorVersion"))
+(println "客户端 jar 大小: " (json-get ver "downloads" "client" "size") " 字节")
+(println "客户端 jar sha1: " (json-get ver "downloads" "client" "sha1"))
+(println "客户端 jar URL:  " (json-get ver "downloads" "client" "url"))
+(println "资源索引 id:     " (json-get ver "assetIndex" "id"))
+
+;; 依赖库：数组里的对象，取 name 与本地路径
+(define libs (json-get ver "libraries"))
+(println "")
+(println "依赖库 " (length libs) " 个：")
+(define i 0)
+(while (< i (length libs))
+  (define lib (get libs i))
+  (define path (json-get lib "downloads" "artifact" "path"))
+  (println "  " (json-get lib "name")
+           (if path (str "  ->  " path) ""))
+  (set! i (+ i 1)))
+
+;; 写一份启动器自己的实例配置（用到 json-obj + json-stringify）
+(println "")
+(println "========== 生成实例配置（写盘用）==========")
+(define config (json-obj
+                "name" "我的 1.21.4 实例"
+                "gameVersion" target
+                "loader" "vanilla"
+                "javaMajor" (json-get ver "javaVersion" "majorVersion")
+                "clientSha1" (json-get ver "downloads" "client" "sha1")
+                "lastPlayed" nil))
+(println (json-stringify config))
+
+(println "")
+(println "========== 完成 ==========")

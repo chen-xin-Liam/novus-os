@@ -1,0 +1,39 @@
+; stress.nuomi — 故意制造大量「共享对象」场景，逼出引用计数 bug
+; 这些场景在修复前会偶发 use-after-free / 符号丢失。
+
+(define shared 'sym)            ; 共享符号
+(define a (cons shared (cons shared nil)))
+(define b (list shared shared shared 'x 'y 'sym))
+(define c (vec shared b a shared))
+
+(println "a =" a)
+(println "b =" b)
+(println "c =" c)
+
+; 反复 set! 制造 AST 与运行时共享同一符号
+(define xs (list 1 2 3 4 5))
+(define ys (list shared shared))
+(set! xs (cdr xs))
+(set! ys (cdr ys))
+(set! c (vec xs ys shared b a))
+
+(println "xs=" xs)
+(println "ys=" ys)
+(println "c =" c)
+
+; 嵌套 list/cons 共享结构
+(define nested (list (cons shared 'p) (cons shared 'q) (list shared shared)))
+(println "nested=" nested)
+
+; 函数里也用共享符号
+(define (f x) (list shared x shared))
+(println "f(99)=" (f 99))
+
+; 循环里不断重建共享结构
+(define i 0)
+(while (< i 50)
+  (define tmp (list shared shared i))
+  (set! c (vec tmp c shared))
+  (set! i (+ i 1)))
+(println "done i=" i)
+(println "ok")

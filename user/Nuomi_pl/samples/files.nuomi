@@ -1,0 +1,59 @@
+;; ============================================================
+;;   文件系统操作示例 · Nuomi（壳语言的基本功）
+;;   运行：nuomi samples/files.nuomi
+;; ------------------------------------------------------------
+;;   糯米在 novus 里的定位是系统壳语言（≈ Windows 的 PowerShell），
+;;   文件操作是壳的基本功。本示例自包含：在 ./fs-demo 里折腾，
+;;   结束前用 rm-rf 收拾干净，不在硬盘上留垃圾。
+;;
+;;   语言故意**不提供**递归删除原语（破坏力太大）——
+;;   rm -rf 用 ls + delete + rmdir 在脚本层自己组合，见下面 6 行。
+;; ============================================================
+
+;; ---- rm-rf：脚本层递归删除 ----
+(define (rm-rf path)
+  (if (is-dir? path)
+      (begin
+        (map (lambda (n) (rm-rf (str path "/" n))) (ls path))
+        (rmdir path))
+      (delete path)))
+
+(define dir "fs-demo")
+
+(println "========== 糯米文件系统操作 ==========")
+(println "建目录:" (mkdir dir))
+
+;; ---- 写几个文件，搭个小树 ----
+(write-file (str dir "/a.txt") "文件A\n")
+(write-file (str dir "/b.txt") "文件B\n")
+(mkdir (str dir "/sub"))
+(write-file (str dir "/sub/c.txt") "文件C\n")
+(mkdir (str dir "/empty"))     ;; 空目录——用来试 map 空列表
+
+(println "目录树:")
+(println "  " dir ": " (ls dir))
+(println "  " dir "/sub: " (ls (str dir "/sub")))
+
+;; ---- 读回 + 查大小 ----
+(println "读 a.txt 内容: " (read-file (str dir "/a.txt")))
+(println "a.txt 大小: " (file-size (str dir "/a.txt")) " 字节")
+(println "exists? 判定: " (exists? (str dir "/a.txt"))
+         "  is-dir? 判定: " (is-dir? (str dir "/a.txt")))
+
+;; ---- 复制 / 改名 / 追加 ----
+(println "复制:" (cp (str dir "/a.txt") (str dir "/a-copy.txt")))
+(println "改名:" (mv (str dir "/b.txt") (str dir "/b-renamed.txt")))
+(println "追加:" (append-file (str dir "/a-copy.txt") "追加的一行\n"))
+(println "操作后: " (ls dir))
+
+;; ---- 删单个文件 ----
+(println "删 a-copy.txt:" (delete (str dir "/a-copy.txt")))
+(println "删后还在吗:" (exists? (str dir "/a-copy.txt")))
+
+;; ---- rm-rf：一把删掉整棵树（含子目录和空目录） ----
+(println "rm-rf 整个 " dir " ...")
+(rm-rf dir)
+(println "整棵树还在吗:" (exists? dir))
+
+(println "")
+(println "========== 完成，硬盘已收拾干净 ==========")

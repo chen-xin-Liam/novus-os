@@ -28,6 +28,7 @@ pub mod ui;
 pub mod wm;
 pub mod install;
 pub mod shell;
+pub mod nuomi;
 
 use core::panic::PanicInfo;
 

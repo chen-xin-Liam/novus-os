@@ -1,0 +1,7 @@
+; while 循环：求和 0..99
+(define i 0)
+(define sum 0)
+(while (< i 100)
+  (set! sum (+ sum i))
+  (set! i (+ i 1)))
+(println "sum 0..99 =" sum)
