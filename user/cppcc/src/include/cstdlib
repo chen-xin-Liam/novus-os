@@ -1,0 +1,7 @@
+/* cppcc <cstdlib>: C++ spelling of <stdlib.h>. */
+#ifndef _CPPCC_CSTDLIB
+#define _CPPCC_CSTDLIB
+
+#include <stdlib.h>
+
+#endif

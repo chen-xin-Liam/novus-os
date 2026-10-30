@@ -1,0 +1,7 @@
+/* cppcc <cstdio>: C++ spelling of <stdio.h>. */
+#ifndef _CPPCC_CSTDIO
+#define _CPPCC_CSTDIO
+
+#include <stdio.h>
+
+#endif

@@ -46,8 +46,8 @@ const PAPERS: [(u32, u32); 7] = [
 ];
 const PAPER_NAMES: [&str; 7] = ["彩纸", "青渐变", "海岸", "梯田", "紫夜", "沙丘", "暮色"];
 
-const APPS: [&str; 3] = ["fileman", "taskman", "settings"];
-const APP_NAMES: [&str; 3] = ["文件管理器", "任务管理器", "设置"];
+const APPS: [&str; 4] = ["fileman", "taskman", "settings", "devmgmt"];
+const APP_NAMES: [&str; 4] = ["文件管理器", "任务管理器", "设置", "设备管理器"];
 
 const MAX_ROWS: usize = 8;
 
@@ -337,15 +337,16 @@ fn page_apps(w: &mut wm::Win, s: &State) {
     }
 
     card(w, CONTENT_X, 286, CONTENT_W, 96, "可启动");
+    /* Four launch buttons share the 512 px card: 118 px wide, 8 px gap. */
     for i in 0..APPS.len() {
         let running = s
             .tasks
             .iter()
             .take(s.n_tasks)
             .any(|t| t.name() == APPS[i] && t.state != 3);
-        let x = CONTENT_X + 14 + i as i16 * 160;
+        let x = CONTENT_X + 14 + i as i16 * 126;
 
-        button(w, x, 318, 140, 28, APP_NAMES[i], s.accent, running, false);
+        button(w, x, 318, 118, 28, APP_NAMES[i], s.accent, running, false);
     }
 }
 
@@ -721,12 +722,12 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
                     break;
                 }
             }
-            /* "启动" buttons. */
+            /* "启动" buttons (layout must match page_apps: 118 px wide, 8 px gap). */
             for i in 0..APPS.len() {
-                let bx = CONTENT_X + 14 + i as i16 * 160;
+                let bx = CONTENT_X + 14 + i as i16 * 126;
                 let running = running_for(s, i).is_some();
 
-                if x >= bx as i32 && x < (bx + 140) as i32
+                if x >= bx as i32 && x < (bx + 118) as i32
                     && y >= 318 && y < 346 && !running
                 {
                     s.note = match sinfo::spawn_name(sys_port, APPS[i]) {

@@ -1,0 +1,8 @@
+/* cppcc <cstddef>: C++ spelling of <stddef.h>.
+ * Names live in the global namespace; `std::` qualified uses resolve to them. */
+#ifndef _CPPCC_CSTDDEF
+#define _CPPCC_CSTDDEF
+
+#include <stddef.h>
+
+#endif

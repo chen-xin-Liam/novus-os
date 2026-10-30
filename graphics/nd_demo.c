@@ -434,7 +434,7 @@ static ng_widget_t *g_win_widgets;
 static ng_widget_t *g_start_menu;
 static ng_widget_t *g_quick;
 static ng_widget_t *g_clock_label;
-static ng_widget_t *g_run_dot[5];
+static ng_widget_t *g_run_dot[6];
 static UINT32       g_theme_seen;
 static UINT32       g_lang_seen;
 static char         g_clock[8] = "00:00";
@@ -443,8 +443,8 @@ static char         g_search[48];
 /* Taskbar running indicators follow the scheduler, not a private list:
  * an app started from the start menu lights its dot, one that exits
  * clears it. Names, not table indices - the installer moved the table. */
-static const char *const g_app_names[5] = {"fileman", "taskman", "settings",
-                                           "netman", "nsh"};
+static const char *const g_app_names[6] = {"fileman", "taskman", "settings",
+                                           "netman", "nsh", "devmgmt"};
 
 /* The RTC is optional: without one the taskbar just keeps the placeholder. */
 static void clock_refresh(void) {
@@ -486,7 +486,7 @@ static void clock_refresh(void) {
 static void running_refresh(void) {
   UINT32 i;
 
-  for (i = 0; i < 5u; i++) {
+  for (i = 0; i < 6u; i++) {
     if (g_run_dot[i] != 0) {
       ng_show(g_run_dot[i], sched_find_name(g_app_names[i]) != 0);
     }
@@ -607,6 +607,12 @@ static void on_launch_terminal(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;
   launch("nsh");
+}
+
+static void on_launch_devmgmt(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  launch("devmgmt");
 }
 
 static void on_about(ng_ctx_t *ctx, ng_widget_t *w) {
@@ -766,15 +772,16 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
            "Novus Fluent", ctx->theme.text_dim, 1);
 
   {
-    static const char *names[6] = {"文件管理器", "任务管理器", "设置", "网络",
-                                   "终端", "安装系统"};
-    static const ng_icon_kind_t kinds[6] = {
+    static const char *names[7] = {"文件管理器", "任务管理器", "设置", "网络",
+                                   "终端", "设备管理器", "安装系统"};
+    static const ng_icon_kind_t kinds[7] = {
         NG_ICON_FILES, NG_ICON_TASKS, NG_ICON_SETTINGS, NG_ICON_NET,
-        NG_ICON_TERM, NG_ICON_INSTALL};
-    static ng_action_fn acts[6] = {on_launch_files, on_launch_tasks,
+        NG_ICON_TERM, NG_ICON_DEVICES, NG_ICON_INSTALL};
+    static ng_action_fn acts[7] = {on_launch_files, on_launch_tasks,
                                    on_launch_settings, on_launch_net,
-                                   on_launch_terminal, on_launch_install};
-    UINT32 n = install_available() ? 6u : 5u;
+                                   on_launch_terminal, on_launch_devmgmt,
+                                   on_launch_install};
+    UINT32 n = install_available() ? 7u : 6u;
 
     for (i = 0; i < (INT32)n; i++) {
       ng_button_icon(ng_create(ctx->root, NG_BUTTON, W - 112,
@@ -817,6 +824,8 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
             on_about);
   ng_button(ng_create(g_start_menu, NG_BUTTON, 20, 488, 210, 42), "终端",
             on_launch_terminal);
+  ng_button(ng_create(g_start_menu, NG_BUTTON, 240, 488, 210, 42), "设备管理器",
+            on_launch_devmgmt);
 
   {
     ng_widget_t *line = ng_panel(
@@ -896,17 +905,17 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
             NG_ICON_SEARCH, 18, on_start);
 
     {
-      static const ng_icon_kind_t kinds[5] = {
+      static const ng_icon_kind_t kinds[6] = {
           NG_ICON_FILES, NG_ICON_TASKS, NG_ICON_SETTINGS, NG_ICON_NET,
-          NG_ICON_TERM};
-      ng_action_fn acts[5] = {on_launch_files, on_launch_tasks,
+          NG_ICON_TERM, NG_ICON_DEVICES};
+      ng_action_fn acts[6] = {on_launch_files, on_launch_tasks,
                               on_launch_settings, on_launch_net,
-                              on_launch_terminal};
+                              on_launch_terminal, on_launch_devmgmt};
 
-      for (i = 0; i < 5; i++) {
+      for (i = 0; i < 6; i++) {
         ng_icon(ng_create(ctx->root, NG_ICON, tx + 116 + i * 46, ty + 6, 44, 44),
                 kinds[i], 20, acts[i]);
-        if (i < 5) {
+        if (i < 6) {
           g_run_dot[i] = ng_panel(
               ng_create(ctx->root, NG_PANEL, tx + 116 + i * 46 + 14, ty + th - 7,
                         16, 3),

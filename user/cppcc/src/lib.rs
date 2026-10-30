@@ -1,6 +1,7 @@
 pub mod ast;
 pub mod diagnostic;
 pub mod driver;
+pub mod layout;
 pub mod lexer;
 pub mod nucgen;
 pub mod parser;

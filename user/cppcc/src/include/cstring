@@ -1,0 +1,7 @@
+/* cppcc <cstring>: C++ spelling of <string.h>. */
+#ifndef _CPPCC_CSTRING
+#define _CPPCC_CSTRING
+
+#include <string.h>
+
+#endif

@@ -14,6 +14,7 @@
 #include "nwm.h"
 #include "sched.h"
 #include "sysinfo.h"
+#include "devtab.h"
 #include "net.h"
 #include "blkdev.h"
 #include "nd_theme.h"
@@ -555,6 +556,89 @@ static void req_spawn_name(const ipc_msg_t *m) {
   }
 }
 
+/* ---- device manager --------------------------------------------------- */
+
+/* The whole tree, three nodes per reply. Paging starts at index 0, which is
+ * also where the table is rebuilt: the dynamic parts (block devices, USB,
+ * network, outputs) cost a table walk, and a rebuild between two pages
+ * cannot reorder the PCI nodes the previous page came from. */
+static void req_devlist(const ipc_msg_t *m) {
+  sysinfo_list_req_t q;
+  sysinfo_devs_rsp_t r;
+  UINT32             i;
+  UINT32             out = 0;
+  UINT32             total;
+
+  if (m->hdr.len < sizeof(q)) {
+    rsp_err(m);
+    return;
+  }
+  memcpy(&q, m->payload, sizeof(q));
+  if (q.max == 0u || q.max > SYSINFO_DEV_RECS) {
+    q.max = SYSINFO_DEV_RECS;
+  }
+  memset(&r, 0, sizeof(r));
+  if (q.index == 0u) {
+    devtab_refresh();
+  }
+  total = (UINT32)devtab_count();
+  r.h.total = (UINT16)total;
+  for (i = q.index; i < total && out < q.max; i++) {
+    const devnode_t *d = devtab_at((int)i);
+
+    if (d == 0) {
+      break;
+    }
+    r.rec[out].parent = d->parent;
+    r.rec[out].class_id = d->class;
+    r.rec[out].status = d->status;
+    r.rec[out].kind = d->kind;
+    r.rec[out].idx = d->idx;
+    r.rec[out].flags = d->flags;
+    copy_str(r.rec[out].name, sizeof(r.rec[out].name), d->name);
+    out++;
+  }
+  r.h.n = (UINT8)out;
+  answer(m, SYSINFO_RSP_DEVLIST, &r, sizeof(r));
+}
+
+/* One page of a property tab. `h.total` is the tab's field count, so the
+ * client stops when its index reaches it. */
+static void req_devfield(const ipc_msg_t *m) {
+  sysinfo_devfield_req_t q;
+  sysinfo_devfields_rsp_t r;
+  int                    total;
+  UINT32                 i;
+
+  if (m->hdr.len < sizeof(q)) {
+    rsp_err(m);
+    return;
+  }
+  memcpy(&q, m->payload, sizeof(q));
+  memset(&r, 0, sizeof(r));
+  total = devtab_field_count((int)q.dev, q.tab);
+  if (total < 0) {
+    total = 0;
+  }
+  r.h.total = (UINT16)total;
+  for (i = 0; i < SYSINFO_DEVF_RECS; i++) {
+    devfield_t f;
+    UINT32     index = (UINT32)q.index + i;
+
+    if (index >= (UINT32)total) {
+      break;
+    }
+    if (devtab_field_at((int)q.dev, q.tab, (int)index, &f) == 0) {
+      break;
+    }
+    r.rec[i].key = f.key;
+    r.rec[i].group = f.group;
+    copy_str(r.rec[i].value, sizeof(r.rec[i].value), f.value);
+    r.h.n = (UINT8)(i + 1u);
+  }
+  answer(m, SYSINFO_RSP_DEVFIELD, &r, sizeof(r));
+}
+
 static void handle(const ipc_msg_t *m) {
   switch (m->hdr.type) {
   case SYSINFO_REQ_TASKS:
@@ -601,6 +685,12 @@ static void handle(const ipc_msg_t *m) {
     break;
   case SYSINFO_REQ_DISPLAY:
     req_display(m);
+    break;
+  case SYSINFO_REQ_DEVLIST:
+    req_devlist(m);
+    break;
+  case SYSINFO_REQ_DEVFIELD:
+    req_devfield(m);
     break;
   case SYSINFO_REQ_THEME:
     req_theme(m);

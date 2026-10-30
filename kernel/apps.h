@@ -15,7 +15,7 @@
 
 #include "uefi.h"
 
-#define APPS_MAX 6
+#define APPS_MAX 9
 #define APPS_EAUTH (-101)
 
 /* Number of embedded applications. */

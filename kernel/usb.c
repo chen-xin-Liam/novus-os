@@ -1401,7 +1401,46 @@ int usb_init(void) {
   return (int)g_usb_disks;
 }
 
+/* ---- enumeration for the device manager -------------------------------- */
+
+UINTN usb_device_count(void) { return g_ndev; }
+
+int usb_device_info(UINTN index, usb_info_t *out) {
+  usb_t *u;
+  UINTN  i;
+
+  if (out == NULL || index >= g_ndev) {
+    return -1;
+  }
+  u = &g_dev[index];
+  memset(out, 0, sizeof(*out));
+  if (u->kind == USB_KIND_HID) {
+    out->kind = (u->hid_kind == USB_HID_MOUSE) ? USB_INFO_MOUSE
+                                               : USB_INFO_KEYBOARD;
+  } else if (u->kind == USB_KIND_STORAGE) {
+    out->kind = USB_INFO_STORAGE;
+    out->sectors = u->sectors;
+  }
+  out->speed = (UINT8)u->speed;
+  out->port = (UINT8)u->port;
+  for (i = 0; i < USB_MAX_CONTROLLERS; i++) {
+    if (&g_hc[i] == u->hc) {
+      out->controller = (UINT8)i;
+      break;
+    }
+  }
+  return 0;
+}
+
 #if !CONFIG_NOVUS_PCI
 int usb_init(void) { return 0; }
 void usb_hid_poll(void) {}
+UINTN usb_device_count(void) { return 0; }
+int usb_device_info(UINTN index, usb_info_t *out) {
+  (void)index;
+  if (out != NULL) {
+    memset(out, 0, sizeof(*out));
+  }
+  return -1;
+}
 #endif

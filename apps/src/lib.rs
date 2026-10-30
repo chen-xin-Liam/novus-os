@@ -30,6 +30,7 @@ pub mod wm;
 pub mod install;
 pub mod shell;
 pub mod nuomi;
+pub mod devmgr;
 
 use core::panic::PanicInfo;
 

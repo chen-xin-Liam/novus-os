@@ -21,4 +21,23 @@ int usb_init(void);
  * call it from the input tick. A no-op build provides an empty stub. */
 void usb_hid_poll(void);
 
+/* ---- enumeration for the device manager (M12) ------------------------- */
+
+#define USB_INFO_STORAGE  1u
+#define USB_INFO_KEYBOARD 2u
+#define USB_INFO_MOUSE    3u
+
+typedef struct {
+  UINT8  kind;       /* USB_INFO_*, 0 when the device is not one of them */
+  UINT8  speed;      /* 1 low, 2 full, 3 high, 4 super */
+  UINT8  port;       /* xHCI root port the device is behind */
+  UINT8  controller; /* index into the controller table */
+  UINT64 sectors;    /* storage only */
+} usb_info_t;
+
+/* Read-only: the number of attached devices and one snapshot of a device.
+ * usb_device_info() returns 0 on success, -1 for a bad index. */
+UINTN usb_device_count(void);
+int   usb_device_info(UINTN index, usb_info_t *out);
+
 #endif /* NOVUS_USB_H */

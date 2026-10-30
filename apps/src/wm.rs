@@ -42,8 +42,12 @@ pub const OP_ROUND_FRAME: u8 = 7;
 /* The WM's per-window display list. A client that sends more is cut off
  * silently by the server, which looks like a rendering bug; counting here
  * turns it into a log line naming the budget. */
-pub const MAX_SHAPES: u16 = 40;
-pub const MAX_TEXTS: u16 = 48;
+pub const MAX_SHAPES: u16 = 120;
+pub const MAX_TEXTS: u16 = 160;
+
+/* Window flags for create_ex(). A modal window keeps the pointer and the
+ * keyboard until it is destroyed, which is what a property dialog needs. */
+pub const CREATE_MODAL: u16 = 0x0001;
 
 /// Height of the title bar the WM draws above the client area. A window's
 /// `h` passed to create() must be client height plus this, or the bottom
@@ -194,13 +198,22 @@ impl Win {
     /// Create a window and wait for the id. CREATE always gets a reply
     /// (the id is the result), so a blocking receive is correct here.
     pub fn create(port: u64, x: i32, y: i32, w: i32, h: i32, title: &str) -> Option<Win> {
+        Win::create_ex(port, x, y, w, h, title, 0)
+    }
+
+    /// Same, with window flags (CREATE_MODAL for a dialog). Messages that
+    /// arrive while we wait for the id are dropped, exactly as the
+    /// single-window clients already tolerated: a CREATE is one round trip
+    /// and the WM answers it on the next tick.
+    pub fn create_ex(port: u64, x: i32, y: i32, w: i32, h: i32, title: &str,
+                     flags: u16) -> Option<Win> {
         let c = Create {
             win: 0,
             x,
             y,
             w,
             h,
-            flags: 0,
+            flags,
             pad: 0,
             title: copy_title(title),
         };
@@ -347,6 +360,39 @@ impl Win {
         let w = self.id.to_le_bytes();
 
         send(self.port, REQ_DESTROY, 0, &w);
+    }
+
+    /// Next event for any window of this process, tagged with its window
+    /// id. A client that owns two windows (the device manager and its
+    /// property dialog) routes on the id; next_event() would drop the other
+    /// window's events because it only looks at its own.
+    pub fn next_event_any(&self) -> Option<(u32, Ev)> {
+        loop {
+            let m = ipc::recv(0, false)?;
+
+            match m.ty {
+                EV_MOUSE => {
+                    if let Some(e) = m.read::<MouseEvent>() {
+                        return Some((e.win, Ev::Mouse(e)));
+                    }
+                }
+                EV_CLOSE => {
+                    if let Some(w) = ipc::read::<u32>(m.payload()) {
+                        return Some((w, Ev::Close));
+                    }
+                }
+                EV_KEY => {
+                    if let Some(e) = m.read::<KeyEvent>() {
+                        return Some((e.win, Ev::Key(e.key, e.mods)));
+                    }
+                }
+                EV_FOCUS => {
+                    let w = ipc::read::<u32>(m.payload()).unwrap_or(0);
+                    return Some((w, Ev::Focus(w)));
+                }
+                other => return Some((0, Ev::Other(other))),
+            }
+        }
     }
 
     /// Next event for this window, or None when the queue is empty.

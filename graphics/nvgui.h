@@ -86,7 +86,8 @@ typedef enum {
   NG_ICON_TERM,
   NG_ICON_CHECK,
   NG_ICON_CHEVRON,
-  NG_ICON_DISK
+  NG_ICON_DISK,
+  NG_ICON_DEVICES
 } ng_icon_kind_t;
 
 typedef struct ng_widget ng_widget_t;

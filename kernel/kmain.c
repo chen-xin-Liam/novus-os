@@ -36,6 +36,8 @@
 #include "ahci.h"
 #include "nvme.h"
 #include "usb.h"
+/* M12: the device table the device manager reads. */
+#include "devtab.h"
 #include "gpt.h"
 #include "power.h"
 #include "session.h"
@@ -235,6 +237,11 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * machine's default disk) is gone from the firmware block-device list
    * after ExitBootServices, so drive it natively. */
   (void)ide_init();
+  /* Device manager: scan PCI once and cache it. This is the last moment
+   * where a BAR probe (it writes 0xFFFFFFFF over every window) cannot
+   * disturb a transfer: every storage driver has probed and the network
+   * stack has not started yet. */
+  devtab_init(mmap_addr, map_size, desc_size);
   nd_boot_stage(93, "检测设备");
 
 #if CONFIG_NOVUS_DISPLAY
@@ -457,6 +464,9 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
     /* M10: bring up PCI and the network stack before the applications, so
      * the network app has a link to show and DHCP is already running. */
     (void)net_init();
+    /* The network controllers only exist now; refresh the device table so
+     * the device manager shows the adapter that was just probed. */
+    devtab_refresh();
     if (install_mode) {
       kputs("[BOOT] install mode: starting the graphical installer\n");
       (void)apps_launch_name("setup");

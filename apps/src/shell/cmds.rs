@@ -89,7 +89,7 @@ fn join_path(parent: &[u8], name: &[u8], out: &mut [u8]) -> usize {
     n
 }
 
-const KNOWN_APPS: &[&str] = &["fileman", "taskman", "settings", "netman", "session", "setup", "nsh"];
+const KNOWN_APPS: &[&str] = &["fileman", "taskman", "settings", "netman", "session", "setup", "nsh", "devmgmt"];
 
 type Bfn = fn(&mut Shell, &Cmd, &[u8], &mut dyn Sink) -> i32;
 

@@ -38,6 +38,8 @@
 #define SYSINFO_REQ_LANG      0x030Fu /* get / set the UI language */
 #define SYSINFO_REQ_DISPLAY   0x0318u /* the graphics outputs of the machine */
 #define SYSINFO_REQ_NCSI      0x031Au /* start an NCSI connectivity probe */
+#define SYSINFO_REQ_DEVLIST   0x031Bu /* the device manager's device tree */
+#define SYSINFO_REQ_DEVFIELD  0x031Du /* one page of a device's properties */
 
 typedef struct {
   UINT32 lang;    /* 0 zh, 1 en */
@@ -60,6 +62,8 @@ typedef struct {
 #define SYSINFO_RSP_NET    0x0316u
 #define SYSINFO_RSP_TASKS2 0x0317u
 #define SYSINFO_RSP_DISPLAY 0x0319u
+#define SYSINFO_RSP_DEVLIST  0x031Cu
+#define SYSINFO_RSP_DEVFIELD 0x031Eu
 #define SYSINFO_RSP_ERR    0x03FFu
 
 /* Directories the file manager can browse. */
@@ -232,6 +236,55 @@ typedef struct {
   UINT8  action; /* 0 kill, 1 suspend, 2 resume */
   UINT8  pad[3];
 } sysinfo_tact_t;
+
+/* ---- device manager (M12) --------------------------------------------- */
+
+/* A flat device list: `parent` links a node to its category, so the client
+ * builds the tree without a second query. DEVTAB_NONE means "root". The
+ * ids of class/kind/status/flags are the devtab.h ABI; the words are the
+ * client's. */
+#define SYSINFO_DEV_RECS 3u
+#define SYSINFO_DEV_NAME_MAX 32u
+
+typedef struct {
+  UINT16 parent;
+  UINT8  class_id; /* DEV_CAT_* */
+  UINT8  status;   /* DEV_STATUS_* */
+  UINT8  kind;     /* DEV_KIND_* */
+  UINT8  idx;      /* index in the backing subsystem table */
+  UINT8  flags;    /* DEV_FLAG_* */
+  UINT8  pad;
+  char   name[SYSINFO_DEV_NAME_MAX];
+} sysinfo_dev_t;
+
+typedef struct {
+  sysinfo_list_t h;
+  sysinfo_dev_t  rec[SYSINFO_DEV_RECS];
+} sysinfo_devs_rsp_t;
+
+/* Property fields: key is DEV_F_*, and `group` is the event row or BAR
+ * index. Values are longer than a whole reply would allow, hence paging. */
+#define SYSINFO_DEVF_RECS 2u
+#define SYSINFO_DEVF_VALUE_MAX 56u
+
+typedef struct {
+  UINT16 dev;
+  UINT8  tab;   /* DEV_TAB_* */
+  UINT8  index; /* first field to return */
+  UINT32 pad;
+} sysinfo_devfield_req_t;
+
+typedef struct {
+  UINT8  key;
+  UINT8  group;
+  UINT16 pad;
+  char   value[SYSINFO_DEVF_VALUE_MAX];
+} sysinfo_devfield_t;
+
+typedef struct {
+  sysinfo_list_t     h; /* total = fields in this tab */
+  sysinfo_devfield_t rec[SYSINFO_DEVF_RECS];
+} sysinfo_devfields_rsp_t;
 
 /* Create the port. Call once, after the scheduler owns a task table. */
 void sysinfo_init(void);

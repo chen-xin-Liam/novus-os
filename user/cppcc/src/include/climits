@@ -1,0 +1,7 @@
+/* cppcc <climits>: C++ spelling of <limits.h>. */
+#ifndef _CPPCC_CLIMITS
+#define _CPPCC_CLIMITS
+
+#include <limits.h>
+
+#endif

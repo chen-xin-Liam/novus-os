@@ -63,6 +63,100 @@ pub fn display(port: u64) -> Option<Display> {
     query(port, REQ_DISPLAY, &[], RSP_DISPLAY)?.read::<Display>()
 }
 
+/* ---- device manager --------------------------------------------------- */
+
+pub const REQ_DEVLIST: u16 = 0x031B;
+pub const REQ_DEVFIELD: u16 = 0x031D;
+pub const RSP_DEVLIST: u16 = 0x031C;
+pub const RSP_DEVFIELD: u16 = 0x031E;
+
+/// Nodes per reply, and the longest device name the kernel sends.
+pub const DEV_RECS: usize = 3;
+pub const DEV_NAME_MAX: usize = 32;
+
+/// One device tree node. `parent` is the absolute index of the category
+/// row, 0xFFFF for the root; the class/kind/status ids are the devtab.h
+/// ABI, the words are ours.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DevRec {
+    pub parent: u16,
+    pub class_id: u8,
+    pub status: u8,
+    pub kind: u8,
+    pub idx: u8,
+    pub flags: u8,
+    pub pad: u8,
+    pub name: [u8; DEV_NAME_MAX],
+}
+
+impl DevRec {
+    pub fn name(&self) -> &str {
+        named(&self.name)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DevsRsp {
+    pub h: ListHdr,
+    pub rec: [DevRec; DEV_RECS],
+}
+
+/// Property fields per reply, and the value buffer size.
+pub const DEVF_RECS: usize = 2;
+pub const DEVF_VALUE_MAX: usize = 56;
+
+#[repr(C)]
+struct DevFieldReq {
+    dev: u16,
+    tab: u8,
+    index: u8,
+    pad: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DevField {
+    pub key: u8,
+    pub group: u8,
+    pub pad: u16,
+    pub value: [u8; DEVF_VALUE_MAX],
+}
+
+impl DevField {
+    pub fn value(&self) -> &str {
+        named(&self.value)
+    }
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DevFieldsRsp {
+    pub h: ListHdr,
+    pub rec: [DevField; DEVF_RECS],
+}
+
+pub fn devices(port: u64, index: u16) -> Option<DevsRsp> {
+    let req = ListReq {
+        index,
+        max: DEV_RECS as u8,
+        dir: 0xFF,
+        pad: 0,
+    };
+    query(port, REQ_DEVLIST, ipc::bytes_of(&req), RSP_DEVLIST)?.read()
+}
+
+pub fn dev_fields(port: u64, dev: u16, tab: u8, index: u8) -> Option<DevFieldsRsp> {
+    let req = DevFieldReq {
+        dev,
+        tab,
+        index,
+        pad: 0,
+    };
+    query(port, REQ_DEVFIELD, ipc::bytes_of(&req), RSP_DEVFIELD)?.read()
+}
+
 /// Language reply: current value and a version that changes on every set.
 #[repr(C)]
 #[derive(Clone, Copy)]

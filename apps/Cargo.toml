@@ -29,6 +29,10 @@ path = "src/bin/session.rs"
 name = "nsh"
 path = "src/bin/nsh.rs"
 
+[[bin]]
+name = "devmgmt"
+path = "src/bin/devmgmt.rs"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

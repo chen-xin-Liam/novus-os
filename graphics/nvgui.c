@@ -1172,6 +1172,13 @@ static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
     nd_round_rect(s, nd_rect(cx - h, cy - h + 1, b, b - 3), 3, c);
     nd_hline(s, cx - h + 3, cx + h - 3, cy + h - 4, g_ctx.theme.ctrl_bg);
     break;
+  case NG_ICON_DEVICES:
+    /* A plug-in card: a chip outline with a contact pin above and below. */
+    nd_round_rect(s, nd_rect(cx - h, cy - h + 1, b, b - 2), 3, c);
+    nd_round_rect(s, nd_rect(cx - h + 4, cy - h + 5, b - 8, b - 12), 2, c);
+    nd_hline(s, cx - 1, cx + 1, cy - h - 2, c);
+    nd_hline(s, cx - 1, cx + 1, cy + h + 1, c);
+    break;
   default:
     break;
   }

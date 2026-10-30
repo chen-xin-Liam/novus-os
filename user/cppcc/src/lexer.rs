@@ -65,6 +65,9 @@ impl<'a> Scanner<'a> {
     }
 
     fn scan(mut self) -> LexOutput {
+        if self.text.starts_with('\u{feff}') {
+            self.offset = '\u{feff}'.len_utf8();
+        }
         while self.offset < self.bytes.len() {
             if self.bytes[self.offset].is_ascii_whitespace() {
                 self.offset += 1;
@@ -318,7 +321,11 @@ fn is_keyword(word: &str) -> bool {
         "friend" | "typedef" | "sizeof" | "auto" | "register" | "mutable" | "goto" |
         "wchar_t" | "float" | "double" | "asm" | "typeid" | "dynamic_cast" | "static_cast" |
         "reinterpret_cast" | "const_cast" | "export" | "explicit" | "and" | "and_eq" |
-        "bitand" | "bitor" | "compl" | "not" | "not_eq" | "or" | "or_eq" | "xor" | "xor_eq")
+        "bitand" | "bitor" | "compl" | "not" | "not_eq" | "or" | "or_eq" | "xor" | "xor_eq" |
+        // C++11
+        "nullptr" | "constexpr" | "decltype" | "noexcept" | "override" | "final" |
+        "static_assert" | "thread_local" | "alignas" | "alignof" | "char16_t" | "char32_t" |
+        "char8_t" | "concept" | "requires" | "co_await" | "co_return" | "co_yield")
 }
 
 #[cfg(test)]

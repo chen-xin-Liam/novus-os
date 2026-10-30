@@ -1,0 +1,7 @@
+/* cppcc <cstdbool>: C++ spelling of <stdbool.h>. */
+#ifndef _CPPCC_CSTDBOOL
+#define _CPPCC_CSTDBOOL
+
+#include <stdbool.h>
+
+#endif

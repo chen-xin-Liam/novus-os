@@ -49,6 +49,9 @@ typedef struct {
   nd_rect_t rect;  /* frame rect, title bar included */
   UINT8     state; /* 0 normal, 1 minimized, 2 maximized */
   UINT8     alpha; /* content effect: 255 opaque .. 0 invisible */
+  /* v1.3: NWM_F_CREATE_MODAL. A modal window is the only one that sees the
+   * pointer and the keyboard while it is up (see modal_index()). */
+  UINT8     modal;
   UINT32    draw_n;
   nwm_cmd_t draw[NWM_MAX_CMDS];
   /* v1.1 content list: shapes and text runs a client appends one message
@@ -166,11 +169,33 @@ static void z_raise(int idx) {
   }
 }
 
+/* The topmost modal window, or -1. A modal window is a small sheet on top
+ * of the window that opened it (a property dialog): while it is up it owns
+ * the pointer and the keyboard, which is what makes the dialog modal. */
+static int modal_index(void) {
+  UINT32 i;
+
+  for (i = g_zcount; i > 0u; i--) {
+    nwm_window_t *w = &g_wins[g_z[i - 1u]];
+
+    if (w->used && w->modal != 0u && w->state != 1u) {
+      return (int)g_z[i - 1u];
+    }
+  }
+  return -1;
+}
+
 /* Topmost window under the point, or -1. Minimized windows are out of
  * the picture entirely, which is what "minimized" means here. */
 static int hit_test(INT32 x, INT32 y) {
   UINT32 i;
+  int    modal = modal_index();
 
+  if (modal >= 0) {
+    /* Outside the sheet there is no window: the press is swallowed rather
+     * than going to the window the dialog is covering. */
+    return nd_rect_contains(g_wins[modal].rect, x, y) ? modal : -1;
+  }
   for (i = g_zcount; i > 0u; i--) {
     nwm_window_t *w = &g_wins[g_z[i - 1u]];
 
@@ -436,8 +461,10 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
           w->rect.y + (NWM_TITLE_H - (INT32)nd_text_height(w->title, 2)) / 2,
           w->title, t->text, 2);
 
-  /* Caption buttons, drawn by the same helper the shell windows use. */
-  ng_draw_caption(s, w->rect, t, caption_hover(w), 3);
+  /* Caption buttons, drawn by the same helper the shell windows use. A
+   * sheet cannot be minimized or maximized, so it only gets a close box. */
+  ng_draw_caption(s, w->rect, t, caption_hover(w),
+                  (w->modal != 0u) ? 1 : 3);
 
   (void)i;
 
@@ -552,6 +579,7 @@ static void req_create(const ipc_msg_t *m) {
   }
   w->owner = m->hdr.sender;
   w->alpha = 255u;
+  w->modal = (c.flags & NWM_F_CREATE_MODAL) != 0u ? 1u : 0u;
   w->rect = nd_rect(c.x, c.y, c.w, c.h);
   clamp_rect(&w->rect);
   for (i = 0; i + 1u < NWM_TITLE_MAX && c.title[i] != '\0'; i++) {
@@ -679,6 +707,13 @@ static void req_raise(const ipc_msg_t *m) {
   w = win_get(id);
   if (!owned_by(w, m->hdr.sender, &st)) {
     ack(m, id, st);
+    return;
+  }
+  /* A modal sheet stays on top: another window raising itself must not
+   * end up covering the dialog that is waiting for its answer. */
+  if (w->modal == 0u && modal_index() >= 0) {
+    damage_frame(w->rect);
+    ack(m, id, NWM_OK);
     return;
   }
   z_raise((int)(w - g_wins));
@@ -1061,8 +1096,9 @@ static INT32 caption_hover(const nwm_window_t *w) {
  * with the right edge. */
 static UINT8 title_button(const nwm_window_t *w, INT32 x, INT32 y) {
   UINT32 i;
+  UINT32 n = (w->modal != 0u) ? 1u : 3u;
 
-  for (i = 0; i < 3u; i++) {
+  for (i = 0; i < n; i++) {
     nd_rect_t b = nd_rect(w->rect.x + w->rect.w - (INT32)(i + 1u) * NWM_BTN,
                           w->rect.y, NWM_BTN, NWM_TITLE_H);
 
@@ -1079,19 +1115,34 @@ static UINT8 title_button(const nwm_window_t *w, INT32 x, INT32 y) {
  * follow focus rather than whichever window is merely under the pointer. */
 static void route(const nd_event_t *ev) {
   int idx;
+  int modal = modal_index();
 
   g_mouse_x = ev->x;
   g_mouse_y = ev->y;
 
   /* An open start menu (or any overlay card) takes the pointer before the
    * windows do: it is drawn above them, so it must be clicked above them
-   * too. Dragging a window keeps priority so a drag cannot be swallowed. */
-  if (g_drag < 0 &&
+   * too. Dragging a window keeps priority so a drag cannot be swallowed.
+   * A modal sheet takes the pointer before everything: the desktop behind
+   * it must not react to a click meant for the dialog. */
+  if (modal < 0 && g_drag < 0 &&
       (ev->type == ND_EV_MOUSE_MOVE || ev->type == ND_EV_MOUSE_DOWN ||
        ev->type == ND_EV_MOUSE_UP || ev->type == ND_EV_WHEEL) &&
       ng_overlay_hit(ev->x, ev->y)) {
     nd_demo_dispatch(ev);
     return;
+  }
+  if (modal >= 0) {
+    /* A press outside the sheet is swallowed; the pointer still moves so
+     * the cursor keeps tracking, and a release still ends a capture. */
+    if (ev->type == ND_EV_MOUSE_MOVE) {
+      nd_cursor_set(ev->x, ev->y);
+    }
+    if (ev->type != ND_EV_MOUSE_UP && ev->type != ND_EV_MOUSE_MOVE &&
+        ev->type != ND_EV_WHEEL &&
+        !nd_rect_contains(g_wins[modal].rect, ev->x, ev->y)) {
+      return;
+    }
   }
 
   switch (ev->type) {
@@ -1112,7 +1163,7 @@ static void route(const nd_event_t *ev) {
     idx = hit_test(ev->x, ev->y);
     if (idx >= 0) {
       deliver_mouse(&g_wins[idx], ev);
-    } else {
+    } else if (modal < 0) {
       nd_demo_dispatch(ev); /* the shell's own widgets */
     }
     break;
@@ -1120,8 +1171,10 @@ static void route(const nd_event_t *ev) {
   case ND_EV_MOUSE_DOWN:
     idx = hit_test(ev->x, ev->y);
     if (idx < 0) {
-      focus_set(-1);
-      nd_demo_dispatch(ev);
+      if (modal < 0) {
+        focus_set(-1);
+        nd_demo_dispatch(ev);
+      }
       break;
     }
     z_raise(idx);
@@ -1186,14 +1239,17 @@ static void route(const nd_event_t *ev) {
     g_capture = -1;
     if (idx >= 0) {
       deliver_mouse(&g_wins[idx], ev);
-    } else {
+    } else if (modal < 0) {
       nd_demo_dispatch(ev);
     }
     break;
 
   case ND_EV_KEY:
-    if (g_focus >= 0 && g_wins[g_focus].used && g_wins[g_focus].state != 1u) {
-      nwm_window_t *w = &g_wins[g_focus];
+    /* The keyboard follows the modal sheet while one is up, so the window
+     * underneath cannot be operated behind it. */
+    idx = (modal >= 0) ? modal : g_focus;
+    if (idx >= 0 && g_wins[idx].used && g_wins[idx].state != 1u) {
+      nwm_window_t *w = &g_wins[idx];
 
       /* Ctrl+Space switches client input between English and pinyin. */
       if (ev->key == ' ' && (ev->mods & ND_MOD_CTRL) != 0u) {
@@ -1217,13 +1273,15 @@ static void route(const nd_event_t *ev) {
         }
       }
       deliver_key(w, ev);
-    } else {
+    } else if (modal < 0) {
       nd_demo_dispatch(ev);
     }
     break;
 
   default:
-    nd_demo_dispatch(ev);
+    if (modal < 0) {
+      nd_demo_dispatch(ev);
+    }
     break;
   }
 }

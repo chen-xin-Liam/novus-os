@@ -3,9 +3,10 @@
 //! duplicate scope/type state before there is another backend to reuse it.
 use crate::ast::*;
 use crate::diagnostic::CompileError;
+use crate::layout::{align_to, Layouts};
 use crate::nucgen::{CodeSections, NucRelocation, NucSymbol, SegmentKind};
 use anyhow::{bail, Result};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 const RELOC_32: u32 = 1;
 const RELOC_PC32: u32 = 2;
@@ -30,127 +31,18 @@ enum Reg {
 const ARG_REGS: [Reg; 6] = [Reg::Rdi, Reg::Rsi, Reg::Rdx, Reg::Rcx, Reg::R8, Reg::R9];
 
 #[derive(Clone, Debug)]
-struct StructLayout {
-    fields: HashMap<String, usize>,
-    size: usize,
-    align: usize,
-}
-
-struct Layouts {
-    definitions: HashMap<String, Vec<Variable>>,
-    layouts: HashMap<String, StructLayout>,
-}
-
-impl Layouts {
-    fn from_unit(unit: &TranslationUnit) -> Result<Self> {
-        let mut layouts = Self {
-            definitions: HashMap::new(),
-            layouts: HashMap::new(),
-        };
-        for item in &unit.items {
-            if let TopLevel::Struct(definition) = item {
-                if definition.is_definition {
-                    layouts.definitions.insert(definition.name.clone(), definition.fields.clone());
-                }
-            }
-        }
-        let names: Vec<String> = layouts.definitions.keys().cloned().collect();
-        for name in names {
-            layouts.layout_struct(&name, &mut HashSet::new())?;
-        }
-        Ok(layouts)
-    }
-
-    fn layout_struct(&mut self, name: &str, active: &mut HashSet<String>) -> Result<StructLayout> {
-        if let Some(layout) = self.layouts.get(name) {
-            return Ok(layout.clone());
-        }
-        if !active.insert(name.to_owned()) {
-            bail!("recursive by-value struct '{}' has no finite size", name);
-        }
-        let fields = self.definitions.get(name)
-            .ok_or_else(|| anyhow::anyhow!("incomplete struct '{}'", name))?.clone();
-        let mut field_offsets = HashMap::new();
-        let mut size = 0usize;
-        let mut struct_align = 1usize;
-        for field in &fields {
-            let (field_size, field_align) = self.size_align(&field.ty, active)?;
-            size = align_to(size, field_align)?;
-            field_offsets.insert(field.name.clone(), size);
-            size = size.checked_add(field_size).ok_or_else(|| anyhow::anyhow!("struct size overflow"))?;
-            struct_align = struct_align.max(field_align);
-        }
-        size = align_to(size.max(1), struct_align)?;
-        active.remove(name);
-        let layout = StructLayout { fields: field_offsets, size, align: struct_align };
-        self.layouts.insert(name.to_owned(), layout.clone());
-        Ok(layout)
-    }
-
-    fn size_align(&mut self, ty: &Type, active: &mut HashSet<String>) -> Result<(usize, usize)> {
-        if ty.pointers > 0 {
-            return Ok((8, 8));
-        }
-        let (base_size, base_align) = match &ty.base {
-            BaseType::Void => bail!("void has no object size"),
-            BaseType::Bool | BaseType::Char => (1, 1),
-            BaseType::Short => (2, 2),
-            BaseType::Int => (4, 4),
-            BaseType::Long | BaseType::LongLong => (8, 8),
-            BaseType::Struct(name) => {
-                let layout = self.layout_struct(name, active)?;
-                (layout.size, layout.align)
-            }
-        };
-        if let Some(length) = ty.array_len {
-            Ok((base_size.checked_mul(length).ok_or_else(|| anyhow::anyhow!("array size overflow"))?, base_align))
-        } else {
-            Ok((base_size, base_align))
-        }
-    }
-
-    fn size_of(&mut self, ty: &Type) -> Result<usize> {
-        self.size_align(ty, &mut HashSet::new()).map(|pair| pair.0)
-    }
-
-    fn align_of(&mut self, ty: &Type) -> Result<usize> {
-        self.size_align(ty, &mut HashSet::new()).map(|pair| pair.1)
-    }
-
-    fn size_align_known(&self, ty: &Type) -> Result<(usize, usize)> {
-        if ty.pointers > 0 { return Ok((8, 8)); }
-        let (size, align) = match &ty.base {
-            BaseType::Void => bail!("void has no object size"),
-            BaseType::Bool | BaseType::Char => (1, 1),
-            BaseType::Short => (2, 2),
-            BaseType::Int => (4, 4),
-            BaseType::Long | BaseType::LongLong => (8, 8),
-            BaseType::Struct(name) => {
-                let layout = self.layouts.get(name).ok_or_else(|| anyhow::anyhow!("incomplete struct '{}'", name))?;
-                (layout.size, layout.align)
-            }
-        };
-        if let Some(length) = ty.array_len {
-            Ok((size.checked_mul(length).ok_or_else(|| anyhow::anyhow!("array size overflow"))?, align))
-        } else {
-            Ok((size, align))
-        }
-    }
-
-    fn member_offset(&self, struct_name: &str, field: &str) -> Result<usize> {
-        self.layouts.get(struct_name)
-            .and_then(|layout| layout.fields.get(field))
-            .copied()
-            .ok_or_else(|| anyhow::anyhow!("struct '{}' has no member '{}'", struct_name, field))
-    }
+struct FunctionSignature {
+    params: Vec<Type>,
+    #[allow(dead_code)]
+    is_variadic: bool,
 }
 
 #[derive(Clone, Debug)]
 struct GlobalObject {
     segment: SegmentKind,
     offset: usize,
-    ty: Type,
     size: usize,
+    ty: Type,
 }
 
 struct Generator<'a> {
@@ -158,16 +50,32 @@ struct Generator<'a> {
     layouts: Layouts,
     sections: CodeSections,
     globals: HashMap<String, GlobalObject>,
+    signatures: HashMap<String, FunctionSignature>,
     strings: HashMap<Vec<u8>, String>,
     string_order: Vec<Vec<u8>>,
 }
 
 pub(crate) fn generate(unit: &TranslationUnit) -> Result<CodeSections> {
+    let signatures = unit
+        .items
+        .iter()
+        .filter_map(|item| match item {
+            TopLevel::Function(function) => Some((
+                function.name.clone(),
+                FunctionSignature {
+                    params: function.params.iter().map(|param| param.ty.clone()).collect(),
+                    is_variadic: function.is_variadic,
+                },
+            )),
+            _ => None,
+        })
+        .collect();
     let mut generator = Generator {
         unit,
         layouts: Layouts::from_unit(unit)?,
         sections: CodeSections::default(),
         globals: HashMap::new(),
+        signatures,
         strings: HashMap::new(),
         string_order: Vec::new(),
     };
@@ -188,7 +96,7 @@ impl Generator<'_> {
                 TopLevel::Function(function) => {
                     if let Some(body) = &function.body { self.visit_stmt_strings(body); }
                 }
-                TopLevel::Struct(_) => {}
+                TopLevel::Struct(_) | TopLevel::Enum(_) | TopLevel::Typedef(_) | TopLevel::StaticAssert(_) => {}
             }
         }
     }
@@ -204,14 +112,20 @@ impl Generator<'_> {
                 if let Some(branch) = else_branch { self.visit_stmt_strings(branch); }
             }
             StmtKind::While { condition, body } => { self.visit_expr_strings(condition); self.visit_stmt_strings(body); }
+            StmtKind::DoWhile { body, condition } => { self.visit_stmt_strings(body); self.visit_expr_strings(condition); }
             StmtKind::For { init, condition, step, body } => {
                 if let Some(init) = init { self.visit_stmt_strings(init); }
                 if let Some(condition) = condition { self.visit_expr_strings(condition); }
                 if let Some(step) = step { self.visit_expr_strings(step); }
                 self.visit_stmt_strings(body);
             }
+            StmtKind::RangeFor { var, range, body } => {
+                if let Some(expr) = &var.initializer { self.visit_expr_strings(expr); }
+                self.visit_expr_strings(range);
+                self.visit_stmt_strings(body);
+            }
             StmtKind::Return(expr) => if let Some(expr) = expr { self.visit_expr_strings(expr); },
-            StmtKind::Empty | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Empty | StmtKind::Break | StmtKind::Continue | StmtKind::StaticAssert(_) => {}
         }
     }
 
@@ -225,6 +139,7 @@ impl Generator<'_> {
                 }
             }
             ExprKind::Unary { operand, .. } | ExprKind::Postfix { operand, .. } => self.visit_expr_strings(operand),
+            ExprKind::Cast { operand, .. } | ExprKind::SizeofExpr(operand) => self.visit_expr_strings(operand),
             ExprKind::Binary { left, right, .. } => { self.visit_expr_strings(left); self.visit_expr_strings(right); }
             ExprKind::Ternary { condition, then_expr, else_expr } => {
                 self.visit_expr_strings(condition); self.visit_expr_strings(then_expr); self.visit_expr_strings(else_expr);
@@ -235,7 +150,9 @@ impl Generator<'_> {
             }
             ExprKind::Index { base, index } => { self.visit_expr_strings(base); self.visit_expr_strings(index); }
             ExprKind::Member { base, .. } => self.visit_expr_strings(base),
-            ExprKind::Integer(_) | ExprKind::Character(_) | ExprKind::Boolean(_) | ExprKind::Identifier(_) => {}
+            ExprKind::Aggregate(elements) => for element in elements { self.visit_expr_strings(element); },
+            ExprKind::Integer(_) | ExprKind::Character(_) | ExprKind::Boolean(_) | ExprKind::Nullptr
+            | ExprKind::Identifier(_) | ExprKind::SizeofType(_) => {}
         }
     }
 
@@ -278,20 +195,21 @@ impl Generator<'_> {
                     self.sections.bss_size = align_to(self.sections.bss_size as usize, align)? as u64;
                     let offset = self.sections.bss_size as usize;
                     self.sections.bss_size = self.sections.bss_size.checked_add(size as u64).ok_or_else(|| anyhow::anyhow!("BSS size overflow"))?;
-                    self.globals.insert(variable.name.clone(), GlobalObject { segment, offset, ty: variable.ty.clone(), size });
+                    self.globals.insert(variable.name.clone(), GlobalObject { segment, offset, size, ty: variable.ty.clone() });
                     continue;
                 }
                 SegmentKind::Text => unreachable!(),
             };
             let offset = align_to(section_len.len(), align)?;
             section_len.resize(offset.checked_add(size).ok_or_else(|| anyhow::anyhow!("global data size overflow"))?, 0);
-            self.globals.insert(variable.name.clone(), GlobalObject { segment, offset, ty: variable.ty.clone(), size });
+            self.globals.insert(variable.name.clone(), GlobalObject { segment, offset, size, ty: variable.ty.clone() });
         }
 
         for variable in &globals {
             let object = self.globals[&variable.name].clone();
             if let Some(initializer) = &variable.initializer {
-                self.emit_global_initializer(variable, &object, initializer)?;
+                let ty = variable.ty.clone();
+                self.write_global_value(&object, 0, &ty, initializer)?;
             }
             self.sections.symbols.push(NucSymbol {
                 name: variable.name.clone(),
@@ -305,8 +223,46 @@ impl Generator<'_> {
         Ok(())
     }
 
-    fn emit_global_initializer(&mut self, variable: &Variable, object: &GlobalObject, expr: &Expr) -> Result<()> {
-        if object.ty.pointers > 0 {
+    /// Emits the constant image for `expr` at `offset` inside a global object.
+    fn write_global_value(&mut self, object: &GlobalObject, offset: usize, ty: &Type, expr: &Expr) -> Result<()> {
+        if ty.is_reference {
+            bail!("{}", codegen_error(&expr.location, "global reference initializers are not supported"));
+        }
+        if ty.array_len.is_some() {
+            let mut element = ty.clone();
+            element.array_len = None;
+            let element_size = self.layouts.size_of(&element)?;
+            let capacity = ty.array_len.unwrap_or(0);
+            match &expr.kind {
+                ExprKind::String(bytes) if element.is_integer() && element.base == BaseType::Char => {
+                    for (index, byte) in bytes.iter().enumerate() {
+                        if index >= capacity { break; }
+                        self.write_global_byte(object, offset + index * element_size, *byte)?;
+                    }
+                    Ok(())
+                }
+                ExprKind::Aggregate(elements) => {
+                    for (index, element_expr) in elements.iter().enumerate() {
+                        if index >= capacity { break; }
+                        self.write_global_value(object, offset + index * element_size, &element, element_expr)?;
+                    }
+                    Ok(())
+                }
+                _ => bail!("{}", codegen_error(&expr.location, "array initializer must be a braced list or a string literal")),
+            }
+        } else if let BaseType::Struct(name) = &ty.base {
+            let ExprKind::Aggregate(elements) = &expr.kind else {
+                bail!("{}", codegen_error(&expr.location, "struct initializer must be a braced list"))
+            };
+            let Some(order) = self.layouts.field_order(name) else {
+                bail!("{}", codegen_error(&expr.location, format!("incomplete struct '{}'", name).as_str()))
+            };
+            for (element_expr, (field_name, field_type)) in elements.iter().zip(order.iter()) {
+                let field_offset = self.layouts.member_offset(name, field_name)?;
+                self.write_global_value(object, offset + field_offset, field_type, element_expr)?;
+            }
+            Ok(())
+        } else if ty.pointers > 0 {
             let target = match &expr.kind {
                 ExprKind::String(bytes) => self.strings.get(bytes).cloned(),
                 ExprKind::Unary { op, operand } if op == "&" => match &operand.kind {
@@ -314,30 +270,67 @@ impl Generator<'_> {
                     _ => None,
                 },
                 _ => None,
-            }.ok_or_else(|| codegen_error(&expr.location, "global pointer initializer must name a string or global object"))?;
-            if object.size != 8 {
-                bail!("{}", codegen_error(&variable.location, "pointer object must be 64 bits"));
+            };
+            match target {
+                Some(symbol) => {
+                    let size = self.layouts.size_of(ty)?;
+                    if size != 8 {
+                        bail!("{}", codegen_error(&expr.location, "pointer object must be 64 bits"));
+                    }
+                    self.sections.relocations.push(NucRelocation {
+                        place_segment: object.segment,
+                        place_offset: (object.offset + offset) as u64,
+                        kind: RELOC_32,
+                        symbol,
+                    });
+                    Ok(())
+                }
+                None => {
+                    let value = self.const_eval(expr).ok_or_else(|| codegen_error(
+                        &expr.location,
+                        "global pointer initializer must name a string, a global object or a null pointer constant",
+                    ))?;
+                    self.write_global_scalar(object, offset, ty, value)
+                }
             }
-            self.sections.relocations.push(NucRelocation {
-                place_segment: object.segment,
-                place_offset: object.offset as u64,
-                kind: RELOC_32,
-                symbol: target,
-            });
-            return Ok(());
+        } else {
+            let value = self.const_eval(expr).ok_or_else(|| codegen_error(&expr.location, "global initializer is not a supported constant"))?;
+            self.write_global_scalar(object, offset, ty, value)
         }
-        let value = const_eval(expr).ok_or_else(|| codegen_error(&expr.location, "global initializer is not a supported constant"))?;
-        if object.size > 8 || object.ty.array_len.is_some() || matches!(&object.ty.base, BaseType::Struct(_)) {
-            bail!("{}", codegen_error(&variable.location, "aggregate initialization is not implemented"));
+    }
+
+    fn write_global_scalar(&mut self, object: &GlobalObject, offset: usize, ty: &Type, value: i64) -> Result<()> {
+        let size = self.layouts.size_align_known(ty)?.0;
+        if size > 8 {
+            bail!("scalar global initializer is wider than 8 bytes");
         }
-        let target = match object.segment {
+        let start = object.offset + offset;
+        let bytes = (value as u64).to_le_bytes();
+        let section = match object.segment {
             SegmentKind::Rodata => &mut self.sections.rodata,
             SegmentKind::Data => &mut self.sections.data,
             SegmentKind::Bss => bail!("initialized global was placed in BSS"),
             SegmentKind::Text => unreachable!(),
         };
-        let value_bytes = (value as u64).to_le_bytes();
-        target[object.offset..object.offset + object.size].copy_from_slice(&value_bytes[..object.size]);
+        if start + size > section.len() {
+            bail!("global initializer runs past the end of its object");
+        }
+        section[start..start + size].copy_from_slice(&bytes[..size]);
+        Ok(())
+    }
+
+    fn write_global_byte(&mut self, object: &GlobalObject, offset: usize, value: u8) -> Result<()> {
+        let start = object.offset + offset;
+        let section = match object.segment {
+            SegmentKind::Rodata => &mut self.sections.rodata,
+            SegmentKind::Data => &mut self.sections.data,
+            SegmentKind::Bss => bail!("initialized global was placed in BSS"),
+            SegmentKind::Text => unreachable!(),
+        };
+        if start >= section.len() {
+            bail!("global initializer runs past the end of its object");
+        }
+        section[start] = value;
         Ok(())
     }
 
@@ -397,51 +390,73 @@ impl Generator<'_> {
         }
         Ok(())
     }
+
+    /// Constant folding for static initializers, `sizeof` and enum values.
+    fn const_eval(&self, expr: &Expr) -> Option<i64> {
+        match &expr.kind {
+            ExprKind::Integer(value) | ExprKind::Character(value) => Some(*value),
+            ExprKind::Boolean(value) => Some(bool_value(*value)),
+            ExprKind::Nullptr => Some(0),
+            ExprKind::Cast { ty, operand } => {
+                let value = self.const_eval(operand)?;
+                Some(cast_constant(ty, value))
+            }
+            ExprKind::SizeofType(ty) => self.layouts.size_align_known(ty).ok().map(|pair| pair.0 as i64),
+            ExprKind::SizeofExpr(operand) => {
+                let ty = operand.ty.as_ref()?;
+                self.layouts.size_align_known(ty).ok().map(|pair| pair.0 as i64)
+            }
+            ExprKind::Unary { op, operand } => {
+                let value = self.const_eval(operand)?;
+                match op.as_str() { "+" => Some(value), "-" => value.checked_neg(), "~" => Some(!value), "!" => Some(bool_value(value == 0)), _ => None }
+            }
+            ExprKind::Binary { op, left, right } => {
+                let left = self.const_eval(left)?;
+                let right = self.const_eval(right)?;
+                match op.as_str() {
+                    "+" => left.checked_add(right), "-" => left.checked_sub(right), "*" => left.checked_mul(right),
+                    "/" => left.checked_div(right), "%" => left.checked_rem(right),
+                    "<<" => u32::try_from(right).ok().and_then(|shift| left.checked_shl(shift)),
+                    ">>" => u32::try_from(right).ok().and_then(|shift| left.checked_shr(shift)),
+                    "&" => Some(left & right), "|" => Some(left | right), "^" => Some(left ^ right),
+                    "==" => Some(bool_value(left == right)), "!=" => Some(bool_value(left != right)),
+                    "<" => Some(bool_value(left < right)), "<=" => Some(bool_value(left <= right)),
+                    ">" => Some(bool_value(left > right)), ">=" => Some(bool_value(left >= right)),
+                    "&&" => Some(bool_value(left != 0 && right != 0)), "||" => Some(bool_value(left != 0 || right != 0)),
+                    _ => None,
+                }
+            }
+            ExprKind::Ternary { condition, then_expr, else_expr } => {
+                if self.const_eval(condition)? != 0 { self.const_eval(then_expr) } else { self.const_eval(else_expr) }
+            }
+            _ => None,
+        }
+    }
 }
 
 fn codegen_error(location: &crate::diagnostic::SourceLocation, message: &str) -> CompileError {
     CompileError::new(location.clone(), message)
 }
 
-fn align_to(value: usize, alignment: usize) -> Result<usize> {
-    value.checked_add(alignment - 1)
-        .map(|value| value & !(alignment - 1))
-        .ok_or_else(|| anyhow::anyhow!("alignment overflow"))
-}
-
 fn bool_value(value: bool) -> i64 {
     if value { 1 } else { 0 }
 }
 
-fn const_eval(expr: &Expr) -> Option<i64> {
-    match &expr.kind {
-        ExprKind::Integer(value) | ExprKind::Character(value) => Some(*value),
-        ExprKind::Boolean(value) => Some(bool_value(*value)),
-        ExprKind::Unary { op, operand } => {
-            let value = const_eval(operand)?;
-            match op.as_str() { "+" => Some(value), "-" => value.checked_neg(), "~" => Some(!value), "!" => Some(bool_value(value == 0)), _ => None }
-        }
-        ExprKind::Binary { op, left, right } => {
-            let left = const_eval(left)?;
-            let right = const_eval(right)?;
-            match op.as_str() {
-                "+" => left.checked_add(right), "-" => left.checked_sub(right), "*" => left.checked_mul(right),
-                "/" => left.checked_div(right), "%" => left.checked_rem(right),
-                "<<" => u32::try_from(right).ok().and_then(|shift| left.checked_shl(shift)),
-                ">>" => u32::try_from(right).ok().and_then(|shift| left.checked_shr(shift)),
-                "&" => Some(left & right), "|" => Some(left | right), "^" => Some(left ^ right),
-                "==" => Some(bool_value(left == right)), "!=" => Some(bool_value(left != right)),
-                "<" => Some(bool_value(left < right)), "<=" => Some(bool_value(left <= right)),
-                ">" => Some(bool_value(left > right)), ">=" => Some(bool_value(left >= right)),
-                "&&" => Some(bool_value(left != 0 && right != 0)), "||" => Some(bool_value(left != 0 || right != 0)),
-                _ => None,
-            }
-        }
-        ExprKind::Ternary { condition, then_expr, else_expr } => {
-            if const_eval(condition)? != 0 { const_eval(then_expr) } else { const_eval(else_expr) }
-        }
-        _ => None,
+fn cast_constant(ty: &Type, value: i64) -> i64 {
+    if ty.is_reference || ty.pointers > 0 {
+        return value;
     }
+    match ty.base {
+        BaseType::Bool => bool_value(value != 0),
+        BaseType::Char => if ty.is_unsigned { (value as u8) as i64 } else { (value as i8) as i64 },
+        BaseType::Short => if ty.is_unsigned { (value as u16) as i64 } else { (value as i16) as i64 },
+        BaseType::Int => if ty.is_unsigned { (value as u32) as i64 } else { (value as i32) as i64 },
+        _ => value,
+    }
+}
+
+fn long_type() -> Type {
+    Type::new(BaseType::Long)
 }
 
 struct FunctionOutput {
@@ -453,6 +468,7 @@ struct FunctionOutput {
 struct LocalBinding {
     offset: i32,
     ty: Type,
+    is_reference: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -525,7 +541,11 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             let name = param.name.as_ref().ok_or_else(|| anyhow::anyhow!("{}", codegen_error(&param.location, "function definition parameter requires a name")))?;
             let offset = self.allocate_local(name, ty.clone())?;
             self.emit_mov_rr(Reg::Rax, ARG_REGS[index], true);
-            self.emit_store(Reg::Rax, Reg::Rbp, -offset, &ty)?;
+            if ty.is_reference {
+                self.emit_store(Reg::Rax, Reg::Rbp, -offset, &long_type())?;
+            } else {
+                self.emit_store(Reg::Rax, Reg::Rbp, -offset, &ty)?;
+            }
         }
         self.emit_stmt(body, true)?;
         self.emit_mov_imm64(Reg::Rax, 0);
@@ -545,30 +565,9 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 for statement in statements { self.emit_stmt(statement, false)?; }
                 if !is_function_body { self.locals.pop(); }
             }
-            StmtKind::Empty => {}
+            StmtKind::Empty | StmtKind::StaticAssert(_) => {}
             StmtKind::Expression(expr) => self.emit_expr(expr)?,
-            StmtKind::Variable(variable) => {
-                if variable.is_static {
-                    bail!("{}", codegen_error(&variable.location, "static local variables are not implemented"));
-                }
-                if variable.ty.is_void() || matches!(&variable.ty.base, BaseType::Struct(_)) && variable.ty.pointers == 0 && variable.ty.array_len.is_none() {
-                    if matches!(&variable.ty.base, BaseType::Struct(_)) && variable.ty.pointers == 0 && variable.ty.array_len.is_none() {
-                        self.allocate_local(&variable.name, variable.ty.clone())?;
-                    } else {
-                        bail!("{}", codegen_error(&variable.location, "void local object is invalid"));
-                    }
-                } else {
-                    self.allocate_local(&variable.name, variable.ty.clone())?;
-                }
-                if let Some(initializer) = &variable.initializer {
-                    if variable.ty.array_len.is_some() || matches!(&variable.ty.base, BaseType::Struct(_)) && variable.ty.pointers == 0 {
-                        bail!("{}", codegen_error(&variable.location, "aggregate local initialization is not implemented"));
-                    }
-                    self.emit_expr(initializer)?;
-                    let local = self.lookup_local(&variable.name).ok_or_else(|| anyhow::anyhow!("local variable allocation failed"))?;
-                    self.emit_store(Reg::Rax, Reg::Rbp, -local.offset, &local.ty)?;
-                }
-            }
+            StmtKind::Variable(variable) => self.emit_local_variable(variable)?,
             StmtKind::If { condition, then_branch, else_branch } => {
                 let else_label = self.new_label();
                 let end_label = self.new_label();
@@ -598,6 +597,20 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 self.emit_jmp(condition_label);
                 self.place_label(end_label);
             }
+            StmtKind::DoWhile { body, condition } => {
+                let body_label = self.new_label();
+                let condition_label = self.new_label();
+                let end_label = self.new_label();
+                self.place_label(body_label);
+                self.loops.push(LoopLabels { break_label: end_label, continue_label: condition_label });
+                self.emit_stmt(body, false)?;
+                self.loops.pop();
+                self.place_label(condition_label);
+                self.emit_expr(condition)?;
+                self.emit_test_rax();
+                self.emit_jcc(0x85, body_label);
+                self.place_label(end_label);
+            }
             StmtKind::For { init, condition, step, body } => {
                 self.locals.push(HashMap::new());
                 if let Some(init) = init { self.emit_stmt(init, false)?; }
@@ -619,9 +632,12 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 self.place_label(end_label);
                 self.locals.pop();
             }
+            StmtKind::RangeFor { var, range, body } => self.emit_range_for(var, range, body)?,
             StmtKind::Return(expr) => {
-                if let Some(expr) = expr { self.emit_expr(expr)?; }
-                else { self.emit_mov_imm64(Reg::Rax, 0); }
+                match expr {
+                    Some(expr) => self.emit_expr(expr)?,
+                    None => self.emit_mov_imm64(Reg::Rax, 0),
+                }
                 self.emit_jmp(self.epilogue);
             }
             StmtKind::Break => {
@@ -636,23 +652,174 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
         Ok(())
     }
 
+    fn emit_local_variable(&mut self, variable: &Variable) -> Result<()> {
+        if variable.is_static {
+            bail!("{}", codegen_error(&variable.location, "static local variables are not implemented"));
+        }
+        if variable.ty.is_void() {
+            bail!("{}", codegen_error(&variable.location, "void local object is invalid"));
+        }
+        let ty = variable.ty.clone();
+        let offset = self.allocate_local(&variable.name, ty.clone())?;
+        let Some(initializer) = &variable.initializer else { return Ok(()) };
+        if ty.is_reference {
+            self.emit_lvalue_address(initializer)?;
+            self.emit_store(Reg::Rax, Reg::Rbp, -offset, &long_type())?;
+        } else if ty.is_aggregate() {
+            let local = self.lookup_local(&variable.name).ok_or_else(|| anyhow::anyhow!("local variable allocation failed"))?;
+            self.emit_local_aggregate(&local, initializer)?;
+        } else {
+            self.emit_expr(initializer)?;
+            let local = self.lookup_local(&variable.name).ok_or_else(|| anyhow::anyhow!("local variable allocation failed"))?;
+            self.emit_store(Reg::Rax, Reg::Rbp, -local.offset, &local.ty)?;
+        }
+        Ok(())
+    }
+
+    fn emit_local_aggregate(&mut self, local: &LocalBinding, expr: &Expr) -> Result<()> {
+        let ty = local.ty.clone();
+        let size = self.generator.layouts.size_align_known(&ty)?.0;
+        self.emit_zero_fill(Reg::Rbp, -local.offset, size)?;
+        self.emit_aggregate_elements(Reg::Rbp, -local.offset, &ty, expr)
+    }
+
+    fn emit_aggregate_elements(&mut self, base: Reg, displacement: i32, ty: &Type, expr: &Expr) -> Result<()> {
+        if ty.array_len.is_some() {
+            let mut element = ty.clone();
+            element.array_len = None;
+            let element_size = self.generator.layouts.size_align_known(&element)?.0;
+            let capacity = ty.array_len.unwrap_or(0);
+            match &expr.kind {
+                ExprKind::String(bytes) if element.is_integer() && element.base == BaseType::Char => {
+                    for (index, byte) in bytes.iter().enumerate() {
+                        if index >= capacity { break; }
+                        self.emit_store_imm8(base, displacement + (index * element_size) as i32, *byte);
+                    }
+                    Ok(())
+                }
+                ExprKind::Aggregate(elements) => {
+                    for (index, element_expr) in elements.iter().enumerate() {
+                        if index >= capacity { break; }
+                        self.emit_aggregate_elements(base, displacement + (index * element_size) as i32, &element, element_expr)?;
+                    }
+                    Ok(())
+                }
+                _ => bail!("{}", codegen_error(&expr.location, "array initializer must be a braced list or a string literal")),
+            }
+        } else if let BaseType::Struct(name) = &ty.base {
+            let ExprKind::Aggregate(elements) = &expr.kind else {
+                bail!("{}", codegen_error(&expr.location, "struct initializer must be a braced list"))
+            };
+            let Some(order) = self.generator.layouts.field_order(name) else {
+                bail!("{}", codegen_error(&expr.location, format!("incomplete struct '{}'", name).as_str()))
+            };
+            for (element_expr, (field_name, field_type)) in elements.iter().zip(order.iter()) {
+                let field_offset = self.generator.layouts.member_offset(name, field_name)?;
+                self.emit_aggregate_elements(base, displacement + field_offset as i32, field_type, element_expr)?;
+            }
+            Ok(())
+        } else {
+            self.emit_expr(expr)?;
+            self.emit_store(Reg::Rax, base, displacement, ty)
+        }
+    }
+
+    fn emit_range_for(&mut self, var: &Variable, range: &Expr, body: &Stmt) -> Result<()> {
+        let range_type = range.ty.clone().ok_or_else(|| anyhow::anyhow!("range expression has no type"))?;
+        let Some(count) = range_type.array_len else {
+            bail!("{}", codegen_error(&range.location, "range-based for requires a fixed-size array"));
+        };
+        let mut element = range_type.clone();
+        element.array_len = None;
+        if element.is_aggregate() && !var.ty.is_reference {
+            bail!("{}", codegen_error(&var.location, "range-based for over struct elements requires a reference loop variable"));
+        }
+        let element_size = self.generator.layouts.size_align_known(&element)?.0;
+
+        self.locals.push(HashMap::new());
+        let cursor = self.allocate_local("__range.cursor", long_type())?;
+        let end = self.allocate_local("__range.end", long_type())?;
+        let loop_var = self.allocate_local(&var.name, var.ty.clone())?;
+
+        self.emit_lvalue_address(range)?;
+        self.emit_store(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
+        self.emit_mov_imm64(Reg::Rax, (count.saturating_mul(element_size)) as u64);
+        self.emit_mov_rr(Reg::Rcx, Reg::Rax, true);
+        self.emit_load(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
+        self.emit_bytes(&[0x48, 0x01, 0xC8]); // add rax, rcx
+        self.emit_store(Reg::Rax, Reg::Rbp, -end, &long_type())?;
+
+        let condition_label = self.new_label();
+        let step_label = self.new_label();
+        let end_label = self.new_label();
+        self.place_label(condition_label);
+        self.emit_load(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
+        self.emit_load(Reg::Rcx, Reg::Rbp, -end, &long_type())?;
+        self.emit_bytes(&[0x48, 0x39, 0xC8]); // cmp rax, rcx
+        self.emit_jcc(0x83, end_label); // jae
+        if var.ty.is_reference {
+            self.emit_load(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
+            self.emit_store(Reg::Rax, Reg::Rbp, -loop_var, &long_type())?;
+        } else {
+            self.emit_load(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
+            self.emit_load(Reg::Rax, Reg::Rax, 0, &element)?;
+            self.emit_store(Reg::Rax, Reg::Rbp, -loop_var, &var.ty)?;
+        }
+        self.loops.push(LoopLabels { break_label: end_label, continue_label: step_label });
+        self.emit_stmt(body, false)?;
+        self.loops.pop();
+        self.place_label(step_label);
+        self.emit_load(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
+        if element_size > 1 {
+            self.emit_scale_rax(element_size)?;
+        }
+        self.emit_store(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
+        self.emit_jmp(condition_label);
+        self.place_label(end_label);
+        self.locals.pop();
+        Ok(())
+    }
+
     fn emit_expr(&mut self, expr: &Expr) -> Result<()> {
         let ty = expr.ty.as_ref().ok_or_else(|| anyhow::anyhow!("{}", codegen_error(&expr.location, "expression has no semantic type")))?;
         match &expr.kind {
             ExprKind::Integer(value) | ExprKind::Character(value) => self.emit_mov_imm64(Reg::Rax, *value as u64),
             ExprKind::Boolean(value) => self.emit_mov_imm64(Reg::Rax, if *value { 1 } else { 0 }),
+            ExprKind::Nullptr => self.emit_mov_imm64(Reg::Rax, 0),
+            ExprKind::SizeofType(target) => {
+                let size = self.generator.layouts.size_align_known(target)?.0;
+                self.emit_mov_imm64(Reg::Rax, size as u64);
+            }
+            ExprKind::SizeofExpr(operand) => {
+                let target = operand.ty.as_ref().ok_or_else(|| anyhow::anyhow!("sizeof operand has no type"))?;
+                let size = self.generator.layouts.size_align_known(target)?.0;
+                self.emit_mov_imm64(Reg::Rax, size as u64);
+            }
             ExprKind::String(bytes) => {
                 let name = self.generator.strings.get(bytes).ok_or_else(|| anyhow::anyhow!("string literal was not collected"))?.clone();
                 self.emit_abs32_symbol(&name);
             }
+            ExprKind::Cast { ty: target, operand } => {
+                self.emit_expr(operand)?;
+                self.emit_cast(target)?;
+            }
             ExprKind::Identifier(name) => {
-                if ty.array_len.is_some() {
-                    self.emit_lvalue_address(expr)?;
-                } else if let Some(local) = self.lookup_local(name) {
-                    self.emit_load(Reg::Rax, Reg::Rbp, -local.offset, &local.ty)?;
+                if let Some(local) = self.lookup_local(name) {
+                    if local.is_reference {
+                        self.emit_load(Reg::Rax, Reg::Rbp, -local.offset, &long_type())?;
+                        if ty.array_len.is_none() && !ty.is_aggregate() {
+                            self.emit_load(Reg::Rax, Reg::Rax, 0, ty)?;
+                        }
+                    } else if ty.array_len.is_some() {
+                        self.emit_lvalue_address(expr)?;
+                    } else {
+                        self.emit_load(Reg::Rax, Reg::Rbp, -local.offset, &local.ty)?;
+                    }
                 } else if let Some(global) = self.generator.globals.get(name).cloned() {
                     self.emit_abs32_symbol(name);
-                    self.emit_load(Reg::Rax, Reg::Rax, 0, &global.ty)?;
+                    if ty.array_len.is_none() && !ty.is_aggregate() {
+                        self.emit_load(Reg::Rax, Reg::Rax, 0, &global.ty)?;
+                    }
                 } else {
                     bail!("{}", codegen_error(&expr.location, "identifier is not an emitted object"));
                 }
@@ -696,6 +863,29 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 if ty.array_len.is_some() { return Ok(()); }
                 self.emit_load(Reg::Rax, Reg::Rax, 0, ty)?;
             }
+            ExprKind::Aggregate(_) => bail!("{}", codegen_error(&expr.location, "braced initializer list outside of an initialization")),
+        }
+        Ok(())
+    }
+
+    fn emit_cast(&mut self, target: &Type) -> Result<()> {
+        if target.is_void() || target.is_reference || target.pointers > 0 {
+            return Ok(());
+        }
+        let size = self.generator.layouts.size_align_known(target)?.0;
+        match (target.base.clone(), target.is_unsigned, size) {
+            (BaseType::Bool, _, _) => {
+                self.emit_test_rax();
+                self.emit_setcc(0x95);
+            }
+            (_, true, 1) => self.emit_bytes(&[0x0F, 0xB6, 0xC0]),
+            (_, false, 1) => self.emit_bytes(&[0x48, 0x0F, 0xBE, 0xC0]),
+            (_, true, 2) => self.emit_bytes(&[0x0F, 0xB7, 0xC0]),
+            (_, false, 2) => self.emit_bytes(&[0x48, 0x0F, 0xBF, 0xC0]),
+            (_, true, 4) => self.emit_bytes(&[0x89, 0xC0]),
+            (_, false, 4) => self.emit_bytes(&[0x48, 0x63, 0xC0]),
+            (_, _, 8) => {}
+            _ => bail!("unsupported cast width"),
         }
         Ok(())
     }
@@ -875,26 +1065,96 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 self.emit_bytes(&[0x0F, 0x05]);
                 return Ok(());
             }
-            "novus_exit" => {
-                if args.len() != 1 { bail!("{}", codegen_error(location, "novus_exit expects one argument")); }
+            "novus_exit" | "exit" => {
+                if args.len() != 1 { bail!("{}", codegen_error(location, "exit expects one argument")); }
                 self.emit_expr(&args[0])?;
                 self.emit_mov_rr(Reg::Rdi, Reg::Rax, true);
                 self.emit_mov_imm32(Reg::Rax, 60);
                 self.emit_bytes(&[0x0F, 0x05, 0xF4]);
                 return Ok(());
             }
+            "abort" => {
+                if !args.is_empty() { bail!("{}", codegen_error(location, "abort takes no arguments")); }
+                self.emit_mov_imm32(Reg::Rdi, 134);
+                self.emit_mov_imm32(Reg::Rax, 60);
+                self.emit_bytes(&[0x0F, 0x05, 0xF4]);
+                return Ok(());
+            }
+            "puts" => {
+                if args.len() != 1 { bail!("{}", codegen_error(location, "puts expects one argument")); }
+                self.emit_expr(&args[0])?;
+                self.emit_mov_rr(Reg::Rsi, Reg::Rax, true);
+                self.emit_mov_rr(Reg::Rcx, Reg::Rax, true);
+                // strlen: scan for the terminating NUL.
+                let scan = self.new_label();
+                let done = self.new_label();
+                self.place_label(scan);
+                self.emit_bytes(&[0x80, 0x39, 0x00]); // cmp byte [rcx], 0
+                self.emit_jcc(0x84, done);
+                self.emit_bytes(&[0x48, 0xFF, 0xC1]); // inc rcx
+                self.emit_jmp(scan);
+                self.place_label(done);
+                self.emit_mov_rr(Reg::Rdx, Reg::Rcx, true);
+                self.emit_bytes(&[0x48, 0x29, 0xF2]); // sub rdx, rsi
+                self.emit_mov_imm32(Reg::Rdi, 1);
+                self.emit_mov_imm32(Reg::Rax, 2);
+                self.emit_bytes(&[0x0F, 0x05]);
+                // Trailing newline, written from a stack scratch byte.
+                self.adjust_rsp(false, 16)?;
+                self.stack_depth += 16;
+                self.emit_bytes(&[0xC6, 0x04, 0x24, b'\n']); // mov byte [rsp], 10
+                self.emit_bytes(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+                self.emit_mov_imm32(Reg::Rdx, 1);
+                self.emit_mov_imm32(Reg::Rdi, 1);
+                self.emit_mov_imm32(Reg::Rax, 2);
+                self.emit_bytes(&[0x0F, 0x05]);
+                self.adjust_rsp(true, 16)?;
+                self.stack_depth -= 16;
+                self.emit_mov_imm32(Reg::Rax, 0);
+                return Ok(());
+            }
+            "putchar" => {
+                if args.len() != 1 { bail!("{}", codegen_error(location, "putchar expects one argument")); }
+                self.emit_expr(&args[0])?;
+                self.adjust_rsp(false, 16)?;
+                self.stack_depth += 16;
+                self.emit_bytes(&[0x88, 0x04, 0x24]); // mov byte [rsp], al
+                self.emit_bytes(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+                self.emit_mov_imm32(Reg::Rdx, 1);
+                self.emit_mov_imm32(Reg::Rdi, 1);
+                self.emit_mov_imm32(Reg::Rax, 2);
+                self.emit_bytes(&[0x0F, 0x05]);
+                self.emit_bytes(&[0x0F, 0xB6, 0x04, 0x24]); // movzx eax, byte [rsp]
+                self.adjust_rsp(true, 16)?;
+                self.stack_depth -= 16;
+                return Ok(());
+            }
             _ => {}
         }
         if args.len() > ARG_REGS.len() { bail!("{}", codegen_error(location, "calls with more than six arguments are not implemented")); }
+        let by_reference: Vec<bool> = self
+            .generator
+            .signatures
+            .get(name)
+            .map(|signature| {
+                (0..args.len())
+                    .map(|index| signature.params.get(index).map(|param| param.is_reference).unwrap_or(false))
+                    .collect()
+            })
+            .unwrap_or_else(|| vec![false; args.len()]);
         let argument_bytes = args.len() * 8;
         let padding = (16 - ((self.stack_depth + argument_bytes) & 15)) & 15;
         if padding != 0 { self.adjust_rsp(false, padding)?; self.stack_depth += padding; }
-        for argument in args.iter().rev() {
-            self.emit_expr(argument)?;
+        for (argument, pass_reference) in args.iter().zip(by_reference.iter()).rev() {
+            if *pass_reference {
+                self.emit_lvalue_address(argument)?;
+            } else {
+                self.emit_expr(argument)?;
+            }
             self.push(Reg::Rax);
         }
         for (index, register) in ARG_REGS.iter().take(args.len()).enumerate() {
-            self.emit_load(*register, Reg::Rsp, (index * 8) as i32, &Type::new(BaseType::Long))?;
+            self.emit_load(*register, Reg::Rsp, (index * 8) as i32, &long_type())?;
         }
         let displacement = self.code.len() + 1;
         self.emit_bytes(&[0xE8, 0, 0, 0, 0]);
@@ -935,7 +1195,11 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
         match &expr.kind {
             ExprKind::Identifier(name) => {
                 if let Some(local) = self.lookup_local(name) {
-                    self.emit_lea(Reg::Rax, Reg::Rbp, -local.offset);
+                    if local.is_reference {
+                        self.emit_load(Reg::Rax, Reg::Rbp, -local.offset, &long_type())?;
+                    } else {
+                        self.emit_lea(Reg::Rax, Reg::Rbp, -local.offset);
+                    }
                 } else if self.generator.globals.contains_key(name) {
                     self.emit_abs32_symbol(name);
                 } else {
@@ -997,12 +1261,12 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
         self.local_cursor = self.local_cursor.checked_add(size).ok_or_else(|| anyhow::anyhow!("local frame size overflow"))?;
         if self.local_cursor > self.frame_size { bail!("local allocation exceeded precomputed stack frame"); }
         let offset = i32::try_from(self.local_cursor).map_err(|_| anyhow::anyhow!("local frame exceeds 2 GiB"))?;
-        self.locals.last_mut().expect("function has a local scope").insert(name.to_owned(), LocalBinding { offset, ty });
+        self.locals.last_mut().expect("function has a local scope").insert(name.to_owned(), LocalBinding { offset, ty: ty.clone(), is_reference: ty.is_reference });
         Ok(offset)
     }
 
     fn emit_load(&mut self, target: Reg, base: Reg, displacement: i32, ty: &Type) -> Result<()> {
-        if ty.array_len.is_some() || matches!(&ty.base, BaseType::Struct(_)) && ty.pointers == 0 {
+        if ty.array_len.is_some() || matches!(&ty.base, BaseType::Struct(_)) && ty.pointers == 0 || ty.is_reference {
             bail!("aggregate values cannot be loaded into a scalar register");
         }
         let size = self.generator.layouts.size_align_known(ty)?.0;
@@ -1013,13 +1277,44 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
     }
 
     fn emit_store(&mut self, source: Reg, base: Reg, displacement: i32, ty: &Type) -> Result<()> {
-        if ty.array_len.is_some() || matches!(&ty.base, BaseType::Struct(_)) && ty.pointers == 0 {
+        if ty.array_len.is_some() || matches!(&ty.base, BaseType::Struct(_)) && ty.pointers == 0 || ty.is_reference {
             bail!("aggregate values cannot be stored from a scalar register");
         }
         let size = self.generator.layouts.size_align_known(ty)?.0;
         let width = match size { 1 => 1, 2 => 2, 4 => 4, 8 => 8, _ => bail!("unsupported scalar width {}", size) };
         self.emit_memory_instruction(source, base, displacement, width, false, true);
         Ok(())
+    }
+
+    fn emit_zero_fill(&mut self, base: Reg, displacement: i32, size: usize) -> Result<()> {
+        if size == 0 {
+            return Ok(());
+        }
+        if size <= 64 {
+            for byte in 0..size {
+                self.emit_store_imm8(base, displacement + byte as i32, 0);
+            }
+            return Ok(());
+        }
+        self.emit_lea(Reg::Rdi, base, displacement);
+        self.emit_mov_imm32(Reg::Rcx, size as u32);
+        self.emit_bytes(&[0x31, 0xC0]); // xor eax, eax
+        let fill = self.new_label();
+        self.place_label(fill);
+        self.emit_bytes(&[0x88, 0x07]); // mov byte [rdi], al
+        self.emit_bytes(&[0x48, 0xFF, 0xC7]); // inc rdi
+        self.emit_bytes(&[0xFF, 0xC9]); // dec ecx
+        self.emit_jcc(0x85, fill); // jnz
+        Ok(())
+    }
+
+    fn emit_store_imm8(&mut self, base: Reg, displacement: i32, value: u8) {
+        if base as u8 >= 8 { self.emit_u8(0x41); }
+        self.emit_u8(0xC6);
+        self.emit_u8(0x80 | (base as u8 & 7));
+        if base as u8 & 7 == 4 { self.emit_u8(0x24); }
+        self.emit_bytes(&displacement.to_le_bytes());
+        self.emit_u8(value);
     }
 
     fn emit_memory_instruction(&mut self, reg: Reg, base: Reg, displacement: i32, width: usize, signed: bool, store: bool) {
@@ -1184,16 +1479,23 @@ fn count_local_bytes(stmt: &Stmt, layouts: &Layouts, total: &mut usize) -> Resul
             let size = align_to(layouts.size_align_known(&variable.ty)?.0.max(1), 8)?;
             *total = total.checked_add(size).ok_or_else(|| anyhow::anyhow!("stack frame size overflow"))?;
         }
+        StmtKind::RangeFor { var, body, .. } => {
+            let size = align_to(layouts.size_align_known(&var.ty)?.0.max(1), 8)?;
+            // Cursor, end pointer and the loop variable.
+            *total = total.checked_add(size + 16).ok_or_else(|| anyhow::anyhow!("stack frame size overflow"))?;
+            count_local_bytes(body, layouts, total)?;
+        }
         StmtKind::If { then_branch, else_branch, .. } => {
             count_local_bytes(then_branch, layouts, total)?;
             if let Some(branch) = else_branch { count_local_bytes(branch, layouts, total)?; }
         }
-        StmtKind::While { body, .. } => count_local_bytes(body, layouts, total)?,
+        StmtKind::While { body, .. } | StmtKind::DoWhile { body, .. } => count_local_bytes(body, layouts, total)?,
         StmtKind::For { init, body, .. } => {
             if let Some(init) = init { count_local_bytes(init, layouts, total)?; }
             count_local_bytes(body, layouts, total)?;
         }
-        StmtKind::Empty | StmtKind::Expression(_) | StmtKind::Return(_) | StmtKind::Break | StmtKind::Continue => {}
+        StmtKind::Empty | StmtKind::Expression(_) | StmtKind::Return(_) | StmtKind::Break
+        | StmtKind::Continue | StmtKind::StaticAssert(_) => {}
     }
     Ok(())
 }
@@ -1208,5 +1510,71 @@ fn condition_code(op: &str, unsigned: bool) -> u8 {
 }
 
 fn is_builtin(name: &str) -> bool {
-    matches!(name, "novus_write" | "novus_yield" | "novus_exit")
+    matches!(name, "novus_write" | "novus_yield" | "novus_exit" | "puts" | "putchar" | "exit" | "abort")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn encode_scalar_widths_and_sign_extension() {
+        let mut generator = test_generator();
+        generator.emit_cast(&Type::new(BaseType::Char)).unwrap();
+        assert_eq!(generator.code, vec![0x48, 0x0F, 0xBE, 0xC0]);
+        generator.code.clear();
+        let mut unsigned = Type::new(BaseType::Char);
+        unsigned.is_unsigned = true;
+        generator.emit_cast(&unsigned).unwrap();
+        assert_eq!(generator.code, vec![0x0F, 0xB6, 0xC0]);
+        generator.code.clear();
+        generator.emit_cast(&Type::int()).unwrap();
+        assert_eq!(generator.code, vec![0x48, 0x63, 0xC0]);
+    }
+
+    #[test]
+    fn zero_fill_uses_immediate_stores_for_small_objects() {
+        let mut generator = test_generator();
+        generator.emit_zero_fill(Reg::Rbp, -16, 2).unwrap();
+        assert_eq!(generator.code, vec![
+            0xC6, 0x85, 0xF0, 0xFF, 0xFF, 0xFF, 0x00,
+            0xC6, 0x85, 0xF1, 0xFF, 0xFF, 0xFF, 0x00,
+        ]);
+    }
+
+    fn test_generator() -> FunctionGenerator<'static, 'static> {
+        let unit: &'static TranslationUnit = Box::leak(Box::new(TranslationUnit { items: Vec::new() }));
+        let generator: &'static Generator<'static> = Box::leak(Box::new(Generator {
+            unit,
+            layouts: Layouts::default(),
+            sections: CodeSections::default(),
+            globals: HashMap::new(),
+            signatures: HashMap::new(),
+            strings: HashMap::new(),
+            string_order: Vec::new(),
+        }));
+        FunctionGenerator {
+            generator,
+            function: Function {
+                name: "test".into(),
+                return_type: Type::int(),
+                params: Vec::new(),
+                body: None,
+                is_static: true,
+                is_variadic: false,
+                location: crate::diagnostic::SourceLocation::synthetic(),
+            },
+            code: Vec::new(),
+            relocations: Vec::new(),
+            locals: vec![HashMap::new()],
+            local_cursor: 0,
+            frame_size: 64,
+            stack_depth: 0,
+            next_label: 0,
+            labels: HashMap::new(),
+            branch_fixups: Vec::new(),
+            loops: Vec::new(),
+            epilogue: 0,
+        }
+    }
 }

@@ -1,0 +1,7 @@
+/* cppcc <cstdint>: C++ spelling of <stdint.h>. */
+#ifndef _CPPCC_CSTDINT
+#define _CPPCC_CSTDINT
+
+#include <stdint.h>
+
+#endif

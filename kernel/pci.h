@@ -16,7 +16,11 @@
 
 #include "uefi.h"
 
-#define PCI_MAX_DEVICES 16
+/* A current desktop board exposes more than sixteen functions (bridges,
+ * xHCI, SATA, the GPU, audio, SMBus, ...), and the device manager lists
+ * everything the bus has: the table is large enough that a whole machine
+ * fits instead of the first sixteen functions. */
+#define PCI_MAX_DEVICES 32
 
 typedef struct {
   UINT8  bus;

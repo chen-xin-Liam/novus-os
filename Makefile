@@ -120,6 +120,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/install.c \
        kernel/lang.c \
        kernel/sysinfo.c \
+       kernel/devtab.c \
        kernel/rtc.c \
        kernel/pci.c \
        kernel/net.c \
@@ -314,7 +315,7 @@ $(RUST_LIB): $(RUST_DEPS)
 APPS_DIR    := apps
 APPS_TARGET := $(CURDIR)/build/rust-apps
 APPS_STAMP  := build/apps.stamp
-APPS_NAMES  := fileman taskman settings netman session setup nsh
+APPS_NAMES  := fileman taskman settings netman session setup nsh devmgmt
 APPS_BINS   := $(addprefix out/apps/,$(addsuffix .bin,$(APPS_NAMES)))
 APPS_BLOB_H := build/apps_blobs.h
 APPS_DEPS   := $(shell find $(APPS_DIR)/src -type f 2>/dev/null) \

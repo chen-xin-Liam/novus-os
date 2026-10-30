@@ -27,10 +27,17 @@
 #define NWM_PORT_NAME     "nwm"
 #define NWM_PID_SHELL     0ull /* the desktop itself: no inbox, local call */
 
-#define NWM_MAX_WINDOWS 8
+/* Ten windows: the seven built-in applications, the shell, and the device
+ * manager's modal property sheet on top of its own window. */
+#define NWM_MAX_WINDOWS 10
 #define NWM_MAX_CMDS    7  /* (IPC_PAYLOAD_MAX - 8) / 16 */
-#define NWM_MAX_SHAPES  40 /* per-window display list, v1.1 */
-#define NWM_MAX_TEXTS   48
+/* Per-window display list, v1.1. 40/48 was sized for a toolbar and a dozen
+ * list rows; the device manager needs a tree of twenty rows plus a property
+ * sheet of five tabs, so the budget grew - the cost is BSS (a shape is 20
+ * bytes, a text run 112), not IPC traffic, and clients are still expected
+ * to keep a frame small because every item is one message. */
+#define NWM_MAX_SHAPES  120
+#define NWM_MAX_TEXTS   160
 #define NWM_TEXT_MAX    96
 #define NWM_TITLE_MAX   24
 #define NWM_TITLE_H     32
@@ -76,6 +83,12 @@
 
 /* Request flags. */
 #define NWM_F_SYNC 0x0001u /* "reply before you go on" - the WM always replies */
+
+/* Window flags carried in nwm_create_t.flags. A modal window takes the
+ * pointer and the keyboard until it is destroyed: clicks outside it are
+ * swallowed instead of reaching the window underneath, and it is drawn
+ * with a close button only. */
+#define NWM_F_CREATE_MODAL 0x0001u
 
 /* ---- request payloads ------------------------------------------------- */
 

@@ -1,0 +1,7 @@
+/* cppcc <cassert>: C++ spelling of <assert.h>. */
+#ifndef _CPPCC_CASSERT
+#define _CPPCC_CASSERT
+
+#include <assert.h>
+
+#endif
