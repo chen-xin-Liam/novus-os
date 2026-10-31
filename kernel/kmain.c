@@ -48,6 +48,7 @@
 #include "pe.h"
 /* M5: NovusDisplay and the GUI widget library. */
 #include "nd.h"
+#include "nd_font_uni.h"
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
 #include "ipc.h"
 #include "nwm.h"
@@ -268,6 +269,9 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
     kputs("[WARN] NovusFS selftest failed, continuing degraded\n");
   }
   storage_mount_ahci_novusfs();
+  /* M5: pull the Unicode font out of the mounted system partition (an
+   * installed GPT partition, if present) so the desktop has CJK glyphs. */
+  nd_font_load_from(novusfs_root());
   if (vfs_selftest() != 0) {
     kputs("[WARN] VFS selftest failed, continuing degraded\n");
   }
@@ -334,6 +338,9 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
                 : status == NOVUSFS_MERKLE_MISMATCH ? "MISMATCH\n"
                 : status == NOVUSFS_MERKLE_NOT_BUILT ? "NOT BUILT\n"
                                                      : "UNREADABLE\n");
+          /* M5: the live root is unmounted after verification, so read the
+           * font out of it now and cache it in kernel memory. */
+          nd_font_load_from(&livefs);
           novusfs_unmount(&livefs);
         }
       }

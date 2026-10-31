@@ -78,8 +78,8 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # The package is counted twice in the live ESP - once for itself, once inside
 # the template - so it is the term that sets these two numbers.
 SYS_SIZE_MB     ?= 8
-ESP_TPL_SIZE_MB ?= 15
-ESP_SIZE_MB     ?= 30
+ESP_TPL_SIZE_MB ?= 16
+ESP_SIZE_MB     ?= 31
 
 ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
@@ -301,8 +301,12 @@ novus-img: $(NOVUS_IMG)
 
 # The system partition: formatted and Merkle-built by the kernel's own
 # filesystem code, so its root hash is already in the superblock.
-$(NOVUS_IMG): $(MKFSNOVUS) | out
-	$(MKFSNOVUS) $@ $(SYS_SIZE_MB)
+# The Unicode font (graphics/nd_font_data.bin, ~3.5 MiB) is seeded into the
+# system partition instead of being linked into NOVUS.EFI: the volume is a
+# fixed 8 MiB, so the EFI shrinks while the FAT images do not grow. The
+# kernel reads /font.bin during the boot-stage mount window and caches it.
+$(NOVUS_IMG): $(MKFSNOVUS) graphics/nd_font_data.bin | out
+	$(MKFSNOVUS) $@ $(SYS_SIZE_MB) --put graphics/nd_font_data.bin /font.bin
 
 esp: $(ESP_IMG)
 

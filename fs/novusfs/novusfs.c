@@ -340,19 +340,23 @@ INT64 novusfs_write(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
   UINT64 txid;
 
   if (fs == NULL || !fs->mounted || data == NULL) {
+
     return -1;
   }
   if (len == 0) {
     return 0;
   }
   if (novusfs_inode_read(fs, ino, &in) != 0) {
+
     return -1;
   }
   if (in.mode != NOVUSFS_IFILE) {
+
     return -1;
   }
   txid = wal_begin(fs);
   if (txid == 0) {
+
     return -1;
   }
   old_size = in.size;
@@ -371,6 +375,7 @@ INT64 novusfs_write(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
     }
     blk = novusfs_inode_bmap(fs, &in, lblk, 1);
     if (blk == 0) {
+  
       wal_abort(fs, txid);
       return -1;
     }
@@ -397,6 +402,7 @@ INT64 novusfs_write(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
     }
     /* Redo record first: the block itself is only written at commit. */
     if (wal_log_block(fs, txid, blk, fs->blkbuf, NOVUSFS_BLOCK_SIZE) != 0) {
+  
       wal_abort(fs, txid);
       return -1;
     }
@@ -409,13 +415,83 @@ INT64 novusfs_write(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
   }
   in.mtime = ++fs->mtime_counter;
   if (novusfs_inode_write_tx(fs, &in, txid) != 0) {
+
     wal_abort(fs, txid);
     return -1;
   }
   if (wal_commit(fs, txid) != 0) {
+
     return -1;
   }
   return (INT64)done;
+}
+
+int novusfs_write_direct(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
+                         const void *data, UINT64 len) {
+  novusfs_inode_t in;
+  const UINT8 *src = (const UINT8 *)data;
+  UINT64 pos = off;
+  UINT64 done = 0;
+
+  if (fs == NULL || !fs->mounted || data == NULL) {
+
+    return -1;
+  }
+  if (len == 0) {
+    return 0;
+  }
+  if (novusfs_inode_read(fs, ino, &in) != 0) {
+
+    return -1;
+  }
+  if (in.mode != NOVUSFS_IFILE) {
+
+    return -1;
+  }
+  /* Straight-through (txid == 0): no WAL, so the 256 KiB ring cannot thrash
+   * a multi-megabyte asset. Each block is written directly; the bitmap and
+   * inode are written through too, and the caller rebuilds the Merkle tree. */
+  while (done < len) {
+    UINT64 lblk = pos / NOVUSFS_BLOCK_SIZE;
+    UINT64 boff = pos % NOVUSFS_BLOCK_SIZE;
+    UINT64 chunk = NOVUSFS_BLOCK_SIZE - boff;
+    UINT64 blk;
+
+    if (chunk > len - done) {
+      chunk = len - done;
+    }
+    blk = novusfs_inode_bmap(fs, &in, lblk, 1);
+    if (blk == 0) {
+  
+      return -1;
+    }
+    if (chunk == NOVUSFS_BLOCK_SIZE) {
+      memcpy(fs->blkbuf, src + done, chunk);
+    } else {
+      UINT64 end = boff + chunk;
+      if (novusfs_read_block(fs, blk, fs->blkbuf) != 0) {
+        return -1;
+      }
+      memcpy(fs->blkbuf + boff, src + done, chunk);
+      if (pos + chunk > in.size && end < NOVUSFS_BLOCK_SIZE) {
+        memset(fs->blkbuf + end, 0, NOVUSFS_BLOCK_SIZE - end);
+      }
+    }
+    if (novusfs_write_block(fs, blk, fs->blkbuf) != 0) {
+      return -1;
+    }
+    pos += chunk;
+    done += chunk;
+  }
+  if (pos > in.size) {
+    in.size = (UINT32)pos;
+  }
+  in.mtime = ++fs->mtime_counter;
+  if (novusfs_inode_write(fs, &in) != 0) {
+
+    return -1;
+  }
+  return (int)done;
 }
 
 INT64 novusfs_read(novusfs_fs_t *fs, UINT32 ino, UINT64 off, void *dst,

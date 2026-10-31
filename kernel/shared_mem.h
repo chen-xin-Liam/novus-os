@@ -110,7 +110,17 @@ typedef struct {
   UINT64 wpkg_img_base;            /* 0x308: reserved pages (physical)  */
   UINT64 wpkg_img_size;            /* 0x310: bytes, 0 = none staged     */
 
-  UINT8  reserved[7456 - 16 - 24 - 16]; /* 0x318: pad to exactly 8 KiB  */
+  /* ---- M-debug: boot-stage snapshot of the live-root inode table so the
+   * kernel can tell whether the firmware read or the in-memory copy is the
+   * source of corruption. Tail carve-out only: no field above moves. ---- */
+  UINT64 dbg_tmp[6];               /* 0x318: ESP-read buffer blks 0/130/162 */
+  UINT64 dbg_live[6];              /* 0x348: reserved copy blks 0/130/162   */
+  UINT64 dbg_route;                /* 0x378: 1=firmware FS, 2=fat32         */
+  UINT64 dbg_tmp_addr;             /* 0x380: physical addr of ESP-read buffer */
+  UINT64 dbg_fat[4];               /* 0x388: fat reader diag: ndev,vlba0,init,0 */
+  UINT64 dbg_ktest;                /* 0x3A8: kernel write/read test result    */
+
+  UINT8  reserved[7456 - 16 - 24 - 16 - 40 - 64 - 48]; /* 0x3B0: pad to 8 KiB */
 } shared_mem_t;
 
 #define SHM_INSTALL_FLAG_PAYLOADS 0x00000001u /* ESP and system images staged */
@@ -146,7 +156,7 @@ _Static_assert(__builtin_offsetof(shared_mem_t, boot_usb_port) == 0x304,
 /* The wallpaper package occupies the next bytes of the reserved tail. */
 _Static_assert(__builtin_offsetof(shared_mem_t, wpkg_img_base) == 0x308,
                "shared_mem frozen layout drift: wpkg_img_base");
-_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x318,
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x3B0,
                "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the block at SHARED_MEM_PHYS

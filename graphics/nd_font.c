@@ -13,6 +13,10 @@
 #include "nd_internal.h"
 #include "nd_font_uni.h"
 #include "nd_lang.h"
+#include "heap.h"
+#include "mm.h"
+#include "shared_mem.h"
+#include "../fs/novusfs/novusfs.h"
 
 static const UINT8 g_font[95][ND_GLYPH_H] = {
     /* 32 ' ' */ {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -213,8 +217,158 @@ static UINT32 popcount8(UINT8 v) {
   return (UINT32)((v + (v >> 4)) & 0x0Fu);
 }
 
+/* Glyph bitmap data, loaded at boot from /font.bin in the system partition
+ * (see nd_font_load_from). NULL until that happens, which only affects the
+ * non-ASCII faces; the ASCII 5x7 face is embedded and always available. */
+static const UINT8 *g_font_data = NULL;
+
+void nd_font_set_data(const UINT8 *data) {
+  g_font_data = data;
+}
+
+/* Read /font.bin from an already-mounted NovusFS instance and cache it in a
+ * kernel buffer. Called during the boot-stage mount window (the live root)
+ * and again for an installed GPT system partition. Returns 0 once loaded. */
+int nd_font_load_from(struct novusfs_fs *fs) {
+  UINT32 ino;
+  UINT64 size;
+  UINT16 mode;
+  UINT8  *buf;
+  INT64  n;
+
+  if (fs == NULL || g_font_data != NULL) {
+    return 0;
+  }
+  ino = novusfs_lookup_path(fs, NOVUSFS_ROOT_INO, "font.bin");
+  if (ino == 0) {
+    kputs("[FONT] /font.bin missing in system partition\n");
+    return -1;
+  }
+  {
+    novusfs_inode_t di;
+    kputs("[FONT] dbg ino=");
+    kputs_hex(ino);
+    kputs(" itbl=");
+    kputs_hex(fs->sb.inode_tbl_start);
+    if (novusfs_inode_read(fs, ino, &di) != 0) {
+      kputs(" inode_read=FAIL");
+    } else {
+      kputs(" mode=");
+      kputs_hex(di.mode);
+      kputs(" size=");
+      kputs_hex(di.size);
+      kputs(" blocks=");
+      kputs_hex(di.blocks);
+      kputs(" d0=");
+      kputs_hex((UINT32)di.dblock[0]);
+    }
+    {
+      UINT64 blkids[3];
+      blkids[0] = 0;
+      blkids[1] = fs->sb.inode_tbl_start;
+      blkids[2] = 162;
+      for (int i = 0; i < 3; i++) {
+        UINT64 b = blkids[i];
+        if (novusfs_read_block(fs, b, fs->scratch) == 0) {
+          UINT64 *p = (UINT64 *)fs->scratch;
+          kputs(" b");
+          kputs_hex(b);
+          kputs(":");
+          kputs_hex(p[0]);
+          kputs(" ");
+          kputs_hex(p[1]);
+        } else {
+          kputs(" rdFAIL");
+        }
+      }
+    }
+    {
+      shared_mem_t *shm = shared_mem_get();
+      UINT64 phys = shm->live_root_base + (UINT64)130 * 4096ULL;
+      UINT64 *p2 = (UINT64 *)phys_to_virt(phys);
+      kputs(" phys-b130:");
+      kputs_hex(p2[0]);
+      kputs(" ");
+      kputs_hex(p2[1]);
+    }
+    {
+      shared_mem_t *shm = shared_mem_get();
+      const char *lbl[3] = {"b0", "b130", "b162"};
+      for (int j = 0; j < 3; j++) {
+        kputs(" tmp-");
+        kputs(lbl[j]);
+        kputs(":");
+        kputs_hex(shm->dbg_tmp[j * 2]);
+        kputs(" ");
+        kputs_hex(shm->dbg_tmp[j * 2 + 1]);
+        kputs(" live-");
+        kputs(lbl[j]);
+        kputs(":");
+        kputs_hex(shm->dbg_live[j * 2]);
+        kputs(" ");
+        kputs_hex(shm->dbg_live[j * 2 + 1]);
+      }
+      kputs(" route=");
+      kputs_hex(shm->dbg_route);
+    }
+    {
+      shared_mem_t *shm = shared_mem_get();
+      kputs(" tmp_addr=");
+      kputs_hex(shm->dbg_tmp_addr);
+      kputs(" fat(ndev,vlba,type)=");
+      kputs_hex(shm->dbg_fat[0]);
+      kputs(" ");
+      kputs_hex(shm->dbg_fat[1]);
+      kputs(" ");
+      kputs_hex(shm->dbg_fat[2]);
+      /* Kernel write/read self-test on the reserved live root. */
+      {
+        UINT64 phys = shm->live_root_base + (UINT64)130 * 4096ULL;
+        UINT64 *p = (UINT64 *)phys_to_virt(phys);
+        UINT64 orig = p[0];
+        p[0] = 0xCAFEBABECAFEBABELLU;
+        UINT64 rb = p[0];
+        shm->dbg_ktest = rb;
+        kputs(" ktest(orig=");
+        kputs_hex(orig);
+        kputs(",rb=");
+        kputs_hex(rb);
+        kputs(")");
+        p[0] = orig; /* restore */
+      }
+    }
+    kputs("\n");
+  }
+  if (novusfs_stat(fs, ino, &size, &mode) != 0 || size == 0) {
+    kputs("[FONT] stat /font.bin failed\n");
+    return -1;
+  }
+  buf = (UINT8 *)kmalloc(size);
+  if (buf == NULL) {
+    kputs("[FONT] alloc for /font.bin failed\n");
+    return -1;
+  }
+  n = novusfs_read(fs, ino, 0, buf, size);
+  if (n < 0 || (UINT64)n != size) {
+    kputs("[FONT] read /font.bin failed\n");
+    kfree(buf);
+    return -1;
+  }
+  g_font_data = buf;
+  kputs("[FONT] loaded ");
+  kputs_hex(size);
+  kputs(" bytes from system partition\n");
+  return 0;
+}
+
 const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide) {
   UINT16       slot;
+
+  /* Font not yet loaded from the system partition: non-ASCII glyphs fall
+   * back to the caller's "missing" path; ASCII keeps its embedded 5x7 face. */
+  if (g_font_data == NULL) {
+    return 0;
+  }
   UINT32       byte;
   UINT32       bit;
   UINT32       rank;

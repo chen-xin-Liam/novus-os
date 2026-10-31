@@ -27,8 +27,13 @@ extern const UINT8  g_uni_wide[];
 extern const UINT16 g_uni_width_count;
 extern const nd_uni_range_t g_uni_width[];
 
-/* Packed glyph blob (nd_font_data.bin, incbin'd by nd_font_blob.S). */
-extern const UINT8 g_font_data[];
+/* Glyph bitmap data. Historically incbin'd into NOVUS.EFI by
+ * nd_font_blob.S; now loaded at boot from the system partition (/font.bin)
+ * into a kernel buffer and pointed at here. NULL until loaded, in which
+ * case nd_glyph_find() returns NULL and callers fall back to ASCII. */
+struct novusfs_fs;
+void nd_font_set_data(const UINT8 *data);
+int  nd_font_load_from(struct novusfs_fs *fs);
 
 /* 32 glyph bytes (16 rows, big-endian) or NULL. *wide is 16 or 8. */
 const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide);

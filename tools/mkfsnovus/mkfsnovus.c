@@ -29,6 +29,11 @@
 #include <stdlib.h>
 #include <unistd.h> /* ftruncate */
 
+/* Declared locally rather than via <string.h>: that header also prototypes
+ * memcpy/memset/memcmp, which the build renames to novus_* and would
+ * collide with this file's own definitions. */
+int strcmp(const char *s1, const char *s2);
+
 #include "novusfs.h"
 
 /* ------------------------------------------------------------------ */
@@ -87,6 +92,67 @@ int memcmp(const void *a, const void *b, UINT64 n) {
       return (int)x[i] - (int)y[i];
     }
   }
+  return 0;
+}
+
+/* Inject a host file `src` into the freshly formatted image as `dest`
+ * (relative to root). Seeds the system partition with assets the kernel
+ * loads at boot (e.g. the Unicode font) so they stay out of the kernel EFI
+ * image. The caller rebuilds the Merkle tree afterwards. */
+static int inject_file(novusfs_fs_t *fs, const char *src, const char *dest) {
+  FILE  *f = fopen(src, "rb");
+  long   sz;
+  UINT8 *buf;
+  UINT32 ino;
+
+  if (f == NULL) {
+    fprintf(stderr, "mkfsnovus: cannot open %s\n", src);
+    return 1;
+  }
+  if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) {
+    fclose(f);
+    fprintf(stderr, "mkfsnovus: cannot size %s\n", src);
+    return 1;
+  }
+  fseek(f, 0, SEEK_SET);
+  buf = (UINT8 *)kmalloc((UINT64)(sz == 0 ? 1u : (unsigned long)sz));
+  if (buf == NULL) {
+    fclose(f);
+    fprintf(stderr, "mkfsnovus: out of memory reading %s\n", src);
+    return 1;
+  }
+  if (fread(buf, 1, (size_t)sz, f) != (size_t)sz) {
+    fclose(f);
+    kfree(buf);
+    fprintf(stderr, "mkfsnovus: short read %s\n", src);
+    return 1;
+  }
+  fclose(f);
+
+  /* Treat the destination as a path relative to the root: drop any leading
+   * slashes so "/font.bin" becomes the directory entry "font.bin" rather
+   * than a name that literally begins with '/'. */
+  const char *name = dest;
+  while (*name == '/') {
+    name++;
+  }
+
+  ino = novusfs_creat(fs, NOVUSFS_ROOT_INO, name);
+  if (ino == 0) {
+    kfree(buf);
+    fprintf(stderr, "mkfsnovus: creat failed for %s\n", name);
+    return 1;
+  }
+  /* Write straight through (no WAL): the ramdisk ring is only 256 KiB and
+   * would thrash a multi-megabyte asset. The Merkle tree is rebuilt by the
+   * caller afterwards. */
+  if (novusfs_write_direct(fs, ino, 0, buf, (UINT64)sz) < 0) {
+    fprintf(stderr, "mkfsnovus: write failed for %s\n", dest);
+    kfree(buf);
+    return 1;
+  }
+  kfree(buf);
+  printf("mkfsnovus: injected %s -> /%s (%ld bytes)\n", src, dest, sz);
   return 0;
 }
 
@@ -238,6 +304,24 @@ int main(int argc, char **argv) {
     return 1;
   }
   novusfs_dump_layout(&fs);
+
+  /* Optional "--put <host-src> <image-dest>" pairs seed the system
+   * partition with assets the kernel loads at boot (font, ...). Done
+   * before the Merkle tree is built so the tree covers the new data. */
+  {
+    int ai;
+    for (ai = 3; ai + 2 <= argc; ai += 3) {
+      if (strcmp(argv[ai], "--put") != 0) {
+        fprintf(stderr, "mkfsnovus: bad arg %s (expected --put)\n", argv[ai]);
+        fclose(out);
+        return 1;
+      }
+      if (inject_file(&fs, argv[ai + 1], argv[ai + 2]) != 0) {
+        fclose(out);
+        return 1;
+      }
+    }
+  }
 
   if (novusfs_merkle_build(&fs, root) != 0) {
     fprintf(stderr, "mkfsnovus: merkle build failed\n");

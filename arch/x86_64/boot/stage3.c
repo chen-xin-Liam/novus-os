@@ -61,6 +61,11 @@ static EFI_BOOT_SERVICES *g_bs;
 
 static EFI_FILE_PROTOCOL *g_esp_root;
 
+/* Which loader actually delivered a file: 1 = firmware SimpleFileSystem,
+ * 2 = built-in FAT reader. Published through shared memory for the kernel's
+ * boot diagnostics. */
+static UINT32 g_dbg_route;
+
 /* Live root: reserved pages, handed to the kernel through shared
  * memory. Reserved memory is not reported as conventional, so the PMM
  * will not hand it out again after ExitBootServices. */
@@ -262,17 +267,28 @@ static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   UINT8             *buf;
   UINTN              got;
 
+  /* Prefer the built-in FAT reader. It reads the volume through Block I/O
+   * directly and is immune to firmware file-protocol bugs - OVMF's FAT
+   * driver (FatPkg) returns garbage for parts of large files, which
+   * corrupts the 8 MiB SYSTEM.IMG on the live ISO. Fall back to the
+   * firmware SimpleFileSystem only if the built-in reader cannot find the
+   * volume on any block device. */
+  if (fat32_read_file(path, out_buf, out_len) == 0) {
+    g_dbg_route = 2u;
+    return 0;
+  }
+
   if (g_esp_root == NULL) {
-    return fat32_read_file(path, out_buf, out_len);
+    return -1;
   }
   if (g_esp_root->Open(g_esp_root, &f, (CHAR16 *)path, EFI_FILE_MODE_READ,
                        0) != EFI_SUCCESS ||
       f == NULL) {
-    return fat32_read_file(path, out_buf, out_len);
+    return -1;
   }
   if (f->GetInfo(f, &info_guid, &info_size, info_buf) != EFI_SUCCESS) {
     f->Close(f);
-    return fat32_read_file(path, out_buf, out_len);
+    return -1;
   }
   size = ((EFI_FILE_INFO *)info_buf)->FileSize;
   if (size == 0 || size > (64u * 1024u * 1024u)) {
@@ -293,6 +309,7 @@ static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   f->Close(f);
   *out_buf = buf;
   *out_len = size;
+  g_dbg_route = 1u;
   esp_report_route(g_esp_via, NULL);
   return 0;
 }
@@ -317,6 +334,22 @@ static int esp_read_reserved(const CHAR16 *path, UINT64 *out_base,
     return -1;
   }
   memcpy((VOID *)(UINTN)addr, tmp, len);
+  {
+    shared_mem_t *shm = shared_mem_get();
+    UINT64 offs[3];
+    offs[0] = 0;
+    offs[1] = 130u * 4096u;
+    offs[2] = 162u * 4096u;
+    for (int j = 0; j < 3; j++) {
+      UINT64 o = offs[j];
+      shm->dbg_tmp[j * 2] = *(const UINT64 *)(tmp + (UINTN)o);
+      shm->dbg_tmp[j * 2 + 1] = *(const UINT64 *)(tmp + (UINTN)(o + 8u));
+      shm->dbg_live[j * 2] = *(const UINT64 *)((UINTN)addr + (UINTN)o);
+      shm->dbg_live[j * 2 + 1] = *(const UINT64 *)((UINTN)addr + (UINTN)(o + 8u));
+    }
+    shm->dbg_route = g_dbg_route;
+    shm->dbg_tmp_addr = (UINT64)(UINTN)tmp;
+  }
   efi_free(tmp);
   *out_base = (UINT64)addr;
   *out_size = len;
@@ -334,6 +367,10 @@ static int esp_read_reserved(const CHAR16 *path, UINT64 *out_base,
 
 typedef struct {
   blkdev_t *dev;
+  UINT32    base_lba;       /* 512-byte LBA of the FAT volume on the device
+                             * (0 for a plain disk, the El Torito ESP LBA on
+                             * a live CD). All volume-relative LBA maths in
+                             * this reader are offset by it. */
   UINT32    bytes_per_sector;
   UINT32    sectors_per_block; /* bytes_per_sector / 512: a FAT sector on
                                 * a 4Kn volume is eight block-layer ones */
@@ -356,7 +393,7 @@ typedef struct {
  * and reading LBA 1 as sector 1 fetches the wrong bytes. */
 static int fat32_read_sectors(fat32_ctx_t *ctx, UINT64 lba, UINTN count,
                               void *buf) {
-  return blkdev_read(ctx->dev, lba * (UINT64)ctx->sectors_per_block,
+  return blkdev_read(ctx->dev, (ctx->base_lba + lba) * (UINT64)ctx->sectors_per_block,
                      count * (UINTN)ctx->sectors_per_block, buf);
 }
 
@@ -503,87 +540,197 @@ static int fat32_find_root(fat32_ctx_t *ctx, const CHAR16 *path,
   }
 }
 
-static int fat32_init(fat32_ctx_t *ctx) {
-  UINT8    bpb[512];
-  UINT32   total_sectors;
-  UINT32   fat_sectors;
-  UINT32   root_entries;
-  UINT32   reserved_sectors;
-  UINT32   num_fats;
-  UINT32   bps;
-  UINTN    i;
+/* Reject a 512-byte sector unless it looks like a usable FAT boot sector.
+ * Mirrors the field plausibility checks the old fixed-LBA scan did, so a
+ * stray 0x55/0xAA (an MBR, an ISO padding block) is not mistaken for a
+ * volume. */
+static int fat32_bpb_ok(const UINT8 *bpb, blkdev_t *d) {
+  UINT32 bps = (UINT32)bpb[11] | ((UINT32)bpb[12] << 8);
+  UINT32 spc = (UINT32)bpb[13];
+  UINT32 rs  = (UINT32)bpb[14] | ((UINT32)bpb[15] << 8);
+  UINT32 nf  = (UINT32)bpb[16];
+  UINT32 re  = (UINT32)bpb[17] | ((UINT32)bpb[18] << 8);
+  UINT32 f16 = (UINT32)bpb[22] | ((UINT32)bpb[23] << 8);
+  UINT32 f32 = (UINT32)bpb[36] | ((UINT32)bpb[37] << 8) |
+               ((UINT32)bpb[38] << 16) | ((UINT32)bpb[39] << 24);
+  UINT32 rc  = (UINT32)bpb[44] | ((UINT32)bpb[45] << 8) |
+               ((UINT32)bpb[46] << 16) | ((UINT32)bpb[47] << 24);
+  UINT32 ts  = (UINT32)bpb[19] | ((UINT32)bpb[20] << 8);
 
-  memset(ctx, 0, sizeof(*ctx));
-  /* The first uefi* device is not necessarily the boot volume: a second
-   * raw target disk may have been enumerated before the CD's virtual
-   * hard disk. Scan every device and pick the one whose first sector is
-   * a plausible FAT boot sector. A disk with an accidental 0x55/0xAA
-   * but nonsense fields must be skipped. */
-  for (i = 0; i < (UINTN)blkdev_count(); i++) {
-    blkdev_t *d = blkdev_get_at(i);
-    UINT32    rs;
-    UINT32    nf;
-    UINT32    ts;
-    UINT32    fsz32;
-    UINT32    fsz16;
-    UINT32    rc;
-
-    if (d == NULL || d->sector_count == 0) {
-      continue;
-    }
-    ctx->dev = d;
-    if (fat32_read_sectors(ctx, 0, 1, bpb) != 0) {
-      continue;
-    }
-    if (bpb[510] != 0x55u || bpb[511] != 0xaau) {
-      continue;
-    }
-    rs = (UINT32)bpb[14] | ((UINT32)bpb[15] << 8);
-    nf = (UINT32)bpb[16];
-    root_entries = (UINT32)bpb[17] | ((UINT32)bpb[18] << 8);
-    fsz16 = (UINT32)bpb[22] | ((UINT32)bpb[23] << 8);
-    fsz32 = (UINT32)bpb[36] | ((UINT32)bpb[37] << 8) |
-            ((UINT32)bpb[38] << 16) | ((UINT32)bpb[39] << 24);
-    rc = (UINT32)bpb[44] | ((UINT32)bpb[45] << 8) |
-         ((UINT32)bpb[46] << 16) | ((UINT32)bpb[47] << 24);
-    ts = (UINT32)bpb[19] | ((UINT32)bpb[20] << 8);
-    if (ts == 0) {
-      ts = (UINT32)bpb[32] | ((UINT32)bpb[33] << 8) |
-           ((UINT32)bpb[34] << 16) | ((UINT32)bpb[35] << 24);
-    }
-    if (ts == 0) {
-      ts = (UINT32)bpb[72] | ((UINT32)bpb[73] << 8) |
-           ((UINT32)bpb[74] << 16) | ((UINT32)bpb[75] << 24);
-    }
-    /* bytes-per-sector has to be a power of two the block layer can
-     * express; a 4Kn volume names 4096. `ts` counts those sectors, so it
-     * is compared against the device's capacity converted the same way. */
-    bps = (UINT32)bpb[11] | ((UINT32)bpb[12] << 8);
-    if (bps == 0u || (bps & (bps - 1u)) != 0u ||
-        bps < BLKDEV_SECTOR_SIZE || bps > BLKDEV_BLOCK_MAX) {
-      continue;
-    }
-    if (bpb[13] == 0u || rs == 0u || nf == 0u || nf > 2u || ts == 0u ||
-        (UINT64)ts > d->sector_count / (UINT64)(bps / BLKDEV_SECTOR_SIZE)) {
-      continue;
-    }
-    {
-      /* FAT16: root_entries != 0 and fat_size_16 != 0.
-       * FAT32: root_entries == 0 and fat_size_32 != 0 and root_cluster >= 2. */
-      if (root_entries != 0 && fsz16 != 0) {
-        ctx->fat_type = 16;
-        break;
-      }
-      if (root_entries == 0 && fsz32 != 0 && rc >= 2u) {
-        ctx->fat_type = 32;
-        break;
-      }
-    }
+  if (ts == 0) {
+    ts = (UINT32)bpb[32] | ((UINT32)bpb[33] << 8) |
+         ((UINT32)bpb[34] << 16) | ((UINT32)bpb[35] << 24);
   }
-  if (ctx->dev == NULL || ctx->fat_type == 0) {
+  if (ts == 0) {
+    ts = (UINT32)bpb[72] | ((UINT32)bpb[73] << 8) |
+         ((UINT32)bpb[74] << 16) | ((UINT32)bpb[75] << 24);
+  }
+  if (bps == 0u || (bps & (bps - 1u)) != 0u ||
+      bps < BLKDEV_SECTOR_SIZE || bps > BLKDEV_BLOCK_MAX) {
+    return 0;
+  }
+  if (spc == 0u || rs == 0u || nf == 0u || nf > 2u || ts == 0u) {
+    return 0;
+  }
+  if ((UINT64)ts > d->sector_count / (UINT64)(bps / BLKDEV_SECTOR_SIZE)) {
+    return 0;
+  }
+  /* FAT16: root_entries != 0 and fat_size_16 != 0.
+   * FAT32: root_entries == 0 and fat_size_32 != 0 and root_cluster >= 2. */
+  if (re != 0u && f16 != 0u) {
+    return 1;
+  }
+  if (re == 0u && f32 != 0u && rc >= 2u) {
+    return 1;
+  }
+  return 0;
+}
+
+/* Locate the FAT volume on a block device and read its boot sector into
+ * `bpb`. Returns the 512-byte LBA of the volume, or -1.
+ *
+ * A plain FAT disk (USB stick, hard disk) lives at LBA 0. A live CD ships
+ * the FAT16 ESP as an El Torito "no emulation" image at some higher LBA, so
+ * when LBA 0 is not FAT we scan the device for the first valid FAT boot
+ * sector. The reader walks every device and picks the first one that yields
+ * a volume. */
+/* Confirm a candidate boot sector really is a FAT volume by reading its
+ * first FAT sector and checking the media-descriptor entry. A stray 0x55/0xAA
+ * with plausible BPB fields (an ISO pad block, an MBR) has no valid FAT behind
+ * it, so this filters out false positives that would otherwise make the reader
+ * latch onto the wrong device or the wrong LBA. */
+static int fat32_candidate_verify(blkdev_t *d, INT64 base, const UINT8 *bpb) {
+  UINT8   fatsec[512];
+  UINT32  rs  = (UINT32)bpb[14] | ((UINT32)bpb[15] << 8);
+  UINT32  re  = (UINT32)bpb[17] | ((UINT32)bpb[18] << 8);
+  UINT32  f16 = (UINT32)bpb[22] | ((UINT32)bpb[23] << 8);
+  UINT32  f32 = (UINT32)bpb[36] | ((UINT32)bpb[37] << 8) |
+                ((UINT32)bpb[38] << 16) | ((UINT32)bpb[39] << 24);
+
+  if (rs == 0u) {
+    return 0;
+  }
+  if (blkdev_read(d, (UINT64)base + rs, 1, fatsec) != 0) {
+    return 0;
+  }
+  if (re != 0u && f16 != 0u) {
+    /* FAT16: first entry is the media descriptor ORed with 0xFF00. */
+    UINT16 e = (UINT16)((UINT16)fatsec[0] | ((UINT16)fatsec[1] << 8));
+    return (e == 0xFFF8u || e == 0xFFF0u || (e & 0xFF00u) == 0xFF00u) ? 1 : 0;
+  }
+  if (re == 0u && f32 != 0u) {
+    /* FAT32: low 28 bits of the first entry are 0x0FFFFFF8. */
+    UINT32 e = (UINT32)fatsec[0] | ((UINT32)fatsec[1] << 8) |
+               ((UINT32)fatsec[2] << 16) | ((UINT32)fatsec[3] << 24);
+    return ((e & 0x0FFFFFFFu) == 0x0FFFFFF8u) ? 1 : 0;
+  }
+  return 0;
+}
+
+/* Enumerate FAT boot sectors on a block device. Call repeatedly with
+ * *hint initially 0; each successful call writes the next candidate's boot
+ * sector into `bpb` and leaves *hint advanced just past it (so the caller
+ * can loop). Returns 0 when a candidate is found, -1 once the scan of the
+ * first ~100 MiB is exhausted.
+ *
+ * A candidate is a 0x55/0xAA sector with a plausible BPB whose FAT holds a
+ * valid media descriptor (fat32_candidate_verify), so an MBR or an ISO pad
+ * block with a stray signature is not mistaken for a volume. */
+static int fat32_next_volume(blkdev_t *d, INT64 *hint, UINT8 *bpb) {
+  INT64 limit = (INT64)d->sector_count;
+  INT64 base;
+  UINT8 *chunk;
+  UINTN n, k;
+
+  if (limit > 65536) {
+    limit = 65536; /* scan the first 32 MiB; the ESP is well within this on a
+                      live CD and a plain disk is caught at LBA 0. */
+  }
+  if (*hint <= 0) {
+    /* A plain disk / USB stick keeps its FAT volume at LBA 0. */
+    if (blkdev_read(d, 0, 1, bpb) == 0 && bpb[510] == 0x55u &&
+        bpb[511] == 0xaau && fat32_bpb_ok(bpb, d) &&
+        fat32_candidate_verify(d, 0, bpb)) {
+      *hint = 1;
+      return 0;
+    }
+    *hint = 1;
+  }
+  chunk = (UINT8 *)efi_alloc(8u * 512u);
+  if (chunk == NULL) {
     return -1;
   }
-  ctx->bytes_per_sector = (UINT32)bpb[11] | ((UINT32)bpb[12] << 8);
+  for (base = *hint; base < limit; base += 8) {
+    n = (UINTN)((limit - base < 8) ? (limit - base) : 8);
+    if (blkdev_read(d, (UINT64)base, n, chunk) != 0) {
+      continue;
+    }
+    for (k = 0; k < n; k++) {
+      const UINT8 *s = chunk + k * 512u;
+      INT64 lba = base + (INT64)k;
+      if (s[510] == 0x55u && s[511] == 0xaau && fat32_bpb_ok(s, d) &&
+          fat32_candidate_verify(d, lba, s)) {
+        memcpy(bpb, s, 512u);
+        efi_free(chunk);
+        *hint = lba + 1;
+        return 0;
+      }
+    }
+  }
+  efi_free(chunk);
+  return -1;
+}
+
+/* Parse the FAT volume whose boot sector already sits in `bpb`, located at
+ * ctx->base_lba on ctx->dev. Fills the geometry and loads the FAT. Returns 0
+ * on success, -1 on any inconsistency (freeing any partial allocation). The
+ * caller owns ctx->fat and must fat32_close() it. */
+static int fat32_parse_volume(fat32_ctx_t *ctx, const UINT8 *bpb) {
+  UINT32 total_sectors, fat_sectors, root_entries, reserved_sectors, num_fats;
+  UINT32 bps, f16, f32, rc, rs, nf, ts;
+
+  rs = (UINT32)bpb[14] | ((UINT32)bpb[15] << 8);
+  nf = (UINT32)bpb[16];
+  root_entries = (UINT32)bpb[17] | ((UINT32)bpb[18] << 8);
+  f16 = (UINT32)bpb[22] | ((UINT32)bpb[23] << 8);
+  f32 = (UINT32)bpb[36] | ((UINT32)bpb[37] << 8) |
+        ((UINT32)bpb[38] << 16) | ((UINT32)bpb[39] << 24);
+  rc = (UINT32)bpb[44] | ((UINT32)bpb[45] << 8) |
+       ((UINT32)bpb[46] << 16) | ((UINT32)bpb[47] << 24);
+  ts = (UINT32)bpb[19] | ((UINT32)bpb[20] << 8);
+  if (ts == 0) {
+    ts = (UINT32)bpb[32] | ((UINT32)bpb[33] << 8) |
+         ((UINT32)bpb[34] << 16) | ((UINT32)bpb[35] << 24);
+  }
+  if (ts == 0) {
+    ts = (UINT32)bpb[72] | ((UINT32)bpb[73] << 8) |
+         ((UINT32)bpb[74] << 16) | ((UINT32)bpb[75] << 24);
+  }
+  bps = (UINT32)bpb[11] | ((UINT32)bpb[12] << 8);
+  if (bps == 0u || (bps & (bps - 1u)) != 0u ||
+      bps < BLKDEV_SECTOR_SIZE || bps > BLKDEV_BLOCK_MAX) {
+    return -1;
+  }
+  if (bpb[13] == 0u || rs == 0u || nf == 0u || nf > 2u || ts == 0u ||
+      (UINT64)ts > ctx->dev->sector_count /
+                         (UINT64)(bps / BLKDEV_SECTOR_SIZE)) {
+    return -1;
+  }
+  {
+    /* FAT16: root_entries != 0 and fat_size_16 != 0.
+     * FAT32: root_entries == 0 and fat_size_32 != 0 and root_cluster >= 2. */
+    if (root_entries != 0 && f16 != 0) {
+      ctx->fat_type = 16;
+    } else if (root_entries == 0 && f32 != 0 && rc >= 2u) {
+      ctx->fat_type = 32;
+    } else {
+      return -1;
+    }
+  }
+  if (ctx->fat_type == 0) {
+    return -1;
+  }
+  ctx->bytes_per_sector = bps;
   ctx->sectors_per_cluster = (UINT32)bpb[13];
   reserved_sectors = (UINT32)bpb[14] | ((UINT32)bpb[15] << 8);
   num_fats = (UINT32)bpb[16];
@@ -640,6 +787,147 @@ static int fat32_init(fat32_ctx_t *ctx) {
   return 0;
 }
 
+static void fat32_close(fat32_ctx_t *ctx); /* defined further down */
+
+/* Try a single candidate volume whose boot sector sits at 512-byte LBA
+ * `base` on `d`. On success *ctx is set up (FAT loaded) and 0 is returned;
+ * otherwise -1 and *ctx is left untouched (its prior FAT freed). */
+static int fat32_try_lba(blkdev_t *d, INT64 base, const CHAR16 *path,
+                         fat32_ctx_t *ctx) {
+  UINT8  bpb[512];
+  UINT32 clus;
+  UINT64 size;
+
+  if (base < 0) {
+    return -1;
+  }
+  if (blkdev_read(d, (UINT64)base, 1, bpb) != 0 || bpb[510] != 0x55u ||
+      bpb[511] != 0xaau || !fat32_bpb_ok(bpb, d) ||
+      !fat32_candidate_verify(d, base, bpb)) {
+    return -1;
+  }
+  fat32_close(ctx); /* drop any FAT from a previously rejected candidate */
+  ctx->dev = d;
+  ctx->base_lba = (UINT32)base;
+  if (fat32_parse_volume(ctx, bpb) != 0) {
+    return -1;
+  }
+  if (fat32_find_root(ctx, path, &clus, &size) != 0) {
+    return -1;
+  }
+  return 0;
+}
+
+/* Scan one block device for a FAT volume that contains `path`. Candidates
+ * are tried in order of confidence so the common cases resolve instantly
+ * without a full-device sweep:
+ *   1. a whole-volume FAT at LBA 0 (plain disk / partition-relative boot),
+ *   2. a partition from the MBR / isohybrid table - the live ESP is the
+ *      0xEF (or any non-extended) partition the image was hybridised with,
+ *   3. a brute-force scan of every FAT boot sector (last resort, slow).
+ * The first volume that holds the file wins. On success *ctx is fully set
+ * up (FAT loaded) and 0 is returned; otherwise -1. */
+static int fat32_scan_device(blkdev_t *d, const CHAR16 *path,
+                             fat32_ctx_t *ctx) {
+  UINT8 mbr[512];
+  INT64 hint = 0;
+  UINT8  bpb[512];
+
+  /* 1) If LBA 0 itself is a FAT volume - a plain disk, or the partition-
+   *    relative handle a live CD boots from - it is the only volume on the
+   *    device. Try it; if it lacks the file there is nothing else to find
+   *    here, so do not sweep the whole device (which would stall the boot
+   *    on a large DVD). */
+  if (blkdev_read(d, 0, 1, bpb) == 0 && bpb[510] == 0x55u &&
+      bpb[511] == 0xaau && fat32_bpb_ok(bpb, d) &&
+      fat32_candidate_verify(d, 0, bpb)) {
+    if (fat32_try_lba(d, 0, path, ctx) == 0) {
+      return 0;
+    }
+    return -1;
+  }
+  /* 2) MBR / isohybrid partition table: the live ESP is the 0xEF (or any
+   *    non-extended) partition the image was hybridised with. */
+  if (blkdev_read(d, 0, 1, mbr) == 0 && mbr[510] == 0x55u &&
+      mbr[511] == 0xaau) {
+    int p;
+    for (p = 0; p < 4; p++) {
+      const UINT8 *e = mbr + 446 + p * 16;
+      UINT8  ptype = e[4];
+      UINT32 start;
+      if (ptype == 0u || ptype == 0xEEu || ptype == 0x05u || ptype == 0x0Fu) {
+        continue; /* no partition, GPT protective, or extended */
+      }
+      start = (UINT32)e[8] | ((UINT32)e[9] << 8) | ((UINT32)e[10] << 16) |
+              ((UINT32)e[11] << 24);
+      if (start == 0u) {
+        continue;
+      }
+      if (fat32_try_lba(d, (INT64)start, path, ctx) == 0) {
+        return 0;
+      }
+    }
+  }
+  /* 3) Brute-force scan (slow) for media where LBA 0 is neither a FAT volume
+   *    nor an MBR - e.g. a pure El Torito CD with no isohybrid table. Capped
+   *    so a device with no FAT volume cannot stall the boot; the caller falls
+   *    back to the firmware file protocol if this exhausts. */
+  while (fat32_next_volume(d, &hint, bpb) == 0) {
+    if (fat32_try_lba(d, hint - 1, path, ctx) == 0) {
+      return 0;
+    }
+  }
+  return -1;
+}
+
+/* Locate the FAT volume that actually holds `path`. The boot medium is
+ * tried first: the live ESP always lives on the device Novus was loaded
+ * from, so scanning it alone both avoids touching unrelated disks and finds
+ * the volume quickly even when a stray FAT boot sector (an MBR, an ISO pad
+ * block, or another FAT region) sits before the real embedded ESP. Every
+ * other device is scanned only as a fallback. On success diagnostics are
+ * published; returns -1 if no volume contains the file. */
+static int fat32_locate_best(const CHAR16 *path, fat32_ctx_t *ctx) {
+  UINTN i;
+  int   boot = blkdev_uefi_boot_device();
+
+  memset(ctx, 0, sizeof(*ctx));
+  {
+    shared_mem_t *shm = shared_mem_get();
+    shm->dbg_fat[0] = (UINT64)blkdev_count();
+  }
+  if (boot >= 0) {
+    blkdev_t *d = blkdev_get_at((UINTN)boot);
+    if (d != NULL && d->sector_count != 0 &&
+        fat32_scan_device(d, path, ctx) == 0) {
+      shared_mem_t *shm = shared_mem_get();
+      shm->dbg_fat[1] = (UINT64)ctx->base_lba;
+      shm->dbg_fat[2] = (UINT64)ctx->fat_type;
+      return 0;
+    }
+  }
+  for (i = 0; i < (UINTN)blkdev_count(); i++) {
+    blkdev_t *d = blkdev_get_at(i);
+    if (d == NULL || d->sector_count == 0) {
+      continue;
+    }
+    if (fat32_scan_device(d, path, ctx) == 0) {
+      shared_mem_t *shm = shared_mem_get();
+      shm->dbg_fat[1] = (UINT64)ctx->base_lba;
+      shm->dbg_fat[2] = (UINT64)ctx->fat_type;
+      return 0;
+    }
+  }
+  {
+    shared_mem_t *shm = shared_mem_get();
+    shm->dbg_fat[1] = (UINT64)-1;
+    shm->dbg_fat[2] = (UINT64)-1;
+  }
+  fat32_close(ctx);
+  ctx->dev = NULL;
+  return -1;
+}
+
 static void fat32_close(fat32_ctx_t *ctx) {
   if (ctx->fat != NULL) {
     efi_free(ctx->fat);
@@ -647,10 +935,15 @@ static void fat32_close(fat32_ctx_t *ctx) {
   }
 }
 
-/* Read an entire file from the FAT32 volume into an EfiLoaderData
- * buffer. Returns 0 on success. The mkfat this boot stage pairs with
- * allocates clusters sequentially, so runs of consecutive clusters are
- * read in one Block I/O call rather than one sector at a time. */
+/* Read an entire file from the FAT volume into an EfiLoaderData buffer.
+ * Returns 0 on success. The mkfat this boot stage pairs with allocates
+ * clusters sequentially, so a run of consecutive clusters is read in a
+ * single Block I/O call rather than one sector at a time. We cap a call at
+ * FAT32_MAX_RUN_SECTORS (512-unit sectors) - large enough to collapse a
+ * whole sequential file into a handful of calls, small enough that any
+ * firmware's Block I/O transfer limit accepts it. */
+#define FAT32_MAX_RUN_SECTORS 512u /* 256 KiB per Block I/O call */
+
 static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
                          UINT64 *out_len) {
   fat32_ctx_t ctx;
@@ -659,7 +952,8 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
   UINT8      *buf;
   UINT64      wrote;
 
-  if (fat32_init(&ctx) != 0) {
+  if (fat32_locate_best(path, &ctx) != 0) {
+    say_line(L"[FAT] locate failed");
     return -1;
   }
   esp_report_route("built-in FAT reader", ctx.dev);
@@ -668,47 +962,58 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
     fat32_close(&ctx);
     return -1;
   }
-  buf = (UINT8 *)efi_alloc(size);
+  /* Round the buffer up to a whole sector so the final partial-sector read
+   * can never spill past the allocation. */
+  buf = (UINT8 *)efi_alloc(((size + 511u) / 512u) * 512u);
   if (buf == NULL) {
     fat32_close(&ctx);
     return -1;
   }
-  wrote = 0;
-  while (wrote < size && clus < 0x0ffffff8u) {
-    UINT32 run_start = clus;
-    UINT32 run_len = 1;
-    UINT32 next;
-    UINT64 chunk;
+  {
+    UINT32 eoc = (ctx.fat_type == 16) ? 0xFFF8u : 0x0FFFFFF8u;
+    UINT32 max_run = FAT32_MAX_RUN_SECTORS / ctx.sectors_per_cluster;
+    if (max_run < 1u) {
+      max_run = 1u;
+    }
+    wrote = 0;
+    while (wrote < size && clus < eoc) {
+      UINT32 run_start = clus;
+      UINT32 run_len = 1u;
+      UINT32 next;
 
-    /* Gather a run of consecutive clusters. UEFI Block I/O does not
-     * guarantee huge transfers, so 4 KiB (8 sectors) is a conservative
-     * size that any firmware should accept while still cutting the call
-     * count compared to one sector at a time. */
-    while (run_len < 8u) {
+    /* Gather a run of consecutive clusters (mkfat lays files out
+     * sequentially, so a whole file is usually one run). */
+    while (run_len < max_run) {
       next = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
-      if (next != run_start + run_len) {
+      if (next >= eoc || next != run_start + run_len) {
         break;
       }
       run_len++;
     }
-
-    chunk = (UINT64)run_len * ctx.bytes_per_sector;
-    if (size - wrote < chunk) {
-      chunk = size - wrote;
+    {
+      UINTN run_sect = (UINTN)run_len * (UINTN)ctx.sectors_per_cluster;
+      UINTN want_sect = (UINTN)((size - wrote + 511u) / 512u);
+      if (run_sect > want_sect) {
+        run_sect = want_sect;
+      }
+      if (fat32_read_sectors(&ctx, fat32_cluster_lba(&ctx, run_start),
+                            run_sect, buf + wrote) != 0) {
+        efi_free(buf);
+        fat32_close(&ctx);
+        return -1;
+      }
+      wrote += (UINT64)run_sect * 512u;
+      clus = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
     }
-    if (fat32_read_sectors(&ctx, fat32_cluster_lba(&ctx, run_start),
-                           run_len, buf + wrote) != 0) {
-      efi_free(buf);
-      fat32_close(&ctx);
-      return -1;
-    }
-    wrote += chunk;
-    clus = fat32_get(&ctx, run_start + run_len - 1u) & 0x0fffffffu;
+  }
   }
   fat32_close(&ctx);
   *out_buf = buf;
   *out_len = size;
   esp_report_route("built-in FAT reader", ctx.dev);
+  say(L"[FAT] read ");
+  boot_put_dec(size);
+  say_line(L" bytes");
   return 0;
 }
 

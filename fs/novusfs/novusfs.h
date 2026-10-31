@@ -68,9 +68,11 @@
  * the 16 MiB ramdisk M2 ships, so a single block is enough. */
 #define NOVUSFS_BMAP_BLOCKS 1u
 
-/* 11 direct pointers + 1 single indirect (512 entries) per inode. */
-#define NOVUSFS_NDIR          11u
+/* 7 direct pointers + 1 single indirect (512 entries) + 1 double indirect
+ * (512 * 512 entries) per inode; the 128-byte inode packs dblock[7]+iblk+diblk. */
+#define NOVUSFS_NDIR          7u
 #define NOVUSFS_INDIRECT_CNT  (NOVUSFS_BLOCK_SIZE / 8u)
+#define NOVUSFS_DINDIRECT_CNT (NOVUSFS_INDIRECT_CNT * NOVUSFS_INDIRECT_CNT)
 
 #define NOVUSFS_NAME_MAX     56u
 #define NOVUSFS_DIRENT_SIZE  64u
@@ -166,7 +168,8 @@ typedef struct NOVUSFS_PACKED novusfs_super {
   UINT32 checksum;
 } novusfs_super_t;
 
-/* Inode: 128 bytes, 32 per block. M2 keeps a single indirect level. */
+/* Inode: 128 bytes, 32 per block. Supports double-indirect files so the
+ * system partition can hold multi-megabyte assets (fonts, ...). */
 typedef struct NOVUSFS_PACKED novusfs_inode {
   UINT16 mode;
   UINT16 pad0;
@@ -177,6 +180,7 @@ typedef struct NOVUSFS_PACKED novusfs_inode {
   UINT64 mtime;
   UINT64 dblock[NOVUSFS_NDIR];
   UINT64 iblk;            /* single indirect block, 0 == none */
+  UINT64 diblk;           /* double indirect block, 0 == none */
 } novusfs_inode_t;
 
 /* Directory entry: fixed 64 bytes, so a directory is a flat array of
@@ -473,6 +477,14 @@ int novusfs_rename(novusfs_fs_t *fs, UINT32 old_dir, const char *old_name,
  * of bytes written, or -1 on error. */
 INT64 novusfs_write(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
                     const void *data, UINT64 len);
+
+/* Host-side bulk write used by the image builder (mkfsnovus). Bypasses the
+ * WAL entirely (txid == 0, straight-through), so it can move multi-megabyte
+ * assets into a freshly formatted image without the 256 KiB WAL ring
+ * thrashing. The caller rebuilds the Merkle tree afterwards. Returns the
+ * number of bytes written, or -1 on error. */
+int novusfs_write_direct(novusfs_fs_t *fs, UINT32 ino, UINT64 off,
+                         const void *data, UINT64 len);
 
 /* Read up to `len` bytes at `off` of `ino` into `dst`. Returns the
  * number of bytes actually read, or -1 on error. */

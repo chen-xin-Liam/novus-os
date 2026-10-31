@@ -224,55 +224,147 @@ UINT64 novusfs_inode_bmap(novusfs_fs_t *fs, novusfs_inode_t *in,
     return res;
   }
 
-  /* Indirect level. lblk indexes past the direct pointers. */
+  /* Indirect and double-indirect levels. */
   {
-    UINT64 idx = lblk - (UINT64)NOVUSFS_NDIR;
-    UINT64 *ent;
+    UINT64 dbl_base = (UINT64)NOVUSFS_NDIR + (UINT64)NOVUSFS_INDIRECT_CNT;
 
-    if (idx >= (UINT64)NOVUSFS_INDIRECT_CNT) {
-      return 0; /* beyond the single indirect level */
-    }
-    if (in->iblk == 0) {
+    /* Single indirect: lblk in [NDIR, NDIR + INDIRECT_CNT). */
+    if (lblk < dbl_base) {
+      UINT64 idx = lblk - (UINT64)NOVUSFS_NDIR;
+      UINT64 *ent;
+
+      if (in->iblk == 0) {
+        if (!alloc) {
+          return 0;
+        }
+        in->iblk = novusfs_balloc_alloc(fs);
+        if (in->iblk == 0) {
+          return 0;
+        }
+        if (zero_block(fs, in->iblk) != 0) {
+          return 0;
+        }
+        /* The indirect block is initialized eagerly, before its eventual
+         * inode-table update; later pointer edits also write this block directly.
+         * Zeroing makes absent entries read as holes, not stale block numbers. */
+        in->blocks++;
+      }
+      if (novusfs_read_block(fs, in->iblk, fs->scratch) != 0) {
+        return 0;
+      }
+      ent = (UINT64 *)(VOID *)(fs->scratch + idx * 8u);
+      if (*ent != 0) {
+        return *ent;
+      }
       if (!alloc) {
         return 0;
       }
-      in->iblk = novusfs_balloc_alloc(fs);
-      if (in->iblk == 0) {
+      res = novusfs_balloc_alloc(fs);
+      if (res == 0) {
         return 0;
       }
-      if (zero_block(fs, in->iblk) != 0) {
+      /* novusfs_balloc_alloc() clobbers fs->scratch, so re-read the
+       * indirect block before patching its entry. */
+      if (novusfs_read_block(fs, in->iblk, fs->scratch) != 0) {
         return 0;
       }
-      /* The indirect block is initialized eagerly, before its eventual
-       * inode-table update; later pointer edits also write this block directly.
-       * Zeroing makes absent entries read as holes, not stale block numbers. */
+      ent = (UINT64 *)(VOID *)(fs->scratch + idx * 8u);
+      *ent = res;
+      if (novusfs_write_block(fs, in->iblk, fs->scratch) != 0) {
+        return 0;
+      }
       in->blocks++;
+      return res;
     }
-    if (novusfs_read_block(fs, in->iblk, fs->scratch) != 0) {
-      return 0;
+
+    /* Double indirect: each L1 block points to INDIRECT_CNT L2 blocks, each
+     * L2 to INDIRECT_CNT data blocks. Supports files far larger than the
+     * single-indirect ceiling so the system partition can hold multi-MB
+     * assets (fonts, ...). */
+    {
+      UINT64 rel = lblk - dbl_base;
+      UINT64 l1 = rel / (UINT64)NOVUSFS_INDIRECT_CNT;
+      UINT64 l2 = rel % (UINT64)NOVUSFS_INDIRECT_CNT;
+      UINT64 l1blk;
+
+      if (l1 >= (UINT64)NOVUSFS_INDIRECT_CNT) {
+        return 0; /* file too large */
+      }
+      if (in->diblk == 0) {
+        if (!alloc) {
+          return 0;
+        }
+        in->diblk = novusfs_balloc_alloc(fs);
+        if (in->diblk == 0) {
+          return 0;
+        }
+        if (zero_block(fs, in->diblk) != 0) {
+          return 0;
+        }
+        in->blocks++;
+      }
+      if (novusfs_read_block(fs, in->diblk, fs->scratch) != 0) {
+        return 0;
+      }
+      {
+        UINT64 *e1 = (UINT64 *)(VOID *)(fs->scratch + l1 * 8u);
+        if (*e1 == 0) {
+          UINT64 new_l1;
+
+          if (!alloc) {
+            return 0;
+          }
+          new_l1 = novusfs_balloc_alloc(fs);
+          if (new_l1 == 0) {
+            return 0;
+          }
+          /* balloc() clobbered fs->scratch, so re-read the diblk before
+           * patching its L1 pointer and persisting it. */
+          if (novusfs_read_block(fs, in->diblk, fs->scratch) != 0) {
+            return 0;
+          }
+          e1 = (UINT64 *)(VOID *)(fs->scratch + l1 * 8u);
+          *e1 = new_l1;
+          if (novusfs_write_block(fs, in->diblk, fs->scratch) != 0) {
+            return 0;
+          }
+          if (zero_block(fs, new_l1) != 0) {
+            return 0;
+          }
+          in->blocks++;
+          l1blk = new_l1;
+        } else {
+          l1blk = *e1;
+        }
+      }
+      if (novusfs_read_block(fs, l1blk, fs->scratch) != 0) {
+        return 0;
+      }
+      {
+        UINT64 *e2 = (UINT64 *)(VOID *)(fs->scratch + l2 * 8u);
+        if (*e2 != 0) {
+          return *e2;
+        }
+        if (!alloc) {
+          return 0;
+        }
+        res = novusfs_balloc_alloc(fs);
+        if (res == 0) {
+          return 0;
+        }
+        /* balloc() clobbered fs->scratch, so re-read the L2 block before
+         * patching its data pointer and persisting it. */
+        if (novusfs_read_block(fs, l1blk, fs->scratch) != 0) {
+          return 0;
+        }
+        e2 = (UINT64 *)(VOID *)(fs->scratch + l2 * 8u);
+        *e2 = res;
+        if (novusfs_write_block(fs, l1blk, fs->scratch) != 0) {
+          return 0;
+        }
+        in->blocks++;
+        return res;
+      }
     }
-    ent = (UINT64 *)(VOID *)(fs->scratch + idx * 8u);
-    if (*ent != 0) {
-      return *ent;
-    }
-    if (!alloc) {
-      return 0;
-    }
-    res = novusfs_balloc_alloc(fs);
-    if (res == 0) {
-      return 0;
-    }
-    /* novusfs_balloc_alloc() clobbers fs->scratch, so re-read the
-     * indirect block before patching its entry. */
-    if (novusfs_read_block(fs, in->iblk, fs->scratch) != 0) {
-      return 0;
-    }
-    ent = (UINT64 *)(VOID *)(fs->scratch + idx * 8u);
-    *ent = res;
-    if (novusfs_write_block(fs, in->iblk, fs->scratch) != 0) {
-      return 0;
-    }
-    in->blocks++;
-    return res;
   }
 }

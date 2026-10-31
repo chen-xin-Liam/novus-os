@@ -179,7 +179,6 @@ static int wal_make_room(novusfs_fs_t *fs, UINT64 size) {
     UINT64 esz;
 
     if (iters++ >= WAL_MAX_ITERS) {
-      kputs("[WAL ] make_room: tail did not converge, log stuck\n");
       return -1;
     }
     tail = fs->sb.wal_tail_ptr % fs->wal_bytes;
@@ -189,7 +188,6 @@ static int wal_make_room(novusfs_fs_t *fs, UINT64 size) {
     memcpy(&e, hdr, WAL_CRC_PREFIX);
     if (e.magic != WAL_ENTRY_MAGIC || e.data_len > WAL_MAX_PAYLOAD) {
       /* Unparseable tail: the ring cannot be reclaimed safely. */
-      kputs("[WAL ] WARN tail entry corrupt, cannot reclaim space\n");
       fs->wal_corrupt = 1;
       return -1;
     }
