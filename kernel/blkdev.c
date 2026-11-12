@@ -571,10 +571,17 @@ static int uefi_xfer(uefi_ctx_t *u, UINT64 sector, UINTN count, void *buf,
     }
 
     if (in_blk == 0 && chunk == block) {
-      /* Block-aligned head (or middle): hand every whole block to the
-       * firmware in one call. This is the common case - a filesystem
-       * reads in block-sized runs - and it is the fast one. */
+      /* Block-aligned head (or middle): hand whole blocks to the firmware in
+       * one call. This is the common case - a filesystem reads in block-sized
+       * runs - and it is the fast one. Cap the request: some firmware /
+       * controller pairs silently truncate or drop the tail of large transfers,
+       * so the first part succeeds while later sectors come back stale. 8 KiB
+       * is well under every real limit. */
+      UINTN cap_blocks = (UINTN)(8192ULL / block);
       moved = (UINTN)((bytes - done) / block);
+      if (moved > cap_blocks) {
+        moved = cap_blocks;
+      }
       if (is_write) {
         status = u->bio->WriteBlocks(u->bio, u->bio->Media->MediaId, blk,
                                      moved * block, p + done);

@@ -284,12 +284,10 @@ int nd_font_load_from(struct novusfs_fs *fs) {
     }
     {
       shared_mem_t *shm = shared_mem_get();
-      UINT64 phys = shm->live_root_base + (UINT64)130 * 4096ULL;
+      UINT64 phys = shm->live_root_base + (UINT64)130 * 4096ULL + 128ULL;
       UINT64 *p2 = (UINT64 *)phys_to_virt(phys);
-      kputs(" phys-b130:");
-      kputs_hex(p2[0]);
-      kputs(" ");
-      kputs_hex(p2[1]);
+      kputs(" raw-i2(size):");
+      kputs_hex((UINT32)p2[1]);
     }
     {
       shared_mem_t *shm = shared_mem_get();
