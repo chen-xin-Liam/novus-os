@@ -1,19 +1,20 @@
-import struct
-BLK = 4096
-INO_TBL = 130
-INO_SIZE = 128
-with open('out/novus.img','rb') as f:
-    f.seek((INO_TBL)*BLK)
-    tbl = f.read(BLK)
-# inode 2 at offset (2-1)*INO_SIZE
-off = (2-1)*INO_SIZE
-mode, pad0, ino, size, nlinks, blocks = struct.unpack_from('<HHIIII', tbl, off)
-print('font.bin inode: ino=%d mode=%d size=%d blocks=%d' % (ino, mode, size, blocks))
-dblock = struct.unpack_from('<7I', tbl, off+32)
-print('dblock=', dblock)
-if size != 0:
-    # read first data block and check it is non-zero
-    blk = dblock[0]
-    f.seek(blk*BLK)
-    b0 = f.read(16)
-    print('first data block %d head bytes:' % blk, b0.hex())
+#!/usr/bin/env python3
+"""Inspect the font inode in a NovusFS image by its canonical path."""
+import os
+import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from novusimg import NovusFS
+
+path = sys.argv[1] if len(sys.argv) > 1 else 'out/novus.img'
+with open(path, 'rb') as fh:
+    nv = NovusFS(fh.read())
+ino = nv.lookup('Novus/fonts/font.bin')
+assert ino, '/Novus/fonts/font.bin not found'
+node = nv.inode(ino)
+print('font.bin inode=%d mode=%d size=%d blocks=%d' %
+      (node['ino'], node['mode'], node['size'], node['blocks']))
+print('direct=%s iblk=%d diblk=%d' %
+      (node['direct'], node['iblk'], node['diblk']))
+font = nv.read_file('Novus/fonts/font.bin')
+print('first data bytes: %s' % font[:16].hex())

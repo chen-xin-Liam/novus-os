@@ -129,15 +129,54 @@ static int inject_file(novusfs_fs_t *fs, const char *src, const char *dest) {
   }
   fclose(f);
 
-  /* Treat the destination as a path relative to the root: drop any leading
-   * slashes so "/font.bin" becomes the directory entry "font.bin" rather
-   * than a name that literally begins with '/'. */
+  /* The destination is a path relative to the root. Parent directories are
+   * part of the shared layout seeded by novusfs_format(), but mkdir_p also
+   * creates them so a --put into a new subtree works without a rebuild of
+   * the formatter. */
   const char *name = dest;
+  char parent[256];
+  const char *slash = NULL;
+  const char *p;
+  UINT32 dir = NOVUSFS_ROOT_INO;
+  UINTN plen;
+
   while (*name == '/') {
     name++;
   }
+  for (p = name; *p != '\0'; p++) {
+    if (*p == '/') {
+      slash = p;
+    }
+  }
+  if (slash != NULL) {
+    plen = (UINTN)(slash - name);
+    if (plen == 0u || plen >= sizeof(parent)) {
+      kfree(buf);
+      fprintf(stderr, "mkfsnovus: bad destination path %s\n", dest);
+      return 1;
+    }
+    memcpy(parent, name, plen);
+    parent[plen] = '\0';
+    dir = novusfs_mkdir_p(fs, parent);
+    if (dir == 0) {
+      kfree(buf);
+      fprintf(stderr, "mkfsnovus: mkdir failed for %s\n", parent);
+      return 1;
+    }
+    name = slash + 1;
+  }
+  if (*name == '\0') {
+    kfree(buf);
+    fprintf(stderr, "mkfsnovus: empty destination file name %s\n", dest);
+    return 1;
+  }
 
-  ino = novusfs_creat(fs, NOVUSFS_ROOT_INO, name);
+  /* Seeding a file twice (e.g. the font on a rebuilt image) must not add a
+   * duplicate directory entry: novusfs_dir_add() does not check names. */
+  ino = novusfs_dir_lookup(fs, dir, name);
+  if (ino == 0) {
+    ino = novusfs_creat(fs, dir, name);
+  }
   if (ino == 0) {
     kfree(buf);
     fprintf(stderr, "mkfsnovus: creat failed for %s\n", name);
@@ -152,7 +191,7 @@ static int inject_file(novusfs_fs_t *fs, const char *src, const char *dest) {
     return 1;
   }
   kfree(buf);
-  printf("mkfsnovus: injected %s -> /%s (%ld bytes)\n", src, dest, sz);
+  printf("mkfsnovus: injected %s -> %s (%ld bytes)\n", src, dest, sz);
   return 0;
 }
 

@@ -66,23 +66,32 @@ static int v_sync(vfs_fs_t *fs) {
   return ext4_sync((ext4_fs_t *)fs->ctx);
 }
 
+void ext4_vfs_init(struct vfs_fs *view, ext4_fs_t *fs) {
+  vfs_fs_t *v = view;
+
+  if (v == NULL || fs == NULL) {
+    return;
+  }
+  memset(v, 0, sizeof(*v));
+  v->kind = VFS_KIND_EXT4;
+  v->ctx = fs;
+  v->root = fs->root_ino;
+  v->persistent = 1;
+  v->lookup = v_lookup;
+  v->creat = v_creat;
+  v->mkdir = v_mkdir;
+  v->unlink = v_unlink;
+  v->read = v_read;
+  v->write = v_write;
+  v->stat = v_stat;
+  v->readdir = v_readdir;
+  v->sync = v_sync;
+}
+
 vfs_fs_t *ext4_vfs(ext4_fs_t *fs) {
   if (fs == NULL) {
     return NULL;
   }
-  memset(&g_vfs, 0, sizeof(g_vfs));
-  g_vfs.kind = VFS_KIND_EXT4;
-  g_vfs.ctx = fs;
-  g_vfs.root = fs->root_ino;
-  g_vfs.persistent = 1;
-  g_vfs.lookup = v_lookup;
-  g_vfs.creat = v_creat;
-  g_vfs.mkdir = v_mkdir;
-  g_vfs.unlink = v_unlink;
-  g_vfs.read = v_read;
-  g_vfs.write = v_write;
-  g_vfs.stat = v_stat;
-  g_vfs.readdir = v_readdir;
-  g_vfs.sync = v_sync;
+  ext4_vfs_init(&g_vfs, fs);
   return &g_vfs;
 }

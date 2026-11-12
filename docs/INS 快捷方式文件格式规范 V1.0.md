@@ -32,10 +32,10 @@
 
 | 位置 | 用途 |
 |---|---|
-| `/system/share/applications/*.ins` | 系统预装应用快捷方式（只读） |
+| `/ProgramData/NovusApps/*.ins` | 系统预装应用快捷方式（只读） |
 | `/usr/share/applications/*.ins` | 用户安装的应用快捷方式 |
-| `/home/user/Desktop/*.ins` | 桌面图标 |
-| `/system/assets/icons/` | 图标资源目录 |
+| `/Users/alice/Desktop/*.ins` | 桌面图标 |
+| `/ProgramData/SharedResources/` | 图标资源目录 |
 
 ---
 
@@ -51,9 +51,9 @@ Name=系统设置
 Name[en]=Settings
 Comment=Novus OS 系统配置面板
 Comment[en]=Novus OS Settings
-Exec=/system/bin/novus-settings.nuc
-Icon=/system/assets/icons/settings.png
-Path=/system/bin/
+Exec=/Novus/bin/novus-settings.nuc
+Icon=/ProgramData/SharedResources/settings.png
+Path=/Novus/bin/
 Categories=System;Settings;
 Terminal=false
 StartupNotify=true
@@ -77,7 +77,7 @@ StartupNotify=true
 | `Type` | 字符串 | 条目类型，固定 `Application` | `Type=Application` |
 | `Version` | 数字 | 格式版本，当前 `1` | `Version=1` |
 | `Name` | 字符串 | 应用显示名称（默认语言） | `Name=终端` |
-| `Exec` | 路径 | 要执行的 `.nuc` 文件路径 + 参数 | `Exec=/system/bin/terminal.nuc` |
+| `Exec` | 路径 | 要执行的 `.nuc` 文件路径 + 参数 | `Exec=/Novus/bin/terminal.nuc` |
 
 ### 4.2 可选字段
 
@@ -86,8 +86,8 @@ StartupNotify=true
 | `Name[xx]` | 字符串 | 多语言名称（xx=语言代码） | `Name[en]=Terminal` |
 | `Comment` | 字符串 | 鼠标悬停提示文字 | `Comment=命令行终端` |
 | `Comment[xx]` | 字符串 | 多语言注释 | `Comment[en]=Command Line` |
-| `Icon` | 路径 | 图标文件路径（.png） | `Icon=/system/assets/icons/terminal.png` |
-| `Path` | 目录 | 工作目录（启动时 cd 到这里） | `Path=/home/user/` |
+| `Icon` | 路径 | 图标文件路径（.png） | `Icon=/ProgramData/SharedResources/terminal.png` |
+| `Path` | 目录 | 工作目录（启动时 cd 到这里） | `Path=/Users/alice/` |
 | `Categories` | 分号分隔 | 分类（用于开始菜单分组） | `Categories=System;Utility;` |
 | `Terminal` | 布尔 | 是否在终端中运行 | `Terminal=false` |
 | `StartupNotify` | 布尔 | 是否显示启动通知 | `StartupNotify=true` |
@@ -121,13 +121,13 @@ Exec=<可执行文件路径> [参数1] [参数2] ...
 ### 5.4 示例
 ```ini
 # 无参数启动
-Exec=/system/bin/novus-settings.nuc
+Exec=/Novus/bin/novus-settings.nuc
 
 # 带参数
-Exec=/system/bin/terminal.nuc --working-dir=/home/user
+Exec=/Novus/bin/terminal.nuc --working-dir=/Users/alice
 
 # 打开文件
-Exec=/system/bin/filemgr.nuc %F
+Exec=/Novus/bin/filemgr.nuc %F
 ```
 
 ---
@@ -153,7 +153,7 @@ Exec=/system/bin/filemgr.nuc %F
 ## 7. 完整示例
 
 ### 7.1 系统设置
-文件路径：`/system/share/applications/novus-settings.ins`
+文件路径：`/ProgramData/NovusApps/novus-settings.ins`
 
 ```ini
 [Novus Entry]
@@ -163,16 +163,16 @@ Name=系统设置
 Name[en]=Settings
 Comment=Novus OS 系统配置
 Comment[en]=Novus OS Settings
-Exec=/system/bin/novus-settings.nuc
-Icon=/system/assets/icons/settings.png
-Path=/system/bin/
+Exec=/Novus/bin/novus-settings.nuc
+Icon=/ProgramData/SharedResources/settings.png
+Path=/Novus/bin/
 Categories=System;Settings;
 Terminal=false
 StartupNotify=true
 ```
 
 ### 7.2 终端
-文件路径：`/system/share/applications/terminal.ins`
+文件路径：`/ProgramData/NovusApps/terminal.ins`
 
 ```ini
 [Novus Entry]
@@ -182,9 +182,9 @@ Name=终端
 Name[en]=Terminal
 Comment=命令行终端
 Comment[en]=Command Line Terminal
-Exec=/system/bin/terminal.nuc
-Icon=/system/assets/icons/terminal.png
-Path=/home/user/
+Exec=/Novus/bin/terminal.nuc
+Icon=/ProgramData/SharedResources/terminal.png
+Path=/Users/alice/
 Categories=System;Utility;
 Terminal=true
 StartupNotify=true
@@ -197,9 +197,9 @@ Type=Application
 Version=1
 Name=文件管理器
 Name[en]=File Manager
-Exec=/system/bin/filemgr.nuc %F
-Icon=/system/assets/icons/filemgr.png
-Path=/home/user/
+Exec=/Novus/bin/filemgr.nuc %F
+Icon=/ProgramData/SharedResources/filemgr.png
+Path=/Users/alice/
 Categories=Utility;
 MimeType=text/plain;text/markdown;inode/directory;
 Terminal=false
@@ -212,8 +212,8 @@ Type=Application
 Version=1
 Name=任务管理器
 Name[en]=Task Manager
-Exec=/system/bin/taskmgr.nuc
-Icon=/system/assets/icons/taskmgr.png
+Exec=/Novus/bin/taskmgr.nuc
+Icon=/ProgramData/SharedResources/taskmgr.png
 Categories=System;
 NoDisplay=false
 ```
@@ -225,8 +225,8 @@ Type=Application
 Version=1
 Name=磁盘管理器
 Name[en]=Disk Manager
-Exec=/system/bin/diskmgr.nuc
-Icon=/system/assets/icons/diskmgr.png
+Exec=/Novus/bin/diskmgr.nuc
+Icon=/ProgramData/SharedResources/diskmgr.png
 Categories=System;Settings;
 Terminal=false
 ```
@@ -236,9 +236,9 @@ Terminal=false
 ## 8. 解析规则（桌面/WM 端）
 
 ### 8.1 加载顺序
-1. 扫描 `/system/share/applications/*.ins`
+1. 扫描 `/ProgramData/NovusApps/*.ins`
 2. 扫描 `/usr/share/applications/*.ins`
-3. 扫描 `/home/user/Desktop/*.ins`
+3. 扫描 `/Users/alice/Desktop/*.ins`
 
 ### 8.2 解析步骤
 ```

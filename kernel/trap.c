@@ -23,6 +23,8 @@
 #include "irq.h"
 #include "../fs/novusfs/novusfs.h"
 #include "../fs/vfs.h"
+#include "../fs/vfs_mount.h"
+#include "mountcfg.h"
 #include "power.h"
 #include "session.h"
 #include "install.h"
@@ -46,6 +48,9 @@
 #define SYS_MKDIR       15u
 #define SYS_UNLINK      20u
 #define SYS_RENAME      21u
+#define SYS_MOUNT       22u
+#define SYS_UMOUNT      23u
+#define SYS_MOUNTS      24u
 #define SYS_POWEROFF    16u
 #define SYS_REBOOT      17u
 #define SYS_SESSION     18u
@@ -279,26 +284,48 @@ static int fs_fd_index(task_t *t, UINT64 fd) {
   return (int)index;
 }
 
+/* Bounded local copy: path resolution splits its input in place. */
+static void path_copy(char *dst, const char *src, UINTN cap) {
+  UINTN i = 0;
+
+  while (i + 1u < cap && src[i] != '\0') {
+    dst[i] = src[i];
+    i++;
+  }
+  dst[i] = '\0';
+}
+
+/* The back end a descriptor was opened on. A NULL means a descriptor from
+ * before mount points existed; those all belonged to the boot root. */
+static vfs_fs_t *fd_fs(task_t *t, int index) {
+  return (t->fd[index].fs != NULL) ? t->fd[index].fs : vfs_root();
+}
+
 static void sys_fs_open(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
+  vfs_fs_t *fs = NULL;
   char path[FS_PATH_MAX];
+  char copy[FS_PATH_MAX];
   UINT32 ino;
   UINT32 parent;
   char *leaf;
   UINT32 i;
-  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0) { f->rax = (UINT64)-1; return; }
-  ino = vfs_lookup_path(fs, path);
-  if (ino == 0 && (f->rsi & 1u) != 0u && vfs_parent_path(fs, path, &parent, &leaf) == 0) {
+  if (t == NULL || !session_logged_in() || user_path(t, f->rdi, path) != 0) { f->rax = (UINT64)-1; return; }
+  ino = vfs_resolve_path(path, &fs);
+  if (ino == 0 && (f->rsi & 1u) != 0u) {
+    path_copy(copy, path, sizeof(copy));
+    if (vfs_resolve_parent(copy, &fs, &parent, &leaf) != 0 ||
+        fs->readonly != 0u) { f->rax = (UINT64)-1; return; }
     ino = fs->creat(fs, parent, leaf);
   }
-  if (ino == 0) { f->rax = (UINT64)-1; return; }
+  if (ino == 0 || fs == NULL) { f->rax = (UINT64)-1; return; }
   for (i = 0; i < TASK_FD_MAX; i++) {
     if (!t->fd[i].used) {
       t->fd[i].ino = ino;
       t->fd[i].offset = 0;
       t->fd[i].dir_index = 0;
       t->fd[i].is_dir = 0;
+      t->fd[i].fs = fs;
       t->fd[i].used = 1;
       f->rax = FS_FD_BASE + i;
       return;
@@ -309,13 +336,15 @@ static void sys_fs_open(trap_frame_t *f) {
 
 static void sys_fs_read(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
+  vfs_fs_t *fs;
   UINT8 buf[FS_IO_MAX];
   INT64 n;
   int index;
   UINT64 len = f->rdx > FS_IO_MAX ? FS_IO_MAX : f->rdx;
-  if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 ||
+  if (t == NULL || !session_logged_in() || (index = fs_fd_index(t, f->rdi)) < 0 ||
       t->fd[index].is_dir) { f->rax = (UINT64)-1; return; }
+  fs = fd_fs(t, index);
+  if (fs == NULL) { f->rax = (UINT64)-1; return; }
   n = fs->read(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
   if (n < 0 || user_copy(t->cr3, f->rsi, buf, (UINT64)n, 1) != 0) { f->rax = (UINT64)-1; return; }
   t->fd[index].offset += (UINT64)n;
@@ -324,13 +353,15 @@ static void sys_fs_read(trap_frame_t *f) {
 
 static void sys_fs_write(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
+  vfs_fs_t *fs;
   UINT8 buf[FS_IO_MAX];
   int index;
   UINT64 len = f->rdx > FS_IO_MAX ? FS_IO_MAX : f->rdx;
   INT64 n;
-  if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 ||
+  if (t == NULL || !session_logged_in() || (index = fs_fd_index(t, f->rdi)) < 0 ||
       t->fd[index].is_dir || user_copy(t->cr3, f->rsi, buf, len, 0) != 0) { f->rax = (UINT64)-1; return; }
+  fs = fd_fs(t, index);
+  if (fs == NULL || fs->readonly != 0u) { f->rax = (UINT64)-1; return; }
   n = fs->write(fs, t->fd[index].ino, t->fd[index].offset, buf, len);
   if (n < 0) { f->rax = (UINT64)-1; return; }
   t->fd[index].offset += (UINT64)n;
@@ -347,14 +378,14 @@ static void sys_fs_close(trap_frame_t *f) {
 
 static void sys_fs_stat(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
+  vfs_fs_t *fs = NULL;
   char path[FS_PATH_MAX];
   user_stat_t out;
   UINT32 ino;
   UINT64 size;
   UINT16 mode;
-  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
-      (ino = vfs_lookup_path(fs, path)) == 0 ||
+  if (t == NULL || !session_logged_in() || user_path(t, f->rdi, path) != 0 ||
+      (ino = vfs_resolve_path(path, &fs)) == 0 || fs == NULL ||
       fs->stat(fs, ino, &size, &mode) != 0) { f->rax = (UINT64)-1; return; }
   memset(&out, 0, sizeof(out));
   out.size = size;
@@ -364,14 +395,14 @@ static void sys_fs_stat(trap_frame_t *f) {
 
 static void sys_fs_opendir(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
+  vfs_fs_t *fs = NULL;
   char path[FS_PATH_MAX];
   UINT32 ino;
   UINT64 size;
   UINT16 mode;
   UINT32 i;
-  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
-      (ino = vfs_lookup_path(fs, path)) == 0 ||
+  if (t == NULL || !session_logged_in() || user_path(t, f->rdi, path) != 0 ||
+      (ino = vfs_resolve_path(path, &fs)) == 0 || fs == NULL ||
       fs->stat(fs, ino, &size, &mode) != 0 || mode != VFS_MODE_DIR) { f->rax = (UINT64)-1; return; }
   for (i = 0; i < TASK_FD_MAX; i++) {
     if (!t->fd[i].used) {
@@ -379,6 +410,7 @@ static void sys_fs_opendir(trap_frame_t *f) {
       t->fd[i].offset = 0;
       t->fd[i].dir_index = 0;
       t->fd[i].is_dir = 1;
+      t->fd[i].fs = fs;
       t->fd[i].used = 1;
       f->rax = FS_FD_BASE + i;
       return;
@@ -399,11 +431,13 @@ static void fs_readdir_pick(void *arg, UINT32 ino, const char *name) {
 
 static void sys_fs_readdir(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
+  vfs_fs_t *fs;
   user_dirent_t out;
   readdir_ctx_t ctx;
   int index;
-  if (t == NULL || !session_logged_in() || fs == NULL || (index = fs_fd_index(t, f->rdi)) < 0 || !t->fd[index].is_dir) { f->rax = (UINT64)-1; return; }
+  if (t == NULL || !session_logged_in() || (index = fs_fd_index(t, f->rdi)) < 0 || !t->fd[index].is_dir) { f->rax = (UINT64)-1; return; }
+  fs = fd_fs(t, index);
+  if (fs == NULL) { f->rax = (UINT64)-1; return; }
   memset(&out, 0, sizeof(out));
   ctx.skip = t->fd[index].dir_index;
   ctx.seen = 0;
@@ -418,48 +452,116 @@ static void sys_fs_readdir(trap_frame_t *f) {
 
 static void sys_fs_mkdir(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
+  vfs_fs_t *fs = NULL;
   char path[FS_PATH_MAX];
   UINT32 parent;
   UINT32 existing;
   char *leaf;
-  if (t == NULL || !session_logged_in() || fs == NULL || user_path(t, f->rdi, path) != 0 ||
-      vfs_parent_path(fs, path, &parent, &leaf) != 0) { f->rax = (UINT64)-1; return; }
+  if (t == NULL || !session_logged_in() || user_path(t, f->rdi, path) != 0 ||
+      vfs_resolve_parent(path, &fs, &parent, &leaf) != 0 ||
+      fs->readonly != 0u) { f->rax = (UINT64)-1; return; }
   existing = fs->lookup(fs, parent, leaf);
   if (existing != 0) { f->rax = (UINT64)-1; return; }
   f->rax = fs->mkdir(fs, parent, leaf) == 0 ? (UINT64)-1 : 0;
 }
 
-/* Remove a file or an empty directory by path. vfs_unlink_path refuses a
- * non-empty directory, which is what the shell's `rm` wants: recursion is
- * explicit, not implicit. */
+/* Remove a file or an empty directory by path. Refuses a non-empty
+ * directory, a mount point itself and any write to a read-only volume. */
 static void sys_fs_unlink(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
   char path[FS_PATH_MAX];
-  if (t == NULL || !session_logged_in() || fs == NULL ||
-      user_path(t, f->rdi, path) != 0 || vfs_unlink_path(fs, path) != 0) {
+  if (t == NULL || !session_logged_in() ||
+      user_path(t, f->rdi, path) != 0 || vfs_mount_unlink_path(path) != 0) {
     f->rax = (UINT64)-1;
     return;
   }
   f->rax = 0;
 }
 
-/* Rename (move) a path. Atomicity is best-effort in the back end; on the
- * NovusFS root it is a true rename that preserves the inode, on an ext4
- * mount it returns -1 until that back end grows a rename. */
+/* Rename (move) a path. Cross-mount moves are refused: inode numbers are
+ * only meaningful inside one back end. */
 static void sys_fs_rename(trap_frame_t *f) {
   task_t *t = sched_current();
-  vfs_fs_t *fs = vfs_root();
   char from[FS_PATH_MAX];
   char to[FS_PATH_MAX];
-  if (t == NULL || !session_logged_in() || fs == NULL ||
+  if (t == NULL || !session_logged_in() ||
       user_path(t, f->rdi, from) != 0 || user_path(t, f->rsi, to) != 0 ||
-      vfs_rename_path(fs, from, to) != 0) {
+      vfs_mount_rename_path(from, to) != 0) {
     f->rax = (UINT64)-1;
     return;
   }
   f->rax = 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* Mount points (SYS_MOUNT / SYS_UMOUNT / SYS_MOUNTS)                   */
+/* ------------------------------------------------------------------ */
+
+/* Short user strings (device / fstype) use the same bounded copy as paths,
+ * but with their own small buffers and no UTF-8 path grammar. */
+static int user_str(task_t *t, UINT64 va, char *dst, UINTN cap) {
+  UINTN i;
+
+  memset(dst, 0, cap);
+  for (i = 0; i + 1u < cap; i++) {
+    if (user_copy(t->cr3, va + i, &dst[i], 1u, 0) != 0) {
+      return -1;
+    }
+    if (dst[i] == '\0') {
+      return (i == 0u) ? -1 : 0;
+    }
+  }
+  return -1;
+}
+
+static void sys_fs_mount(trap_frame_t *f) {
+  task_t *t = sched_current();
+  char path[FS_PATH_MAX];
+  char dev[16];
+  char fstype[12];
+
+  if (t == NULL || !session_logged_in() ||
+      user_path(t, f->rdi, path) != 0 ||
+      user_str(t, f->rsi, dev, sizeof(dev)) != 0 ||
+      user_str(t, f->rdx, fstype, sizeof(fstype)) != 0) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  f->rax = (mountcfg_mount(path, dev, fstype) == 0) ? 0 : (UINT64)-1;
+}
+
+static void sys_fs_umount(trap_frame_t *f) {
+  task_t *t = sched_current();
+  char path[FS_PATH_MAX];
+
+  if (t == NULL || !session_logged_in() ||
+      user_path(t, f->rdi, path) != 0) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  f->rax = (mountcfg_umount(path) == 0) ? 0 : (UINT64)-1;
+}
+
+/* Returns the number of active mounts; the array is a snapshot, so a
+ * mount added between two calls cannot make the copy overflow. */
+static void sys_fs_mounts(trap_frame_t *f) {
+  task_t *t = sched_current();
+  user_mount_t out[MOUNTCFG_MAX_ENTRIES];
+  UINT32 cap = (UINT32)f->rsi;
+
+  if (t == NULL || !session_logged_in() || cap == 0u) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  if (cap > MOUNTCFG_MAX_ENTRIES) {
+    cap = MOUNTCFG_MAX_ENTRIES;
+  }
+  memset(out, 0, sizeof(out));
+  (void)mountcfg_list(out, cap);
+  f->rax = (user_copy(t->cr3, f->rdi, out,
+                      (UINT64)cap * sizeof(user_mount_t), 1) == 0)
+               ? (UINT64)vfs_mount_count()
+               : (UINT64)-1;
 }
 
 /* Installer control. The pid check is the capability: only the process
@@ -751,6 +853,9 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_MKDIR, "mkdir", sys_fs_mkdir},
     {SYS_UNLINK, "unlink", sys_fs_unlink},
     {SYS_RENAME, "rename", sys_fs_rename},
+    {SYS_MOUNT, "mount", sys_fs_mount},
+    {SYS_UMOUNT, "umount", sys_fs_umount},
+    {SYS_MOUNTS, "mounts", sys_fs_mounts},
     {SYS_POWEROFF, "power_off", sys_power_off},
     {SYS_REBOOT, "power_reboot", sys_power_reboot},
     {SYS_SESSION, "session", sys_session},

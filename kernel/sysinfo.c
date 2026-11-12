@@ -21,11 +21,11 @@
 #include "nd.h"
 #include "nd_lang.h"
 #include "lang.h"
+#include "mountcfg.h"
 
 #if CONFIG_NOVUS_IPC && CONFIG_NOVUS_WM
 
 static UINT64 g_port;
-static UINT32 g_t2_log;
 
 /* ---- built-in file tree ----------------------------------------------- */
 
@@ -181,10 +181,33 @@ static void req_files(const ipc_msg_t *m) {
         copy_str(r.rec[k].name, sizeof(r.rec[k].name), g_dev[i].name);
         r.rec[k].kind = g_dev[i].kind;
       } else {
-        blkdev_t *dev = blkdev_get_at(i -
-                         (UINT32)(sizeof(g_dev) / sizeof(g_dev[0])));
+        UINT32 bindex = i - (UINT32)(sizeof(g_dev) / sizeof(g_dev[0]));
+        blkdev_t *dev = blkdev_get_at(bindex);
+        const char *logical = mountcfg_logical_name(bindex);
+
         if (dev != 0) {
-          copy_str(r.rec[k].name, sizeof(r.rec[k].name), dev->name);
+          if (logical != NULL) {
+            char label[40];
+            UINTN n = 0;
+            UINTN m = 0;
+
+            while (n + 1u < sizeof(label) && dev->name[n] != '\0') {
+              label[n] = dev->name[n];
+              n++;
+            }
+            if (n + 3u < sizeof(label)) {
+              label[n++] = ' ';
+              label[n++] = '[';
+              while (n + 2u < sizeof(label) && logical[m] != '\0') {
+                label[n++] = logical[m++];
+              }
+              label[n++] = ']';
+            }
+            label[n] = '\0';
+            copy_str(r.rec[k].name, sizeof(r.rec[k].name), label);
+          } else {
+            copy_str(r.rec[k].name, sizeof(r.rec[k].name), dev->name);
+          }
           r.rec[k].kind = SYSINFO_KIND_DEV;
         }
       }

@@ -16,12 +16,21 @@
  *     image or unpacks it with an archive tool: the guide path is there in
  *     the open, not sealed inside an image file.
  *
- * So this writes a small ISO: one primary volume descriptor, a directory
- * tree of a handful of entries, and the structures that boot it. Novus
- * does not read files out of the ISO, so there is no Joliet and no Rock
- * Ridge - but the tree is written properly enough for any other reader,
- * because an install image that only a firmware can understand is an
- * install image nobody can check.
+ * The ISO also publishes the standard root directory tree from
+ * fs/novusfs/rootfs_layout.h: the same 77 directories that the system
+ * partition and the FAT ESP carry. Names with spaces, dots or mixed case
+ * cannot be written into a primary ISO 9660 descriptor, so the tree is
+ * written twice:
+ *
+ *   - primary descriptor: 8.3 uppercase aliases (standard ISO 9660),
+ *   - Joliet supplementary descriptor: UCS-2BE names exactly as they
+ *     appear on the NovusFS root ("Program Files", ".novusfs", ...).
+ *
+ * Both trees share file data extents and path-table numbering; they have
+ * separate directory extents. There is still no Rock Ridge: Novus itself
+ * does not read files out of the ISO, and Joliet is what desktop readers
+ * use to show the original names. The El Torito catalog, the embedded ESP
+ * and the isohybrid partition table are unchanged.
  *
  * Usage:
  *   mkiso <out.iso> <esp.img> [volume-id] [--file <iso-path> <host-path>]...
@@ -32,17 +41,32 @@
 #include <string.h>
 #include <stdint.h>
 
+/* The published root tree is the same one the system partition is seeded
+ * with. Joliet carries the original names, the primary descriptor carries
+ * their 8.3 aliases. */
+#define NOVUS_LAYOUT_WANT_DIRS
+#define NOVUS_LAYOUT_WANT_META
+#include "rootfs_layout.h"
+
 #define ISO_SECTOR      2048u
 #define SYSTEM_AREA     16u    /* sectors 0..15, unused */
 #define PVD_LBA         16u
-#define BRVD_LBA        17u    /* boot record volume descriptor */
-#define TERM_LBA        18u
-#define PATH_TABLE_LBA  19u    /* little-endian table */
-#define PATH_TABLE_M_LBA 20u   /* big-endian table */
-#define ROOT_DIR_LBA    21u
+#define SVD_LBA         17u    /* Joliet supplementary volume descriptor */
+#define BRVD_LBA        18u    /* boot record volume descriptor */
+#define TERM_LBA        19u
+/* Four path tables: primary and Joliet, each in little- and big-endian
+ * order. Two sectors each: the 77-directory layout plus Joliet's UCS-2
+ * names does not fit in one 2048-byte sector. */
+#define PATH_TABLE_LBA   20u
+#define PATH_TABLE_M_LBA 22u
+#define JPATH_TABLE_LBA  24u
+#define JPATH_TABLE_M_LBA 26u
+#define PATH_TABLE_SECTORS 2u
+#define ROOT_DIR_LBA     28u
+#define JOLIET_ROOT_LBA  29u
 
-#define MAX_NODES       64u
-#define MAX_NAME        40u
+#define MAX_NODES       256u
+#define MAX_NAME        128u
 
 #define ISO_EPOCH_YEAR  1970   /* date fields are written as zeros */
 
@@ -67,12 +91,17 @@ static uint64_t esp_sectors;
  * files: there is no --dir, because a directory with nothing in it is not
  * something an ISO needs. */
 typedef struct node {
-  char         name[MAX_NAME]; /* exactly as written into the ISO */
+  char         name[MAX_NAME]; /* primary descriptor: uppercased 8.3 alias */
+  char         jsrc[MAX_NAME]; /* original name, for reports and checks */
+  uint8_t      jname[MAX_NAME];/* Joliet identifier, UCS-2BE */
+  uint32_t     jlen;           /* bytes in jname */
   int          is_dir;
-  uint32_t     lba;
+  uint32_t     lba;            /* primary directory extent */
+  uint32_t     jlba;           /* Joliet directory extent (directories) */
   uint32_t     size;           /* bytes; ISO_SECTOR for a directory */
-  const char  *host;           /* host file, NULL for directories */
-  uint16_t     dir_num;        /* path-table number, directories only */
+  const char  *host;           /* host file, NULL for inline data/dirs */
+  const char  *inline_data;    /* .novusfs text, no host file */
+  uint16_t     dir_num;        /* path-table number; shared by both trees */
   struct node *parent;
   struct node *child;          /* first child */
   struct node *next;           /* next sibling */
@@ -135,7 +164,27 @@ static void upper_iso_name(char *dst, size_t cap, const char *src) {
   dst[i] = '\0';
 }
 
-static node_t *new_node(const char *name, int is_dir, node_t *parent) {
+/* Joliet identifiers are UCS-2BE. All layout names are ASCII, so the high
+ * byte is always zero; no general Unicode conversion is needed here. */
+static void make_joliet_name(node_t *n, const char *src) {
+  size_t len = strlen(src);
+  size_t i;
+
+  if (len == 0u || len * 2u >= sizeof(n->jname)) {
+    die("Joliet name too long");
+  }
+  memcpy(n->jsrc, src, len + 1u);
+  for (i = 0; i < len; i++) {
+    n->jname[i * 2u] = 0u;
+    n->jname[i * 2u + 1u] = (uint8_t)src[i];
+  }
+  n->jlen = (uint32_t)(len * 2u);
+}
+
+/* `pname` is the primary-descriptor name (already 8.3-safe, or one of the
+ * boot files), `jsrc` is the original name for the Joliet tree. */
+static node_t *new_node(const char *pname, const char *jsrc, int is_dir,
+                        node_t *parent) {
   node_t *n;
 
   if (nnodes >= MAX_NODES) {
@@ -143,7 +192,8 @@ static node_t *new_node(const char *name, int is_dir, node_t *parent) {
   }
   n = &nodes[nnodes++];
   memset(n, 0, sizeof(*n));
-  upper_iso_name(n->name, sizeof(n->name), name);
+  upper_iso_name(n->name, sizeof(n->name), pname);
+  make_joliet_name(n, jsrc);
   n->is_dir = is_dir;
   n->parent = parent;
   n->size = is_dir ? ISO_SECTOR : 0u;
@@ -152,29 +202,33 @@ static node_t *new_node(const char *name, int is_dir, node_t *parent) {
 
 /* Sorted insertion: ISO 9660 wants a directory's records ordered, and
  * keeping the children sorted also makes the record order agree with the
- * path table order, which is what a reader checking the two against each
- * other expects. */
-static node_t *add_child(node_t *dir, const char *name, int is_dir) {
+ * path table order. Uppercase BEFORE comparing: the old code compared an
+ * uppercased stored name with a mixed-case argument, which broke the
+ * duplicate check for every lower-case path. */
+static node_t *add_child(node_t *dir, const char *pname, const char *jsrc,
+                         int is_dir) {
+  char    up[MAX_NAME];
   node_t **link = &dir->child;
   node_t  *n;
 
+  upper_iso_name(up, sizeof(up), pname);
   while (*link != NULL) {
-    if (strcmp((*link)->name, name) == 0) {
+    if (strcmp((*link)->name, up) == 0) {
       return *link;
     }
-    if (strcmp((*link)->name, name) > 0) {
+    if (strcmp((*link)->name, up) > 0) {
       break;
     }
     link = &(*link)->next;
   }
-  n = new_node(name, is_dir, dir);
+  n = new_node(up, jsrc, is_dir, dir);
   n->next = *link;
   *link = n;
   return n;
 }
 
-/* "EFI/BOOT/BOOTX64.EFI" -> two directories and a file. The file gets the
- * ";1" version suffix ISO 9660 puts on every file name. */
+/* "EFI/BOOT/BOOTX64.EFI" -> two directories and a file. Only the primary
+ * descriptor gets the ";1" version suffix; Joliet keeps the real name. */
 static void add_file(const char *iso_path, const char *host) {
   node_t     *dir = &nodes[0];
   const char *p = iso_path;
@@ -198,19 +252,123 @@ static void add_file(const char *iso_path, const char *host) {
       size_t   len = strlen(comp);
       node_t  *f;
 
-      if (len + 2u > sizeof(fname)) {
+      if (len + 2u >= sizeof(fname)) {
         die("file name too long");
       }
       memcpy(fname, comp, len);
       fname[len] = ';';
       fname[len + 1u] = '1';
       fname[len + 2u] = '\0';
-      f = add_child(dir, fname, 0);
+      f = add_child(dir, fname, comp, 0);
       f->host = host;
       return;
     }
-    dir = add_child(dir, comp, 1);
+    dir = add_child(dir, comp, comp, 1);
     p = slash + 1;
+  }
+}
+
+static const char *alias_of(const char *prefix) {
+  size_t i;
+
+  for (i = 0; i < sizeof(novus_layout_dirs) / sizeof(novus_layout_dirs[0]);
+       i++) {
+    if (strcmp(novus_layout_dirs[i].path, prefix) == 0) {
+      return novus_layout_dirs[i].alias;
+    }
+  }
+  return NULL;
+}
+
+/* Add one directory from the shared layout, component by component. The
+ * primary tree gets the 8.3 alias of each component; Joliet gets the
+ * original spelling including dots, spaces and case. */
+static node_t *seed_dir_path(const char *path) {
+  char        prefix[256];
+  const char *p = path;
+  node_t     *dir = &nodes[0];
+  size_t      plen = 0;
+
+  prefix[0] = '\0';
+  while (*p != '\0') {
+    const char *start = p;
+    const char *alias;
+    char        comp[MAX_NAME];
+    size_t      n;
+
+    while (*p != '\0' && *p != '/') {
+      p++;
+    }
+    n = (size_t)(p - start);
+    if (n == 0u || n >= sizeof(comp) || plen + 1u + n >= sizeof(prefix)) {
+      die("bad layout path");
+    }
+    if (plen != 0u) {
+      prefix[plen++] = '/';
+    }
+    memcpy(prefix + plen, start, n);
+    plen += n;
+    prefix[plen] = '\0';
+    alias = alias_of(prefix);
+    if (alias == NULL) {
+      die("layout alias missing");
+    }
+    memcpy(comp, start, n);
+    comp[n] = '\0';
+    dir = add_child(dir, alias, comp, 1);
+    if (*p == '/') {
+      p++;
+    }
+  }
+  return dir;
+}
+
+/* The static disc copy of the root tree. Real mounts exist only on the
+ * writable NovusFS system partition; here these are browsable directories
+ * plus two readable metadata files. */
+static void seed_iso_tree(void) {
+  size_t i;
+
+  for (i = 0; i < sizeof(novus_layout_dirs) / sizeof(novus_layout_dirs[0]);
+       i++) {
+    seed_dir_path(novus_layout_dirs[i].path);
+  }
+  for (i = 0; i < sizeof(novus_layout_meta) / sizeof(novus_layout_meta[0]);
+       i++) {
+    const char *path = novus_layout_meta[i].path;
+    const char *slash = strrchr(path, '/');
+    char        parent[256];
+    char        leaf[MAX_NAME];
+    char        pname[MAX_NAME + 2u];
+    size_t      plen;
+    size_t      llen;
+    size_t      alen;
+    node_t     *dir;
+    node_t     *f;
+
+    if (slash == NULL || (size_t)(slash - path) >= sizeof(parent)) {
+      die("bad metadata path");
+    }
+    plen = (size_t)(slash - path);
+    memcpy(parent, path, plen);
+    parent[plen] = '\0';
+    dir = seed_dir_path(parent);
+    llen = strlen(slash + 1);
+    if (llen >= sizeof(leaf)) {
+      die("metadata leaf name too long");
+    }
+    memcpy(leaf, slash + 1, llen + 1u);
+    alen = strlen(novus_layout_meta[i].alias);
+    if (alen + 2u >= sizeof(pname)) {
+      die("metadata alias too long");
+    }
+    memcpy(pname, novus_layout_meta[i].alias, alen);
+    pname[alen] = ';';
+    pname[alen + 1u] = '1';
+    pname[alen + 2u] = '\0';
+    f = add_child(dir, pname, leaf, 0);
+    f->inline_data = novus_layout_meta[i].text;
+    f->size = (uint32_t)strlen(novus_layout_meta[i].text);
   }
 }
 
@@ -227,8 +385,12 @@ static void assign_dirs(node_t *d, uint16_t *num) {
   (*num)++;
   if (d->parent == NULL) {
     d->lba = ROOT_DIR_LBA;
+    d->jlba = JOLIET_ROOT_LBA;
   } else {
+    /* Two directory extents, one per descriptor tree. File data is shared
+     * by both trees and is assigned below. */
     d->lba = next_lba++;
+    d->jlba = next_lba++;
   }
   for (c = d->child; c != NULL; c = c->next) {
     if (c->is_dir) {
@@ -245,7 +407,9 @@ static void assign_files(node_t *d) {
       assign_files(c);
       continue;
     }
-    {
+    if (c->inline_data != NULL) {
+      c->size = (uint32_t)strlen(c->inline_data);
+    } else {
       FILE *fp = fopen(c->host, "rb");
       long  end;
 
@@ -265,22 +429,23 @@ static void assign_files(node_t *d) {
   }
 }
 
-/* The path table: one entry per directory, parents before children. */
-static uint32_t path_table_size(const node_t *d) {
+/* Path table size. ISO 9660 pads an entry when the name length is ODD so
+ * that 8 + name_len + pad stays even. Joliet names are byte counts of
+ * UCS-2 identifiers. */
+static uint32_t path_table_size(const node_t *d, int joliet) {
   const node_t *c;
-  uint32_t      n = 0;
+  uint32_t      name_len;
+  uint32_t      n;
 
   if (d->parent == NULL) {
-    n = 10u; /* root: one byte of name, which is the 0x00 filler */
+    name_len = 1u; /* root: one 0x00 filler byte in both trees */
   } else {
-    n = 8u + (uint32_t)strlen(d->name);
-    if ((strlen(d->name) & 1u) == 0u) {
-      n += 1u; /* pad to even */
-    }
+    name_len = joliet ? d->jlen : (uint32_t)strlen(d->name);
   }
+  n = 8u + name_len + (name_len & 1u);
   for (c = d->child; c != NULL; c = c->next) {
     if (c->is_dir) {
-      n += path_table_size(c);
+      n += path_table_size(c, joliet);
     }
   }
   return n;
@@ -294,7 +459,18 @@ static uint32_t path_table_size(const node_t *d) {
 static uint32_t write_dir_record(uint8_t *p, uint32_t extent, uint32_t size,
                                  uint8_t flags, const uint8_t *name,
                                  uint32_t name_len) {
-  p[0] = (uint8_t)(33u + name_len); /* record length */
+  uint32_t rec_len = 33u + name_len;
+
+  /* The padding byte is part of the record: ISO 9660 requires an even
+   * record length, and the length byte is what a reader advances by. Joliet
+   * identifiers are always an even number of bytes, so without this fix
+   * every Joliet record claimed an odd length and directory scans stopped
+   * at the first child. */
+  if ((rec_len & 1u) != 0u) {
+    p[33u + name_len] = 0;
+    rec_len++;
+  }
+  p[0] = (uint8_t)rec_len;
   p[1] = 0;                         /* extended attribute record length */
   put_le32(p + 2, extent);
   put_be32(p + 6, extent);
@@ -308,35 +484,53 @@ static uint32_t write_dir_record(uint8_t *p, uint32_t extent, uint32_t size,
   put_be16(p + 30, 1);
   p[32] = (uint8_t)name_len;
   memcpy(p + 33, name, name_len);
-  /* Records are padded to an even length. */
-  if (((33u + name_len) & 1u) != 0u) {
-    p[33u + name_len] = 0;
-    return 34u + name_len;
-  }
-  return 33u + name_len;
+  return rec_len;
 }
 
-static void write_pvd(const char *volume_id, uint32_t path_size) {
-  uint8_t *p = sector(PVD_LBA);
+/* One volume descriptor, shared by the primary (ISO 9660 8.3) tree and
+ * the Joliet supplementary tree. Type 2 with the "%/E" escape sequence is
+ * what makes a reader prefer the UCS-2 names: "Program Files" and
+ * ".novusfs" appear on the disc exactly as they do on the system partition. */
+static void write_volume_descriptor(uint32_t lba, uint8_t type,
+                                    const char *volume_id,
+                                    uint32_t path_size,
+                                    uint32_t path_lba, uint32_t path_m_lba,
+                                    uint32_t root_lba, int joliet) {
+  uint8_t *p = sector(lba);
   uint32_t off;
 
   memset(p, 0, ISO_SECTOR);
-  p[0] = 1; /* primary volume descriptor */
+  p[0] = type;
   memcpy(p + 1, "CD001", 5);
   p[6] = 1;
   memset(p + 7, 0, 32); /* system identifier */
   {
     size_t n = strlen(volume_id);
+    size_t i;
+
     if (n > 32) {
       n = 32;
     }
-    memcpy(p + 40, volume_id, n);
+    if (joliet) {
+      if (n > 16) {
+        n = 16;
+      }
+      for (i = 0; i < n; i++) {
+        p[40 + i * 2u] = 0;
+        p[41 + i * 2u] = (uint8_t)volume_id[i];
+      }
+    } else {
+      memcpy(p + 40, volume_id, n);
+    }
   }
 
   put_le32(p + 80, (uint32_t)total_sectors);
   put_be32(p + 84, (uint32_t)total_sectors);
 
-  memset(p + 88, 0, 32); /* escape sequences: none */
+  memset(p + 88, 0, 32); /* escape sequences */
+  if (joliet) {
+    memcpy(p + 88, "%/E", 3);
+  }
 
   put_le16(p + 120, 1);
   put_be16(p + 122, 1);
@@ -346,9 +540,9 @@ static void write_pvd(const char *volume_id, uint32_t path_size) {
   put_be16(p + 130, ISO_SECTOR);
 
   put_le32(p + 132, path_size);
-  put_le32(p + 136, PATH_TABLE_LBA);
-  put_le32(p + 140, 0);
-  put_be32(p + 144, PATH_TABLE_M_LBA);
+  put_le32(p + 136, path_lba);
+  put_le32(p + 140, 0); /* optional path table: none */
+  put_be32(p + 144, path_m_lba);
   put_be32(p + 148, 0);
 
   /* Root directory record occupying bytes 156..189. */
@@ -356,7 +550,7 @@ static void write_pvd(const char *volume_id, uint32_t path_size) {
   {
     uint8_t name[1];
     name[0] = 0x00;
-    (void)write_dir_record(p + off, ROOT_DIR_LBA, ISO_SECTOR, 0x02, name, 1);
+    (void)write_dir_record(p + off, root_lba, ISO_SECTOR, 0x02, name, 1);
   }
 
   memset(p + 190, ' ', 128);
@@ -408,121 +602,151 @@ static void write_terminator(void) {
 }
 
 static void write_path_table_entry(uint8_t *p, uint32_t *off,
-                                   const node_t *d, int big_endian) {
-  uint32_t name_len = (d->parent == NULL) ? 1u : (uint32_t)strlen(d->name);
+                                   const node_t *d, int big_endian,
+                                   int joliet) {
+  uint32_t name_len = (d->parent == NULL) ? 1u :
+                      (joliet ? d->jlen : (uint32_t)strlen(d->name));
+  uint32_t extent = joliet ? d->jlba : d->lba;
   uint32_t o = *off;
 
+  if (o + 8u + name_len + (name_len & 1u) >
+      PATH_TABLE_SECTORS * ISO_SECTOR) {
+    die("path table too large");
+  }
   p[o] = (uint8_t)name_len;
   p[o + 1u] = 0; /* extended attribute record length */
   if (big_endian) {
-    put_be32(p + o + 2u, d->lba);
+    put_be32(p + o + 2u, extent);
     put_be16(p + o + 6u, d->parent != NULL ? d->parent->dir_num : d->dir_num);
   } else {
-    put_le32(p + o + 2u, d->lba);
+    put_le32(p + o + 2u, extent);
     put_le16(p + o + 6u, d->parent != NULL ? d->parent->dir_num : d->dir_num);
   }
   if (d->parent == NULL) {
     p[o + 8u] = 0x00; /* root's name is a single zero byte */
   } else {
-    memcpy(p + o + 8u, d->name, strlen(d->name));
+    memcpy(p + o + 8u, joliet ? d->jname : (const uint8_t *)d->name,
+           name_len);
   }
   o += 8u + name_len;
-  if ((name_len & 1u) == 0u) {
+  if ((name_len & 1u) != 0u) {
     p[o] = 0;
     o += 1u;
   }
   *off = o;
 }
 
-static void write_path_tables_node(const node_t *d, uint8_t *le, uint8_t *be,
-                                   uint32_t *off) {
+static void write_path_tables_node(const node_t *d, uint8_t *tab[4],
+                                   uint32_t off[4]) {
   const node_t *c;
 
-  write_path_table_entry(le, off, d, 0);
-  {
-    uint32_t o = *off;
-    write_path_table_entry(be, &o, d, 1);
-  }
+  write_path_table_entry(tab[0], &off[0], d, 0, 0);
+  write_path_table_entry(tab[1], &off[1], d, 1, 0);
+  write_path_table_entry(tab[2], &off[2], d, 0, 1);
+  write_path_table_entry(tab[3], &off[3], d, 1, 1);
   for (c = d->child; c != NULL; c = c->next) {
     if (c->is_dir) {
-      write_path_tables_node(c, le, be, off);
+      write_path_tables_node(c, tab, off);
     }
   }
 }
 
 static void write_path_tables(void) {
-  uint8_t *le = sector(PATH_TABLE_LBA);
-  uint8_t *be = sector(PATH_TABLE_M_LBA);
-  uint32_t off = 0;
+  uint8_t *tab[4];
+  uint32_t off[4] = {0u, 0u, 0u, 0u};
+  int      i;
 
-  memset(le, 0, ISO_SECTOR);
-  memset(be, 0, ISO_SECTOR);
-  write_path_tables_node(&nodes[0], le, be, &off);
+  tab[0] = sector(PATH_TABLE_LBA);
+  tab[1] = sector(PATH_TABLE_M_LBA);
+  tab[2] = sector(JPATH_TABLE_LBA);
+  tab[3] = sector(JPATH_TABLE_M_LBA);
+  for (i = 0; i < 4; i++) {
+    memset(tab[i], 0, PATH_TABLE_SECTORS * ISO_SECTOR);
+  }
+  write_path_tables_node(&nodes[0], tab, off);
 }
 
-/* One directory: ".", "..", then its children in order. */
-static void write_dir(const node_t *d) {
-  uint8_t *p = sector(d->lba);
-  uint32_t off = 0;
-  uint8_t  dot[1];
+/* One directory: ".", "..", then its children in order. Both trees have
+ * their own directory extents (names differ), but file data is shared: a
+ * file record in either tree points at the same extent. */
+static void write_dir(const node_t *d, int joliet) {
+  uint8_t      *p = sector(joliet ? d->jlba : d->lba);
+  uint32_t      off = 0;
+  uint8_t       dot[1];
   const node_t *c;
+  uint32_t      self = joliet ? d->jlba : d->lba;
+  uint32_t      parent = joliet
+      ? (d->parent != NULL ? d->parent->jlba : d->jlba)
+      : (d->parent != NULL ? d->parent->lba : d->lba);
 
-  dot[0] = 0x00;
   memset(p, 0, ISO_SECTOR);
-  off += write_dir_record(p + off, d->lba, ISO_SECTOR, 0x02, dot, 1);
-  off += write_dir_record(p + off,
-                          d->parent != NULL ? d->parent->lba : d->lba,
-                          ISO_SECTOR, 0x02, dot, 1);
+  dot[0] = 0x00;
+  off += write_dir_record(p + off, self, ISO_SECTOR, 0x02, dot, 1);
+  dot[0] = 0x01;
+  off += write_dir_record(p + off, parent, ISO_SECTOR, 0x02, dot, 1);
   for (c = d->child; c != NULL; c = c->next) {
-    off += write_dir_record(p + off, c->lba, c->size,
-                            c->is_dir ? 0x02u : 0x00u,
-                            (const uint8_t *)c->name,
-                            (uint32_t)strlen(c->name));
+    uint32_t extent = c->is_dir ? (joliet ? c->jlba : c->lba) : c->lba;
+    const uint8_t *nm = joliet ? c->jname : (const uint8_t *)c->name;
+    uint32_t nl = joliet ? c->jlen : (uint32_t)strlen(c->name);
+
+    if (off + 34u + nl > ISO_SECTOR) {
+      die("directory extent too large");
+    }
+    off += write_dir_record(p + off, extent, c->size,
+                            c->is_dir ? 0x02u : 0x00u, nm, nl);
   }
 }
 
-static void write_dirs(const node_t *d) {
+static void write_dirs(const node_t *d, int joliet) {
   const node_t *c;
 
-  write_dir(d);
+  write_dir(d, joliet);
   for (c = d->child; c != NULL; c = c->next) {
     if (c->is_dir) {
-      write_dirs(c);
+      write_dirs(c, joliet);
     }
   }
 }
 
 /* File data, copied in whole sectors with the tail zero-filled: an ISO
  * file is a run of sectors, so the last one is padded rather than left
- * short. */
+ * short. Inline metadata needs no host file. */
 static void copy_files(const node_t *d) {
   const node_t *c;
 
   for (c = d->child; c != NULL; c = c->next) {
+    FILE    *fp = NULL;
+    uint64_t remaining = c->size;
+    uint64_t done = 0;
+    uint32_t lba = c->lba;
+
     if (c->is_dir) {
       copy_files(c);
       continue;
     }
-    {
-      FILE   *fp = fopen(c->host, "rb");
-      uint64_t remaining = c->size;
-      uint32_t lba = c->lba;
-
+    if (c->inline_data == NULL) {
+      fp = fopen(c->host, "rb");
       if (fp == NULL) {
         die("cannot open a file named in the ISO");
       }
-      while (remaining > 0) {
-        size_t chunk =
-            (remaining > ISO_SECTOR) ? ISO_SECTOR : (size_t)remaining;
-        if (fread(sector(lba), 1, chunk, fp) != chunk) {
-          die("short read on a file named in the ISO");
-        }
-        if (chunk < ISO_SECTOR) {
-          memset(sector(lba) + chunk, 0, ISO_SECTOR - chunk);
-        }
-        remaining -= chunk;
-        lba++;
+    }
+    while (remaining > 0) {
+      size_t chunk =
+          (remaining > ISO_SECTOR) ? ISO_SECTOR : (size_t)remaining;
+
+      if (c->inline_data != NULL) {
+        memcpy(sector(lba), c->inline_data + done, chunk);
+      } else if (fread(sector(lba), 1, chunk, fp) != chunk) {
+        die("short read on a file named in the ISO");
       }
+      if (chunk < ISO_SECTOR) {
+        memset(sector(lba) + chunk, 0, ISO_SECTOR - chunk);
+      }
+      remaining -= chunk;
+      done += chunk;
+      lba++;
+    }
+    if (fp != NULL) {
       fclose(fp);
     }
   }
@@ -662,10 +886,10 @@ static void write_isohybrid_mbr(uint32_t image_lba, uint32_t image_sectors) {
 /* ------------------------------------------------------------------ */
 /* Look a name up in a directory record. Returns the entry's extent and
  * size, or 0 if it is not there. */
-static int dir_find(const uint8_t *dir, const char *name, uint32_t *extent,
-                    uint32_t *size, uint8_t *flags) {
-  uint32_t   off = 0;
-  uint32_t   want = (uint32_t)strlen(name);
+static int dir_find_bytes(const uint8_t *dir, const uint8_t *name,
+                          uint32_t want, uint32_t *extent, uint32_t *size,
+                          uint8_t *flags) {
+  uint32_t off = 0;
 
   while (off + 33u <= ISO_SECTOR && dir[off] != 0u) {
     uint32_t nlen = dir[off + 32];
@@ -680,6 +904,24 @@ static int dir_find(const uint8_t *dir, const char *name, uint32_t *extent,
     off += (uint32_t)dir[off];
   }
   return 0;
+}
+
+static int dir_find(const uint8_t *dir, const char *name, uint32_t *extent,
+                    uint32_t *size, uint8_t *flags) {
+  return dir_find_bytes(dir, (const uint8_t *)name, (uint32_t)strlen(name),
+                        extent, size, flags);
+}
+
+/* Build a UCS-2BE identifier for verification of the Joliet tree. */
+static uint32_t joliet_lookup_name(const char *src, uint8_t *out) {
+  size_t n = strlen(src);
+  size_t i;
+
+  for (i = 0; i < n; i++) {
+    out[i * 2u] = 0u;
+    out[i * 2u + 1u] = (uint8_t)src[i];
+  }
+  return (uint32_t)(n * 2u);
 }
 
 /* Check the finished image against what its own structures claim, before
@@ -697,12 +939,17 @@ static int dir_find(const uint8_t *dir, const char *name, uint32_t *extent,
 static void verify_image(uint32_t catalog_lba, uint32_t boot_lba,
                          uint32_t boot_sectors) {
   const uint8_t *brvd = sector(BRVD_LBA);
+  const uint8_t *svd = sector(SVD_LBA);
   const uint8_t *cat = sector(catalog_lba);
   const uint8_t *mbr = sector(0);
   const uint8_t *esp = sector(boot_lba);
   uint32_t       sum = 0;
   uint32_t       i;
 
+  if (svd[0] != 2u || memcmp(svd + 1, "CD001", 5) != 0 ||
+      memcmp(svd + 88, "%/E", 3) != 0) {
+    die("the Joliet supplementary volume descriptor is malformed");
+  }
   if (brvd[0] != 0u || memcmp(brvd + 1, "CD001", 5) != 0 ||
       memcmp(brvd + 7, "EL TORITO SPECIFICATION", 23) != 0) {
     die("boot record volume descriptor is malformed");
@@ -763,6 +1010,28 @@ static void verify_image(uint32_t catalog_lba, uint32_t boot_lba,
     }
   }
 
+  /* The Joliet tree is what a desktop shows when the disc is opened:
+   * the original names, including spaces, dots and case. */
+  {
+    static const char *want[] = {".novusfs", "Program Files", "Users",
+                                 "Novus"};
+    uint8_t  jn[MAX_NAME];
+    uint32_t jl;
+    uint32_t lba = 0;
+    uint32_t size = 0;
+    uint8_t  flags = 0;
+
+    for (i = 0; i < 4; i++) {
+      jl = joliet_lookup_name(want[i], jn);
+      if (!dir_find_bytes(sector(JOLIET_ROOT_LBA), jn, jl, &lba, &size,
+                          &flags) ||
+          (flags & 0x02u) == 0u) {
+        fprintf(stderr, "mkiso: Joliet root is missing %s\n", want[i]);
+        die("the Joliet root tree is incomplete");
+      }
+    }
+  }
+
   /* The isohybrid table is what makes the same file bootable off a USB
    * stick, where it is no longer a disc. It has to cover the image at
    * its byte offset in the file, in 512-byte sectors. */
@@ -779,11 +1048,11 @@ static void report_tree(const node_t *d, const char *prefix) {
   for (c = d->child; c != NULL; c = c->next) {
     if (c->is_dir) {
       char sub[MAX_NAME + 32u];
-      snprintf(sub, sizeof(sub), "%s%s/", prefix, c->name);
-      printf("mkiso:   %s%s/ (directory)\n", prefix, c->name);
+      snprintf(sub, sizeof(sub), "%s%s/", prefix, c->jsrc);
+      printf("mkiso:   %s%s/ (directory)\n", prefix, c->jsrc);
       report_tree(c, sub);
     } else {
-      printf("mkiso:   %s%s  %u bytes\n", prefix, c->name, c->size);
+      printf("mkiso:   %s%s  %u bytes\n", prefix, c->jsrc, c->size);
     }
   }
 }
@@ -793,6 +1062,8 @@ int main(int argc, char **argv) {
   uint32_t catalog_lba;
   uint32_t boot_lba;
   uint32_t units; /* size of the embedded ESP in 512-byte units */
+  uint32_t primary_path_size;
+  uint32_t joliet_path_size;
   uint16_t dir_num = 1;
   int      i;
 
@@ -803,6 +1074,11 @@ int main(int argc, char **argv) {
   }
   memset(nodes, 0, sizeof(nodes));
   nnodes = 1; /* nodes[0] is the root */
+  /* The published root tree is built here, not passed on the command
+   * line: one definition (rootfs_layout.h) drives all three images. */
+  seed_iso_tree();
+  nodes[0].lba = ROOT_DIR_LBA;
+  nodes[0].jlba = JOLIET_ROOT_LBA;
 
   if (argc >= 4 && strcmp(argv[3], "--file") != 0) {
     volume_id = argv[3];
@@ -840,9 +1116,15 @@ int main(int argc, char **argv) {
    * files, then the embedded ESP on an aligned boundary, the catalog,
    * and 150 sectors of slack so a slightly larger ESP still fits without
    * recomputing anything. */
-  next_lba = ROOT_DIR_LBA + 1u;
+  next_lba = JOLIET_ROOT_LBA + 1u;
   assign_dirs(&nodes[0], &dir_num);
   assign_files(&nodes[0]);
+  primary_path_size = path_table_size(&nodes[0], 0);
+  joliet_path_size = path_table_size(&nodes[0], 1);
+  if (primary_path_size > PATH_TABLE_SECTORS * ISO_SECTOR ||
+      joliet_path_size > PATH_TABLE_SECTORS * ISO_SECTOR) {
+    die("path table too large");
+  }
   boot_lba = (next_lba + (ESP_ALIGN_SECTORS - 1u)) &
              ~(uint32_t)(ESP_ALIGN_SECTORS - 1u);
   catalog_lba = boot_lba + (uint32_t)esp_sectors;
@@ -853,11 +1135,16 @@ int main(int argc, char **argv) {
     die("out of memory");
   }
 
-  write_pvd(volume_id, path_table_size(&nodes[0]));
+  write_volume_descriptor(PVD_LBA, 1u, volume_id, primary_path_size,
+                          PATH_TABLE_LBA, PATH_TABLE_M_LBA, ROOT_DIR_LBA, 0);
+  write_volume_descriptor(SVD_LBA, 2u, volume_id, joliet_path_size,
+                          JPATH_TABLE_LBA, JPATH_TABLE_M_LBA,
+                          JOLIET_ROOT_LBA, 1);
   write_boot_record(catalog_lba);
   write_terminator();
   write_path_tables();
-  write_dirs(&nodes[0]);
+  write_dirs(&nodes[0], 0);
+  write_dirs(&nodes[0], 1);
   copy_files(&nodes[0]);
 
   {

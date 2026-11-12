@@ -23,7 +23,7 @@ fd 0-2 保留；应用 fd 从 3 开始，每进程最多 16 个，任务退出�
 
 syscall 18 `session` 接收 `session_req_t`：`op/name_len/pass_len/pad`、`username[32]`、`password[64]`。操作：0 查询是否已有账号、1 首次 setup、2 login、3 logout。成功返回 0；错误返回负值。普通应用经 `apps_launch()` 启动前必须已登录。
 
-账号保存在根目录 `/users.db`，记录为固定长度用户名、每账号 16 字节 salt 和 32 字节摘要，不写入明文密码。摘要使用 1024 轮 SHA-256；salt 由 RDTSC、PID、调度 tick 和启动内计数混合生成。用户名限 ASCII 字母、数字、下划线和连字符；密码为 4-63 个可打印 ASCII 字符。连续 5 次登录失败后锁定 3000 scheduler ticks（校准周期 10 ms，约 30 秒）。登录态仅保存在内存，重启后需重新登录。
+账号保存在 `/ProgramData/Security/users.db`，记录为固定长度用户名、每账号 16 字节 salt 和 32 字节摘要，不写入明文密码。摘要使用 1024 轮 SHA-256；salt 由 RDTSC、PID、调度 tick 和启动内计数混合生成。用户名限 ASCII 字母、数字、下划线和连字符；密码为 4-63 个可打印 ASCII 字符。连续 5 次登录失败后锁定 3000 scheduler ticks（校准周期 10 ms，约 30 秒）。登录态仅保存在内存，重启后需重新登录。
 
 注销结束 fileman、taskman、settings、netman 和 staged `demo`，保留 session manager。会话窗口的关机/重启调用 syscall 16/17，内核串口打印 `[POWER]` 日志；ACPI 不可用时调用返回错误并保持系统运行。
 

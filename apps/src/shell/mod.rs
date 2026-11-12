@@ -7,8 +7,9 @@
 //!
 //! Design boundaries that matter:
 //!
-//! * Paths are always resolved to the single root `/` (see `path`). The shell
-//!   owns the cwd; the kernel never sees a relative path.
+//! * Paths are resolved to the single root `/`, with mount points redirecting
+//!   subtrees to other volumes (see `path`). The shell owns the cwd; the
+//!   kernel never sees a relative path.
 //! * There is no fork/exec: builtins run inline, external commands are
 //!   registered apps launched through `sinfo::spawn_name`, and `|` / `$(...)`
 //!   are sequential captures rather than concurrent processes.
@@ -146,7 +147,9 @@ impl Shell {
             sdepth: 0,
         };
         s.cwd[0] = b'/';
-        s.set_var(b"HOME", b"/");
+        /* The standard root tree gives every user a real home; path.rs uses
+         * the same constant when expanding `~` outside a Shell instance. */
+        s.set_var(b"HOME", path::DEFAULT_HOME);
         s.set_var(b"PWD", b"/");
         s.set_var(b"USER", b"user");
         s.set_var(b"SHELL", b"nsh");

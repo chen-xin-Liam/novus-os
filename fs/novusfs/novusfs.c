@@ -29,6 +29,10 @@
 /* The single mounted instance. */
 static novusfs_fs_t g_novusfs;
 static novusfs_fs_t *g_root_fs;
+/* A live root is mounted but not persistent: adopting it must not make
+ * session_init() demand an account on installation media. Only a NovusFS
+ * partition found on a real disk sets this flag. */
+static int g_root_persistent;
 
 novusfs_fs_t *novusfs_get(void) {
   if (!g_novusfs.mounted) {
@@ -44,11 +48,23 @@ novusfs_fs_t *novusfs_root(void) {
   return novusfs_get();
 }
 
-int novusfs_root_persistent(void) { return g_root_fs != NULL && g_root_fs->mounted; }
+int novusfs_root_persistent(void) {
+  return g_root_persistent && g_root_fs != NULL && g_root_fs->mounted;
+}
 
 void novusfs_set_root(novusfs_fs_t *fs) {
   if (g_root_fs == NULL && fs != NULL && fs->mounted) {
     g_root_fs = fs;
+    g_root_persistent = 0;
+  }
+}
+
+void novusfs_set_root_persistent(novusfs_fs_t *fs) {
+  if (g_root_fs == NULL && fs != NULL && fs->mounted) {
+    g_root_fs = fs;
+  }
+  if (g_root_fs != NULL && g_root_fs == fs) {
+    g_root_persistent = 1;
   }
 }
 
@@ -121,6 +137,13 @@ int novusfs_format(novusfs_fs_t *fs, blkdev_t *dev) {
     return -1;
   }
   fs->sb.root_inode = ino;
+  /* Seed the standard root tree before the superblock is flushed. All
+   * directory and metadata writes go through the same code path on the host
+   * image builder, on a freshly installed disk and on the selftest ramdisk. */
+  if (novusfs_seed_root(fs) != 0) {
+    kputs("[NOVS] ERROR root layout seed failed\n");
+    return -1;
+  }
   return novusfs_super_flush(fs);
 }
 
@@ -668,15 +691,16 @@ int novusfs_selftest(void) {
   root = fs->sb.root_inode;
   fails += check("format + root inode", root != 0);
 
-  /* 3. Root directory contains "." and "..". */
+  /* 3. Root directory contains ".", ".." and the seeded top-level tree. */
   ls.count = 0;
   ls.found = 0;
   ls.want = ".";
   if (novusfs_dir_readdir(fs, root, ls_cb, &ls) != 0) {
     fails += check("readdir root", 0);
   } else {
-    fails += check("readdir root: 2 entries + self ref",
-                   ls.count == 2u && ls.found == root);
+    fails += check("readdir root: . .. + seeded top dirs + self ref",
+                   ls.count == 2u + novusfs_root_top_count() &&
+                   ls.found == root);
   }
 
   /* 4. mkdir. */

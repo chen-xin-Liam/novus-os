@@ -27,6 +27,13 @@
 #include <stdint.h>
 #include <ctype.h>
 
+/* The ESP mirrors the system's root tree using 8.3 aliases. FAT has no
+ * long file names, so the original names (with spaces, dots and case) live
+ * on the ISO's Joliet tree and on the writable NovusFS root instead. */
+#define NOVUS_LAYOUT_WANT_DIRS
+#define NOVUS_LAYOUT_WANT_META
+#include "rootfs_layout.h"
+
 #define SECTOR_SIZE      512u
 #define SECTORS_PER_CLUS 1u
 #define CLUSTER_SIZE     (SECTOR_SIZE * SECTORS_PER_CLUS)
@@ -176,7 +183,11 @@ typedef struct {
   uint32_t first_cluster; /* 0 for the root */
   uint32_t tail_cluster;
   uint32_t used_dirents;  /* in the whole chain */
+  char     key[256];      /* alias path, for pool lookup */
 } dir_t;
+
+/* The FAT16 root is a fixed area rather than a cluster chain. */
+static dir_t root;
 
 static uint8_t *root_dir_slot(uint32_t idx) {
   if (idx >= ROOT_DIRENTS) {
@@ -241,40 +252,88 @@ static uint32_t dir_find_or_extend(dir_t *d, const char *name83,
   return 0xffffffffu;
 }
 
-/* Small pool: ESP directory trees are shallow. */
-static dir_t dir_pool[16];
+/* The mirrored root tree is 77 directories deep in places, and several
+ * parents share short names (DESKTOP, SYSTEM32, ...). Keying the pool by
+ * the full alias path both raises the cap and makes a second visit to a
+ * parent return the SAME dir_t: allocating a fresh one reset used_dirents
+ * to 2 and overwrote the children already written into that directory. */
+#define DIR_POOL_MAX 128
+static dir_t dir_pool[DIR_POOL_MAX];
 static int   dir_pool_used = 0;
 
 static dir_t *alloc_dir(void) {
-  if (dir_pool_used >= 16) {
+  if (dir_pool_used >= DIR_POOL_MAX) {
     die("too many directories");
   }
+  memset(&dir_pool[dir_pool_used], 0, sizeof(dir_t));
   return &dir_pool[dir_pool_used++];
+}
+
+static void dir_key(char *out, size_t cap, const dir_t *parent,
+                    const char *upper_name) {
+  size_t pn;
+  size_t nn = strlen(upper_name);
+
+  if (parent == NULL) {
+    parent = &root;
+  }
+  pn = strlen(parent->key);
+  if (pn + 1u + nn + 1u > cap) {
+    die("directory key too long");
+  }
+  memcpy(out, parent->key, pn);
+  out[pn] = '/';
+  memcpy(out + pn + 1u, upper_name, nn + 1u);
+}
+
+static dir_t *dir_by_key(const char *key) {
+  int i;
+
+  for (i = 0; i < dir_pool_used; i++) {
+    if (strcmp(dir_pool[i].key, key) == 0) {
+      return &dir_pool[i];
+    }
+  }
+  return NULL;
 }
 
 static dir_t *dir_get_or_create(dir_t *parent, const char *name) {
   dir_t      *child;
   char        name83[12];
+  char        upper[16];
+  char        key[256];
   uint8_t    *slot;
   uint32_t    clus;
+  size_t      len = strlen(name);
+  size_t      i;
+
+  if (parent == NULL) {
+    parent = &root;
+  }
+  if (len == 0u || len > 8u || len >= sizeof(upper)) {
+    die("directory base name too long");
+  }
+  for (i = 0; i < len; i++) {
+    upper[i] = (char)toupper((unsigned char)name[i]);
+  }
+  upper[len] = '\0';
+  dir_key(key, sizeof(key), parent, upper);
+  child = dir_by_key(key);
+  if (child != NULL) {
+    return child;
+  }
 
   memset(name83, ' ', 11);
   name83[11] = '\0';
-  {
-    size_t len = strlen(name);
-    size_t i;
-    if (len > 8) {
-      die("directory base name too long");
-    }
-    for (i = 0; i < len; i++) {
-      name83[i] = (char)toupper((unsigned char)name[i]);
-    }
+  for (i = 0; i < len; i++) {
+    name83[i] = upper[i];
   }
   if (dir_find_or_extend(parent, name83, &clus) != 0xffffffffu) {
     child = alloc_dir();
     child->first_cluster = clus;
     child->tail_cluster = clus;
     child->used_dirents = 2; /* "." and ".." are already there */
+    memcpy(child->key, key, strlen(key) + 1u);
     return child;
   }
   clus = cluster_alloc();
@@ -290,6 +349,7 @@ static dir_t *dir_get_or_create(dir_t *parent, const char *name) {
   child->first_cluster = clus;
   child->tail_cluster = clus;
   child->used_dirents = 2; /* skip "." and ".." entries */
+  snprintf(child->key, sizeof(child->key), "%s", key);
   /* Create . and .. */
   {
     uint8_t *dot = dir_slot(child, 0);
@@ -492,18 +552,17 @@ static void write_bpb(void) {
 /* ------------------------------------------------------------------ */
 
 typedef struct {
-  FILE    *fp;
-  char    *src;
-  char    *dest;
-  char     iso_name[12];
-  uint64_t len;
-  dir_t   *out_dir;
+  FILE       *fp;          /* NULL when inline_data is used */
+  char       *src;
+  char       *dest;
+  char        iso_name[12];
+  uint64_t    len;
+  dir_t      *out_dir;
+  const char *inline_data; /* .novusfs metadata, no host file needed */
 } file_arg_t;
 
 static file_arg_t files[32];
 static size_t     file_count = 0;
-
-static dir_t root;
 
 /* Split a destination path into the directory chain and the leaf name.
  *
@@ -571,7 +630,9 @@ static void add_file(file_arg_t *f) {
     if ((uint64_t)chunk > f->len - wrote) {
       chunk = (size_t)(f->len - wrote);
     }
-    if (fread(buf, 1, chunk, f->fp) != chunk) {
+    if (f->inline_data != NULL) {
+      memcpy(buf, f->inline_data + wrote, chunk);
+    } else if (fread(buf, 1, chunk, f->fp) != chunk) {
       die("short read while copying file");
     }
     if (chunk < CLUSTER_SIZE) {
@@ -591,8 +652,150 @@ static void add_file(file_arg_t *f) {
     f->iso_name[i] = (char)toupper((unsigned char)f->iso_name[i]);
   }
   printf("mkfat: %s -> %-17s %10lu bytes (cluster %u, FAT%d)\n",
-         f->src, f->iso_name, (unsigned long)f->len, start, fat_type);
+         f->src != NULL ? f->src : "<inline>", f->iso_name,
+         (unsigned long)f->len, start, fat_type);
   (void)fflush(stdout);
+}
+
+/* ------------------------------------------------------------------ */
+/* Root layout mirror                                                  */
+/* ------------------------------------------------------------------ */
+
+static const char *alias_of(const char *prefix) {
+  size_t i;
+
+  for (i = 0; i < sizeof(novus_layout_dirs) / sizeof(novus_layout_dirs[0]);
+       i++) {
+    if (strcmp(novus_layout_dirs[i].path, prefix) == 0) {
+      return novus_layout_dirs[i].alias;
+    }
+  }
+  return NULL;
+}
+
+/* Turn "Users/alice/Desktop" into "USERS/ALICE/DESKTOP" by replacing each
+ * component with the alias of the matching layout entry. */
+static void alias_path_for(const char *path, char *out, size_t cap) {
+  char       prefix[256];
+  const char *p = path;
+  size_t     plen = 0;
+  size_t     olen = 0;
+
+  out[0] = '\0';
+  prefix[0] = '\0';
+  while (*p != '\0') {
+    const char *start = p;
+    const char *alias;
+    size_t      n;
+    size_t      alen;
+
+    while (*p != '\0' && *p != '/') {
+      p++;
+    }
+    n = (size_t)(p - start);
+    if (plen != 0u) {
+      prefix[plen++] = '/';
+    }
+    if (plen + n + 1u > sizeof(prefix)) {
+      die("layout path too long");
+    }
+    memcpy(prefix + plen, start, n);
+    plen += n;
+    prefix[plen] = '\0';
+    alias = alias_of(prefix);
+    if (alias == NULL) {
+      die("layout alias missing");
+    }
+    if (olen != 0u) {
+      if (olen + 1u >= cap) {
+        die("layout alias path too long");
+      }
+      out[olen++] = '/';
+    }
+    alen = strlen(alias);
+    if (olen + alen + 1u > cap) {
+      die("layout alias path too long");
+    }
+    memcpy(out + olen, alias, alen);
+    olen += alen;
+    out[olen] = '\0';
+    if (*p == '/') {
+      p++;
+    }
+  }
+}
+
+/* Every ESP image carries the same (aliased) directory tree as the system
+ * partition, plus the two .novusfs metadata texts. The boot files are then
+ * added on top by main(), so /EFI/BOOT/BOOTX64.EFI stays where firmware
+ * looks for it. */
+static void seed_layout(void) {
+  size_t i;
+  char   alias_path[256];
+  char   buf[256];
+  char   name[12];
+  dir_t *out_dir;
+
+  for (i = 0; i < sizeof(novus_layout_dirs) / sizeof(novus_layout_dirs[0]);
+       i++) {
+    char  *save;
+    char  *part;
+    dir_t *cur = &root;
+
+    alias_path_for(novus_layout_dirs[i].path, alias_path,
+                   sizeof(alias_path));
+    if (strlen(alias_path) >= sizeof(buf)) {
+      die("layout alias path too long");
+    }
+    strcpy(buf, alias_path);
+    part = strtok_r(buf, "/", &save);
+    while (part != NULL) {
+      cur = dir_get_or_create(cur, part);
+      part = strtok_r(NULL, "/", &save);
+    }
+  }
+
+  for (i = 0; i < sizeof(novus_layout_meta) / sizeof(novus_layout_meta[0]);
+       i++) {
+    const char *meta_path = novus_layout_meta[i].path;
+    const char *slash = strrchr(meta_path, '/');
+    char        parent[256];
+    char        dest[256];
+    size_t      plen;
+    size_t      alen;
+    size_t      nlen;
+    file_arg_t *f;
+
+    if (slash == NULL || (size_t)(slash - meta_path) >= sizeof(parent)) {
+      die("bad metadata path");
+    }
+    plen = (size_t)(slash - meta_path);
+    memcpy(parent, meta_path, plen);
+    parent[plen] = '\0';
+    alias_path_for(parent, alias_path, sizeof(alias_path));
+    alen = strlen(alias_path);
+    nlen = strlen(novus_layout_meta[i].alias);
+    if (alen + 1u + nlen + 1u > sizeof(dest)) {
+      die("metadata alias path too long");
+    }
+    memcpy(dest, alias_path, alen);
+    dest[alen] = '/';
+    memcpy(dest + alen + 1u, novus_layout_meta[i].alias, nlen + 1u);
+    resolve_dir(dest, &out_dir, name, sizeof(name));
+    if (file_count >= sizeof(files) / sizeof(files[0])) {
+      die("too many files");
+    }
+    f = &files[file_count++];
+    memset(f, 0, sizeof(*f));
+    f->out_dir = out_dir;
+    f->inline_data = novus_layout_meta[i].text;
+    f->len = (uint64_t)strlen(novus_layout_meta[i].text);
+    nlen = strlen(name);
+    if (nlen >= sizeof(f->iso_name)) {
+      die("metadata short name too long");
+    }
+    memcpy(f->iso_name, name, nlen + 1u);
+  }
 }
 
 /* ------------------------------------------------------------------ */
@@ -636,6 +839,8 @@ int main(int argc, char **argv) {
     memset(cluster_ptr(2), 0, CLUSTER_SIZE);
   }
 
+  seed_layout();
+
   for (i = 0; i < (size_t)(argc - 3); i++) {
     char *colon;
     char  dest[256];
@@ -651,6 +856,7 @@ int main(int argc, char **argv) {
     *colon = '\0';
     files[file_count].src = argv[3 + i];
     files[file_count].dest = colon + 1;
+    files[file_count].inline_data = NULL;
     files[file_count].fp = fopen(files[file_count].src, "rb");
     if (files[file_count].fp == NULL) {
       die("cannot open source file");

@@ -72,7 +72,7 @@ typedef struct __attribute__((packed)) {
 | 位 | 名称 | 含义 |
 |---|---|---|
 | bit0 | NUP_FLAG_SIGNED | 1=有签名 |
-| bit1 | NUP_FLAG_SYSTEM | 1=系统包（安装到 /system） |
+| bit1 | NUP_FLAG_SYSTEM | 1=系统包（安装到 /Novus） |
 | bit2 | NUP_FLAG_REBOOT | 1=安装后需重启 |
 | bit3~15 | 保留 | 必须为 0 |
 
@@ -100,12 +100,12 @@ Dep1=novus-wm >= 1.0.0
 Dep2=novus-sdk >= 1.0.0
 
 [Files]
-File1=/system/bin/novus-settings.nuc
-File2=/system/share/applications/novus-settings.ins
-File3=/system/assets/icons/settings.png
+File1=/Novus/bin/novus-settings.nuc
+File2=/ProgramData/NovusApps/novus-settings.ins
+File3=/ProgramData/SharedResources/settings.png
 
 [Icons]
-MainIcon=/system/assets/icons/settings.png
+MainIcon=/ProgramData/SharedResources/settings.png
 
 [Desktop]
 EntryFile=novus-settings.ins
@@ -203,9 +203,9 @@ typedef struct __attribute__((packed)) {
    - 依赖未安装 → 弹窗提示"需要先安装 XXX"，终止
 8. 检查磁盘空间：total_uncompressed < 剩余空间？
 9. 逐文件解压并写入目标路径
-   - /system/ 下的文件需要 fs.full CAP（管理员确认弹窗）
+   - /Novus/ 下的文件需要 fs.full CAP（管理员确认弹窗）
 10. 注册快捷方式（.ins 文件自动生效）
-11. 写入安装记录到 /var/db/packages/novus-settings.nupdb
+11. 写入安装记录到 /ProgramData/NovusApps/packages/novus-settings.nupdb
 12. 完成弹窗"安装成功"
 ```
 
@@ -215,9 +215,9 @@ typedef struct __attribute__((packed)) {
 
 ```
 1. 用户在设置→应用管理中点击"卸载"
-2. 安装器读取 /var/db/packages/<包名>.nupdb
+2. 安装器读取 /ProgramData/NovusApps/packages/<包名>.nupdb
 3. 遍历已安装文件列表
-4. 逐文件删除（/system/ 下文件需管理员确认）
+4. 逐文件删除（/Novus/ 下文件需管理员确认）
 5. 删除安装记录文件
 6. 删除开始菜单条目（.ins 文件）
 7. 完成弹窗"卸载成功"
@@ -253,12 +253,12 @@ Category=System
 Dep1=novus-wm >= 1.0.0
 
 [Files]
-File1=/system/bin/novus-settings.nuc
-File2=/system/share/applications/novus-settings.ins
-File3=/system/assets/icons/settings.png
+File1=/Novus/bin/novus-settings.nuc
+File2=/ProgramData/NovusApps/novus-settings.ins
+File3=/ProgramData/SharedResources/settings.png
 
 [Icons]
-MainIcon=/system/assets/icons/settings.png
+MainIcon=/ProgramData/SharedResources/settings.png
 
 [Desktop]
 EntryFile=novus-settings.ins
@@ -266,10 +266,10 @@ EntryFile=novus-settings.ins
 
 ### 10.3 安装后系统状态
 ```
-/system/bin/novus-settings.nuc              ← 程序
-/system/share/applications/novus-settings.ins ← 快捷方式
-/system/assets/icons/settings.png            ← 图标
-/var/db/packages/novus-settings.nupdb        ← 安装记录
+/Novus/bin/novus-settings.nuc              ← 程序
+/ProgramData/NovusApps/novus-settings.ins ← 快捷方式
+/ProgramData/SharedResources/settings.png            ← 图标
+/ProgramData/NovusApps/packages/novus-settings.nupdb        ← 安装记录
 ```
 
 ---
@@ -294,7 +294,7 @@ novus-pkg info novus-settings
 
 ## 12. 安装记录文件（.nupdb）
 
-每个已安装包在 `/var/db/packages/` 下有一个 `.nupdb` 文件，记录：
+每个已安装包在 `/ProgramData/NovusApps/packages/` 下有一个 `.nupdb` 文件，记录：
 
 ```ini
 [Installed]
@@ -304,9 +304,9 @@ InstallDate=2026-10-18
 InstalledBy=root
 
 [Files]
-File1=/system/bin/novus-settings.nuc
-File2=/system/share/applications/novus-settings.ins
-File3=/system/assets/icons/settings.png
+File1=/Novus/bin/novus-settings.nuc
+File2=/ProgramData/NovusApps/novus-settings.ins
+File3=/ProgramData/SharedResources/settings.png
 ```
 
 卸载时读取此文件，逐个删除记录的文件。
@@ -333,7 +333,7 @@ File3=/system/assets/icons/settings.png
 - Manifest 为 INI 文本，UTF-8
 - 文件表 16 字节/条
 - 签名（可选）使用 Ed25519
-- 安装记录存 `/var/db/packages/*.nupdb`
+- 安装记录存 `/ProgramData/NovusApps/packages/*.nupdb`
 - 安装目标路径在 Manifest [Files] 段声明
 
 任何格式变更必须升级 Version 字段。

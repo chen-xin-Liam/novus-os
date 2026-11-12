@@ -394,7 +394,10 @@ system/
 novus-os/
 ├── arch/x86_64/        # x86_64架构相关汇编、启动代码
 ├── kernel/             # 内核核心：调度、内存、SMP、系统调用
-├── fs/novusfs/         # NovusFS、WAL、Merkle树实现
+├── fs/novusfs/         # NovusFS、WAL、Merkle树、标准根目录树
+├── fs/fat/             # 只读 FAT12/16/32 卷（ESP / U 盘）
+├── fs/iso9660/         # 只读 ISO9660 + Joliet 卷（光盘）
+├── fs/vfs_mount.c      # 多挂载点表与跨卷路径解析
 ├── security/           # CAP权限、NKM签名校验
 ├── drivers/            # VGA/DP、PCI、存储驱动
 ├── graphics/           # NovusDisplay图形栈
@@ -420,6 +423,7 @@ novus-os/
 2. 生成`.config`配置文件
 3. make开始编译，仅编译启用模块
 4. 输出：UEFI引导镜像 + 内核 + 内置应用 + NKM模块
+5. `make iso` 生成三套镜像后，`make check-rootfs` 校验 ISO（主描述符 + Joliet）、ESP（FAT 8.3）与系统盘（NovusFS）的目录树、字体路径和 `.novusfs` 元数据
 
 ### 16.4 语言混合编译规则
 C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在图形、驱动、编译器模块。
@@ -481,7 +485,8 @@ C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在�
 > M9 Win32 兼容层原型已实现：PE32+ 加载器把 .exe 映射到 `0x50000000`，应用
 > DIR64 基址重定位并按名称填充 IAT；每个 API 是一条 32 字节 `syscall` thunk
 > （系统调用号 40），只放行 `SYS_WIN32` 与 `SYS_EXIT`。首批 15 个 API 覆盖
-> 控制台输出、计时、`Sleep` 与模拟注册表（持久化到 `/registry.cfg`）。样例
+> 控制台输出、计时、`Sleep` 与模拟注册表（持久化到
+> `/Novus/wincompat/system32/registry.cfg`）。样例
 > `hello.exe` 由 `make` 交叉编译并内嵌，文件管理器 `/exe` 标签可选中运行。
 > 说明见 `docs/M9 Win32 兼容层原型.md`。
 - M9：Win32兼容层原型 🆗

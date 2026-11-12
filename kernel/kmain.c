@@ -27,6 +27,8 @@
 /* M2: NovusFS lives in fs/novusfs, which the build adds to the include
  * path, so the kernel stage can reach its public header directly. */
 #include "../fs/vfs.h"
+#include "../fs/vfs_mount.h"
+#include "mountcfg.h"
 #include "../fs/novusfs/novusfs.h"
 /* M12: the ext4 driver, built from fs/ext4. */
 #include "../fs/ext4/ext4.h"
@@ -161,7 +163,7 @@ static void storage_mount_ahci_novusfs(void) {
       continue;
     }
     storage_fs_count++;
-    novusfs_set_root(fs);
+    novusfs_set_root_persistent(fs);
     kputs("[STORAGE] NovusFS mounted: ");
     kputs(part_dev->name);
     kputs("\n");
@@ -338,16 +340,24 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
                 : status == NOVUSFS_MERKLE_MISMATCH ? "MISMATCH\n"
                 : status == NOVUSFS_MERKLE_NOT_BUILT ? "NOT BUILT\n"
                                                      : "UNREADABLE\n");
-          /* M5: the live root is unmounted after verification, so read the
-           * font out of it now and cache it in kernel memory. */
+          /* M5: cache the font from the live root, then keep it mounted:
+           * it is the VFS root for the whole live session, so nsh and the
+           * file manager can browse the standard tree. Persistence stays
+           * off, so session_init() still starts a login-free live desktop. */
           nd_font_load_from(&livefs);
-          novusfs_unmount(&livefs);
+          novusfs_set_root(&livefs);
         }
       }
     } else {
       kputs("[M3] no live root published by the boot stage\n");
     }
   }
+
+  /* All candidate roots are mounted by now. Register the root in the mount
+   * table, then apply /.novusfs/mounts.json to the detected block devices.
+   * This runs before lang_init / win32_init / session_init, so every
+   * consumer of a canonical path sees the finished VFS. */
+  (void)mountcfg_apply();
 
   /* M3: the symbol table modules resolve against. A module that binds to
    * a symbol the kernel does not export is a link error, not a runtime

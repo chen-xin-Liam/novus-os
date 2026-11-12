@@ -27,3 +27,5 @@ run pc   /tmp/b_nvme.log "-drive if=none,format=raw,file=/tmp/disk.img,id=nv -de
 echo NVME_DONE
 run pc   /tmp/b_usb.log  "-device qemu-xhci,id=xhci -drive if=none,format=raw,file=/tmp/disk.img,id=u0 -device usb-storage,bus=xhci.0,drive=u0"
 echo USB_DONE
+echo "===== mount markers ====="
+grep -h '\[MOUNT\]' /tmp/b_ide.log /tmp/b_ahci.log /tmp/b_nvme.log /tmp/b_usb.log | head -12 || true

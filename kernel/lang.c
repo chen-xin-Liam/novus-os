@@ -2,8 +2,9 @@
 #include "kernel.h"
 #include "nd_lang.h"
 #include "../fs/vfs.h"
+#include "nvus_paths.h"
 
-#define LANG_FILE "/language.cfg"
+#define LANG_FILE NVUS_LANG_FILE
 #define LANG_MAGIC 0x474E4C56u /* "VLNG" */
 
 typedef struct {

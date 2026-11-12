@@ -235,7 +235,10 @@ typedef struct novusfs_fs {
 novusfs_fs_t *novusfs_get(void);
 novusfs_fs_t *novusfs_root(void);
 int novusfs_root_persistent(void);
+/* Adopt a root. A live image stays non-persistent (no account required);
+ * a real disk partition is persistent and must be named explicitly. */
 void novusfs_set_root(novusfs_fs_t *fs);
+void novusfs_set_root_persistent(novusfs_fs_t *fs);
 
 /* ------------------------------------------------------------------ */
 /* super.c - layout, superblock, raw block IO                          */
@@ -448,8 +451,17 @@ void novusfs_merkle_invalidate(novusfs_fs_t *fs);
 /* novusfs.c - high level API                                          */
 /* ------------------------------------------------------------------ */
 
-/* Format `dev` (layout + root directory) and mount it. */
+/* Format `dev` (layout + root directory + standard tree) and mount it. */
 int novusfs_format(novusfs_fs_t *fs, blkdev_t *dev);
+
+/* rootfs.c - the shared root directory tree (fs/novusfs/rootfs_layout.h).
+ * mkdir_p resolves a path from the root, creating missing directories.
+ * seed_root creates the standard tree plus .novusfs metadata; it is called
+ * by novusfs_format() so host images and freshly formatted disks agree.
+ * root_top_count is the number of top-level directories, for the self test. */
+UINT32 novusfs_mkdir_p(novusfs_fs_t *fs, const char *path);
+int novusfs_seed_root(novusfs_fs_t *fs);
+UINT32 novusfs_root_top_count(void);
 
 /* Mount an existing NovusFS image, then recover the WAL. */
 int novusfs_mount(novusfs_fs_t *fs, blkdev_t *dev);

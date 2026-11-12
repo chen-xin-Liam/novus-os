@@ -20,6 +20,7 @@
 #include "shared_mem.h"
 #include "nd_lang.h"
 #include "novusfs.h"
+#include "nvus_paths.h"
 
 #if CONFIG_NOVUS_INSTALLER
 
@@ -293,13 +294,20 @@ static int write_language(novusfs_fs_t *fs) {
   } lang_cfg_t;
   lang_cfg_t cfg;
   UINT32     ino;
+  UINT32     dir;
 
   if (!g_lang_set) {
     return 0;
   }
-  ino = novusfs_lookup_path(fs, fs->sb.root_inode, "/language.cfg");
+  ino = novusfs_lookup_path(fs, fs->sb.root_inode, NVUS_LANG_FILE);
   if (ino == 0) {
-    ino = novusfs_creat(fs, fs->sb.root_inode, "language.cfg");
+    /* The image is already seeded with this directory chain, but mkdir_p
+     * also repairs an older image that only had a flat root. */
+    dir = novusfs_mkdir_p(fs, "/Novus/kernel/core");
+    if (dir == 0) {
+      return -1;
+    }
+    ino = novusfs_creat(fs, dir, "language.cfg");
   }
   if (ino == 0) {
     return -1;

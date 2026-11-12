@@ -1,7 +1,8 @@
 //! POSIX path normalisation for the shell.
 //!
-//! The kernel VFS keeps a single root and has no `.`/`..` directory entries,
-//! and it resolves the path it is given relative to the root. So the shell
+//! The kernel VFS keeps a single root with mount points and has no
+//! `.`/`..` directory entries, and it resolves the path it is given relative
+//! to the root. So the shell
 //! must turn every command argument into a clean absolute path before
 //! passing it down, using the current working directory as the base. This
 //! module does that lexical folding (it never touches the file system, so it
@@ -9,13 +10,16 @@
 
 pub const PATH_MAX: usize = 256;
 
+/// Default home directory in the standard root tree. `Shell::new` publishes
+/// the same value as $HOME; this constant is what `~` expands to when the
+/// caller has no variable table.
+pub const DEFAULT_HOME: &[u8] = b"/Users/alice";
+
 /// Normalise `input` against `cwd` and write the result into `out`.
 ///
 /// Returns the number of bytes written, or 0 when the result would not fit.
-/// The result always begins with `/`. A leading `~` is treated as the root
-/// (the shell's idea of "home" is currently the root; see `drives`/OOBE for
-/// where a real home would live). `..` is folded lexically and never escapes
-/// the root.
+/// The result always begins with `/`. A leading `~` expands to the default
+/// home directory. `..` is folded lexically and never escapes the root.
 pub fn normalize(cwd: &[u8], input: &[u8], out: &mut [u8]) -> usize {
     if out.is_empty() {
         return 0;
@@ -27,11 +31,13 @@ pub fn normalize(cwd: &[u8], input: &[u8], out: &mut [u8]) -> usize {
     // Pick the base.
     let mut rest: &[u8] = input;
     let mut absolute = false;
+    let mut home_base = false;
     if rest.first() == Some(&b'/') {
         absolute = true;
         rest = &rest[1..];
     } else if rest.first() == Some(&b'~') {
-        absolute = true; // home is the root for now
+        absolute = true;
+        home_base = true;
         rest = &rest[1..];
         if rest.first() == Some(&b'/') {
             rest = &rest[1..];
@@ -40,6 +46,14 @@ pub fn normalize(cwd: &[u8], input: &[u8], out: &mut [u8]) -> usize {
 
     if absolute {
         slen = 0;
+        if home_base {
+            let mut h = 0;
+            while h < DEFAULT_HOME.len() && slen < PATH_MAX {
+                stack[slen] = DEFAULT_HOME[h];
+                slen += 1;
+                h += 1;
+            }
+        }
     } else {
         let mut j = 0;
         while j < cwd.len() && slen < PATH_MAX - 1 {

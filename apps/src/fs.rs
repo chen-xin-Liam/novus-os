@@ -128,3 +128,79 @@ pub fn rename(from: &str, to: &str) -> bool {
     let _keep_alive = (a, b);
     rc == 0
 }
+
+/* ---- mount points (calls 22-24, ABI mirrors kernel/mountcfg.h) -------- */
+
+pub const MOUNT_MAX: usize = 8;
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct MountInfo {
+    pub path: [u8; 64],
+    pub dev: [u8; 16],
+    pub fstype: [u8; 12],
+    pub active: u8,
+    pub readonly: u8,
+    pad: [u8; 2],
+}
+
+const _: [(); 96] = [(); core::mem::size_of::<MountInfo>()];
+
+fn field(bytes: &[u8]) -> &str {
+    let mut n = 0;
+    while n < bytes.len() && bytes[n] != 0 {
+        n += 1;
+    }
+    core::str::from_utf8(&bytes[..n]).unwrap_or("")
+}
+
+impl MountInfo {
+    pub fn zeroed() -> MountInfo {
+        MountInfo {
+            path: [0; 64],
+            dev: [0; 16],
+            fstype: [0; 12],
+            active: 0,
+            readonly: 0,
+            pad: [0; 2],
+        }
+    }
+    pub fn path(&self) -> &str { field(&self.path) }
+    pub fn dev(&self) -> &str { field(&self.dev) }
+    pub fn fstype(&self) -> &str { field(&self.fstype) }
+}
+
+fn short_arg<const N: usize>(value: &str) -> Option<[u8; N]> {
+    if value.is_empty() || value.len() >= N || value.as_bytes().contains(&0) {
+        return None;
+    }
+    let mut bytes = [0u8; N];
+    bytes[..value.len()].copy_from_slice(value.as_bytes());
+    Some(bytes)
+}
+
+/// Mount `dev` (logical name or a block-device name) at `path`.
+pub fn mount(path: &str, dev: &str, fstype: &str) -> bool {
+    let p = match path_arg(path) { Some(value) => value, None => return false };
+    let d = match short_arg::<16>(dev) { Some(value) => value, None => return false };
+    let f = match short_arg::<12>(fstype) { Some(value) => value, None => return false };
+    let rc = sys::call(22, p.as_ptr() as u64, d.as_ptr() as u64,
+                       f.as_ptr() as u64, 0);
+    let _keep_alive = (p, d, f);
+    rc == 0
+}
+
+pub fn umount(path: &str) -> bool {
+    let p = match path_arg(path) { Some(value) => value, None => return false };
+    let rc = sys::call(23, p.as_ptr() as u64, 0, 0, 0);
+    let _keep_alive = p;
+    rc == 0
+}
+
+/// Snapshot the kernel mount table. Returns the number of active entries.
+pub fn mounts(out: &mut [MountInfo]) -> i64 {
+    if out.is_empty() || out.len() > MOUNT_MAX {
+        return -1;
+    }
+    sys::call(24, out.as_mut_ptr() as u64, out.len() as u64, 0, 0)
+}

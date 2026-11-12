@@ -59,7 +59,7 @@ static int nv_rename(vfs_fs_t *fs, UINT32 olddir, const char *oldname,
                         newname);
 }
 
-static void nv_fill(vfs_fs_t *v, novusfs_fs_t *n) {
+void vfs_novusfs_init(vfs_fs_t *v, novusfs_fs_t *n) {
   memset(v, 0, sizeof(*v));
   v->kind = VFS_KIND_NOVUSFS;
   v->ctx = n;
@@ -98,7 +98,7 @@ vfs_fs_t *vfs_root(void) {
   if (n == NULL) {
     return NULL;
   }
-  nv_fill(&g_novusfs_view, n);
+  vfs_novusfs_init(&g_novusfs_view, n);
   return &g_novusfs_view;
 }
 
@@ -118,7 +118,7 @@ vfs_fs_t *vfs_novusfs_wrap(novusfs_fs_t *fs) {
   if (fs == NULL) {
     return NULL;
   }
-  nv_fill(&view, fs);
+  vfs_novusfs_init(&view, fs);
   return &view;
 }
 
@@ -133,6 +133,8 @@ const char *vfs_kind_name(vfs_kind_t kind) {
   case VFS_KIND_NOVUSFS: return "NovusFS";
   case VFS_KIND_EXT4: return "ext4";
   case VFS_KIND_NTFS: return "NTFS";
+  case VFS_KIND_FAT: return "FAT";
+  case VFS_KIND_ISO9660: return "ISO9660";
   default: return "unknown";
   }
 }

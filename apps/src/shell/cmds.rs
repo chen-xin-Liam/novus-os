@@ -221,7 +221,7 @@ fn cmd_cd(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i3
     let target: &[u8] = if cmd.argc > 1 {
         cmd.argv[1]
     } else {
-        shell.get_var(b"HOME").unwrap_or(b"/")
+        shell.get_var(b"HOME").unwrap_or(b"/Users/alice")
     };
     let mut abs = [0u8; PATH_MAX];
     let n = shell.abs_path(target, &mut abs);
@@ -1100,10 +1100,152 @@ fn cmd_nuomi(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) ->
     crate::nuomi::command(shell, cmd, out)
 }
 
-fn cmd_drives(_shell: &mut Shell, _cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
-    puts(out, "Mounts (single root, see design notes):\n");
-    puts(out, "  /   NovusFS root\n");
+fn put_pad(out: &mut dyn Sink, s: &str, width: usize) {
+    puts(out, s);
+    let mut n = s.len();
+    while n < width {
+        putc(out, b' ');
+        n += 1;
+    }
+}
+
+fn find_sub(hay: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.len() > hay.len() {
+        return None;
+    }
+    for i in 0..=(hay.len() - needle.len()) {
+        if &hay[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+    }
+    None
+}
+
+/// Read the value of a fixed key on one flat mounts.json line.
+fn json_field<'a>(line: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
+    let mut pat = [0u8; 24];
+    let mut n = 0;
+    pat[n] = b'"'; n += 1;
+    for &b in key.iter() {
+        if n + 4 >= pat.len() { return None; }
+        pat[n] = b; n += 1;
+    }
+    pat[n] = b'"'; n += 1;
+    pat[n] = b':'; n += 1;
+    pat[n] = b'"'; n += 1;
+    let at = find_sub(line, &pat[..n])? + n;
+    let mut end = at;
+    while end < line.len() && line[end] != b'"' {
+        end += 1;
+    }
+    if end == at { None } else { Some(&line[at..end]) }
+}
+
+fn list_mounts(out: &mut dyn Sink) -> i32 {
+    let mut table = [fs::MountInfo::zeroed(); fs::MOUNT_MAX];
+    let n = fs::mounts(&mut table);
+    if n < 0 {
+        puts(out, "mounts: kernel rejected the request\n");
+        return 1;
+    }
+    puts(out, "MOUNT POINT          DEVICE       FSTYPE      MODE\n");
+    if n == 0 {
+        puts(out, "(no mounts)\n");
+    }
+    for i in 0..n as usize {
+        let m = &table[i];
+        if m.active == 0 {
+            continue;
+        }
+        put_pad(out, m.path(), 21);
+        put_pad(out, m.dev(), 13);
+        put_pad(out, m.fstype(), 12);
+        puts(out, if m.readonly != 0 { "ro\n" } else { "rw\n" });
+    }
     0
+}
+
+fn cmd_drives(_shell: &mut Shell, _cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    list_mounts(out)
+}
+
+/// mount [-a] | mount <dev> <path> [fstype]
+fn cmd_mount(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    if cmd.argc == 1 {
+        return list_mounts(out);
+    }
+    if cmd.argv[1] == b"-a" {
+        let fd = match fs::open("/.novusfs/mounts.json", false) {
+            Some(value) => value,
+            None => { puts(out, "mount: cannot open /.novusfs/mounts.json\n"); return 1; }
+        };
+        let mut text = [0u8; 4096];
+        let n = fs::read(fd, &mut text);
+        fs::close(fd);
+        if n <= 0 {
+            puts(out, "mount: cannot read the mount table\n");
+            return 1;
+        }
+        let mut failed = 0i32;
+        let mut start = 0usize;
+        let len = n as usize;
+        while start < len {
+            let mut end = start;
+            while end < len && text[end] != b'\n' { end += 1; }
+            let line = &text[start..end];
+            start = if end < len { end + 1 } else { end };
+            let path = json_field(line, b"path");
+            let dev = json_field(line, b"dev");
+            let fstype = json_field(line, b"fstype");
+            if let (Some(p), Some(d), Some(f)) = (path, dev, fstype) {
+                if p.len() != 1 || p[0] != b'/' {
+                    if !fs::mount(to_str(p), to_str(d), to_str(f)) {
+                        failed += 1;
+                    }
+                }
+            }
+        }
+        if failed > 0 {
+            puts(out, "mount: ");
+            put_dec(out, failed as u64);
+            puts(out, " volume(s) not mounted\n");
+        }
+        return list_mounts(out);
+    }
+    if cmd.argc < 3 {
+        puts(out, "usage: mount [-a] | mount <dev> <path> [fstype]\n");
+        return 2;
+    }
+    let mut abs = [0u8; PATH_MAX];
+    let n = shell.abs_path(cmd.argv[2], &mut abs);
+    if n == 0 {
+        puts(out, "mount: path too long\n");
+        return 1;
+    }
+    let fstype = if cmd.argc > 3 { to_str(cmd.argv[3]) } else { "auto" };
+    if fs::mount(to_str(&abs[..n]), to_str(cmd.argv[1]), fstype) {
+        0
+    } else {
+        puts(out, "mount: failed (unknown device, volume or mount point)\n");
+        1
+    }
+}
+
+fn cmd_umount(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    if cmd.argc < 2 {
+        puts(out, "usage: umount <path>\n");
+        return 2;
+    }
+    let mut abs = [0u8; PATH_MAX];
+    let n = shell.abs_path(cmd.argv[1], &mut abs);
+    if n == 0 {
+        puts(out, "umount: path too long\n");
+        return 1;
+    }
+    if fs::umount(to_str(&abs[..n])) { 0 } else {
+        puts(out, "umount: not mounted\n");
+        1
+    }
 }
 
 /* ---- dispatch ---------------------------------------------------------- */
@@ -1187,5 +1329,7 @@ const BUILTINS: &[(&str, Bfn)] = &[
     ("tree", cmd_tree),
     ("alias", cmd_alias),
     ("drives", cmd_drives),
+    ("mount", cmd_mount),
+    ("umount", cmd_umount),
     ("nuomi", cmd_nuomi),
 ];

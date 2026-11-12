@@ -53,6 +53,7 @@ NOVUSFS_HOST_SRCS := fs/novusfs/super.c \
                      fs/novusfs/balloc.c \
                      fs/novusfs/dir.c \
                      fs/novusfs/novusfs.c \
+                     fs/novusfs/rootfs.c \
                      fs/novusfs/merkle.c
 NOVUSFS_HOST_OBJS := $(foreach s,$(NOVUSFS_HOST_SRCS),\
                        $(TOOLS_OUT)/$(subst /,_,$(basename $(s))).o)
@@ -121,11 +122,11 @@ tools: $(MKFAT) $(MKISO) $(MKFSNOVUS) $(MKDISK) $(WPKG)
 $(TOOLS_OUT):
 	mkdir -p $(TOOLS_OUT)
 
-$(MKFAT): tools/mkfat/mkfat.c | $(TOOLS_OUT)
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ $<
+$(MKFAT): tools/mkfat/mkfat.c fs/novusfs/rootfs_layout.h | $(TOOLS_OUT)
+	$(HOSTCC) $(HOSTCFLAGS) -Ifs/novusfs -o $@ $<
 
-$(MKISO): tools/mkiso/mkiso.c | $(TOOLS_OUT)
-	$(HOSTCC) $(HOSTCFLAGS) -o $@ $<
+$(MKISO): tools/mkiso/mkiso.c fs/novusfs/rootfs_layout.h | $(TOOLS_OUT)
+	$(HOSTCC) $(HOSTCFLAGS) -Ifs/novusfs -o $@ $<
 
 $(WPKG): tools/wpkg/wpkg.c graphics/wpkg.h | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) -Itools/wpkg -o $@ $<
@@ -306,7 +307,7 @@ novus-img: $(NOVUS_IMG)
 # fixed 8 MiB, so the EFI shrinks while the FAT images do not grow. The
 # kernel reads /font.bin during the boot-stage mount window and caches it.
 $(NOVUS_IMG): $(MKFSNOVUS) graphics/nd_font_data.bin | out
-	$(MKFSNOVUS) $@ $(SYS_SIZE_MB) --put graphics/nd_font_data.bin /font.bin
+	$(MKFSNOVUS) $@ $(SYS_SIZE_MB) --put graphics/nd_font_data.bin /Novus/fonts/font.bin
 
 esp: $(ESP_IMG)
 
@@ -369,6 +370,12 @@ $(ISO_IMG): $(MKISO) $(ESP_IMG) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) | out
 iso-force:
 	rm -f $(ISO_IMG)
 	$(MAKE) iso
+
+# Structural check: the same standard root tree must be present in the
+# writable system image, both FAT ESP images and both ISO descriptor trees.
+.PHONY: check-rootfs
+check-rootfs: $(NOVUS_IMG) $(ESP_TPL) $(ESP_IMG) $(ISO_IMG)
+	python3 scripts/check_rootfs.py out
 
 run-iso: iso
 	scripts/run-iso.sh "$(MEM)"

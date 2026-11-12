@@ -104,7 +104,10 @@ def cmd(text):
     time.sleep(0.3)
     try:
         while True:
-            s.recv(65536)
+            # QEMU closing the monitor makes recv() return b'' immediately;
+            # without this check the loop spins forever at 100% CPU.
+            if not s.recv(65536):
+                break
     except socket.timeout:
         pass
 
@@ -157,4 +160,4 @@ cmd("quit")
 PY
 
 echo "serial log: $SERIAL"
-grep -aE '\[MENU\]|\[INST\]|\[APPS\]|\[APP\]|\[BOOT\] install|installer' "$SERIAL" || true
+grep -aE '\[MENU\]|\[INST\]|\[MOUNT\]|\[APPS\]|\[APP\]|\[BOOT\] install|installer' "$SERIAL" || true

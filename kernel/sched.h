@@ -33,6 +33,10 @@
 #define SCHED_FOREGROUND_NONE (~0ULL)
 #define TASK_FD_MAX 16u
 
+/* A descriptor remembers which mounted back end owns its inode. Without
+ * this, reading a file under /media/usb0 would use the root back end. */
+struct vfs_fs;
+
 #define TASK_FREE    0
 #define TASK_READY   1
 #define TASK_RUNNING 2
@@ -74,6 +78,7 @@ typedef struct task {
     UINT32 ino;
     UINT32 dir_index;
     UINT64 offset;
+    struct vfs_fs *fs;
     UINT8  used;
     UINT8  is_dir;
     UINT8  pad[6];

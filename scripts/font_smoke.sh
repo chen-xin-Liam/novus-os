@@ -13,6 +13,6 @@ timeout 50 qemu-system-x86_64 -machine q35 -smp 2 -m 4G \
   -cdrom out/novus-live.iso \
   -serial file:out/smoke.log -no-reboot -display none -net none || true
 echo "===== FONT / boot markers ====="
-grep -E "\[FONT\]|\[M3\]|DEVTAB|NOVUS OS|panic|assert" out/smoke.log | head -20 || true
+grep -E "\[FONT\]|\[M3\]|\[MOUNT\]|DEVTAB|NOVUS OS|panic|assert" out/smoke.log | head -24 || true
 echo "===== line count ====="
 wc -l out/smoke.log

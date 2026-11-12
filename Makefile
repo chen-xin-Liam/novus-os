@@ -119,6 +119,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/apps.c \
        kernel/install.c \
        kernel/lang.c \
+       kernel/mountcfg.c \
        kernel/sysinfo.c \
        kernel/devtab.c \
        kernel/rtc.c \
@@ -143,7 +144,13 @@ SRC := arch/x86_64/boot/main.c \
        fs/novusfs/wal.c \
        fs/novusfs/merkle.c \
        fs/novusfs/novusfs.c \
+       fs/novusfs/rootfs.c \
        fs/vfs.c \
+       fs/vfs_mount.c \
+       fs/fat/fat.c \
+       fs/fat/vfs_fat.c \
+       fs/iso9660/iso9660.c \
+       fs/iso9660/vfs_iso9660.c \
        fs/ext4/volume.c \
        fs/ext4/alloc.c \
        fs/ext4/mount.c \
@@ -158,7 +165,7 @@ SRC := arch/x86_64/boot/main.c \
 ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S arch/x86_64/kernel/chkstk.S
 
 INC := -Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs -Ifs \
-       -Isecurity/nkm -Ibuild
+       -Ifs/fat -Ifs/iso9660 -Isecurity/nkm -Ibuild
 
 # Freestanding UEFI environment: no libc, no host runtime, no stack
 # protector, no PIC, no Red Zone (interrupts may clobber it), small code

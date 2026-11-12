@@ -17,6 +17,7 @@
 #include "mm.h"
 #include "shared_mem.h"
 #include "../fs/novusfs/novusfs.h"
+#include "../kernel/nvus_paths.h"
 
 static const UINT8 g_font[95][ND_GLYPH_H] = {
     /* 32 ' ' */ {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -217,7 +218,7 @@ static UINT32 popcount8(UINT8 v) {
   return (UINT32)((v + (v >> 4)) & 0x0Fu);
 }
 
-/* Glyph bitmap data, loaded at boot from /font.bin in the system partition
+/* Glyph bitmap data, loaded at boot from /Novus/fonts/font.bin in the system partition
  * (see nd_font_load_from). NULL until that happens, which only affects the
  * non-ASCII faces; the ASCII 5x7 face is embedded and always available. */
 static const UINT8 *g_font_data = NULL;
@@ -226,7 +227,7 @@ void nd_font_set_data(const UINT8 *data) {
   g_font_data = data;
 }
 
-/* Read /font.bin from an already-mounted NovusFS instance and cache it in a
+/* Read /Novus/fonts/font.bin from an already-mounted NovusFS instance and cache it in a
  * kernel buffer. Called during the boot-stage mount window (the live root)
  * and again for an installed GPT system partition. Returns 0 once loaded. */
 int nd_font_load_from(struct novusfs_fs *fs) {
@@ -239,9 +240,9 @@ int nd_font_load_from(struct novusfs_fs *fs) {
   if (fs == NULL || g_font_data != NULL) {
     return 0;
   }
-  ino = novusfs_lookup_path(fs, NOVUSFS_ROOT_INO, "font.bin");
+  ino = novusfs_lookup_path(fs, NOVUSFS_ROOT_INO, NVUS_FONT_FILE);
   if (ino == 0) {
-    kputs("[FONT] /font.bin missing in system partition\n");
+    kputs("[FONT] /Novus/fonts/font.bin missing in system partition\n");
     return -1;
   }
   {
@@ -338,17 +339,17 @@ int nd_font_load_from(struct novusfs_fs *fs) {
     kputs("\n");
   }
   if (novusfs_stat(fs, ino, &size, &mode) != 0 || size == 0) {
-    kputs("[FONT] stat /font.bin failed\n");
+    kputs("[FONT] stat /Novus/fonts/font.bin failed\n");
     return -1;
   }
   buf = (UINT8 *)kmalloc(size);
   if (buf == NULL) {
-    kputs("[FONT] alloc for /font.bin failed\n");
+    kputs("[FONT] alloc for /Novus/fonts/font.bin failed\n");
     return -1;
   }
   n = novusfs_read(fs, ino, 0, buf, size);
   if (n < 0 || (UINT64)n != size) {
-    kputs("[FONT] read /font.bin failed\n");
+    kputs("[FONT] read /Novus/fonts/font.bin failed\n");
     kfree(buf);
     return -1;
   }

@@ -5,6 +5,7 @@
 #include "nuc.h"
 #include "shared_mem.h"
 #include "../fs/vfs.h"
+#include "nvus_paths.h"
 #include "../lib/novuslib_rs.h"
 #include <stddef.h>
 
@@ -120,8 +121,8 @@ static void make_salt(UINT64 pid, UINT8 salt[16]) {
 static int load_record(void) {
   vfs_fs_t *fs = vfs_root();
   if (fs == NULL) return -1;
-  if (vfs_lookup_path(fs, "/users.db") == 0) return 0;
-  if (vfs_read_file(fs, "/users.db", &g_record, sizeof(g_record)) != 0 ||
+  if (vfs_lookup_path(fs, NVUS_USERS_DB_FILE) == 0) return 0;
+  if (vfs_read_file(fs, NVUS_USERS_DB_FILE, &g_record, sizeof(g_record)) != 0 ||
       g_record.magic != SESSION_MAGIC || g_record.version != SESSION_VERSION ||
       g_record.username[0] == '\0') return -1;
   g_record_ready = 1;
@@ -159,7 +160,8 @@ int session_live(void) { return g_live != 0; }
 static int write_record(void) {
   vfs_fs_t *fs = vfs_root();
   if (fs == NULL) return -1;
-  return vfs_write_file(fs, "/users.db", &g_record, sizeof(g_record));
+  return vfs_write_file(fs, NVUS_USERS_DB_FILE, &g_record,
+                        sizeof(g_record));
 }
 
 /* A user name is any printable UTF-8 text that is not a path component

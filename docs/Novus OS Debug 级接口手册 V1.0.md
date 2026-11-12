@@ -266,7 +266,7 @@ int sched_spawn(const char* path, uint64_t caps, pid_t* out_pid);
 
 | 参数 | 说明 |
 |---|---|
-| path | .nuc 文件路径，如 "/system/bin/novus-settings" |
+| path | .nuc 文件路径，如 "/Novus/bin/novus-settings" |
 | caps | 进程初始 CAP 掩码（低64位） |
 | out_pid | 输出参数，成功写入新 PID |
 
@@ -398,7 +398,7 @@ int vfs_open(const char* path, uint32_t flags, uint32_t mode);
   - bit3 = O_CREAT
   - bit4 = O_TRUNC
 - **路径检查**：
-  - `/system` 下写操作需要 `fs.full` CAP
+  - `/Novus` 下写操作需要 `fs.full` CAP
   - 路径解析失败 → -ENOENT
 - **返回值**：文件描述符（正整数）；负数错误码
 - **调试检查点**：打印 path、flags、返回的 fd

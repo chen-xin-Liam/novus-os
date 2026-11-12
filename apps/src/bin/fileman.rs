@@ -35,8 +35,9 @@ const LIST_X: i16 = NAV_W + 8;
 const LIST_Y: i16 = TOOL_H + COL_H;
 const LIST_W: i16 = CW - LIST_X - 8;
 const NAV_Y: i16 = 74;
-const NAV_ITEM_H: i16 = 26;
-const NAV_ITEM_PITCH: i16 = 30;
+const NAV_ITEM_H: i16 = 24;
+const NAV_ITEM_PITCH: i16 = 27;
+const NAV_COUNT: usize = 8; /* 5 built-in views + 3 quick paths */
 const NAME_X: i16 = LIST_X + 30;
 const TYPE_X: i16 = LIST_X + 244;
 const SIZE_R: i16 = CW - 14;
@@ -329,6 +330,15 @@ impl State {
     }
 
     fn nav_go(&mut self, i: usize, port: u64) {
+        if i >= 5 && i < NAV_COUNT {
+            let p = shortcut_path(i);
+            let mut path = [0u8; PATH_CAP];
+            let n = p.len().min(PATH_CAP);
+
+            path[..n].copy_from_slice(&p[..n]);
+            self.go(View::disk_path(path, n), port);
+            return;
+        }
         if i == 4 {
             if self.disk {
                 self.refresh(port);
@@ -410,20 +420,32 @@ fn inside(r: (i16, i16, i16, i16), x: i32, y: i32) -> bool {
         && y < (r.1 + r.3) as i32
 }
 
+fn shortcut_path(i: usize) -> &'static [u8] {
+    match i {
+        5 => b"/Users/alice",
+        6 => b"/media",
+        7 => b"/.novusfs",
+        _ => b"/",
+    }
+}
+
 fn nav_label(i: usize) -> &'static str {
     match i {
         0 => ui::l("应用", "Apps"),
         1 => ui::l("设备", "Devices"),
         2 => ui::l("进程", "Processes"),
         3 => ui::l("程序", "Programs"),
-        _ => ui::l("磁盘", "Disk"),
+        4 => ui::l("磁盘", "Disk"),
+        5 => ui::l("用户", "Home"),
+        6 => ui::l("媒体", "Media"),
+        _ => ui::l("元数据", "Meta"),
     }
 }
 
 fn nav_color(i: usize) -> u32 {
     match i {
         0 | 3 => ui::accent(),
-        1 => ui::good(),
+        1 | 5 | 6 => ui::good(),
         2 => ui::warn(),
         _ => ui::dim(),
     }
@@ -495,7 +517,7 @@ fn hit_test(st: &State, x: i32, y: i32) -> Hit {
     if inside((OPEN_X, 8, OPEN_W, BTN_H), x, y) {
         return Hit::Open;
     }
-    for i in 0..5usize {
+    for i in 0..NAV_COUNT {
         if inside(nav_rect(i), x, y) {
             return Hit::Nav(i);
         }
@@ -580,7 +602,7 @@ fn draw(w: &mut wm::Win, st: &mut State, accent: u32) {
     w.text(12, 52, ui::dim(), ui::l("此电脑", "This PC"));
     let cur = st.nav();
 
-    for i in 0..5usize {
+    for i in 0..NAV_COUNT {
         let (nx, ny, nw, nh) = nav_rect(i);
         let sel = cur == i;
 

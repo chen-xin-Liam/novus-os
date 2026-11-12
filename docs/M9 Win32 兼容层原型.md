@@ -174,7 +174,10 @@ C3               ret
   由 `win32_owner_exit` 统一关闭。
 * 首次启动写入种子项 `HKCU\Software\Novus` / `Greeting`。
 
-持久化文件 `/registry.cfg`：
+Windows 路径前缀的用户目录为 `/Users/alice/.winprefix/`（其下含
+`Program Files`、`ProgramData`、`users/alice`、`Windows/system32`）。
+
+持久化文件 `/Novus/wincompat/system32/registry.cfg`：
 
 ```
 UINT32 magic   = 'NVRG' (0x4752564E)

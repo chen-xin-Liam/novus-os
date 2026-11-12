@@ -183,5 +183,7 @@ int    ext4_selftest(void);
 /* The dispatch-layer view of a mounted ext4 volume. */
 struct vfs_fs;
 struct vfs_fs *ext4_vfs(ext4_fs_t *fs);
+/* Fill caller-owned storage: one adapter per mounted ext4 volume. */
+void ext4_vfs_init(struct vfs_fs *view, ext4_fs_t *fs);
 
 #endif /* NOVUS_EXT4_H */

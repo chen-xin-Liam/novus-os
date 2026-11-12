@@ -9,7 +9,7 @@
  * rest (return address + 32-byte shadow space, so the fifth argument is at
  * rsp + 0x28).
  *
- * The registry is a flat table persisted to /registry.cfg. It is not a real
+ * The registry is a flat table persisted under /Novus/wincompat. It is not a real
  * key tree: keys are strings, values are strings or DWORDs, and the whole
  * table is rewritten after every set. That is enough for the milestone's
  * "simulated registry" and leaves the format documented in one struct.
@@ -19,6 +19,7 @@
 #include "win32.h"
 #include "sched.h"
 #include "ipc.h"
+#include "nvus_paths.h"
 #include "../fs/vfs.h"
 
 #define WIN32_REG_MAX_ENTRIES 16u
@@ -27,7 +28,7 @@
 #define WIN32_REG_DATA_LEN    72u
 #define WIN32_REG_MAGIC       0x4752564Eu /* 'NVRG' little-endian */
 #define WIN32_REG_VERSION     1u
-#define WIN32_REG_PATH        "/registry.cfg"
+#define WIN32_REG_PATH        NVUS_REGISTRY_FILE
 
 #define WIN32_KEY_MAX 8u
 #define WIN32_KEY_BASE 0x1000ULL
@@ -105,7 +106,6 @@ static const win32_api_t g_api[] = {
     {"kernel32.dll", "GetTickCount64", WIN32_API_GET_TICK_COUNT64},
     {"kernel32.dll", "GetTickCount", WIN32_API_GET_TICK_COUNT},
     {"kernel32.dll", "GetLastError", WIN32_API_GET_LAST_ERROR},
-    {"kernel32.dll", "SetLastError", WIN32_API_SET_LAST_ERROR},
     {"kernel32.dll", "GetCommandLineA", WIN32_API_GET_COMMAND_LINE},
     {"kernel32.dll", "GetModuleHandleA", WIN32_API_GET_MODULE_HANDLE},
     {"advapi32.dll", "RegOpenKeyExA", WIN32_API_REG_OPEN_KEY_EX},

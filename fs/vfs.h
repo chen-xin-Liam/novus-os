@@ -30,7 +30,9 @@
 typedef enum {
   VFS_KIND_NOVUSFS = 0,
   VFS_KIND_EXT4 = 1,
-  VFS_KIND_NTFS = 2
+  VFS_KIND_NTFS = 2,   /* reserved: name only, no back end */
+  VFS_KIND_FAT = 3,
+  VFS_KIND_ISO9660 = 4
 } vfs_kind_t;
 
 /* File type bits. These are the values the syscall ABI hands to user
@@ -59,6 +61,9 @@ struct vfs_fs {
   UINT32     root;  /* inode / MFT record number of the root directory */
   /* 1 = the root survives a reboot (a real disk), 0 = a live image. */
   UINT8      persistent;
+  /* 1 = a read-only volume (FAT/ISO9660 media). Write syscalls refuse
+   * before reaching the back end; the adapters also return -1. */
+  UINT8      readonly;
 
   /* Resolve one component inside `dir`. Returns 0 when absent. */
   UINT32 (*lookup)(vfs_fs_t *fs, UINT32 dir, const char *name);
@@ -132,6 +137,10 @@ int vfs_write_file(vfs_fs_t *fs, const char *path, const void *buf,
  * stat, list and remove one file. Returns 0 on success, -1 on failure,
  * and 0 without a root (a live medium has nothing to test). */
 int vfs_selftest(void);
+
+/* Fill caller-owned storage with the NovusFS adapter. Needed once per
+ * mounted volume: a static singleton cannot describe several mounts. */
+void vfs_novusfs_init(vfs_fs_t *view, novusfs_fs_t *fs);
 
 /* Wrap a NovusFS instance as a vfs_fs_t. The returned pointer is static
  * storage owned by this layer; the caller keeps the novusfs_fs_t. */

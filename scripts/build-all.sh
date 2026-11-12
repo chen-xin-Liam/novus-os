@@ -6,3 +6,4 @@ cd /home/dev/novus-os/novus-os
 make clean
 make iso
 python3 scripts/inspect_img.py out/novus.img
+python3 scripts/check_rootfs.py out
