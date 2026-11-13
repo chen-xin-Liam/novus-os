@@ -13,7 +13,7 @@
  *
  * A medium that carries no package, or a package that fails to parse, is
  * not an error: g_ready stays 0 and nd_wallpaper_paint() fills the area with
- * a flat colour, so the shell never paints a hole.
+ * a theme gradient, so the shell never paints a hole.
  */
 
 #include "kernel.h"
@@ -61,42 +61,43 @@ const char *nd_wallpaper_name(UINT32 index) {
 /* Bilinear cover-scale: the source fills the screen, overflowing edges are
  * cropped symmetrically. */
 static void wp_cover(nd_surface_t *dst, const nd_surface_t *src) {
-  UINT64 fx = ((UINT64)src->w << 16) / (UINT64)dst->w;
-  UINT64 fy = ((UINT64)src->h << 16) / (UINT64)dst->h;
-  UINT64 f = (fx > fy) ? fx : fy;
-  UINT64 cw = ((UINT64)dst->w * f) >> 16;
-  UINT64 ch = ((UINT64)dst->h * f) >> 16;
+  int width_limited = (UINT64)src->w * dst->h < (UINT64)src->h * dst->w;
+  UINT64 cw = width_limited ? (UINT64)src->w
+                            : (UINT64)dst->w * src->h / dst->h;
+  UINT64 ch = width_limited ? (UINT64)dst->h * src->w / dst->w
+                            : (UINT64)src->h;
   INT64  ox = ((INT64)src->w - (INT64)cw) / 2;
   INT64  oy = ((INT64)src->h - (INT64)ch) / 2;
   int    x, y;
 
-  if (cw == 0 || ch == 0) {
-    return;
-  }
+  if (cw == 0) { cw = 1; }
+  if (ch == 0) { ch = 1; }
   for (y = 0; y < dst->h; y++) {
     /* 4.12 source coordinates, then a 4.12 blend weight. */
-    INT64 fy12 = (((INT64)y * (INT64)ch) << WP_FIX) / dst->h + (oy << WP_FIX);
+    INT64 fy12 = (((INT64)y * (INT64)ch) << WP_FIX) / dst->h +
+                 oy * (1 << WP_FIX);
     int   y0 = (int)(fy12 >> WP_FIX);
     int   wy = (int)(fy12 & ((1 << WP_FIX) - 1));
     int   y1;
     const UINT32 *r0, *r1;
 
-    if (y0 < 0) { y0 = 0; }
-    if (y0 > src->h - 2) { y0 = src->h - 2; }
-    y1 = y0 + 1;
+    if (y0 < 0) { y0 = 0; wy = 0; }
+    if (y0 >= src->h - 1) { y0 = src->h - 1; wy = 0; }
+    y1 = (y0 + 1 < src->h) ? y0 + 1 : y0;
     r0 = src->px + (UINT64)y0 * (UINT32)src->stride;
     r1 = src->px + (UINT64)y1 * (UINT32)src->stride;
 
     for (x = 0; x < dst->w; x++) {
-      INT64 fx12 = (((INT64)x * (INT64)cw) << WP_FIX) / dst->w + (ox << WP_FIX);
+      INT64 fx12 = (((INT64)x * (INT64)cw) << WP_FIX) / dst->w +
+                   ox * (1 << WP_FIX);
       int   x0 = (int)(fx12 >> WP_FIX);
       int   wx = (int)(fx12 & ((1 << WP_FIX) - 1));
       int   x1, c;
       UINT32 p[2][2];
 
-      if (x0 < 0) { x0 = 0; }
-      if (x0 > src->w - 2) { x0 = src->w - 2; }
-      x1 = x0 + 1;
+      if (x0 < 0) { x0 = 0; wx = 0; }
+      if (x0 >= src->w - 1) { x0 = src->w - 1; wx = 0; }
+      x1 = (x0 + 1 < src->w) ? x0 + 1 : x0;
       p[0][0] = r0[x0]; p[0][1] = r0[x1];
       p[1][0] = r1[x0]; p[1][1] = r1[x1];
 
@@ -170,7 +171,8 @@ static int wp_locate(UINT32 index, const UINT8 **out, UINT32 *out_len) {
   count = wp_le32(p + WPKG_OFF_COUNT);
   total = wp_le32(p + WPKG_OFF_TOTAL);
   staged = (UINT32)shared_mem_get()->wpkg_img_size;
-  if (count > WPKG_MAX_IMAGES || total > staged) {
+  if (count > WPKG_MAX_IMAGES || total > staged ||
+      total < WPKG_HEADER_SIZE + count * WPKG_ENTRY_SIZE) {
     kputs("[WP] wallpaper package: header does not fit the staged bytes\n");
     return -1;
   }
@@ -200,10 +202,6 @@ static int wp_decode(void) {
     return -1;
   }
   if (wp_locate(g_index, &data, &len) != 0) {
-    if (g_ready) {
-      nd_surface_destroy(&g_img);
-      g_ready = 0;
-    }
     return -1;
   }
   if (nd_jpeg_size(data, len, &w, &h) != 0) {
@@ -224,18 +222,20 @@ static int wp_decode(void) {
     return -1;
   }
 
-  if (g_ready) {
+  {
+    nd_surface_t next;
+    if (nd_surface_create(&next, g_sw, g_sh) != 0) {
+      nd_surface_destroy(&out);
+      kputs("[WP] wallpaper surface allocation failed\n");
+      return -1;
+    }
+    if (out.w == g_sw && out.h == g_sh) {
+      memcpy(next.px, out.px, (UINT64)g_sw * (UINT64)g_sh * 4u);
+    } else {
+      wp_cover(&next, &out);
+    }
     nd_surface_destroy(&g_img);
-    g_ready = 0;
-  }
-  if (nd_surface_create(&g_img, g_sw, g_sh) != 0) {
-    nd_surface_destroy(&out);
-    return -1;
-  }
-  if (out.w == g_sw && out.h == g_sh) {
-    memcpy(g_img.px, out.px, (UINT64)g_sw * (UINT64)g_sh * 4u);
-  } else {
-    wp_cover(&g_img, &out);
+    g_img = next;
   }
   nd_surface_destroy(&out);
   g_ready = 1;
@@ -255,6 +255,7 @@ int nd_wallpaper_init(INT32 screen_w, INT32 screen_h) {
 }
 
 int nd_wallpaper_set(UINT32 index) {
+  UINT32 previous = g_index;
   if (index >= ND_WALLPAPER_COUNT) {
     return -1;
   }
@@ -265,7 +266,11 @@ int nd_wallpaper_set(UINT32 index) {
   if (g_sw <= 0 || g_sh <= 0) {
     return -1; /* no screen size yet: retry from nd_wallpaper_init() */
   }
-  return wp_decode();
+  if (wp_decode() != 0) {
+    g_index = previous;
+    return -1;
+  }
+  return 0;
 }
 
 static UINT32 wp_lerp(UINT32 a, UINT32 b, UINT32 t) {
@@ -286,13 +291,11 @@ void nd_wallpaper_paint(nd_surface_t *s, const nd_rect_t *area,
   nd_rect_t a = *area;
   INT32     y;
 
-  /* A generated vertical gradient. The photo pipeline (JPEG decode -> cover
-   * scale) is currently unreliable across toolchains - it decodes to a
-   * systematically wrong/dark image, which showed up as a garbled, wrong
-   * coloured desktop (the "花屏"). A gradient is always correct and clean, so
-   * it is the default background until that decoder is fixed. The area handed
-   * in is always the full desktop rect, so the gradient stays continuous
-   * across partial repaints. */
+  if (g_ready) {
+    nd_blit(s, a.x, a.y, &g_img, nd_rect(0, 0, a.w, a.h));
+    return;
+  }
+  /* Use desktop coordinates, not the damage rectangle, for the gradient. */
   if (a.h <= 1) {
     nd_fill_rect(s, a, bottom);
     return;

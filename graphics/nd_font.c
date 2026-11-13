@@ -14,8 +14,6 @@
 #include "nd_font_uni.h"
 #include "nd_lang.h"
 #include "heap.h"
-#include "mm.h"
-#include "shared_mem.h"
 #include "../fs/novusfs/novusfs.h"
 #include "../kernel/nvus_paths.h"
 
@@ -245,99 +243,6 @@ int nd_font_load_from(struct novusfs_fs *fs) {
     kputs("[FONT] /Novus/fonts/font.bin missing in system partition\n");
     return -1;
   }
-  {
-    novusfs_inode_t di;
-    kputs("[FONT] dbg ino=");
-    kputs_hex(ino);
-    kputs(" itbl=");
-    kputs_hex(fs->sb.inode_tbl_start);
-    if (novusfs_inode_read(fs, ino, &di) != 0) {
-      kputs(" inode_read=FAIL");
-    } else {
-      kputs(" mode=");
-      kputs_hex(di.mode);
-      kputs(" size=");
-      kputs_hex(di.size);
-      kputs(" blocks=");
-      kputs_hex(di.blocks);
-      kputs(" d0=");
-      kputs_hex((UINT32)di.dblock[0]);
-    }
-    {
-      UINT64 blkids[3];
-      blkids[0] = 0;
-      blkids[1] = fs->sb.inode_tbl_start;
-      blkids[2] = 162;
-      for (int i = 0; i < 3; i++) {
-        UINT64 b = blkids[i];
-        if (novusfs_read_block(fs, b, fs->scratch) == 0) {
-          UINT64 *p = (UINT64 *)fs->scratch;
-          kputs(" b");
-          kputs_hex(b);
-          kputs(":");
-          kputs_hex(p[0]);
-          kputs(" ");
-          kputs_hex(p[1]);
-        } else {
-          kputs(" rdFAIL");
-        }
-      }
-    }
-    {
-      shared_mem_t *shm = shared_mem_get();
-      UINT64 phys = shm->live_root_base + (UINT64)130 * 4096ULL + 128ULL;
-      UINT64 *p2 = (UINT64 *)phys_to_virt(phys);
-      kputs(" raw-i2(size):");
-      kputs_hex((UINT32)p2[1]);
-    }
-    {
-      shared_mem_t *shm = shared_mem_get();
-      const char *lbl[3] = {"b0", "b130", "b162"};
-      for (int j = 0; j < 3; j++) {
-        kputs(" tmp-");
-        kputs(lbl[j]);
-        kputs(":");
-        kputs_hex(shm->dbg_tmp[j * 2]);
-        kputs(" ");
-        kputs_hex(shm->dbg_tmp[j * 2 + 1]);
-        kputs(" live-");
-        kputs(lbl[j]);
-        kputs(":");
-        kputs_hex(shm->dbg_live[j * 2]);
-        kputs(" ");
-        kputs_hex(shm->dbg_live[j * 2 + 1]);
-      }
-      kputs(" route=");
-      kputs_hex(shm->dbg_route);
-    }
-    {
-      shared_mem_t *shm = shared_mem_get();
-      kputs(" tmp_addr=");
-      kputs_hex(shm->dbg_tmp_addr);
-      kputs(" fat(ndev,vlba,type)=");
-      kputs_hex(shm->dbg_fat[0]);
-      kputs(" ");
-      kputs_hex(shm->dbg_fat[1]);
-      kputs(" ");
-      kputs_hex(shm->dbg_fat[2]);
-      /* Kernel write/read self-test on the reserved live root. */
-      {
-        UINT64 phys = shm->live_root_base + (UINT64)130 * 4096ULL;
-        UINT64 *p = (UINT64 *)phys_to_virt(phys);
-        UINT64 orig = p[0];
-        p[0] = 0xCAFEBABECAFEBABELLU;
-        UINT64 rb = p[0];
-        shm->dbg_ktest = rb;
-        kputs(" ktest(orig=");
-        kputs_hex(orig);
-        kputs(",rb=");
-        kputs_hex(rb);
-        kputs(")");
-        p[0] = orig; /* restore */
-      }
-    }
-    kputs("\n");
-  }
   if (novusfs_stat(fs, ino, &size, &mode) != 0 || size == 0) {
     kputs("[FONT] stat /Novus/fonts/font.bin failed\n");
     return -1;
@@ -450,12 +355,13 @@ UINT32 nd_text_width(const char *text, UINT32 scale) {
 
 UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
   const char *p = text;
-  const char *end = text + bytes;
+  const char *end;
   UINT32      w = 0;
 
   if (text == 0 || scale == 0u) {
     return 0;
   }
+  end = text + bytes;
   while (p < end && *p != '\0') {
     UINT32 cp = nd_utf8_next(&p);
 

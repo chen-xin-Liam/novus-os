@@ -45,7 +45,7 @@
 #define NG_TITLE_H  32
 /* Drop shadow falloff around a window, in pixels. Damage for a window has
  * to cover this ring as well as the window rectangle. */
-#define NG_SHADOW_SPREAD 10
+#define NG_SHADOW_SPREAD 14
 #define NG_BORDER   1
 #define NG_PAD      10
 #define NG_ROW_H    24
@@ -224,6 +224,7 @@ struct ng_ctx {
 /* Reset the pool and bind the context to a surface. Returns NULL when the
  * surface is not drawable. */
 ng_ctx_t *ng_init(nd_surface_t *surf);
+void ng_shutdown(void);
 ng_ctx_t *ng_ctx_get(void);
 
 /* Create a widget under `parent` (NULL means the desktop root). */

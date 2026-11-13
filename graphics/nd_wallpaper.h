@@ -34,9 +34,8 @@ int         nd_wallpaper_set(UINT32 index);
  * after nd_init(); safe to call again (e.g. after a mode change). */
 int         nd_wallpaper_init(INT32 screen_w, INT32 screen_h);
 
-/* Paint the wallpaper over `area`, falling back to a flat `fallback` colour
- * while no image is decoded: no package on the medium, or a decode
- * failure. */
+/* Paint the desktop `area`, respecting the surface clip. Fall back to the
+ * theme gradient while no photo is decoded. */
 void        nd_wallpaper_paint(nd_surface_t *s, const nd_rect_t *area,
                                nd_color_t top, nd_color_t bottom);
 

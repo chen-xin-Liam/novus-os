@@ -207,6 +207,13 @@ ng_ctx_t *ng_init(nd_surface_t *surf) {
 
 ng_ctx_t *ng_ctx_get(void) { return g_ready ? &g_ctx : 0; }
 
+void ng_shutdown(void) {
+  g_ready = 0;
+  g_used = 0;
+  memset(&g_ctx, 0, sizeof(g_ctx));
+  memset(g_pool, 0, sizeof(g_pool));
+}
+
 ng_widget_t *ng_create(ng_widget_t *parent, ng_type_t type, INT32 x, INT32 y,
                        INT32 w, INT32 h) {
   ng_widget_t *t;
@@ -1014,7 +1021,7 @@ static void draw_window(ng_widget_t *w) {
   const ng_theme_t *t = &g_ctx.theme;
   nd_color_t        title_bg;
 
-  nd_shadow(s, w->abs, 14, 42);
+  nd_shadow(s, w->abs, NG_SHADOW_SPREAD, 42);
   nd_round_rect(s, w->abs, 10, t->win_bg);
 
   title_bg = (w->state & NG_ST_DRAG) != 0u ? t->win_title : t->win_title;
@@ -1155,10 +1162,10 @@ static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
     break;
   case NG_ICON_TERM:
     /* A terminal window: rounded outline with a `>` prompt and a baseline. */
-    nd_round_rect(s, nd_rect(cx - h, cy - h + 1, b, b - 2), 3, c);
-    nd_line(s, cx - h + 3, cy - 1, cx - 1, cy + h - 5, c);
-    nd_line(s, cx - 1, cy + h - 5, cx + h - 5, cy - 1, c);
-    nd_hline(s, cx - h + 3, cx + h - 5, cy + h - 2, c);
+    nd_round_frame(s, nd_rect(cx - h, cy - h + 1, b, b - 2), 3, 2, c);
+    nd_line(s, cx - h + 4, cy - 4, cx - h + 8, cy, c);
+    nd_line(s, cx - h + 8, cy, cx - h + 4, cy + 4, c);
+    nd_hline(s, cx + 1, cx + h - 4, cy + 4, c);
     break;
   case NG_ICON_CHECK:
     nd_line(s, cx - h + 2, cy, cx - 2, cy + h - 3, c);
@@ -1174,8 +1181,8 @@ static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
     break;
   case NG_ICON_DEVICES:
     /* A plug-in card: a chip outline with a contact pin above and below. */
-    nd_round_rect(s, nd_rect(cx - h, cy - h + 1, b, b - 2), 3, c);
-    nd_round_rect(s, nd_rect(cx - h + 4, cy - h + 5, b - 8, b - 12), 2, c);
+    nd_round_frame(s, nd_rect(cx - h, cy - h + 1, b, b - 2), 3, 2, c);
+    nd_round_frame(s, nd_rect(cx - h + 4, cy - h + 5, b - 8, b - 12), 2, 1, c);
     nd_hline(s, cx - 1, cx + 1, cy - h - 2, c);
     nd_hline(s, cx - 1, cx + 1, cy + h + 1, c);
     break;
@@ -1306,7 +1313,9 @@ static void draw_widget(ng_widget_t *w) {
   if ((w->flags & NG_WF_OVERLAY) != 0u) {
     return; /* drawn by the overlay pass, above the client windows */
   }
-  if (w->type != NG_DESKTOP && !rect_hits(w->abs, g_ctx.surf->clip)) {
+  if (w->type != NG_DESKTOP &&
+      !rect_hits(w->type == NG_WINDOW ? window_visual(w->abs) : w->abs,
+                 g_ctx.surf->clip)) {
     return; /* outside the damage rectangle, children included */
   }
   draw_self(w);
@@ -1343,7 +1352,9 @@ static void draw_widget_overlay(ng_widget_t *w) {
   if ((w->flags & NG_WF_VISIBLE) == 0u) {
     return;
   }
-  if (w->type != NG_DESKTOP && !rect_hits(w->abs, g_ctx.surf->clip)) {
+  if (w->type != NG_DESKTOP &&
+      !rect_hits(w->type == NG_WINDOW ? window_visual(w->abs) : w->abs,
+                 g_ctx.surf->clip)) {
     return;
   }
   draw_self(w);

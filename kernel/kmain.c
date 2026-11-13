@@ -181,6 +181,7 @@ static void storage_mount_ahci_novusfs(void) {
 }
 
 void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
+  shared_mem_kernel_init();
   serial_init();
   vga_init();
 

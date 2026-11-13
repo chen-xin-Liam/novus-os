@@ -2,7 +2,9 @@
  * Novus OS - shared memory block between the A-core (BSP) and the
  * later SMP/B-core stages (Novus OS spec 2.3, FROZEN layout).
  *
- * The block is a fixed 8 KiB reservation at physical address 0x7E000.
+ * In the kernel the block is a fixed 8 KiB reservation at physical 0x7E000.
+ * Before ExitBootServices it lives in the loader image: firmware still
+ * owns low memory and must not overwrite the handoff while staging files.
  * While the low 4 GiB is identity-mapped (true for the UEFI boot stage
  * and for the kernel's low identity map), the physical address doubles
  * as the virtual address, so code can dereference 0x7E000 directly.
@@ -159,13 +161,17 @@ _Static_assert(__builtin_offsetof(shared_mem_t, wpkg_img_base) == 0x308,
 _Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x3B0,
                "shared_mem frozen layout drift: reserved");
 
-/* Boot stage (pre-ExitBootServices): zero the block at SHARED_MEM_PHYS
+/* Boot stage (pre-ExitBootServices): zero the loader-owned handoff copy
  * and fill the frozen header fields. selfcheck_enabled is a plain
  * boolean (1 = run the A-core self-check); it is stored into
  * a_core_selfcheck_enabled using the frozen convention (0 = run,
  * non-0 = skip). CPU/memory facts are filled afterwards by
  * shared_mem_bootstage_set_cpu(). */
 void shared_mem_bootstage_init(UINT32 selfcheck_enabled);
+
+/* After ExitBootServices and .bss clearing, publish the preserved boot
+ * copy at SHARED_MEM_PHYS before any kernel consumer or AP can use it. */
+void shared_mem_kernel_init(void);
 
 /* Fill the CPU/memory facts gathered by the boot self-check. Either
  * string may be NULL; missing strings stay zero-filled. Must be called
@@ -174,8 +180,7 @@ void shared_mem_bootstage_set_cpu(const CHAR8 *vendor, const CHAR8 *brand,
                                   UINT32 cores, UINT64 usable_bytes,
                                   UINT64 ram_top_bytes);
 
-/* Identity-mapped accessor: physical 0x7E000 == virtual 0x7E000 under
- * the low-4GiB identity mapping. */
+/* Loader-owned copy during boot; fixed identity-mapped block in the kernel. */
 shared_mem_t *shared_mem_get(void);
 
 /* Spinlock over shared_mem_t.spinlock (0 = free, 1 = held).

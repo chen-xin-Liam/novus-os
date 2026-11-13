@@ -28,6 +28,7 @@
     .code64
     .globl  kernel_entry
 kernel_entry:
+    cli
     /* Switch to the kernel stack (top of kstack). */
     leaq    kstack+65536(%rip), %rsp
 
@@ -49,6 +50,7 @@ kernel_entry:
     movq    %rbx, %rcx
     movq    %r12, %rdx
     movq    %r13, %r8
+    subq    $32, %rsp           /* MS x64 caller-owned shadow space */
     call    kmain
 
     /* kmain must never return; park the BSP if it does. */

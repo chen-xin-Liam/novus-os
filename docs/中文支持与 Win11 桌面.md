@@ -20,8 +20,8 @@ apps/src/unicode_data.rs          同一份步进表，Rust 侧使用
   不随字形数变慢。
 * ASCII 仍是 5x7（6px 步进），其余码点用 Unifont 字宽：8px 半角、
   16px 全角。组合记号（Mn/Me/Cf）步进 0，画在前一个字形上。
-* 3.5 MB 点阵由 `graphics/nd_font_blob.S` 的 `incbin` 嵌入，不经过 C
-  编译器；EFI 镜像从 2.5 MB 增至约 6.4 MB，仍在 El Torito 32 MB 以内。
+* 3.5 MB 点阵放在系统镜像的 `/Novus/fonts/font.bin`，内核从已挂载的
+  Live 镜像或系统分区加载；无字体时保留内置 ASCII 与缺字方框。
 * 未分配码点与私用区没有字形，画空心方框；宽度按 East Asian Width
   （全角 16，其余 8）保留排版。混排时整行取较高单元格、底边对齐。
 
@@ -39,7 +39,7 @@ python3 tools/fontgen/fontgen.py --bmp unifont.hex --upper unifont_upper.hex
 | `nd_utf8_encode()` | 1–4 字节编码，拒绝代理区与超范围 |
 | `nd_char_adv(cp, scale)` | 控制/组合 0、ASCII `6*scale`、其余 8/16 × scale |
 | `nd_glyph_find(cp, &wide)` | 码点 → 32 字节点阵，附带 8/16 字宽 |
-| `nd_text_width()` / `nd_text_width_n()` | 整串 / 前 N 字节的绘制宽度 |
+| `nd_text_width()` / `nd_text_width_n()` | 整串 / 前 N 字节的单元格步进总和，含末尾间距；`AB` 为 12px，2x 为 24px |
 | `nd_text_height()` | 该行需要的单元格高度（有正宽非 ASCII 时为 16） |
 | `nd_text_limit(..., max_px, ...)` | 按**像素**裁剪，只在码点边界断开 |
 
@@ -106,6 +106,7 @@ python3 tools/fontgen/fontgen.py --bmp unifont.hex --upper unifont_upper.hex
 python3 tools/imegen/imegen.py --gen # 字典改动后重生成
 make                                  # 生成物已提交，普通构建不需要字体
 scripts/wm-churn.sh 4G 20             # 应用启停压力（含窗口装饰点击）
+bash scripts/display-selftest.sh      # 宿主 C 编译器：交接、碎片堆、度量、图标、局部重绘
 ```
 
 验收点：桌面与三个应用全中文；开始菜单浮于窗口之上且点击优先；文本框键入
@@ -114,6 +115,13 @@ scripts/wm-churn.sh 4G 20             # 应用启停压力（含窗口装饰点�
 完整 Unicode 的验收：终端里 `Ctrl+Shift+U 0410 Enter` 出现西里尔 `А`，
 `Ctrl+Space` 后输入 `nihao` 候选窗出现在窗口内、空格上屏"鸟"，两者与
 ASCII 混排时光标与换行按像素对齐。
+
+启动交接先保存在 EFI 镜像的 `.data`，退出固件、清零 `.bss` 后再复制到
+固定的 `0x7E000` 共享块，防止固件分配覆盖 Live root / 壁纸包地址。
+画布、字模等多页堆缓冲使用连续物理页；直接映射不能把独立页面拼成连续缓冲。
+显示自检退出时释放 GUI 上下文、清空合成输入；窗口损伤及裁剪与实际绘制
+共用 14px 阴影范围，逐扫描线、拖动及隐藏重绘与完整重绘逐像素比较。
+壁纸包成功解码后绘制照片，缺包或失败时使用主题渐变。
 
 ## 6. M10：Novus Fluent 与深色主题
 

@@ -2,7 +2,7 @@
  * Novus OS - page-granular kernel heap (README 3.1 memory partition 4).
  *
  * M1 keeps the heap deliberately simple: kmalloc() rounds the request up
- * to whole 4 KiB pages and hands out a run of fresh pages from the VMM;
+ * to whole 4 KiB pages and maps a physically contiguous PMM run;
  * kfree() releases the run again. No sub-page carving yet, so every
  * allocation consumes a whole number of pages.
  *
@@ -17,7 +17,6 @@
 #include "kernel.h"
 #include "heap.h"
 #include "mm.h"
-#include "vmm.h"
 #include "pmm.h"
 
 #define HEAP_MAX_ALLOCS 256
@@ -42,6 +41,10 @@ void *kmalloc(UINT64 size) {
   if (size == 0) {
     return 0;
   }
+  if (size > 0xFFFFFFFFULL * MM_PAGE_SIZE) {
+    kputs("[HEAP] warning: allocation size too large\n");
+    return 0;
+  }
   pages = (size + MM_PAGE_SIZE - 1) / MM_PAGE_SIZE; /* round up to pages */
 
   for (i = 0; i < HEAP_MAX_ALLOCS; i++) {
@@ -55,22 +58,15 @@ void *kmalloc(UINT64 size) {
     return 0;
   }
 
-  first = vmm_alloc_page();
+  first = pmm_alloc_contig((UINT32)pages);
   if (first == 0) {
     kputs("[HEAP] warning: out of memory, kmalloc failed\n");
     return 0;
   }
-  for (i = 1; i < pages; i++) {
-    if (vmm_alloc_page() == 0) {
-      /* Roll back the pages taken so far. */
-      UINT64 j;
-      for (j = 0; j < i; j++) {
-        vmm_free_page((UINT8 *)first + j * MM_PAGE_SIZE);
-      }
-      kputs("[HEAP] warning: out of memory, kmalloc failed\n");
-      return 0;
-    }
-  }
+  /* The physmap preserves physical offsets; separately allocated pages
+   * cannot form a linear buffer when the PMM contains holes. */
+  first = phys_to_virt((UINT64)(UINTN)first);
+  memset(first, 0, pages * MM_PAGE_SIZE);
 
   rec->ptr = first;
   rec->pages = pages;
@@ -94,9 +90,7 @@ void kfree(void *ptr) {
     kputs("[HEAP] warning: kfree of unknown pointer\n");
     return;
   }
-  for (i = 0; i < rec->pages; i++) {
-    vmm_free_page((UINT8 *)rec->ptr + i * MM_PAGE_SIZE);
-  }
+  pmm_free_contig((void *)(UINTN)virt_to_phys(rec->ptr), (UINT32)rec->pages);
   rec->ptr = 0;
   rec->pages = 0;
 }

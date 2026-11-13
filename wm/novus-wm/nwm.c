@@ -435,6 +435,8 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   if (w->state == 1u) {
     return; /* minimized */
   }
+  nd_surface_set_clip(s, clip);
+  nd_shadow(s, w->rect, NWM_SHADOW, 42);
   vis = nd_rect_intersect(w->rect, clip);
   if (nd_rect_empty(vis)) {
     return;
@@ -442,7 +444,6 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   t = &ng_ctx_get()->theme;
   nd_surface_set_clip(s, vis);
 
-  nd_shadow(s, w->rect, NWM_SHADOW, 42);
   save_corners(s, w->rect);
   nd_round_rect(s, w->rect, 10, t->win_bg);
 
