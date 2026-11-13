@@ -29,8 +29,8 @@ extern const nd_uni_range_t g_uni_width[];
 
 /* Glyph bitmap data. Historically incbin'd into NOVUS.EFI by
  * nd_font_blob.S; now loaded at boot from the system partition (/font.bin)
- * into a kernel buffer and pointed at here. NULL until loaded, in which
- * case nd_glyph_find() returns NULL and callers fall back to ASCII. */
+ * into a kernel buffer and pointed at here. Until loaded, nd_glyph_find()
+ * searches the embedded emergency UI subset instead. */
 struct novusfs_fs;
 void nd_font_set_data(const UINT8 *data);
 int  nd_font_load_from(struct novusfs_fs *fs);

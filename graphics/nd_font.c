@@ -16,6 +16,7 @@
 #include "heap.h"
 #include "../fs/novusfs/novusfs.h"
 #include "../kernel/nvus_paths.h"
+#include <nd_font_fallback.h>
 
 static const UINT8 g_font[95][ND_GLYPH_H] = {
     /* 32 ' ' */ {0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00},
@@ -235,8 +236,12 @@ int nd_font_load_from(struct novusfs_fs *fs) {
   UINT8  *buf;
   INT64  n;
 
-  if (fs == NULL || g_font_data != NULL) {
+  if (g_font_data != NULL) {
     return 0;
+  }
+  if (fs == NULL) {
+    kputs("[FONT] no system filesystem: embedded UI glyphs active\n");
+    return -1;
   }
   ino = novusfs_lookup_path(fs, NOVUSFS_ROOT_INO, NVUS_FONT_FILE);
   if (ino == 0) {
@@ -245,6 +250,10 @@ int nd_font_load_from(struct novusfs_fs *fs) {
   }
   if (novusfs_stat(fs, ino, &size, &mode) != 0 || size == 0) {
     kputs("[FONT] stat /Novus/fonts/font.bin failed\n");
+    return -1;
+  }
+  if (size != ND_FONT_DATA_SIZE) {
+    kputs("[FONT] invalid font size: using embedded UI glyphs\n");
     return -1;
   }
   buf = (UINT8 *)kmalloc(size);
@@ -268,9 +277,17 @@ int nd_font_load_from(struct novusfs_fs *fs) {
 const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide) {
   UINT16       slot;
 
-  /* Font not yet loaded from the system partition: non-ASCII glyphs fall
-   * back to the caller's "missing" path; ASCII keeps its embedded 5x7 face. */
   if (g_font_data == NULL) {
+    UINT32 lo = 0, hi = sizeof(g_fallback_font) / sizeof(g_fallback_font[0]);
+    while (lo < hi) {
+      UINT32 mid = lo + (hi - lo) / 2;
+      if (cp < g_fallback_font[mid].cp) hi = mid;
+      else if (cp > g_fallback_font[mid].cp) lo = mid + 1;
+      else {
+        if (wide != 0) *wide = g_fallback_font[mid].wide;
+        return g_fallback_font[mid].bits;
+      }
+    }
     return 0;
   }
   UINT32       byte;

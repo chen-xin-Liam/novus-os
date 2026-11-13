@@ -28,6 +28,9 @@ void nwm_tick(void);
  * and checks window state, z-order, focus and error paths. */
 int nwm_selftest(void);
 
+/* Restore, raise and focus the topmost window belonging to a running app. */
+int nwm_activate_owner(UINT64 owner);
+
 /* Build a ring-3 client (a hand-assembled NUC program) that talks to the
  * WM over IPC: create a window, then walk it across the desktop and
  * repaint when the WM sends it input. Returns 0 when the task is running. */

@@ -700,7 +700,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit(2);
     };
     let Some(mut win) = wm::Win::create(wm_port, 40, 396, CW as i32 + 2,
-                                        CH as i32 + wm::TITLE_H, "文件管理器")
+                                        CH as i32 + wm::FRAME_H, "文件管理器")
     else {
         sys::exit(3);
     };

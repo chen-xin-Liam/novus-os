@@ -50,9 +50,9 @@ pub const MAX_TEXTS: u16 = 160;
 pub const CREATE_MODAL: u16 = 0x0001;
 
 /// Height of the title bar the WM draws above the client area. A window's
-/// `h` passed to create() must be client height plus this, or the bottom
-/// rows of the content are cut off.
+/// `h` passed to create() must also include the one-pixel bottom border.
 pub const TITLE_H: i32 = 32;
+pub const FRAME_H: i32 = TITLE_H + 1;
 
 pub const TITLE_MAX: usize = 24;
 pub const TEXT_MAX: usize = 96;
@@ -162,12 +162,12 @@ pub struct Win {
 /// Send, retrying while the WM's queue is full. A repaint is a burst of
 /// messages; without the retry a burst longer than the queue would leave
 /// the frame half drawn.
-fn send(port: u64, ty: u16, flags: u16, payload: &[u8]) {
+fn send(port: u64, ty: u16, flags: u16, payload: &[u8]) -> i64 {
     loop {
         let rc = ipc::send(port, ty, flags, payload);
 
         if rc != ipc::EBUSY {
-            return;
+            return rc;
         }
         crate::sys::yield_now();
     }
@@ -218,7 +218,7 @@ impl Win {
             title: copy_title(title),
         };
 
-        if ipc::send(port, REQ_CREATE, ipc::F_SYNC, ipc::bytes_of(&c)) != 0 {
+        if send(port, REQ_CREATE, ipc::F_SYNC, ipc::bytes_of(&c)) != 0 {
             return None;
         }
         loop {

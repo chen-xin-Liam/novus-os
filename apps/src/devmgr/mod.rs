@@ -51,7 +51,7 @@ pub struct App {
 
 impl App {
     pub fn new(wm_port: u64, sys_port: u64) -> Option<App> {
-        let main = wm::Win::create(wm_port, MAIN_X, MAIN_Y, CW + 2, CH + wm::TITLE_H,
+        let main = wm::Win::create(wm_port, MAIN_X, MAIN_Y, CW + 2, CH + wm::FRAME_H,
                                    ui::l("设备管理器", "Device Manager"))?;
         ui::init(sys_port);
         let mut app = App {
@@ -138,7 +138,7 @@ impl App {
                 PROP_X,
                 PROP_Y,
                 PROP_CW + 2,
-                PROP_CH + wm::TITLE_H,
+                PROP_CH + wm::FRAME_H,
                 ui::l("设备属性", "Device Properties"),
                 wm::CREATE_MODAL,
             ) {

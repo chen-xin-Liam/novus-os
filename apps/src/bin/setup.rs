@@ -681,7 +681,7 @@ pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] setup wizard up\n");
     let Some(wm_port) = ipc::lookup(wm::PORT_NAME) else { sys::exit(1) };
     let Some(win) = wm::Win::create(wm_port, 61, 68, (CW + 2) as i32,
-                                    CH as i32 + wm::TITLE_H, "安装 Novus OS")
+                                    CH as i32 + wm::FRAME_H, "安装 Novus OS")
     else { sys::exit(2) };
 
     let sys_port = ipc::lookup(sinfo::PORT_NAME).unwrap_or(0);
