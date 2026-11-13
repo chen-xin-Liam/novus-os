@@ -186,45 +186,21 @@ void pmm_init(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 /* ------------------------------------------------------------------ */
 
 void *pmm_alloc_contig(UINT32 count) {
-  UINT32 attempt;
+  INT64 first;
+  UINT32 i;
 
-  if (count == 0u) {
+  if (!pmm_ready || count == 0u || count > pmm_free) {
     return NULL;
   }
-  if (count == 1u) {
-    return pmm_alloc_page();
+  first = novus_rs_bitmap_find_first_clear_run(pmm_bitmap, pmm_bits, count);
+  if (first < 0) {
+    return NULL;
   }
-  for (attempt = 0; attempt < 256u; attempt++) {
-    UINT64 first = (UINT64)(UINTN)pmm_alloc_page();
-    UINT32 i;
-    int    ok = 1;
-
-    if (first == 0u) {
-      return NULL;
-    }
-    for (i = 1; i < count; i++) {
-      UINT64 next = (UINT64)(UINTN)pmm_alloc_page();
-
-      if (next != first + (UINT64)i * PMM_PAGE_SIZE) {
-        if (next != 0u) {
-          pmm_free_page((void *)(UINTN)next);
-        }
-        ok = 0;
-        break;
-      }
-    }
-    if (ok) {
-      return (void *)(UINTN)first;
-    }
-    {
-      UINT32 j;
-
-      for (j = 0; j < i; j++) {
-        pmm_free_page((void *)(UINTN)(first + (UINT64)j * PMM_PAGE_SIZE));
-      }
-    }
+  for (i = 0; i < count; i++) {
+    novus_rs_bitmap_set(pmm_bitmap, (UINT64)first + i);
   }
-  return NULL;
+  pmm_free -= count;
+  return (void *)(UINTN)((UINT64)first * PMM_PAGE_SIZE);
 }
 
 void pmm_free_contig(void *firstv, UINT32 count) {

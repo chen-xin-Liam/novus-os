@@ -150,9 +150,13 @@ void nd_selftest(void) {
   /* text: a glyph must light pixels, and advance by 6 per character */
   nd_clear(&s, ND_RGB(0, 0, 0));
   nd_text(&s, 10, 10, "I", ND_RGB(255, 255, 255), 1);
-  CHECK(nd_text_width("AB", 1) == 11u, "text width");
+  CHECK(nd_text_width("AB", 1) == 12u, "text width");
   CHECK(nd_font_height(1) == 7u, "font height");
-  CHECK(nd_text_width("AB", 2) == 22u, "text width 2x");
+  CHECK(nd_text_width("AB", 2) == 24u, "text width 2x");
+  CHECK(nd_text_width_n("AB", 2, 1) == nd_text_width("AB", 1),
+        "text range width");
+  CHECK(nd_text_width("A\xE4\xB8\xAD", 1) == 22u, "mixed text width");
+  CHECK(nd_text_height("A\xE4\xB8\xAD", 1) == 16u, "mixed text height");
   {
     UINT32 lit = 0;
     INT32  y;
@@ -210,6 +214,7 @@ void nd_selftest(void) {
   ctx = ng_init(&s);
   if (ctx == 0) {
     CHECK(0, "gui init");
+    ng_shutdown();
     nd_surface_destroy(&s);
     kputs("[ND] selftest FAIL\n");
     return;
@@ -326,6 +331,12 @@ void nd_selftest(void) {
   send_key(ND_KEY_TAB);
   CHECK(ng_focus_get() == edit, "tab order");
 
+  ng_shutdown();
+  CHECK(ng_ctx_get() == 0, "selftest context released");
+  {
+    nd_event_t ev;
+    while (nd_input_pop(&ev)) {}
+  }
   nd_surface_destroy(&s);
 
   kputs("[ND] selftest: ");
@@ -338,6 +349,7 @@ void nd_selftest(void) {
 
 /* ---- demo desktop ----------------------------------------------------- */
 
+#ifndef ND_SELFTEST_ONLY
 static int          g_demo_ready;
 static char         g_status[80];
 static char         g_slider_text[24];
@@ -1092,6 +1104,8 @@ void nd_demo_tick(void) {
     }
   }
 }
+
+#endif /* !ND_SELFTEST_ONLY */
 
 #else /* !CONFIG_NOVUS_GUI */
 

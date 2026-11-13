@@ -16,7 +16,11 @@
 use novus_apps::{ipc, lang, sinfo, sys, ui, wm};
 
 const CW: i16 = 720;
-const CH: i16 = 560;
+const CH: i16 = 584;
+const LANGUAGE_Y: i16 = 108;
+const THEME_Y: i16 = 182;
+const ACCENT_Y: i16 = 264;
+const WALLPAPER_Y: i16 = 402;
 
 const NAV_W: i16 = 168;
 const CONTENT_X: i16 = 188;
@@ -234,7 +238,7 @@ fn page_look(w: &mut wm::Win, s: &State) {
     let langs = ["中文", "English"];
     for i in 0..2usize {
         let x = CONTENT_X + 14 + i as i16 * 150;
-        let y = 100;
+        let y = LANGUAGE_Y;
         let sel = (crate::lang::get() == 1) == (i == 1);
         let label = langs[i];
         let tw = ui::width(label);
@@ -256,7 +260,7 @@ fn page_look(w: &mut wm::Win, s: &State) {
     let modes = ["浅色", "深色", "跟随时间"];
     for i in 0..3usize {
         let x = CONTENT_X + 14 + i as i16 * 154;
-        let y = 176;
+        let y = THEME_Y;
         let sel = s.mode == i as u32;
         let label = modes[i];
         let tw = ui::width(label);
@@ -271,10 +275,10 @@ fn page_look(w: &mut wm::Win, s: &State) {
         }
     }
 
-    card(w, CONTENT_X, 230, CONTENT_W, 110, "颜色");
+    card(w, CONTENT_X, 230, CONTENT_W, 126, "颜色");
     for (i, c) in PRESETS.iter().enumerate() {
         let x = CONTENT_X + 14 + (i % 4) as i16 * 62;
-        let y = 258 + (i / 4) as i16 * 38;
+        let y = ACCENT_Y + (i / 4) as i16 * 38;
 
         w.round_fill(x, y, 44, 26, 5, *c);
         if *c == s.accent {
@@ -283,12 +287,12 @@ fn page_look(w: &mut wm::Win, s: &State) {
     }
     let idx = preset_index(s.accent);
     w.text(CONTENT_X + 14 + 4 * 62 + 6, 264, ui::text(), PRESET_NAMES[idx]);
-    w.text(CONTENT_X + 14, 320, ui::dim(), "强调色用于按钮、选中条与焦点环");
+    w.text(CONTENT_X + 14, 338, ui::dim(), "强调色用于按钮、选中条与焦点环");
 
-    card(w, CONTENT_X, 350, CONTENT_W, 134, "桌面背景");
+    card(w, CONTENT_X, 368, CONTENT_W, 152, "桌面背景");
     for (i, p) in PAPERS.iter().enumerate() {
         let x = CONTENT_X + 14 + (i % 4) as i16 * 124;
-        let y = 376 + (i / 4) as i16 * 58;
+        let y = WALLPAPER_Y + (i / 4) as i16 * 58;
 
         w.fill(x, y, 112, 34, p.0);
         w.fill(x, y + 17, 112, 17, p.1);
@@ -383,7 +387,7 @@ fn draw(w: &mut wm::Win, s: &State) {
         Page::Apps => 2,
         Page::About => 3,
     }]);
-    w.text(CONTENT_X, 48, ui::dim(), PAGE_SUB[match s.page {
+    w.text(CONTENT_X, 60, ui::dim(), PAGE_SUB[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
@@ -608,7 +612,7 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             /* Language buttons. */
             for i in 0..2usize {
                 let px = CONTENT_X + 14 + i as i16 * 150;
-                let py = 100;
+                let py = LANGUAGE_Y;
 
                 if x >= px as i32 && x < (px + 136) as i32
                     && y >= py as i32 && y < (py + 28) as i32
@@ -623,7 +627,7 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             /* Theme mode buttons. */
             for i in 0..3usize {
                 let px = CONTENT_X + 14 + i as i16 * 154;
-                let py = 176;
+                let py = THEME_Y;
 
                 if x >= px as i32 && x < (px + 140) as i32
                     && y >= py as i32 && y < (py + 30) as i32
@@ -645,7 +649,7 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             /* Accent swatches. */
             for (i, c) in PRESETS.iter().enumerate() {
                 let px = CONTENT_X + 14 + (i % 4) as i16 * 62;
-                let py = 258 + (i / 4) as i16 * 38;
+                let py = ACCENT_Y + (i / 4) as i16 * 38;
 
                 if x >= (px - 2) as i32 && x < (px + 46) as i32
                     && y >= (py - 2) as i32 && y < (py + 28) as i32
@@ -661,7 +665,7 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             /* Wallpaper previews. */
             for i in 0..PAPERS.len() {
                 let px = CONTENT_X + 14 + (i % 4) as i16 * 124;
-                let py = 376 + (i / 4) as i16 * 58;
+                let py = WALLPAPER_Y + (i / 4) as i16 * 58;
 
                 if x >= px as i32 && x < (px + 112) as i32
                     && y >= py as i32 && y < (py + 34) as i32

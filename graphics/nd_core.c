@@ -653,7 +653,7 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
     UINT32 adv = nd_char_adv(cp, scale);
     INT32  gx = cx;
 
-    if (max_px != 0u && (UINT32)(cx - x) + adv > max_px + 1u) {
+    if (max_px != 0u && (UINT32)(cx - x) + adv > max_px) {
       break; /* clip at a character boundary, never mid-glyph */
     }
     if (cp < 0x20u) {

@@ -10,9 +10,9 @@
 /* Reset the allocation accounting table and print the readiness banner. */
 void heap_init(void);
 
-/* Allocate ceil(size / 4 KiB) whole zeroed pages; the physical pages are
- * NOT required to be contiguous. Returns NULL on failure (table full or
- * PMM exhausted). */
+/* Allocate ceil(size / 4 KiB) whole zeroed pages. The physmap-backed buffer
+ * requires a physically contiguous run. Returns NULL when no run is
+ * available or the allocation table is full. */
 void *kmalloc(UINT64 size);
 
 /* Release a block obtained from kmalloc(), page by page. */

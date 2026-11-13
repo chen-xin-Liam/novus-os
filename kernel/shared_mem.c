@@ -2,22 +2,25 @@
  * Novus OS - shared memory block implementation (spec 2.3, frozen layout).
  *
  * Everything below runs both in the UEFI boot stage (pre-ExitBootServices)
- * and in the kernel stage: the block lives in conventional memory at
- * physical 0x7E000 and is reached through the identity mapping.
+ * and in the kernel stage. Boot uses a loader-owned copy; the kernel
+ * publishes it at physical 0x7E000 through the identity mapping.
  */
 
 #include "kernel.h"
 #include "shared_mem.h"
 
-/* Low-4GiB identity mapping: the fixed physical reservation is used
- * directly as a virtual address. */
-static shared_mem_t *const g_shm = (shared_mem_t *)(UINTN)SHARED_MEM_PHYS;
+/* Firmware may allocate the low handoff pages before ExitBootServices.
+ * Keep the boot copy inside the loaded image, including across .bss reset. */
+static shared_mem_t g_boot_shm __attribute__((section(".data")));
+static shared_mem_t *g_shm __attribute__((section(".data"))) =
+    (shared_mem_t *)(UINTN)SHARED_MEM_PHYS;
 
 shared_mem_t *shared_mem_get(void) {
   return g_shm;
 }
 
 void shared_mem_bootstage_init(UINT32 selfcheck_enabled) {
+  g_shm = &g_boot_shm;
   memset(g_shm, 0, (UINTN)sizeof(*g_shm));
   g_shm->magic = SHARED_MEM_MAGIC;
   g_shm->version = SHARED_MEM_VERSION;
@@ -25,6 +28,13 @@ void shared_mem_bootstage_init(UINT32 selfcheck_enabled) {
    * field uses the inverted convention 0 = run, non-0 = skip. */
   g_shm->a_core_selfcheck_enabled = (selfcheck_enabled != 0) ? 0u : 1u;
   g_shm->ap_online_count = 1;
+}
+
+void shared_mem_kernel_init(void) {
+  shared_mem_t *dst = (shared_mem_t *)(UINTN)SHARED_MEM_PHYS;
+
+  memcpy(dst, &g_boot_shm, sizeof(*dst));
+  g_shm = dst;
 }
 
 /* Copy src into dst (capacity cap, always NUL-terminated); src may be

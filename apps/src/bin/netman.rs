@@ -11,7 +11,8 @@
 use novus_apps::{ipc, sinfo, sys, ui, wm};
 
 const CW: i16 = 520;
-const CH: i16 = 494;
+const CH: i16 = 524;
+const TEST_BUTTON_Y: i16 = 470;
 const CARD: u32 = 0x00FAFAFC;
 
 fn ip_str(ip: u32, buf: &mut [u8; 16]) -> &str {
@@ -115,7 +116,7 @@ fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
         kv(w, 158, "设备数", line.str());
     }
 
-    card(w, 188, 110, "地址");
+    card(w, 188, 112, "地址");
     kv(w, 218, "IP", ip_str(n.ip, &mut b));
     kv(w, 240, "掩码", ip_str(n.mask, &mut m));
     kv(w, 262, "网关", ip_str(n.gw, &mut g));
@@ -126,13 +127,13 @@ fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
         _ => "未启动",
     });
 
-    card(w, 306, 58, "计数与测试");
+    card(w, 306, 80, "计数与测试");
     {
         let mut line = ui::Buf::new();
 
         line.s("收 ").num(n.rx_pkts as u32).s("  发 ").num(n.tx_pkts as u32)
             .s("  错 ").num((n.rx_err + n.tx_err) as u32);
-        w.text(24, 330, ui::dim(), line.str());
+        w.text(24, 336, ui::dim(), line.str());
     }
     {
         let mut line = ui::Buf::new();
@@ -152,11 +153,11 @@ fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
                 line.s("未测试");
             }
         }
-        w.text(24, 346, ui::dim(), line.str());
+        w.text(24, 356, ui::dim(), line.str());
     }
 
-    card(w, 372, 60, "联网检测");
-    kv(w, 398, "结果", ncsi_name(n.ncsi));
+    card(w, 394, 68, "联网检测");
+    kv(w, 424, "结果", ncsi_name(n.ncsi));
     {
         let mut line = ui::Buf::new();
 
@@ -174,23 +175,23 @@ fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
                 line.s("ncsi.novus-os.ryzn.pro/connecttest.txt");
             }
         }
-        w.text(24, 416, ui::dim(), line.str());
+        w.text(24, 444, ui::dim(), line.str());
     }
 
     /* Buttons. */
-    w.fill(24, 440, 110, 26, ui::row_sel());
-    w.frame(24, 440, 110, 26, ui::accent());
-    w.text(34, 446, ui::text(), "Ping 网关");
+    w.fill(24, TEST_BUTTON_Y, 110, 26, ui::row_sel());
+    w.frame(24, TEST_BUTTON_Y, 110, 26, ui::accent());
+    w.text(34, TEST_BUTTON_Y + 6, ui::text(), "Ping 网关");
 
-    w.fill(146, 440, 130, 26, ui::row_sel());
-    w.frame(146, 440, 130, 26, ui::accent());
-    w.text(156, 446, ui::text(), "TCP 回显测试");
+    w.fill(146, TEST_BUTTON_Y, 130, 26, ui::row_sel());
+    w.frame(146, TEST_BUTTON_Y, 130, 26, ui::accent());
+    w.text(156, TEST_BUTTON_Y + 6, ui::text(), "TCP 回显测试");
 
-    w.fill(288, 440, 110, 26, ui::row_sel());
-    w.frame(288, 440, 110, 26, ui::accent());
-    w.text(298, 446, ui::text(), "NCSI 检测");
+    w.fill(288, TEST_BUTTON_Y, 110, 26, ui::row_sel());
+    w.frame(288, TEST_BUTTON_Y, 110, 26, ui::accent());
+    w.text(298, TEST_BUTTON_Y + 6, ui::text(), "NCSI 检测");
 
-    w.text(24, 474, ui::dim(), if note.is_empty() { "ncsi.novus-os.ryzn.pro" } else { note });
+    w.text(24, TEST_BUTTON_Y + 34, ui::dim(), if note.is_empty() { "ncsi.novus-os.ryzn.pro" } else { note });
 }
 
 /* Network state and test requests go through the named sysinfo IPC service;
@@ -236,15 +237,15 @@ pub extern "C" fn _start() -> ! {
                     sys::exit(0);
                 }
                 wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
-                    if m.x >= 24 && m.x < 134 && m.y >= 440 && m.y < 466 {
+                    if m.x >= 24 && m.x < 134 && m.y >= TEST_BUTTON_Y as i32 && m.y < (TEST_BUTTON_Y + 26) as i32 {
                         let gw = n.gw;
                         let _ = sinfo::ping(sys_port, gw);
                         note = "已发出 ping";
-                    } else if m.x >= 146 && m.x < 276 && m.y >= 440 && m.y < 466 {
+                    } else if m.x >= 146 && m.x < 276 && m.y >= TEST_BUTTON_Y as i32 && m.y < (TEST_BUTTON_Y + 26) as i32 {
                         let gw = n.gw;
                         let _ = sinfo::tcp_test(sys_port, gw, 9000);
                         note = "连接 10.0.2.2:9000";
-                    } else if m.x >= 288 && m.x < 398 && m.y >= 440 && m.y < 466 {
+                    } else if m.x >= 288 && m.x < 398 && m.y >= TEST_BUTTON_Y as i32 && m.y < (TEST_BUTTON_Y + 26) as i32 {
                         let _ = sinfo::ncsi(sys_port);
                         note = "NCSI 检测中…";
                     }
