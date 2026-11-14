@@ -165,3 +165,17 @@ pub fn update_defer(uuid: [u8; 8]) -> i64 {
     let req = update_req(UPDATE_OP_DEFER, uuid);
     call(25, &req as *const UpdateReq as u64, 0, 0, 0)
 }
+
+/* ---- SYS_CONSOLE: serial console I/O for the no-graphics shell ---- */
+
+/// Write raw bytes to the serial console (COM1). `SYS_WRITE` is a prefixed
+/// kernel log line, so the shell uses this for its stdout instead.
+pub fn console_write(bytes: &[u8]) -> i64 {
+    call(27, 0, bytes.as_ptr() as u64, bytes.len() as u64, 0)
+}
+
+/// Drain pending serial input into `buf`, non-blocking. Returns the number
+/// of bytes read (0 when the RX queue is empty).
+pub fn console_read(buf: &mut [u8]) -> i64 {
+    call(27, 1, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
+}

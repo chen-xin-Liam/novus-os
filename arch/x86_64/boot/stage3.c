@@ -1633,6 +1633,7 @@ static void menu_show(void) {
   say_line(L"   2  Load and verify signed modules (NKM)");
   say_line(L"   3  Install Novus (graphical wizard)");
   say_line(L"   4  Continue into the kernel");
+  say_line(L"   5  Continue into the kernel (no desktop, shell only)");
   say_line(L"");
   say(L"  choice [4]: ");
 }
@@ -1701,6 +1702,11 @@ static void menu_run(void) {
 #else
     say_line(L"[MENU] installer not built in");
 #endif
+    break;
+  case L'5':
+    say_line(L"5");
+    say_line(L"[MENU] booting the kernel without the desktop");
+    shared_mem_get()->boot_mode = SHM_BOOT_MODE_NO_DESKTOP;
     break;
   default:
     break;

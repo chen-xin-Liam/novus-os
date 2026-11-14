@@ -49,6 +49,9 @@
  * when the operator (or the ESP marker file) asked for an install. */
 #define SHM_BOOT_MODE_LIVE    0
 #define SHM_BOOT_MODE_INSTALL 1
+/* M11: the live menu's "no desktop" choice - the kernel skips the graphical
+ * boot menu and launches the shell terminal directly. */
+#define SHM_BOOT_MODE_NO_DESKTOP 2
 
 /* M3: module-loading outcome. Modules are verified in the boot stage
  * too, because they are read off the ESP with the firmware's FAT driver

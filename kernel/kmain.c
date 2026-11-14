@@ -15,6 +15,7 @@
 #include "kernel.h"
 #include "vga.h"
 #include "serial.h"
+#include "irq.h"
 #include "shared_mem.h"
 #include "pmm.h"
 #include "mm.h"
@@ -43,6 +44,7 @@
 #include "gpt.h"
 #include "power.h"
 #include "session.h"
+#include "boot_menu.h"
 #include "nksym.h"
 #include "nkm.h"
 #include "novu_verify.h"
@@ -69,8 +71,13 @@
 
 /* Unified output entry: mirror text to both VGA and COM1. */
 void kputs(const char *s) {
+  /* Reentrant: the timer ISR (and other interrupt handlers) also call kputs
+   * to mirror to the UART, whose byte-wise writes are not concurrency-safe.
+   * Serialize the whole write so two callers cannot interleave on COM1. */
+  UINT64 flags = irq_save();
   vga_puts(s);
   serial_puts(s);
+  irq_restore(flags);
 }
 
 void kputs_hex(UINT64 v) {
@@ -498,11 +505,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   (void)pe_selftest();
 #endif
 
-  /* M5: paint the demo desktop last, so the display shows the finished
-   * scene instead of being overwritten by later boot output. The desktop
-   * is composed off-screen and presented in one go, which is also the
-   * moment the boot splash leaves the screen. */
-#if CONFIG_NOVUS_DISPLAY
+  /* M5: the boot splash reaches its final stage here. The desktop is painted
+   * after the boot menu resolves; when there is no window manager to host the
+   * menu (display only), paint it straight away. */
+#if CONFIG_NOVUS_DISPLAY && !CONFIG_NOVUS_WM
   nd_boot_stage(99, "绘制桌面");
   nd_demo_init();
 #endif
@@ -511,33 +517,79 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * shell through nd_demo_dispatch/nd_demo_paint), then a ring-3 client
    * is started that asks it for a window over IPC. */
 #if CONFIG_NOVUS_WM && CONFIG_NOVUS_DISPLAY
-  nwm_init();
-  /* M8: the sysinfo service and the three built-in applications. The
-   * apps are Rust programs embedded in this image (kernel/apps.c); the
-   * launcher buttons on the shell's taskbar start the same three later,
-   * which is why apps_launch() refuses a second copy. */
-  sysinfo_init();
   {
-    int install_mode = (shared_mem_get() != NULL &&
-                        shared_mem_get()->boot_mode == SHM_BOOT_MODE_INSTALL);
+    /* The "no desktop" boot option (stage3 text menu option 5) wants a pure
+     * text shell with no graphics at all: skip the window manager, the desktop,
+     * the graphical boot menu and the splash. nsh detects the absent WM port
+     * and runs a serial REPL over COM1. */
+    int no_graphics = (shared_mem_get() != NULL &&
+                       shared_mem_get()->boot_mode == SHM_BOOT_MODE_NO_DESKTOP);
 
-    /* The installer is the only session in install mode; on a live medium
-     * session_init() starts the desktop itself and there is no login
-     * window; an installed system still asks for an account. */
-    if (!install_mode) {
-      session_init();
-    }
-    /* M10: bring up PCI and the network stack before the applications, so
-     * the network app has a link to show and DHCP is already running. */
-    (void)net_init();
-    /* The network controllers only exist now; refresh the device table so
-     * the device manager shows the adapter that was just probed. */
-    devtab_refresh();
-    if (install_mode) {
-      kputs("[BOOT] install mode: starting the graphical installer\n");
-      (void)apps_launch_name("setup");
-    } else if (!session_live()) {
-      (void)apps_launch_name("session");
+    if (no_graphics) {
+      kputs("[BOOT] no-graphics mode: serial shell, window manager not started\n");
+      /* These do not need the window manager; keep them up so the shell's
+       * device/update commands and the update service behave as usual. */
+      (void)net_init();
+      devtab_refresh();
+      (void)apps_launch_name("nsh");
+    } else {
+      nwm_init();
+      /* M8: the sysinfo service and the three built-in applications. The
+       * apps are Rust programs embedded in this image (kernel/apps.c); the
+       * launcher buttons on the shell's taskbar start the same three later,
+       * which is why apps_launch() refuses a second copy. */
+      sysinfo_init();
+      {
+        int install_mode = (shared_mem_get() != NULL &&
+                            shared_mem_get()->boot_mode == SHM_BOOT_MODE_INSTALL);
+
+        /* The installer is the only session in install mode; on a live medium
+         * session_init() marks the session live and logged in (no login window);
+         * an installed system still asks for an account. */
+        if (!install_mode) {
+          session_init();
+        }
+        /* M10: bring up PCI, the network stack and the USB HID keyboard before
+         * the applications, so the network app has a link to show, the device
+         * manager sees the adapter, and the boot menu can read arrow keys. */
+        (void)net_init();
+        devtab_refresh();
+
+        if (install_mode) {
+          nd_boot_stage(99, "绘制桌面");
+          nd_demo_init();
+          kputs("[BOOT] install mode: starting the graphical installer\n");
+          (void)apps_launch_name("setup");
+        } else {
+          /* The boot stage's text menu can already have chosen the shell:
+           * SHM_BOOT_MODE_NO_DESKTOP skips the graphical menu entirely. */
+          int no_desktop = (shared_mem_get() != NULL &&
+                            shared_mem_get()->boot_mode == SHM_BOOT_MODE_NO_DESKTOP);
+          if (no_desktop) {
+            kputs("[BOOT] boot stage chose no-desktop: skipping the menu\n");
+          } else {
+            /* Boot menu: choose the desktop (default) or a bare shell. It draws on
+             * the framebuffer, reads the USB keyboard and counts down five seconds
+             * before defaulting to the desktop. */
+            boot_menu_select();
+          }
+          if (no_desktop || g_boot_no_desktop) {
+            /* No desktop: end the splash, clear the screen and launch the shell
+             * directly. The window manager stays up to host the terminal. */
+            boot_menu_finish();
+            kputs("[BOOT] no-desktop mode: launching the shell\n");
+            (void)apps_launch_name("nsh");
+          } else {
+            nd_boot_stage(99, "绘制桌面");
+            nd_demo_init();
+            if (session_live()) {
+              session_start_desktop();
+            } else {
+              (void)apps_launch_name("session");
+            }
+          }
+        }
+      }
     }
   }
 #endif

@@ -374,8 +374,100 @@ fn render(win: &mut wm::Win, shell: &shell::Shell, scroll: &Scroll, input: &[u8]
     drawer.win.fill(caret_x, caret_y, 7, 13, accent);
 }
 
+/// The terminal's [`shell::Sink`] for the serial console: bytes straight to
+/// COM1, no decoration.
+struct SerialSink;
+
+impl shell::Sink for SerialSink {
+    fn write(&mut self, data: &[u8]) {
+        sys::console_write(data);
+    }
+    fn clear_screen(&mut self) {
+        sys::console_write(b"\x1b[2J\x1b[H");
+    }
+}
+
+/// Runs the shell over the serial console, with no window manager. Chosen
+/// automatically when the WM port is absent (e.g. the "no desktop" boot
+/// option, which never initialises graphics).
+fn serial_mode() -> ! {
+    let mut shell = shell::Shell::new(0);
+    let mut prompt = [0u8; 128];
+    let mut input = [0u8; INPUT_MAX];
+    let mut ilen = 0usize;
+
+    sys::console_write(b"\x1b[2J\x1b[H");
+    sys::console_write(b"Novus OS nsh (serial) - type 'help'.\r\n");
+
+    loop {
+        let plen = build_prompt(&shell, &mut prompt);
+        sys::console_write(&prompt[..plen]);
+
+        /* Read one command line, byte by byte, with minimal editing. */
+        let mut buf = [0u8; 64];
+        'line: loop {
+            let n = sys::console_read(&mut buf) as usize;
+            if n == 0 {
+                sys::yield_now();
+                continue;
+            }
+            for k in 0..n {
+                let b = buf[k];
+                match b {
+                    0x0d | 0x0a => {
+                        sys::console_write(b"\r\n");
+                        {
+                            let mut sink = SerialSink;
+                            shell.run_line(&input[..ilen], &mut sink);
+                        }
+                        if ilen > 0 {
+                            shell.push_history(&input[..ilen]);
+                        }
+                        ilen = 0;
+                        break 'line;
+                    }
+                    0x7f | 0x08 => {
+                        if ilen > 0 {
+                            ilen -= 1;
+                            sys::console_write(b"\x08 \x08");
+                        }
+                    }
+                    0x03 => {
+                        sys::console_write(b"^C\r\n");
+                        ilen = 0;
+                        break 'line;
+                    }
+                    0x15 => {
+                        while ilen > 0 {
+                            ilen -= 1;
+                            sys::console_write(b"\x08 \x08");
+                        }
+                    }
+                    _ => {
+                        if b >= 0x20 && ilen < INPUT_MAX {
+                            input[ilen] = b;
+                            ilen += 1;
+                            sys::console_write(&buf[k..k + 1]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
+    /* No window manager means no graphics: fall back to a serial shell.
+     * This is how the "no desktop" boot option reaches a pure-text prompt. */
+    if ipc::lookup(wm::PORT_NAME).is_none() {
+        serial_mode();
+    }
+    window_mode()
+}
+
+/// Graphical terminal: a window on the Novus desktop.
+fn window_mode() -> ! {
     let wm_port = match ipc::lookup(wm::PORT_NAME) {
         Some(p) => p,
         None => loop {},

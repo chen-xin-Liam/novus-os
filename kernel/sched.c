@@ -49,6 +49,10 @@ static UINT32  g_next_id;
 static UINT32  g_exit_count;
 static UINT64  g_ticks;
 static UINT32  g_logged_switches;
+/* Set once sched_start() has entered ring 3. The per-tick subsystem hooks
+ * (WM, sysinfo, network, update daemon, NovusDisplay) only make sense once
+ * a real task is running; before that they touch uninitialised state. */
+static int     g_sched_started;
 
 /* A task that exited on the last switch. Its pages cannot be returned at
  * the point of the switch - the CPU is still running on its ring-0 stack
@@ -538,7 +542,10 @@ void sched_tick(void) {
     /* Kernel idle: ask for a switch every tick so the first process that
      * becomes runnable (a taskbar click forks one) is entered promptly. */
     g_need_resched = 1;
-    if ((g_ticks % 40u) == 0u) {
+    /* Before sched_start() the boot menu is running on the BSP with
+     * interrupts enabled; its own kputs must not be clobbered by a concurrent
+     * tick print, so stay silent here until the scheduler is live. */
+    if (g_sched_started && ((g_ticks % 40u) == 0u)) {
       kputs("[SCHED] ticks=");
       kputs_hex(g_ticks);
       kputs(" current=(kernel idle)\n");
@@ -553,25 +560,32 @@ void sched_tick(void) {
     (void)nuc_create_idle();
   }
 
+  /* The per-tick subsystem hooks below only make sense once a real task is
+   * running (they drive the desktop, network and update daemon). Before
+   * sched_start() they touch uninitialised state and must be skipped - this
+   * is what lets the boot menu enable interrupts for keyboard input without
+   * the timer ISR corrupting kernel state. */
+  if (g_sched_started) {
 #if CONFIG_NOVUS_WM
-  /* M6: Novus-WM drives the whole desktop from the tick - input routing,
-   * the IPC server queue and the compositor. M5's nd_demo_tick() is what
-   * runs instead when the window manager is configured out. */
-  nwm_tick();
-  /* M8: the sysinfo service shares the tick with the WM. */
-  sysinfo_tick();
-  /* M10: drain network receive queues and run DHCP/ICMP/TCP timers. Bounded work
-   * per tick - eight frames and a handful of timers. */
-  net_tick();
-  /* Update daemon: rate-limited state machine / journal replay. Bounded,
-   * sampled every NOVU_TICK_INTERVAL ticks. */
-  novu_service_tick((UINT32)g_ticks);
+    /* M6: Novus-WM drives the whole desktop from the tick - input routing,
+     * the IPC server queue and the compositor. M5's nd_demo_tick() is what
+     * runs instead when the window manager is configured out. */
+    nwm_tick();
+    /* M8: the sysinfo service shares the tick with the WM. */
+    sysinfo_tick();
+    /* M10: drain network receive queues and run DHCP/ICMP/TCP timers. Bounded work
+     * per tick - eight frames and a handful of timers. */
+    net_tick();
+    /* Update daemon: rate-limited state machine / journal replay. Bounded,
+     * sampled every NOVU_TICK_INTERVAL ticks. */
+    novu_service_tick((UINT32)g_ticks);
 #elif CONFIG_NOVUS_DISPLAY
-  /* M5: NovusDisplay shares the tick. Input is decoded from the IRQ queue
-   * and at most one damage rectangle is repainted per event, so the cost
-   * stays bounded and the scheduler's own work is unaffected. */
-  nd_demo_tick();
+    /* M5: NovusDisplay shares the tick. Input is decoded from the IRQ queue
+     * and at most one damage rectangle is repainted per event, so the cost
+     * stays bounded and the scheduler's own work is unaffected. */
+    nd_demo_tick();
 #endif
+  }
 }
 
 void sched_exit_current(int code) {
@@ -848,6 +862,7 @@ void sched_start(void) {
     }
   }
   g_current = first;
+  g_sched_started = 1; /* per-tick subsystem hooks are now safe to run */
   first->state = TASK_RUNNING;
   first->slice = task_slice(first);
   tss_set_rsp0(first->kstack_top);

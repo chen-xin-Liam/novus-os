@@ -217,6 +217,11 @@ void nd_boot_stage(UINT32 percent, const char *text);
  * alone instead of clearing them. */
 int nd_boot_splash_active(void);
 
+/* The framebuffer surface the boot splash draws into. Valid while the splash
+ * is active (before the desktop presents); used by the boot menu, which runs
+ * before nd_demo_init() binds the live compositor surface. */
+nd_surface_t *splash_surface(void);
+
 /* The desktop is about to be presented: the splash stops owning the
  * screen. */
 void nd_boot_splash_end(void);

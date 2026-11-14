@@ -21,6 +21,7 @@
 #include "msr.h"
 #include "ipc.h"
 #include "irq.h"
+#include "serial.h"
 #include "../fs/novusfs/novusfs.h"
 #include "../fs/vfs.h"
 #include "../fs/vfs_mount.h"
@@ -65,6 +66,7 @@
 #define SYS_EXIT        60u
 #define SYS_UPDATE      25u   /* update service control ABI */
 #define SYS_HTTPS       26u   /* https client control ABI  */
+#define SYS_CONSOLE     27u   /* serial console read/write  */
 
 #define FS_PATH_MAX 256u
 #define FS_IO_MAX 4096u
@@ -984,6 +986,74 @@ static void sys_https_call(trap_frame_t *f) {
   f->rax = (UINT64)rc;
 }
 
+/* Serial console for the no-graphics shell. op 0 writes a byte buffer to
+ * COM1 (raw: the driver turns '\\n' into CRLF); op 1 drains the RX queue
+ * into a buffer, non-blocking, and returns the byte count (0 when empty).
+ * This is deliberately separate from SYS_WRITE, whose output is a prefixed
+ * kernel log line, not an application's stdout. */
+static void sys_console(trap_frame_t *f) {
+  UINT64 cr3 = (sched_current() != 0) ? sched_current()->cr3 : 0;
+  UINT64 op = f->rdi;
+  UINT64 len = f->rdx;
+  UINT8  tmp[128];
+
+  if (cr3 == 0) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  if (op == 0u) { /* write */
+    UINT64 done = 0;
+
+    while (done < len) {
+      UINT64 chunk = len - done;
+
+      if (chunk > sizeof(tmp)) {
+        chunk = sizeof(tmp);
+      }
+      if (user_copy(cr3, f->rsi + done, tmp, chunk, 0) != 0) {
+        f->rax = (UINT64)-1;
+        return;
+      }
+      for (UINT64 i = 0; i < chunk; i++) {
+        serial_putc((char)tmp[i]);
+      }
+      done += chunk;
+    }
+    f->rax = len;
+  } else if (op == 1u) { /* read */
+    UINT64 got = 0;
+
+    while (got < len) {
+      UINT64 room = len - got;
+      UINT64 n = 0;
+      int    r;
+
+      if (room > sizeof(tmp)) {
+        room = sizeof(tmp);
+      }
+      while (n < room) {
+        r = serial_getc();
+        if (r < 0) {
+          break;
+        }
+        tmp[n] = (UINT8)r;
+        n++;
+      }
+      if (n == 0u) {
+        break;
+      }
+      if (user_copy(cr3, f->rsi + got, tmp, n, 1) != 0) {
+        f->rax = (UINT64)-1;
+        return;
+      }
+      got += n;
+    }
+    f->rax = got;
+  } else {
+    f->rax = (UINT64)-1;
+  }
+}
+
 /* README part 8: one numbered table, one ABI. A new call is a new row;
  * nothing else in the kernel needs to know its number. */
 static const sys_ent_t g_syscalls[] = {
@@ -1015,6 +1085,7 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_WIN32, "win32", win32_syscall},
     {SYS_UPDATE, "update", sys_update_call},
     {SYS_HTTPS, "https", sys_https_call},
+    {SYS_CONSOLE, "console", sys_console},
 };
 
 /* Unknown numbers are reported once each and refused; a wrong ABI must be

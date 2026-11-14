@@ -92,7 +92,8 @@ SRC := arch/x86_64/boot/main.c \
         kernel/power.c \
     kernel/trap.c \
     kernel/session.c \
-       kernel/sched.c \
+    kernel/boot_menu.c \
+    kernel/sched.c \
        kernel/vm.c \
        kernel/nuc.c \
        kernel/pe.c \

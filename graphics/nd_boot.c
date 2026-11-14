@@ -48,8 +48,9 @@ static struct {
 } g_splash __attribute__((section(".data")));
 
 /* The surface to draw on: the real screen once the kernel has bound it,
- * otherwise a temporary view of the captured framebuffer. */
-static nd_surface_t *splash_surface(void) {
+ * otherwise a temporary view of the captured framebuffer. Exported so the
+ * boot menu can draw on the same surface the splash uses. */
+nd_surface_t *splash_surface(void) {
   nd_surface_t       *s = nd_screen();
   const nd_display_t *d;
 
