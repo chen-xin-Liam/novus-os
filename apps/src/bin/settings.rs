@@ -517,7 +517,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit(2);
     };
     let Some(mut win) = wm::Win::create(wm_port, 300, 190, CW as i32 + 2,
-                                    CH as i32 + wm::TITLE_H, "设置")
+                                    CH as i32 + wm::FRAME_H, "设置")
     else {
         sys::exit(3);
     };

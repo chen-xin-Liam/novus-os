@@ -14,6 +14,13 @@
 
 /* Page granularity used across the whole memory subsystem. */
 #define MM_PAGE_SIZE 4096ULL
+#define MM_HEAP_BASE 0xFFFF810000000000ULL
+#define MM_HEAP_SIZE (256ULL * 1024 * 1024)
+
+/* The heap window is supervisor-only and shared by every process CR3.
+ * Mapping failure rolls back every newly allocated physical page. */
+int mm_heap_map(UINT64 offset, UINT32 pages);
+void mm_heap_unmap(UINT64 offset, UINT32 pages);
 
 /* Build the page-table hierarchy (identity map of the low 4 GiB through
  * PML4[0] plus the direct physical map of [0, ram_top_bytes) through

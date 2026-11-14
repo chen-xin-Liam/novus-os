@@ -1,6 +1,13 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include "../kernel/pmm.c"
+#include "../kernel/mm.h"
+#define ARENA_PAGES 128u
+static UINT8 heap_arena[ARENA_PAGES * 4096u] __attribute__((aligned(4096)));
+#undef MM_HEAP_BASE
+#define MM_HEAP_BASE ((UINT64)(UINTN)heap_arena)
+#define MM_INVALIDATE(address) ((void)(address))
+#include "../kernel/mm.c"
 #include "../kernel/heap.c"
 #include "../kernel/shared_mem.h"
 
@@ -10,8 +17,6 @@ static shared_mem_t handoff_destination;
 #include "../kernel/shared_mem.c"
 
 #define ARENA_BASE 0x7C000ULL
-#define ARENA_PAGES 128u
-static UINT8 arena[ARENA_PAGES * 4096u];
 
 #define REQUIRE(c) do { \
   if (!(c)) { fprintf(stderr, "FAIL line %d: %s\n", __LINE__, #c); exit(1); } \
@@ -19,15 +24,6 @@ static UINT8 arena[ARENA_PAGES * 4096u];
 
 void kputs(const char *text) { fputs(text, stdout); }
 void kputs_hex(UINT64 value) { printf("0x%llx", value); }
-
-void *phys_to_virt(UINT64 phys) {
-  REQUIRE(phys >= ARENA_BASE && phys < ARENA_BASE + sizeof(arena));
-  return arena + phys - ARENA_BASE;
-}
-
-UINT64 virt_to_phys(const void *ptr) {
-  return ARENA_BASE + (const UINT8 *)ptr - arena;
-}
 
 UINT32 novus_rs_version(void) { return 0x00010000; }
 
@@ -82,9 +78,10 @@ static void check_handoff(void) {
 
 static void check_fragmented_heap(void) {
   EFI_MEMORY_DESCRIPTOR desc = {0};
-  UINT8 *hole, *guard, *buffer;
-  UINT64 before;
-  UINT32 i;
+  UINT8 *buffer;
+  void *physical[ARENA_PAGES];
+  UINT64 before, fragmented, first;
+  UINT32 i, n = 0;
 
   desc.Type = EfiConventionalMemory;
   desc.PhysicalStart = ARENA_BASE;
@@ -92,26 +89,35 @@ static void check_fragmented_heap(void) {
   pmm_init((UINT64)(UINTN)&desc, sizeof(desc), sizeof(desc));
   heap_init();
   before = pmm_free_count();
-  memset(arena + 2u * 4096u, 0x5A, 2u * 4096u);
-  hole = kmalloc(4096);
-  guard = kmalloc(4096);
-  REQUIRE(hole && guard);
-  memset(guard, 0xA5, 4096);
-  kfree(hole);
+  while (n < ARENA_PAGES && (physical[n] = pmm_alloc_page()) != NULL) n++;
+  REQUIRE(n > 8);
+  for (i = 0; i < n; i += 2) pmm_free_page(physical[i]);
+  fragmented = pmm_free_count();
+  REQUIRE(pmm_alloc_contig(2) == NULL);
   buffer = kmalloc(3u * 4096u);
   REQUIRE(buffer != NULL);
-  REQUIRE(buffer > guard);
+  first = virt_to_phys(buffer);
+  REQUIRE(first == (UINT64)(UINTN)physical[0]);
+  REQUIRE(virt_to_phys(buffer + 4096) == (UINT64)(UINTN)physical[2]);
+  REQUIRE(virt_to_phys(buffer + 8192) == (UINT64)(UINTN)physical[4]);
   for (i = 0; i < 3u * 4096u; i++) REQUIRE(buffer[i] == 0);
   memset(buffer, 0xCC, 3u * 4096u);
-  for (i = 0; i < 4096u; i++) REQUIRE(guard[i] == 0xA5);
-  for (i = 2u * 4096u; i < 4u * 4096u; i++) REQUIRE(arena[i] == 0x5A);
   kfree(buffer);
-  kfree(guard);
+  REQUIRE(pmm_free_count() == fragmented);
+  REQUIRE(kmalloc((fragmented + 1) * 4096) == NULL);
+  REQUIRE(pmm_free_count() == fragmented);
+  for (i = 0; i < MM_HEAP_SIZE / MM_PAGE_SIZE; i++)
+    REQUIRE(g_heap_pt[i / 512].e[i % 512] == 0);
+  for (i = 1; i < n; i += 2) pmm_free_page(physical[i]);
   REQUIRE(pmm_free_count() == before);
   REQUIRE(kmalloc(~0ULL) == NULL);
   REQUIRE(kmalloc((ARENA_PAGES + 1ULL) * 4096u) == NULL);
   REQUIRE(pmm_free_count() == before);
   REQUIRE(pmm_double_free_count() == 0);
+  buffer = kmalloc(4096);
+  REQUIRE(buffer == heap_arena);
+  REQUIRE(buffer[0] == 0);
+  kfree(buffer);
   puts("[TEST] fragmented linear heap, guard pages and exhaustion PASS");
 }
 

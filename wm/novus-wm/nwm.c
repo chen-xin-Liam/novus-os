@@ -313,6 +313,22 @@ static void clamp_rect(nd_rect_t *r) {
   }
 }
 
+int nwm_activate_owner(UINT64 owner) {
+  INT32 z;
+  for (z = (INT32)g_zcount - 1; z >= 0; z--) {
+    UINT32 i = g_z[z];
+    nwm_window_t *w = &g_wins[i];
+    if (w->used && w->owner == owner) {
+      w->state = 0;
+      z_raise((int)i);
+      focus_set((int)i);
+      damage_frame(w->rect);
+      return 1;
+    }
+  }
+  return 0;
+}
+
 /* ---- compositor ------------------------------------------------------- */
 
 /* One drawing primitive. Both display-list formats (the M6 command
@@ -540,9 +556,6 @@ static void paint(nd_rect_t clip) {
 /* ---- protocol --------------------------------------------------------- */
 
 static void log_request(const char *what, UINT32 win, UINT64 from) {
-  if (g_requests > 8u) {
-    return; /* one line per request would flood COM1 once a client polls */
-  }
   kputs("[NWM] ");
   kputs(what);
   kputs(" win=");
@@ -931,6 +944,7 @@ static void req_invalidate(const ipc_msg_t *m) {
   nwm_win_t     r;
   nwm_window_t *w;
   int           st = NWM_OK;
+  int           first;
 
   if (m->hdr.len < sizeof(r)) {
     ack(m, 0, NWM_EBADPAY);
@@ -942,6 +956,7 @@ static void req_invalidate(const ipc_msg_t *m) {
     ack(m, r.win, st);
     return;
   }
+  first = w->shape_n == 0 && w->text_n == 0;
   /* End of frame: the list built since CLEAR becomes the one the
    * compositor replays, in one step. */
   if (w->frame_open) {
@@ -958,6 +973,9 @@ static void req_invalidate(const ipc_msg_t *m) {
     w->frame_open = 0;
   }
   damage(client_rect(w));
+  if (first && (w->shape_n != 0 || w->text_n != 0)) {
+    log_request("first frame", w->id, w->owner);
+  }
   ack(m, w->id, NWM_OK);
 }
 
@@ -1627,6 +1645,39 @@ int nwm_selftest(void) {
   handle_request(&m);
   pass &= expect(win_get(a) != 0 && win_get(a)->draw_n == 2u, "draw list");
 
+  {
+    nwm_shape_t shape;
+    nwm_text_t text;
+    nwm_window_t *window = win_get(a);
+    memset(&shape, 0, sizeof(shape));
+    memset(&text, 0, sizeof(text));
+    shape.win = text.win = a;
+    shape.op = NWM_OP_FILL;
+    shape.w = 40;
+    shape.h = 20;
+    text.len = 2;
+    memcpy(text.text, "UI", 2);
+    fake_msg(&m, NWM_REQ_CLEAR, 0xF001ull, &a, sizeof(a));
+    handle_request(&m);
+    fake_msg(&m, NWM_REQ_SHAPE, 0xF001ull, &shape, sizeof(shape));
+    handle_request(&m);
+    fake_msg(&m, NWM_REQ_TEXT, 0xF001ull, &text, sizeof(text));
+    handle_request(&m);
+    pass &= expect(window->frame_open && window->shape_n == 0 &&
+                       window->pend_shape_n == 1 && window->pend_text_n == 1,
+                   "client frame stays pending until invalidate");
+    fake_msg(&m, NWM_REQ_INVALIDATE, 0xF001ull, &a, sizeof(a));
+    handle_request(&m);
+    pass &= expect(!window->frame_open && window->shape_n == 1 &&
+                       window->text_n == 1, "client frame commits both lists");
+    pass &= expect(client_rect(window).h + NWM_TITLE_H + 1 == window->rect.h,
+                   "client height includes bottom border");
+    window->state = 1;
+    pass &= expect(nwm_activate_owner(0xF001ull) && window->state == 0 &&
+                       g_focus == win_index(a) && g_z[g_zcount - 1] == win_index(a),
+                   "launcher restores and focuses existing window");
+  }
+
   memset(&ef, 0, sizeof(ef));
   ef.win = a;
   ef.alpha = 100;
@@ -1686,5 +1737,6 @@ int nwm_selftest(void) {
 void nwm_init(void) {}
 void nwm_tick(void) {}
 int nwm_selftest(void) { return 1; }
+int nwm_activate_owner(UINT64 owner) { (void)owner; return 0; }
 
 #endif /* CONFIG_NOVUS_WM */

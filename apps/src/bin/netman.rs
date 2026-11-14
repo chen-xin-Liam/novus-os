@@ -192,6 +192,7 @@ fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
     w.text(298, TEST_BUTTON_Y + 6, ui::text(), "NCSI 检测");
 
     w.text(24, TEST_BUTTON_Y + 34, ui::dim(), if note.is_empty() { "ncsi.novus-os.ryzn.pro" } else { note });
+    w.invalidate();
 }
 
 /* Network state and test requests go through the named sysinfo IPC service;
@@ -207,7 +208,7 @@ pub extern "C" fn _start() -> ! {
         sys::exit(2);
     };
     let Some(mut win) = wm::Win::create(wm_port, 380, 160, CW as i32 + 2,
-                                    CH as i32 + wm::TITLE_H, "网络")
+                                    CH as i32 + wm::FRAME_H, "网络")
     else {
         sys::exit(3);
     };

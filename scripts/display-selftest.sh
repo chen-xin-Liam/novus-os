@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 HOSTCC="${HOSTCC:-cc}"
-flags=(-Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs
+flags=(-Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs -Ibuild
        -O2 -ffreestanding -fno-builtin -ffunction-sections -fdata-sections
        -Wall -Wextra -Werror)
 link=(-Wl,--gc-sections)
@@ -12,6 +12,7 @@ case "$("$HOSTCC" -dumpmachine)" in
         ;;
 esac
 mkdir -p build/tests
+python3 tools/fontgen/fallback.py build/nd_font_fallback.h
 "$HOSTCC" "${flags[@]}" scripts/memory-selftest.c "${link[@]}" \
     -o build/tests/memory-selftest.exe
 build/tests/memory-selftest.exe

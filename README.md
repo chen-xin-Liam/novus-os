@@ -469,7 +469,7 @@ C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在�
 > M8 已实现：内置应用为 Rust 程序（`apps/`），编译成扁平 NUC 镜像内嵌
 > 进内核；会话管理器先启动，登录后再启动桌面应用，任务栏可再拉起；数据来自内核 sysinfo 服务
 > （端口 `"sys"`），窗口内容走 Novus-WM 协议 1.1 的显示列表
-> （CLEAR/SHAPE/TEXT）。说明见 `docs/M8 内置系统应用.md`。M7 编译器在 M8 开发当时暂缓，现已补齐 cppcc。
+> （CLEAR/SHAPE/TEXT，最后必须 INVALIDATE 才会提交整帧）。说明见 `docs/M8 内置系统应用.md`。M7 编译器在 M8 开发当时暂缓，现已补齐 cppcc。
 >
 > M10 已实现：Novus Fluent 统一令牌（浅色 / 深色 / 跟随时间）、圆角显示列表图元，
 > 壳层与全部内置应用适配；安装菜单进入内核图形环境后运行六页安装向导
@@ -494,9 +494,42 @@ C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在�
 
 
 
+#### 启动与交互回归
+
+```sh
+bash scripts/display-selftest.sh
+python3 -m unittest discover -s scripts -p qemu_smoke_test.py
+make disk-img
+bash scripts/qemu-smoke.sh
+bash scripts/qemu-smoke.sh --no-root --output out/qemu-smoke-no-root
+```
+
+QEMU 冒烟需要 Python 3.8+、QEMU 和 OVMF，客体分配 2 核、3 GiB 内存。
+可用 `QEMU_BIN`、`OVMF_CODE`、
+`OVMF_VARS`（或 `--qemu`、`--code`、`--vars`）指定路径。测试使用临时固件变量和
+`-snapshot`，不会修改源磁盘镜像或保存测试账户。VNC 仅监听 `127.0.0.1:5901`
+（可用 `--vnc-display` 调整）；端口占用会直接报错，不会连接别人的虚拟机。
+部分 Windows QEMU 发行版不识别中文文件路径：可用 `subst` 挂载 ASCII 盘符，
+从该盘符启动脚本，并给固件、镜像和可写临时目录使用 ASCII 路径；脚本会保留盘符。
+
+脚本检查 ND / HEAP 自检、live root 和壁纸启动标记，以及内核 fault / 自检失败；
+无系统分区模式改查字体降级标记。客体启用 VMware mouse 绝对坐标协议后，
+还必须收到 RFB 绝对指针能力，才执行建账户、磁贴、开始菜单、应用启动与键盘输入。
+会话 / 文件管理器 / 任务管理器 / 设置 / 网络 / 终端截图和串口日志写入输出目录。
+
+基线在 `scripts/baselines/qemu/{disk,no-root}`；缺失或不匹配均失败，不会自动放行。
+首次建立或有意更新 UI 时使用 `--update-baseline`，检查输出截图后再提交基线；
+普通回归不得携带该选项。比较只覆盖固定布局区域，排除时钟、进程计数等动态内容，
+默认允许每通道差值 8、最多 0.2% 像素变化；`--tolerance` / `--max-changed`
+可明确调整。只接受脚本生成的无损 RGB PNG 基线。
+
+内存与资源降级：`kmalloc` 在共享的 256 MiB 虚拟窗口中按需映射独立物理页，
+映射失败会回收已分配页，释放后虚拟范围可复用；DMA 缓冲仍须显式走 PMM。
+构建从已有字体数据提取界面用字，内嵌一个最小字模；没有系统分区时仍可显示
+界面中文与默认配色桌面，完整 Unicode 字库随后可从系统分区加载。
+壁纸采用三项 LRU 的屏幕尺寸 surface 缓存，模式切换清空缓存，失败保留原图。
+
 ### 19.3 开源规则
 GPLv2协议；提交者保留版权，项目遵循GPLv2条款分发；所有修改源码必须开源。
 
 ---
-
-

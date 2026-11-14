@@ -386,7 +386,7 @@ pub extern "C" fn _start() -> ! {
     };
     ui::init(sys_port);
 
-    let mut win = match wm::Win::create(wm_port, 200, 160, CW as i32, CH as i32 + wm::TITLE_H, "终端") {
+    let mut win = match wm::Win::create(wm_port, 200, 160, CW as i32 + 2, CH as i32 + wm::FRAME_H, "终端") {
         Some(w) => w,
         None => sys::exit(1),
     };

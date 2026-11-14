@@ -156,6 +156,19 @@ $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o: tools/mkfsnovus/mkfsnovus.c \
 $(TOOLS_OUT)/tools_mkdisk_mkdisk.o: tools/mkdisk/mkdisk.c | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
+# PE/COFF keeps the core rlib's .xdata unwind metadata, and --gc-sections
+# cannot discard it the way it drops an unreferenced ELF debug section, so a
+# Windows host link dies on an undefined rust_eh_personality. Novus never
+# unwinds, so an empty definition is enough. ELF hosts carry no .xdata and get
+# an empty prerequisite instead, which keeps the Linux link byte-identical.
+ifeq ($(OS),Windows_NT)
+RUST_UNWIND_STUB := $(TOOLS_OUT)/rust_unwind_stub.o
+$(TOOLS_OUT)/rust_unwind_stub.o: tools/rust_unwind_stub.c | $(TOOLS_OUT)
+	$(HOSTCC) $(HOSTCFLAGS) -c $< -o $@
+else
+RUST_UNWIND_STUB :=
+endif
+
 # The headers matter here: gpt.c reaches the block layer through
 # blkdev.h, and part of that interface is inline, so a change to the
 # header changes the object even though the .c file is untouched.
@@ -176,7 +189,7 @@ $(MKFSNOVUS): $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o $(NOVUSFS_HOST_OBJS) \
 # is linked in unchanged, so a host-built disk and a live-installed disk
 # agree on where every partition starts.
 $(MKDISK): $(TOOLS_OUT)/tools_mkdisk_mkdisk.o $(TOOLS_OUT)/kernel_gpt.o \
-           $(RUST_HOST_LIB)
+           $(RUST_UNWIND_STUB) $(RUST_HOST_LIB)
 	$(HOSTCC) -Wl,--gc-sections -o $@ $^
 
 $(RUST_HOST_LIB): $(RUST_DEPS)

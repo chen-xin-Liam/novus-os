@@ -476,7 +476,9 @@ static int interactive(const ng_widget_t *w) {
   return (w->flags & NG_WF_ENABLED) != 0u &&
          (w->type == NG_BUTTON || w->type == NG_CHECKBOX ||
           w->type == NG_TEXTBOX || w->type == NG_SLIDER ||
-          w->type == NG_LIST || w->type == NG_TREE);
+          w->type == NG_LIST || w->type == NG_TREE ||
+          ((w->type == NG_ICON || w->type == NG_SWATCH) &&
+           w->on_action != 0));
 }
 
 static ng_widget_t *hit_deep(ng_widget_t *w, INT32 x, INT32 y) {
@@ -728,7 +730,9 @@ static void draw_textbox(ng_widget_t *w) {
   if (w->abs.w <= NG_PAD * 2) {
     return;
   }
-  cell = nd_text_height(w->u.edit.buf, NG_TEXT_SCALE);
+  shown = (w->u.edit.len == 0u && w->u.edit.placeholder != 0)
+              ? w->u.edit.placeholder : w->u.edit.buf;
+  cell = nd_text_height(shown, NG_TEXT_SCALE);
   ty = w->abs.y + (w->abs.h - (INT32)cell) / 2;
   max_px = (UINT32)(w->abs.w - NG_PAD * 2);
   if (w->u.edit.len == 0u && w->u.edit.placeholder != 0) {
@@ -1072,8 +1076,20 @@ static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
     break;
   }
   case NG_ICON_FILES:
-    nd_round_rect(s, nd_rect(cx - h, cy - h + 3, h, 5), 2, c);
-    nd_round_rect(s, nd_rect(cx - h, cy - h + 6, b, b - 8), 2, c);
+    nd_round_frame(s, nd_rect(cx - h, cy - h + 2, h, 7), 2, 2, c);
+    nd_round_frame(s, nd_rect(cx - h, cy - h + 6, b, b - 8), 2, 2, c);
+    break;
+  case NG_ICON_VOLUME:
+    nd_round_frame(s, nd_rect(cx - h, cy - 3, 5, 7), 1, 1, c);
+    nd_line(s, cx - h + 4, cy - 3, cx - 2, cy - h + 2, c);
+    nd_line(s, cx - 2, cy - h + 2, cx - 2, cy + h - 2, c);
+    nd_line(s, cx - 2, cy + h - 2, cx - h + 4, cy + 3, c);
+    nd_line(s, cx + 1, cy - 4, cx + 3, cy - 2, c);
+    nd_vline(s, cx + 3, cy - 2, cy + 2, c);
+    nd_line(s, cx + 3, cy + 2, cx + 1, cy + 4, c);
+    nd_line(s, cx + 4, cy - 7, cx + 7, cy - 4, c);
+    nd_vline(s, cx + 7, cy - 4, cy + 4, c);
+    nd_line(s, cx + 7, cy + 4, cx + 4, cy + 7, c);
     break;
   case NG_ICON_TASKS: {
     INT32 i;

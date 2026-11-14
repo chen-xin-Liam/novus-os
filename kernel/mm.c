@@ -12,13 +12,13 @@
  *                the switch instruction, this function's code and the
  *                kernel stack stay mapped on both paths at all times.
  *   - PML4[256]: direct physical map at PHYSMAP_BASE covering all RAM in
- *                [0, ram_top). The VMM and heap allocate through it
- *                without any per-page mapping work.
+ *                [0, ram_top). The VMM allocates single pages through it.
+ *   - PML4[258]: shared 4 KiB heap mappings, contiguous in virtual space.
  *
- * Everything is built from 2 MiB huge pages: a PML4/PDPT entry points at
+ * The identity map and physmap use 2 MiB huge pages: a PML4/PDPT entry points at
  * the next table, each PD covers one 1 GiB slice with 512 x 2 MiB leaf
  * entries (PS bit set). The whole M1 tree is therefore 1 PML4 + 6 PDPTs
- * + N PDs and no 4 KiB page-splitting logic exists yet.
+ * + N PDs. The separate heap window does not split either huge-page map.
  *
  * Table pages come from pmm_alloc_page(). While the tables are built the
  * firmware identity map is still active, so physical addresses can be
@@ -45,6 +45,18 @@
 typedef struct {
   UINT64 e[512];
 } mm_table_t;
+
+/* Install the entire hierarchy before vm_space_create() clones the PML4.
+ * Static tables avoid allocating page-table pages in a low-memory rollback. */
+static mm_table_t g_heap_pdpt __attribute__((aligned(4096)));
+static mm_table_t g_heap_pd __attribute__((aligned(4096)));
+static mm_table_t g_heap_pt[MM_HEAP_SIZE / (2 * 1024 * 1024)]
+    __attribute__((aligned(4096)));
+
+#ifndef MM_INVALIDATE
+#define MM_INVALIDATE(address) \
+  __asm__ volatile("invlpg (%0)" : : "r"((UINT64)(address)) : "memory")
+#endif
 
 static void mm_write_cr3(UINT64 table_phys) {
   /* PCD/PWT (bits 4/3) stay clear so table walks are cacheable; the base
@@ -78,6 +90,15 @@ void *phys_to_virt(UINT64 phys) {
 
 UINT64 virt_to_phys(const void *v) {
   UINT64 a = (UINT64)v;
+  if (a >= MM_HEAP_BASE && a < MM_HEAP_BASE + MM_HEAP_SIZE) {
+    UINT64 page = (a - MM_HEAP_BASE) / MM_PAGE_SIZE;
+    UINT64 entry = g_heap_pt[page / 512].e[page % 512];
+    if ((entry & MM_PTE_PRESENT) == 0) {
+      kputs("[MM] ERROR: translating unmapped heap address\n");
+      return 0;
+    }
+    return (entry & MM_PTE_ADDR4K_MASK) | (a & (MM_PAGE_SIZE - 1));
+  }
   if (a >= PHYSMAP_BASE) {
     return a - PHYSMAP_BASE;
   }
@@ -162,6 +183,14 @@ void mm_init(UINT64 ram_top_bytes) {
   /* Switch CR3. The new tables identity-map the full low 4 GiB, so this
    * function's code and the kernel stack stay reachable on both the
    * identity path and the new physmap path. */
+  memset(&g_heap_pdpt, 0, sizeof(g_heap_pdpt));
+  memset(&g_heap_pd, 0, sizeof(g_heap_pd));
+  memset(g_heap_pt, 0, sizeof(g_heap_pt));
+  pml4->e[258] = (UINT64)(UINTN)&g_heap_pdpt | MM_PTE_PRESENT | MM_PTE_WRITE;
+  g_heap_pdpt.e[0] = (UINT64)(UINTN)&g_heap_pd | MM_PTE_PRESENT | MM_PTE_WRITE;
+  for (i = 0; i < MM_HEAP_SIZE / (2 * 1024 * 1024); i++) {
+    g_heap_pd.e[i] = (UINT64)(UINTN)&g_heap_pt[i] | MM_PTE_PRESENT | MM_PTE_WRITE;
+  }
   mm_write_cr3(pml4_phys);
   mm_capture_kernel_cr3();
 
@@ -170,6 +199,59 @@ void mm_init(UINT64 ram_top_bytes) {
   kputs("\n");
 
   mm_selftest();
+}
+
+static int mm_heap_range(UINT64 offset, UINT32 pages) {
+  return pages != 0 && (offset & (MM_PAGE_SIZE - 1)) == 0 &&
+      offset < MM_HEAP_SIZE &&
+      (UINT64)pages <= (MM_HEAP_SIZE - offset) / MM_PAGE_SIZE;
+}
+
+void mm_heap_unmap(UINT64 offset, UINT32 pages) {
+  UINT32 i;
+  if (!mm_heap_range(offset, pages)) {
+    kputs("[MM] ERROR: invalid heap unmap range\n");
+    return;
+  }
+  for (i = 0; i < pages; i++) {
+    UINT64 page = offset / MM_PAGE_SIZE + i;
+    UINT64 *entry = &g_heap_pt[page / 512].e[page % 512];
+    UINT64 phys = *entry & MM_PTE_ADDR4K_MASK;
+    if ((*entry & MM_PTE_PRESENT) == 0) {
+      kputs("[MM] ERROR: heap page already unmapped\n");
+      continue;
+    }
+    *entry = 0;
+    MM_INVALIDATE(MM_HEAP_BASE + page * MM_PAGE_SIZE);
+    pmm_free_page((void *)(UINTN)phys);
+  }
+}
+
+int mm_heap_map(UINT64 offset, UINT32 pages) {
+  UINT32 i;
+  if (!mm_heap_range(offset, pages)) {
+    kputs("[MM] ERROR: invalid heap map range\n");
+    return -1;
+  }
+  for (i = 0; i < pages; i++) {
+    UINT64 page = offset / MM_PAGE_SIZE + i;
+    if (g_heap_pt[page / 512].e[page % 512] != 0) {
+      kputs("[MM] ERROR: heap mapping overlaps an allocation\n");
+      return -1;
+    }
+  }
+  for (i = 0; i < pages; i++) {
+    UINT64 page = offset / MM_PAGE_SIZE + i;
+    UINT64 phys = (UINT64)(UINTN)pmm_alloc_page();
+    if (phys == 0) {
+      if (i != 0) mm_heap_unmap(offset, i);
+      kputs("[MM] ERROR: no physical page for heap mapping\n");
+      return -1;
+    }
+    g_heap_pt[page / 512].e[page % 512] = phys | MM_PTE_PRESENT | MM_PTE_WRITE;
+    MM_INVALIDATE(MM_HEAP_BASE + page * MM_PAGE_SIZE);
+  }
+  return 0;
 }
 
 void mm_selftest(void) {

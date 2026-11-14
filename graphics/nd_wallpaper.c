@@ -9,7 +9,7 @@
  * for the screen size - the JPEG decoder scales inside the IDCT, so sources
  * larger than the display never allocate full planes - cover-scales it into
  * a cached screen-sized surface and hands pixels to the shell from there. A
- * wallpaper change decodes synchronously.
+ * wallpaper change decodes synchronously on a cache miss.
  *
  * A medium that carries no package, or a package that fails to parse, is
  * not an error: g_ready stays 0 and nd_wallpaper_paint() fills the area with
@@ -45,6 +45,14 @@ static UINT32       g_index; /* requested wallpaper */
 static INT32        g_sw, g_sh;
 static int          g_ready;
 static int          g_said_no_pkg; /* the "no package" line, once */
+
+#define WP_CACHE_SIZE 3
+static struct {
+  nd_surface_t image;
+  UINT32 index;
+  UINT64 used;
+} g_cache[WP_CACHE_SIZE];
+static UINT64 g_cache_clock;
 
 int nd_wallpaper_count(void) { return ND_WALLPAPER_COUNT; }
 int nd_wallpaper_default(void) { return 0; }
@@ -197,9 +205,21 @@ static int wp_decode(void) {
   const UINT8 *data;
   UINT32 len;
   int w = 0, h = 0, scale;
+  UINT32 i, slot = 0;
 
   if (g_sw <= 0 || g_sh <= 0) {
     return -1;
+  }
+  for (i = 0; i < WP_CACHE_SIZE; i++) {
+    if (g_cache[i].image.px != 0 && g_cache[i].index == g_index) {
+      g_cache[i].used = ++g_cache_clock;
+      g_img = g_cache[i].image;
+      g_ready = 1;
+      return 0;
+    }
+    if (g_cache[i].used < g_cache[slot].used) {
+      slot = i;
+    }
   }
   if (wp_locate(g_index, &data, &len) != 0) {
     return -1;
@@ -234,7 +254,10 @@ static int wp_decode(void) {
     } else {
       wp_cover(&next, &out);
     }
-    nd_surface_destroy(&g_img);
+    nd_surface_destroy(&g_cache[slot].image);
+    g_cache[slot].image = next;
+    g_cache[slot].index = g_index;
+    g_cache[slot].used = ++g_cache_clock;
     g_img = next;
   }
   nd_surface_destroy(&out);
@@ -246,6 +269,15 @@ static int wp_decode(void) {
 }
 
 int nd_wallpaper_init(INT32 screen_w, INT32 screen_h) {
+  if (g_sw != screen_w || g_sh != screen_h) {
+    UINT32 i;
+    for (i = 0; i < WP_CACHE_SIZE; i++) {
+      nd_surface_destroy(&g_cache[i].image);
+    }
+    memset(g_cache, 0, sizeof(g_cache));
+    memset(&g_img, 0, sizeof(g_img));
+    g_ready = 0;
+  }
   g_sw = screen_w;
   g_sh = screen_h;
   if (g_index >= ND_WALLPAPER_COUNT) {
@@ -257,6 +289,7 @@ int nd_wallpaper_init(INT32 screen_w, INT32 screen_h) {
 int nd_wallpaper_set(UINT32 index) {
   UINT32 previous = g_index;
   if (index >= ND_WALLPAPER_COUNT) {
+    kputs("[WP] wallpaper index out of range\n");
     return -1;
   }
   if (index == g_index && g_ready) {
@@ -264,6 +297,7 @@ int nd_wallpaper_set(UINT32 index) {
   }
   g_index = index;
   if (g_sw <= 0 || g_sh <= 0) {
+    kputs("[WP] wallpaper selection deferred: display not initialized\n");
     return -1; /* no screen size yet: retry from nd_wallpaper_init() */
   }
   if (wp_decode() != 0) {
@@ -271,6 +305,28 @@ int nd_wallpaper_set(UINT32 index) {
     return -1;
   }
   return 0;
+}
+
+UINT32 nd_wallpaper_luma(nd_rect_t area, nd_color_t fallback) {
+  UINT64 sum = 0;
+  UINT32 count = 0;
+  INT32 x, y;
+  if (g_ready) {
+    area = nd_rect_intersect(area, nd_rect(0, 0, g_img.w, g_img.h));
+    for (y = area.y; y < area.y + area.h; y++) {
+      for (x = area.x; x < area.x + area.w; x++) {
+        UINT32 c = g_img.px[(UINT64)y * g_img.stride + x];
+        sum += ((c >> 16) & 255u) * 299u +
+               ((c >> 8) & 255u) * 587u + (c & 255u) * 114u;
+        count++;
+      }
+    }
+  }
+  if (count != 0) {
+    return (UINT32)(sum / ((UINT64)count * 1000u));
+  }
+  return (((fallback >> 16) & 255u) * 299u +
+          ((fallback >> 8) & 255u) * 587u + (fallback & 255u) * 114u) / 1000u;
 }
 
 static UINT32 wp_lerp(UINT32 a, UINT32 b, UINT32 t) {

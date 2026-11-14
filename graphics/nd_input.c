@@ -79,6 +79,42 @@ static UINT32     g_tail;
 static INT32 g_mx;
 static INT32 g_my;
 static UINT8 g_buttons;
+static int g_absolute_mouse;
+
+typedef struct {
+  UINT32 a, b, c, d;
+} vm_mouse_regs_t;
+
+static vm_mouse_regs_t vm_mouse_call(UINT32 command, UINT32 value) {
+  vm_mouse_regs_t r = {0x564D5868u, value, command, 0x5658u};
+  UINT32 si = 0, di = 0;
+  __asm__ volatile("inl %%dx, %%eax"
+      : "+a"(r.a), "+b"(r.b), "+c"(r.c), "+d"(r.d), "+S"(si), "+D"(di)
+      : : "memory");
+  return r;
+}
+
+static void vm_mouse_init(void) {
+  UINT32 c;
+  vm_mouse_regs_t r;
+  g_absolute_mouse = 0;
+  cpuid(1, 0, 0, 0, &c, 0);
+  if ((c & (1u << 31)) == 0) return;
+  r = vm_mouse_call(10, ~0x564D5868u);
+  if (r.b != 0x564D5868u || r.a == 0xFFFFFFFFu) return;
+  (void)vm_mouse_call(41, 0x45414552u);
+  r = vm_mouse_call(40, 0);
+  if ((r.a >> 16) != 0 || (r.a & 0xFFFFu) != 1) return;
+  r = vm_mouse_call(39, 1);
+  if (r.a != 0x3442554Au) {
+    (void)vm_mouse_call(41, 0xF5);
+    kputs("[ND] WARN unsupported absolute pointer version; using PS/2\n");
+    return;
+  }
+  (void)vm_mouse_call(41, 0x53424152u);
+  g_absolute_mouse = 1;
+  kputs("[ND] absolute pointer ready (VMware mouse protocol)\n");
+}
 
 static UINT8 g_mouse_packet[3];
 static UINT8 g_mouse_bytes;
@@ -242,6 +278,7 @@ void nd_input_init(void) {
     (void)irq_unregister(12u, ps2_irq, NULL);
     kputs("[ND] WARN PS/2 IRQ unavailable: input disabled\n");
   }
+  vm_mouse_init();
 }
 
 /* ---- scancode set 1 --------------------------------------------------- */
@@ -441,6 +478,7 @@ static void kbd_byte(UINT8 b) {
 }
 
 static void mouse_byte(UINT8 b) {
+  if (g_absolute_mouse) return; /* PS/2 packets only notify the absolute queue. */
   if (g_mouse_bytes == 0 && (b & 0x08u) == 0u) {
     return; /* out of sync: wait for a packet start */
   }
@@ -463,6 +501,37 @@ static void mouse_byte(UINT8 b) {
     }
     /* PS/2 counts Y upward; nd_input_feed_mouse counts it downward. */
     nd_input_feed_mouse(dx, -dy, buttons);
+  }
+}
+
+static void vm_mouse_poll(void) {
+  UINT32 guard = 32;
+  const nd_display_t *d = nd_display();
+  INT32 w = d && d->available ? (INT32)d->width : 1024;
+  INT32 h = d && d->available ? (INT32)d->height : 768;
+  while (g_absolute_mouse && guard-- != 0) {
+    vm_mouse_regs_t r = vm_mouse_call(40, 0);
+    UINT8 buttons;
+    INT32 x, y;
+    if ((r.a >> 16) != 0) {
+      (void)vm_mouse_call(41, 0xF5);
+      g_absolute_mouse = 0;
+      g_mouse_bytes = 0;
+      kputs("[ND] WARN absolute pointer queue error; using PS/2\n");
+      return;
+    }
+    if ((r.a & 0xFFFFu) < 4) return;
+    r = vm_mouse_call(39, 4);
+    buttons = (UINT8)(((r.a & 0x20u) ? 1u : 0u) |
+                      ((r.a & 0x10u) ? 2u : 0u) |
+                      ((r.a & 0x08u) ? 4u : 0u));
+    if ((r.a & 0x10000u) != 0) {
+      nd_input_feed_mouse((INT32)r.b, -(INT32)r.c, buttons);
+      continue;
+    }
+    x = (INT32)(((UINT64)(r.b & 0xFFFFu) * (w - 1) + 32767) / 65535);
+    y = (INT32)(((UINT64)(r.c & 0xFFFFu) * (h - 1) + 32767) / 65535);
+    nd_input_feed_mouse(x - g_mx, y - g_my, buttons);
   }
 }
 
@@ -551,5 +620,6 @@ void nd_input_poll(void) {
       kbd_byte(data);
     }
   }
+  vm_mouse_poll();
   usb_hid_poll(); /* collect USB keyboard/mouse reports, if any */
 }

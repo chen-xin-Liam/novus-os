@@ -38,6 +38,7 @@ fn draw(w: &mut wm::Win, username: &[u8; 32], user_len: usize,
     ui::button(w, 112, 192, 96, 26, "关机", ui::warn());
     ui::button(w, 218, 192, 96, 26, "重启", ui::accent());
     w.text(18, 232, ui::dim(), note);
+    w.invalidate();
 }
 
 fn add_char(buf: &mut [u8], len: &mut usize, key: u32, cap: usize) {
@@ -72,7 +73,7 @@ pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] session manager up\n");
     let Some(wm_port) = ipc::lookup(wm::PORT_NAME) else { sys::exit(1) };
     let Some(mut win) = wm::Win::create(wm_port, 302, 210, CW as i32 + 2,
-                                    CH as i32 + wm::TITLE_H, "用户会话") else { sys::exit(2) };
+                                    CH as i32 + wm::FRAME_H, "用户会话") else { sys::exit(2) };
     let mut username = [0u8; 32];
     let mut password = [0u8; 64];
     let mut user_len = 0usize;
@@ -84,7 +85,7 @@ pub extern "C" fn _start() -> ! {
     if sys_port != 0 {
         ui::init(sys_port);
     }
-    let mut note = if setup { "创建首个账户，用户名仅支持 ASCII" } else { "输入用户名和密码" };
+    let mut note = if setup { "创建首个账户，密码至少 4 字节" } else { "输入用户名和密码" };
     draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
     /* The login window deliberately remains the session bootstrap service:
      * dismissing its close button cannot strand the desktop without a way to
@@ -133,7 +134,7 @@ pub extern "C" fn _start() -> ! {
                     draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
                 }
                 wm::Ev::Key(key, _mods) => {
-                    if key == KEY_ENTER {
+                    if key == KEY_ENTER || key == wm::KEY_TAB {
                         focus = 1 - focus;
                     } else if key == KEY_BACK {
                         if focus == 0 { erase(&mut username, &mut user_len); }

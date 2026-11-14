@@ -344,6 +344,13 @@ WP_IMGS := $(WP_DIR)/pexels-snapsbyclark-12981877.jpg \
            $(WP_DIR)/pexels-tu-n-vu-2153773491-40278712.jpg \
            $(WP_DIR)/treptoweralex-usa-9889580.jpg
 
+FONT_UI_SOURCES := $(wildcard graphics/*.c kernel/*.c wm/novus-wm/*.c) \
+                   $(shell find apps/src -name '*.rs' -type f)
+build/nd_font_fallback.h: tools/fontgen/fallback.py graphics/nd_font_data.bin $(FONT_UI_SOURCES) | build
+	python3 tools/fontgen/fallback.py $@
+
+build/graphics_nd_font.o: build/nd_font_fallback.h
+
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
 # embedded trampoline binary.
@@ -442,10 +449,12 @@ $(TRAMPOLINE_BIN): $(TRAMPOLINE_OBJ)
 
 # Generated assembly embedding the trampoline binary via .incbin,
 # bracketed by the global symbols ap_trampoline_bin / ap_trampoline_bin_end.
-# The blob references the binary by absolute path so the assembler finds it
-# regardless of its source-directory-relative search rules.
+# The blob references the binary by the path make was invoked with, which
+# keeps the line free of non-ASCII absolute paths (a UTF-8 path reaches the
+# assembler mojibake'd on Windows hosts) and still resolves because the
+# compiler runs with the project root as its working directory.
 $(TRAMP_BLOB_S): $(TRAMPOLINE_BIN)
-	@printf '\t.globl ap_trampoline_bin\nap_trampoline_bin:\n\t.incbin "%s"\n\t.globl ap_trampoline_bin_end\nap_trampoline_bin_end:\n' '$(abspath $<)' > $@
+	@printf '\t.globl ap_trampoline_bin\nap_trampoline_bin:\n\t.incbin "%s"\n\t.globl ap_trampoline_bin_end\nap_trampoline_bin_end:\n' '$<' > $@
 
 $(TRAMP_BLOB_OBJ): $(TRAMP_BLOB_S) | build
 	$(CC) $(CFLAGS) -c $< -o $@
