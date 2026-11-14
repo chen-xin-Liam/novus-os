@@ -22,6 +22,7 @@
 #include "ipc.h"
 #include "irq.h"
 #include "serial.h"
+#include "con.h"
 #include "../fs/novusfs/novusfs.h"
 #include "../fs/vfs.h"
 #include "../fs/vfs_mount.h"
@@ -1001,7 +1002,7 @@ static void sys_console(trap_frame_t *f) {
     f->rax = (UINT64)-1;
     return;
   }
-  if (op == 0u) { /* write */
+  if (op == 0u) { /* write: to the on-screen console (mirrored to serial) */
     UINT64 done = 0;
 
     while (done < len) {
@@ -1014,30 +1015,32 @@ static void sys_console(trap_frame_t *f) {
         f->rax = (UINT64)-1;
         return;
       }
-      for (UINT64 i = 0; i < chunk; i++) {
-        serial_putc((char)tmp[i]);
-      }
+      con_out(tmp, (UINT32)chunk);
       done += chunk;
     }
     f->rax = len;
-  } else if (op == 1u) { /* read */
+  } else if (op == 1u) { /* read: keyboard when a console is bound, else serial */
     UINT64 got = 0;
 
     while (got < len) {
       UINT64 room = len - got;
       UINT64 n = 0;
-      int    r;
 
       if (room > sizeof(tmp)) {
         room = sizeof(tmp);
       }
-      while (n < room) {
-        r = serial_getc();
-        if (r < 0) {
-          break;
+      if (con_ready()) {
+        n = con_in_read(tmp, (UINT32)room);
+      } else {
+        int r;
+        while (n < room) {
+          r = serial_getc();
+          if (r < 0) {
+            break;
+          }
+          tmp[n] = (UINT8)r;
+          n++;
         }
-        tmp[n] = (UINT8)r;
-        n++;
       }
       if (n == 0u) {
         break;

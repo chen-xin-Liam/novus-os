@@ -58,6 +58,8 @@
 #include "pe.h"
 /* M5: NovusDisplay and the GUI widget library. */
 #include "nd.h"
+#include "nd_input.h"
+#include "con.h"
 #include "nd_font_uni.h"
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
 #include "ipc.h"
@@ -526,11 +528,15 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
                        shared_mem_get()->boot_mode == SHM_BOOT_MODE_NO_DESKTOP);
 
     if (no_graphics) {
-      kputs("[BOOT] no-graphics mode: serial shell, window manager not started\n");
-      /* These do not need the window manager; keep them up so the shell's
-       * device/update commands and the update service behave as usual. */
+      kputs("[BOOT] no-graphics mode: on-screen text console, window manager not started\n");
+      /* These do not need the window manager: net_init() enumerates the USB
+       * HID keyboard and the network, devtab_refresh() fills the device table.
+       * nd_input_init() arms the keyboard queue and con_init() binds the
+       * framebuffer text console nsh will draw into. */
       (void)net_init();
       devtab_refresh();
+      nd_input_init();
+      con_init(nd_screen());
       (void)apps_launch_name("nsh");
     } else {
       nwm_init();

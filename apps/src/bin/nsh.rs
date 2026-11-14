@@ -374,8 +374,8 @@ fn render(win: &mut wm::Win, shell: &shell::Shell, scroll: &Scroll, input: &[u8]
     drawer.win.fill(caret_x, caret_y, 7, 13, accent);
 }
 
-/// The terminal's [`shell::Sink`] for the serial console: bytes straight to
-/// COM1, no decoration.
+/// The terminal's [`shell::Sink`] for the text console: bytes go straight to
+/// the on-screen framebuffer console (and are mirrored to the serial line).
 struct SerialSink;
 
 impl shell::Sink for SerialSink {
@@ -387,17 +387,18 @@ impl shell::Sink for SerialSink {
     }
 }
 
-/// Runs the shell over the serial console, with no window manager. Chosen
+/// Runs the shell over the text console, with no window manager. Chosen
 /// automatically when the WM port is absent (e.g. the "no desktop" boot
-/// option, which never initialises graphics).
-fn serial_mode() -> ! {
+/// option, which never initialises graphics and draws straight to the
+/// framebuffer).
+fn console_mode() -> ! {
     let mut shell = shell::Shell::new(0);
     let mut prompt = [0u8; 128];
     let mut input = [0u8; INPUT_MAX];
     let mut ilen = 0usize;
 
     sys::console_write(b"\x1b[2J\x1b[H");
-    sys::console_write(b"Novus OS nsh (serial) - type 'help'.\r\n");
+    sys::console_write(b"Novus OS nsh (console) - type 'help'.\r\n");
 
     loop {
         let plen = build_prompt(&shell, &mut prompt);
@@ -458,10 +459,11 @@ fn serial_mode() -> ! {
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
-    /* No window manager means no graphics: fall back to a serial shell.
-     * This is how the "no desktop" boot option reaches a pure-text prompt. */
+    /* No window manager means no graphics: fall back to the text console,
+     * drawn straight to the framebuffer. This is how the "no desktop" boot
+     * option reaches a pure-text prompt without loading the UI. */
     if ipc::lookup(wm::PORT_NAME).is_none() {
-        serial_mode();
+        console_mode();
     }
     window_mode()
 }
