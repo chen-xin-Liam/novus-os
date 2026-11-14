@@ -39,6 +39,7 @@ MKISO       := $(TOOLS_OUT)/mkiso
 MKFSNOVUS   := $(TOOLS_OUT)/mkfsnovus
 MKDISK      := $(TOOLS_OUT)/mkdisk
 WPKG        := $(TOOLS_OUT)/wpkg
+NOVUPKG     := $(TOOLS_OUT)/novupkg
 
 # fs/novusfs is freestanding and declares memcpy/memset/memcmp itself,
 # with a 64-bit length. Renaming them keeps those declarations from
@@ -117,7 +118,7 @@ NKM_SEED ?= $(shell python3 -c \
 .PHONY: tools esp novus-img disk-img iso iso-force run-iso install \
         nkm-test-module wpkg
 
-tools: $(MKFAT) $(MKISO) $(MKFSNOVUS) $(MKDISK) $(WPKG)
+tools: $(MKFAT) $(MKISO) $(MKFSNOVUS) $(MKDISK) $(WPKG) $(NOVUPKG)
 
 $(TOOLS_OUT):
 	mkdir -p $(TOOLS_OUT)
@@ -130,6 +131,14 @@ $(MKISO): tools/mkiso/mkiso.c fs/novusfs/rootfs_layout.h | $(TOOLS_OUT)
 
 $(WPKG): tools/wpkg/wpkg.c graphics/wpkg.h | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) -Itools/wpkg -o $@ $<
+
+# novupkg: host-side update package builder (Rust, reuses kernel crypto).
+$(NOVUPKG): tools/novupkg/src/main.rs tools/novupkg/src/crypto/mod.rs \
+            tools/novupkg/Cargo.toml | $(TOOLS_OUT)
+	@test -n "$(CARGO)" || { echo "ERROR: cargo not found." >&2; exit 1; }
+	cd tools/novupkg && CARGO_TARGET_DIR=$(CURDIR)/build/rust-host \
+	    $(CARGO) build --quiet
+	cp $(CURDIR)/build/rust-host/debug/novupkg $@
 
 # One rule per kernel filesystem source, flattened like the kernel's own
 # object naming, so the host build and the kernel build never share an

@@ -19,6 +19,8 @@
 pub mod cmds;
 pub mod parse;
 pub mod path;
+pub mod update;
+pub mod crypto;
 
 use crate::fs;
 

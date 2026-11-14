@@ -113,31 +113,30 @@ static void wr(e1000_t *c, UINT32 reg, UINT32 val) {
   *(volatile UINT32 *)(void *)(c->base + reg) = val;
 }
 
-static void e1000_irq(void *ctx) {
-  e1000_t *c = (e1000_t *)ctx;
-  UINT32 cause = rd(c, E1000_ICR);
+/*
+ * Move any completed RX descriptors into the software FIFO. The NIC DMAs each
+ * received frame into its buffer and sets the descriptor's DD bit; this just
+ * harvests them. It is safe to call from both the interrupt handler and a
+ * polled net_tick(): the caller holds the interrupt lock in both cases, and a
+ * descriptor is only touched once (its status is cleared after harvest), so the
+ * two paths never double-process.
+ */
+static void e1000_rx_drain(e1000_t *c) {
   UINT32 guard = RX_COUNT;
 
-  if ((cause & E1000_IRQS) == 0u) {
-    return;
-  }
-  c->irq_count++;
-  if ((cause & (1u << 2)) != 0u) {
-    c->link_pending = 1;
-  }
   while (guard-- != 0u) {
     volatile e1000_desc_t *desc = &c->rx[c->rx_cur];
     UINT32 next;
     UINT32 len;
 
-    if ((desc->status & 1u) == 0u) {
+    if ((*(volatile UINT8 *)&desc->status & 1u) == 0u) {
       break;
     }
     __asm__ volatile("" : : : "memory");
     len = desc->len;
     next = (c->queue_head + 1u) % RX_QUEUE;
-    if ((desc->status & 2u) == 0u || desc->css != 0u || len > BUF_SIZE ||
-        len == 0u || next == c->queue_tail) {
+    if ((*(volatile UINT8 *)&desc->status & 2u) == 0u || desc->css != 0u ||
+        len > BUF_SIZE || len == 0u || next == c->queue_tail) {
       c->rx_dropped++;
     } else {
       memcpy(c->queue[c->queue_head].data, c->rx_buf[c->rx_cur], len);
@@ -150,6 +149,20 @@ static void e1000_irq(void *ctx) {
     wr(c, E1000_RDT, c->rx_cur);
     c->rx_cur = (c->rx_cur + 1u) % RX_COUNT;
   }
+}
+
+static void e1000_irq(void *ctx) {
+  e1000_t *c = (e1000_t *)ctx;
+  UINT32 cause = rd(c, E1000_ICR);
+
+  if ((cause & E1000_IRQS) == 0u) {
+    return;
+  }
+  c->irq_count++;
+  if ((cause & (1u << 2)) != 0u) {
+    c->link_pending = 1;
+  }
+  e1000_rx_drain(c);
 }
 
 /*
@@ -201,6 +214,8 @@ static int e1000_send(netdev_t *d, const UINT8 *frame, UINT32 len) {
   e1000_desc_t *desc = &c->tx[i];
 
   if (len > BUF_SIZE || (*(volatile UINT8 *)&desc->status & 1u) == 0u) {
+    kputs("[NET] e1000_send BUSY slot="); { char b[12]; UINT32 p=0; b[p++]='0'; kputs(b); }
+    kputs("\n");
     return -1;
   }
   for (i = 0; i < len; i++) {
@@ -213,6 +228,7 @@ static int e1000_send(netdev_t *d, const UINT8 *frame, UINT32 len) {
   __asm__ volatile("" : : : "memory");
   c->tx_tail = (c->tx_tail + 1u) % TX_COUNT;
   wr(c, E1000_TDT, c->tx_tail);
+  kputs("[NET] e1000_send OK len="); { char b[12]; UINT32 p=0; if (len>9){b[p++]='0'+len/10;b[p++]='0'+len%10;}else{b[p++]='0'+len;} kputs(b); kputs("\n"); }
   return 0;
 }
 
@@ -233,6 +249,12 @@ static int e1000_poll(netdev_t *d, UINT8 *buf, UINT32 cap, UINT32 *out_len) {
   }
   d->rx_drop += c->rx_dropped;
   c->rx_dropped = 0;
+  if (c->queue_tail == c->queue_head) {
+    /* Polling fallback: the RX interrupt may not have fired yet (e.g. a network
+     * probe that runs before the scheduler enables interrupts), so harvest any
+     * completed descriptors directly instead of waiting for the ISR. */
+    e1000_rx_drain(c);
+  }
   if (c->queue_tail == c->queue_head) {
     irq_restore(saved);
     return 0;

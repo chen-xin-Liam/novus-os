@@ -436,20 +436,27 @@ Novus OS 原生支持**已完成更新的可逆撤回能力**，支持所有增�
 
 # 4\. Novus OS 自研更新体系能力总览表
 
+> 说明：下表为**与当前代码一致的真实状态**（此前版本误标为「已完全落地冻结」）。
+> 状态含义：已实现 = 代码落地并通过构建/测试；部分实现 = 核心逻辑已落地但传输、UI 或调度未闭环；未实现 = 尚无代码。
+
 |系统能力模块|Novus OS 自研实现方案|能力状态|
 |---|---|---|
-|紧急安全漏洞修复|\.hotpth 最高优先级静默热修复体系|已完全落地冻结|
-|系统核心累积迭代|\.npth 系统通用增量补丁体系|已完全落地冻结|
-|用户软件独立更新|\.apth 应用软件专属增量补丁体系|已完全落地冻结|
-|系统大版本升级|\.novu 全量安装包兜底方案|已完全落地冻结|
-|远程统一更新管控|全局唯一大表 \+ 客户端后台轮询架构|已完全落地冻结|
-|五级精细化更新分级|紧急/推荐/预览/可选/开发 全通道体系|已完全落地冻结|
-|字节级增量差分更新|自研Delta差分数据块更新机制|已完全落地冻结|
-|原子更新与事务回滚|快照备份\+全自动异常回滚体系|已完全落地冻结|
-|断点续传续更能力|下载与安装进度持久化机制|已完全落地冻结|
-|智能时段调度更新|空闲识别\+免打扰时段自定义策略|待编码落地|
-|精细化灰度推送管控|设备维度百分比放量\+白名单机制|已支持|
-|更新失败自愈与重试|梯度重试\+设备兼容拉黑\+日志上报闭环|待编码落地|
+|四类载体格式与 8 步校验|128B 冻结头 + 四魔数 + Ed25519/SHA-256 流水线（`security/novu/novu_format.h`、`novu_verify.c`、`tools/novupkg`）|已实现|
+|五级精细化更新分级|固定 64 项优先级队列，热修复插队且不可延后/忽略（`novu_queue.c`）|已实现|
+|字节级增量差分更新|copy/literal 差分块流式应用（`novu_delta.c`）|已实现|
+|更新清单解析|PUT/DEL manifest 编解码（`novu_manifest.c`）|已实现|
+|原子更新与事务回滚|前置快照 + 临时文件 rename + 逆序回滚 + Merkle 重算（`novu_apply.c`）|已实现|
+|更新索引注册表|固定 64 条、状态机、撤回与固化字段（`novu_index.c`）|已实现|
+|后台常驻更新服务|tick 驱动状态机 + journal（`novu_service.c`，已挂 `sched.c`）|部分实现（传输/时段策略待接）|
+|终端更新控制面|`SYS_UPDATE`(25) 已接 STATUS/LIST/CHECK/DEFER/IGNORE/ROLLBACK；`nsh update` 命令|部分实现|
+|远程统一更新管控|客户端 HTTPS 轮询 + 服务端统一大表|部分实现（服务端+客户端已验证；真实厂商根已注入并完成内核侧端到端联调；定时调度与上报待接）|
+|标准 TLS 1.2/1.3 与 WebPKI|`security/tls/*`（asn1/x509/rsa/p256/x25519/aes_gcm/chacha20/hkdf/hmac/prf/csprng/chain/record/tls12_*/tls13_*）|部分实现（TLS1.3 与 TLS1.2 客户端均已验证并接入内核；多根信任集按 issuer/subject DN 选锚；签名/公钥算法子集有限制，见 7.4）|
+|HTTPS 客户端与证书校验|`kernel/net_http.c` + `SYS_HTTPS`(26)|部分实现（已注入 160 张真实厂商根，QEMU `-netdev user` + `updatesrv.py --https` 内核侧端到端通过；公网主机名解析仍为最小实现）|
+|信任锚供给|`user/ssl/certs/*.pem`（上游素材）、`tools/cabundle/roots.pem`（合并集，注明来源/许可）、`tools/cabundle/import_roots.py`（去重+校验）、`cabundle.py`、`security/novu/cabundle.c`|已实现（160 张自签 CA:TRUE 未过期根，DER 170396 字节；上限 192；导入离线、纯 Python stdlib，openssl 仅用于导入期证书校验；未装时 fail-closed；支持多根偏移表，不复制 DER 进 BSS）|
+|设置「更新中心」界面|settings 更新页（服务状态/队列/可用更新/检查/回滚）|部分实现（「更新」页已落地）|
+|智能时段调度|空闲/免打扰/夜间静默|未实现（状态机已留接口）|
+|精细化灰度推送管控|设备维度百分比放量 + 白名单|未实现|
+|更新失败自愈与重试|梯度重试 + 兼容拉黑 + 上报|部分实现（3 次重试状态机已落地）|
 
 # 5\. Novus OS 自研更新体系定位总结
 
@@ -470,4 +477,104 @@ Novus OS 更新体系为**100%纯自研、完全独立知识产权、工业级�
 - 完善服务端大表设备维度百分比灰度推送、放量管控逻辑
 
 - 完成稳定版更新延后次数统计、阈值管控、强制更新策略模块开发
+
+# 7\. 实现进度（与代码同步，2026\-11）
+
+## 7\.1 已落地代码
+
+| 模块 | 文件 | 说明 |
+|---|---|---|
+| 冻结头 / 控制 ABI | `security/novu/novu_format.h` | 128B 头（静态断言）、四魔数、五级、flag、`user_update_req_t`(336)/`user_update_info_t`(84)/`user_https_req_t`(340) |
+| 8 步校验 | `security/novu/novu_verify.c` | 头完整性→魔数→版本→UUID 双向→版本区间→SHA-256→Ed25519 |
+| 五级队列 | `security/novu/novu_queue.c` | 固定 64 项，热修复插队、不可延后/忽略、dev 默认隐藏 |
+| 索引注册表 | `security/novu/novu_index.c` | 固定 64 条，增删查/状态迁移、文本序列化 |
+| 差分引擎 | `security/novu/novu_delta.c` | copy/literal 块流式应用，越界拒绝 |
+| 清单编解码 | `security/novu/novu_manifest.c` | `PUT <off> <len> <dst>` / `DEL <dst>` |
+| 事务应用 | `security/novu/novu_apply.c` | 快照到 `/temp/system`、临时文件 rename、失败逆序回滚、Merkle 重算 |
+| 常驻服务 | `security/novu/novu_service.c` | 状态机 + journal，已由 `kernel/sched.c` 每 40 tick 驱动 |
+| 控制面 | `kernel/trap.c` | `SYS_UPDATE=25`（STATUS/LIST/CHECK/DEFER/IGNORE/ROLLBACK），`SYS_HTTPS=26`（ENOSYS 占位） |
+| 打包器 | `tools/novupkg` | 四类包、128B 头、UUID、SHA-256、Ed25519 签名与自测 |
+| AES-GCM | `security/tls/aes.c`、`gcm.c` | AES-128/256 + GCM AEAD；NIST/FIPS 向量全部通过（含解密与篡改拒绝） |
+| HKDF | `security/tls/hkdf.c` | RFC 5869 extract/expand；RFC 5869 Test Case 1 通过 |
+| X25519 | `security/tls/x25519.c` | RFC 7748 ECDHE；公钥/共享密钥/迭代向量全部通过 |
+| DER 解析 | `security/tls/asn1.c` | 有界 DER TLV 读取（短/长格式、越界拒绝） |
+| ChaCha20-Poly1305 | `security/tls/chacha20poly1305.c` | RFC 8439 AEAD；加密/解密/篡改拒绝通过 |
+| RSA-2048 验签 | `security/tls/rsa.c` | PKCS#1 v1.5 + SHA-256；OpenSSL 真实签名验证通过 |
+| P-256 ECDSA | `security/tls/p256.c` | 4×64 位域/标量运算、Jacobian 点运算；OpenSSL 真实签名验证通过 |
+| RSA-PSS | `security/tls/rsa.c` | MGF1-SHA256 PSS；OpenSSL 真实 PSS 签名通过 |
+| CSPRNG | `security/tls/csprng.c` | hash-DRBG（调用方注入 SHA-256） |
+| X.509 | `security/tls/x509.c` | DER 解析、RSA/ECDSA 证书自签名验证、篡改拒绝、dNSName 与 iPAddress SAN 主机名匹配 |
+| HMAC-SHA256 | `security/tls/hmac.c` | RFC 4231 Test Case 1 通过 |
+| TLS 1.2 PRF | `security/tls/prf.c` | P_SHA256，与 Python 标准 HMAC-SHA256 交叉验证一致 |
+| 证书链校验 | `security/tls/chain.c` | WebPKI 链式验签 + CA 约束 + 有效期 + 主机名；OpenSSL 三层链验证通过 |
+| TLS 1.3 记录层 | `security/tls/record.c` | AES-128/256-GCM、ChaCha20-Poly1305；往返/篡改/序号测试通过 |
+| TLS1.3 密钥调度 | `security/tls/tls13_keys.c` | Expand-Label/Derive-Secret/Finished；与 Python 标准 HKDF 全部一致 |
+| 握手消息 | `security/tls/tls13_msg.c` | ClientHello 构造 / ServerHello 解析；编解码测试通过 |
+| TLS1.3 客户端 | `security/tls/tls13_client.c` | 真实握手 + WebPKI 链校验 + HTTPS GET；与 OpenSSL s_server 互操作通过（HTTP/1.0 200 ok） |
+| TLS1.2 客户端 | `security/tls/tls12_client.c` | ECDHE(X25519)+AES-128-GCM/ChaCha20-Poly1305，PKCS1/PSS 验签；与 OpenSSL `s_server -tls1_2` 互操作通过 |
+| 内核 HTTPS 版本回退 | `kernel/net_http.c` | 优先 TLS1.3，失败后重连回退 TLS1.2 |
+| 终端命令 | `apps/src/shell/update.rs`、`apps/src/sys.rs` | `nsh update --check/--verify/--apply/--status/--list/--defer/--rollback/--pubkey` |
+| 统一大表服务端 | `tools/updatesrv/updatesrv.py` | HTTP/HTTPS 提供 `/v1/updates` 与 `/pkg/<name>`；自测（表+包+sha256）通过 |
+| 设置「更新」页 | `apps/src/bin/settings.rs` | 服务状态/队列/可用更新列表/检查/回滚，驱动 `SYS_UPDATE` |
+| 内核 TCP 流式 | `kernel/net_tcp.c` | `net_tcp_send`（按 MSS 分片）+ `net_tcp_consume`，接收缓冲 4KB |
+| 内核 HTTPS 客户端 | `kernel/net_http.c`、`kernel/trap.c` | TLS1.3/TLS1.2 over net_tcp 适配器、全局 `rtc_unix()` 提供证书有效期时间、`SYS_HTTPS`(26)；未装 cabundle 时 fail-closed |
+| 多根信任集 | `security/tls/chain.c`、`kernel/net_http.c` | `tls_chain_verify_set()` 按链顶证书 issuer 与根 subject 的 DER Name 精确匹配选锚（O(1) 验签次数），无匹配时有界回退扫描；`tls13/tls12_client_connect_set()` 保留单根 API 兼容宿主复现 |
+| 真实厂商根导入 | `user/ssl/certs/*.pem` → `tools/cabundle/import_roots.py` → `tools/cabundle/roots.pem` | 上游素材：curl CA bundle（Mozilla 2026-11-05，带 sha256 完整性文件）、ICANN bundle、ISRG/Let's Encrypt 根。按 DER SHA256 去重，仅接受自签 + CA:TRUE + 未过期；跳过 110 张重复、排除 1 张已过期的 DST Root CA X3（`curl_response`，非 PEM 素材）与非 PEM 产物；新增 12 张。幂等，可重复执行 |
+| 真实厂商根（信任锚供给） | `tools/cabundle/roots.pem` → `cabundle.py` → `security/novu/cabundle.c` | 160 张真实自签 CA:TRUE 未过期根（Debian/Mozilla CA 计划、curl CA bundle、ICANN、ISRG；MPL-2.0 及各 CA 条款，见 roots.pem 头部完整来源与许可）；DER 170396 字节、偏移/长度表；生成离线、不联网、纯 Python stdlib |
+| QEMU 测试锚隔离 | `security/novu/cabundle_e2e.c`、`tools/updatesrv/test_ca.pem/.key`、`server.pem/.key` | 仅 `E2E=1` 编译进镜像，生产构建不含；测试私钥在仓库但**不进入 OS 镜像**；`gen_e2e_certs.sh` 只重生成测试锚，绝不改动生产 `cabundle.c` |
+| 端到端联调脚本 | `tools/updatesrv/e2e-run.sh` | `make E2E=1` + `make iso` → `-cdrom` ISO 启动 + `-netdev user` + `updatesrv.py --https 8443`；全部资产在仓库、无生成步骤、无联网 |
+| 主机名解析 | `kernel/trap.c`（SYS_HTTPS） | IPv4 字面量 + `net_dns_resolve` 异步解析 |
+
+## 7\.2 验证结果
+
+- `make iso`：零错误零警告；`check-rootfs`：435 项检查 0 错误。
+- QEMU 启动日志：`[NOVU] update format hdr=128B, verify+queue ready`，`[MOUNT] path ok: /disk0`、`[FONT] loaded` 无回归。
+- 宿主测试：队列+索引 18 项、差分/manifest/服务 22 项，全部 ALL PASS。
+- TLS/WebPKI：与 OpenSSL `s_server` 及自研 `updatesrv`（HTTPS）均完成真实 TLS1.3 握手 + 证书链校验 + `GET /v1/updates`，返回 `HTTP/1.0 200 OK`（表 JSON 518 字节）。
+- `tools/novupkg selftest`：magic/uuid/sha256/ed25519 全 PASS。
+- 真实厂商根内核侧端到端（`tools/updatesrv/e2e-run.sh`，ISO + `-netdev user`）：串口日志依次出现
+  `[NET] https cabundle: vendor roots=0xa0`（160）、`[E2E] QEMU test anchor added, total roots=0xa1`（161）、
+  `[NCSI] connected`、`[E2E] link up, cabundle ready: starting HTTPS probe`、`[E2E] OK len=519`；
+  无 `cert chain FAIL` / `[E2E] FAIL`。多根按 issuer/subject DN 选中测试锚并完成 TLS1.3 握手、WebPKI 校验与 HTTPS GET。
+  脚本对正向证据做断言（根集加载、测试锚、`[E2E] OK`）并返回退出码，而非仅检查没有失败行。
+- 生产构建（`make`，`E2E=0`）不含 `cabundle_e2e.o`，测试锚不进入生产镜像；`cabundle.c` 为空时仍 fail-closed。
+- 构建切换：`Makefile` 用 `build/.cflags` 记录完整 CFLAGS 签名并让每个对象依赖它。因为 make 不感知命令行
+  flag 变化，若缺少该机制，`make`(E2E=0) 之后再 `make E2E=1` 会复用生产对象，导致测试锚缺失或符号不一致的
+  假失败。回归验证覆盖 E2E=0 → E2E=1 的切换。
+- 单会话 TCP 协调：内核 TCP 为单会话，NCSI 连通性探测与 E2E HTTPS 探针会争抢接收缓冲。E2E 探针会等待
+  NCSI 到达终态（OK 或 FAIL_*）且 TCP 会话空闲后才启动，并对瞬时失败做有界重试（3 次）。
+- 启动方式说明：`-cdrom out/novus-live.iso` 为已验证路径；直接以 `fat:rw:esp` 目录启动会呈现为 504 MiB 硬盘，
+  内置 FAT 读器可能无法定位 `SYSTEM.IMG` 等文件而丢弃 live root，联调脚本因此固定使用 ISO。
+
+## 7\.3 未实现（下一阶段）
+
+- 定时/免打扰调度、百分比灰度、设备兼容拉黑与服务端上报。
+- 设置「更新」页的详情/历史/策略子页（当前为概览 + 检查 + 回滚）。
+- 公网域名场景的端到端验证：当前内核侧联调覆盖 IPv4 字面量 + QEMU `user` 网，DNS 主机名路径尚未在真实公网服务上端到端验证。
+
+## 7\.4 TLS / WebPKI 能力边界（真实状态）
+
+注入的 160 张真实厂商根是完整数据，但内核的 X.509/RSA 子集并非能验证所有公钥链，
+因此**不能表述为「可与任意公网安全更新服务通信」**，实际边界如下：
+
+- 支持的证书签名算法：`sha256WithRSAEncryption`（RSA PKCS#1 v1.5）、`ecdsa-with-SHA256`；
+  `sha1WithRSAEncryption`、`sha384WithRSAEncryption`、`sha512WithRSAEncryption`、`ecdsa-with-SHA384`、
+  `ecdsa-with-SHA512` 的证书链无法验证（`x509.c:classify_sig_alg`）。
+- 支持的签发者公钥：RSA ≤ 4096 bit（`rsa.c` MAX_LIMBS=128）、P-256 EC 点（`x509.c:tls_x509_pubkey_ec`
+  仅解析 65 字节未压缩点）。P-384（97 字节）、P-521 根公钥不可用。
+- 160 张真实根统计：RSA 113 张（全部 ≤4096 bit）、EC 47 张（其中 P-256 仅 4 张）；
+  自签算法分布 sha256WithRSA 62 / ecdsa-with-SHA256 7 / sha1WithRSA 24 / ecdsa-with-SHA384 39 /
+  sha384WithRSA 22 / sha512WithRSA 5 / ecdsa-with-SHA512 1。按「签名算法受支持且签发者公钥可解析」
+  的口径 66 张；其余根已作为信任数据注入，但需扩展签名/曲线支持后才能用于对应链。
+- 其他限制：证书链深度上限 8（`tls13_client.c`）/ 4（`tls12_client.c`）；不支持 0-RTT、客户端证书、
+  HTTP/2、QUIC、OCSP 硬失败、CRL；根证书仍需通过 `tls_x509_valid_at` 有效期检查；
+  `SYS_HTTPS` 主机名解析为最小实现。
+- 根数据来源与许可：`tools/cabundle/roots.pem` 头部记录（Debian/Mozilla CA 计划 MPL-2.0 与
+  GPL-2.0+ 打包、curl CA bundle MPL-2.0 带 sha256 完整性文件、ICANN CPS、ISRG 证书政策；
+  各根证书仍受其签发 CA 条款约束）。上游素材位于 `user/ssl/certs/`，导入工具
+  `tools/cabundle/import_roots.py` 按 DER SHA256 去重并只接受自签 + CA:TRUE + 未过期根，
+  已排除过期的 DST Root CA X3。构建与导入均不联网。
+- 时间源：证书有效期依赖 `kernel/rtc.c` 的全局 `rtc_unix()`；`net_http.c` 不再定义局部 RTC 函数。
+
+> 结论：更新体系的「格式—校验—队列—差分—事务—索引—服务状态机—控制面—统一大表服务端—设置更新页」主干已可用；TLS1.3 客户端与 WebPKI 链校验已通过真实服务器验证；剩余为内核网络传输接入与调度/灰度策略。
 

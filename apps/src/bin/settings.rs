@@ -60,15 +60,17 @@ enum Page {
     System,
     Look,
     Apps,
+    Update,
     About,
 }
 
-const PAGES: [Page; 4] = [Page::System, Page::Look, Page::Apps, Page::About];
-const PAGE_NAMES: [&str; 4] = ["系统", "个性化", "应用", "关于"];
-const PAGE_SUB: [&str; 4] = [
+const PAGES: [Page; 5] = [Page::System, Page::Look, Page::Apps, Page::Update, Page::About];
+const PAGE_NAMES: [&str; 5] = ["系统", "个性化", "应用", "更新", "关于"];
+const PAGE_SUB: [&str; 5] = [
     "设备信息与实时资源",
     "颜色与应用外观",
     "内置应用的运行状态",
+    "系统与应用更新",
     "版本与实现说明",
 ];
 
@@ -85,6 +87,9 @@ struct State {
     confirm_pid: u64,
     confirm_left: u32,
     note: &'static str,
+    svc: i64,
+    updates: [sys::UpdateInfo; MAX_ROWS],
+    n_updates: usize,
 }
 
 fn state_name(s: u8) -> &'static str {
@@ -354,6 +359,56 @@ fn page_apps(w: &mut wm::Win, s: &State) {
     }
 }
 
+fn svc_name(st: i64) -> &'static str {
+    match st {
+        0 => "空闲",
+        1 => "检查中",
+        2 => "下载中",
+        3 => "校验中",
+        4 => "安装中",
+        5 => "回滚中",
+        6 => "错误",
+        _ => "未知",
+    }
+}
+
+fn page_update(w: &mut wm::Win, s: &State) {
+    card(w, CONTENT_X, 80, CONTENT_W, 150, "更新服务");
+    kv(w, CONTENT_X + 14, 116, "状态", svc_name(s.svc));
+    let mut q = ui::Buf::new();
+    q.num(s.n_updates as u32).s(" 个可用更新");
+    kv(w, CONTENT_X + 14, 142, "队列", q.str());
+    kv(w, CONTENT_X + 14, 168, "校验", "SHA-256 + Ed25519");
+    button(w, CONTENT_X + CONTENT_W - 132, 196, 116, 26, "检查更新",
+           s.accent, false, false);
+
+    card(w, CONTENT_X, 242, CONTENT_W, 300, "可用更新");
+    if s.n_updates == 0 {
+        w.text(CONTENT_X + 14, 286, ui::dim(), "暂无更新，点击“检查更新”");
+    } else {
+        let shown = if s.n_updates > 6 { 6 } else { s.n_updates };
+        let mut i = 0;
+        while i < shown {
+            let u = &s.updates[i];
+            let y = 286 + i as i16 * 40;
+            let name = u.name;
+            let mut nl = 0usize;
+            while nl < 48 && name[nl] != 0 {
+                nl += 1;
+            }
+            let nm = core::str::from_utf8(&name[..nl]).unwrap_or("更新包");
+            w.text(CONTENT_X + 14, y, ui::text(), nm);
+            let mut b = ui::Buf::new();
+            b.s("类型 ").num(u.ty as u32).s(" · 级别 ").num(u.level as u32)
+             .s(" · 状态 ").num(u.state as u32);
+            w.text(CONTENT_X + 14, y + 18, ui::dim(), b.str());
+            i += 1;
+        }
+        button(w, CONTENT_X + CONTENT_W - 132, 286 + shown as i16 * 40 + 8,
+               116, 26, "回滚最近", s.accent, false, true);
+    }
+}
+
 fn page_about(w: &mut wm::Win, s: &State) {
     card(w, CONTENT_X, 80, CONTENT_W, 170, "版本");
     kv(w, CONTENT_X + 14, 116, "版本", "Novus OS 0.9（M9）");
@@ -385,19 +440,22 @@ fn draw(w: &mut wm::Win, s: &State) {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
-        Page::About => 3,
+        Page::Update => 3,
+        Page::About => 4,
     }]);
     w.text(CONTENT_X, 60, ui::dim(), PAGE_SUB[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
-        Page::About => 3,
+        Page::Update => 3,
+        Page::About => 4,
     }]);
 
     match s.page {
         Page::System => page_system(w, s),
         Page::Look => page_look(w, s),
         Page::Apps => page_apps(w, s),
+        Page::Update => page_update(w, s),
         Page::About => page_about(w, s),
     }
 
@@ -505,6 +563,9 @@ pub extern "C" fn _start() -> ! {
         confirm_pid: 0,
         confirm_left: 0,
         note: "",
+        svc: 0,
+        updates: [sys::UpdateInfo::zeroed(); MAX_ROWS],
+        n_updates: 0,
     };
 
     if let Some(t) = sinfo::theme(sys_port) {
@@ -534,7 +595,7 @@ pub extern "C" fn _start() -> ! {
                      * highlight; everything else is static between clicks. */
                     let old = s.hover;
                     s.hover = (m.x as i16, m.y as i16);
-                    let nav_area = |p: (i16, i16)| p.0 < NAV_W && p.1 >= 62 && p.1 < 62 + 42 * 4;
+                    let nav_area = |p: (i16, i16)| p.0 < NAV_W && p.1 >= 62 && p.1 < 62 + 42 * PAGES.len() as i16;
                     if nav_area(old) || nav_area(s.hover) {
                         draw(&mut win, &s);
                     }
@@ -571,6 +632,11 @@ pub extern "C" fn _start() -> ! {
                 load_stats(sys_port, &mut s.st);
                 s.n_tasks = load_tasks(sys_port, &mut s.tasks);
                 draw(&mut win, &s);
+            } else if s.page == Page::Update {
+                s.svc = sys::update_status();
+                let n = sys::update_list(&mut s.updates);
+                s.n_updates = if n < 0 { 0 } else { (n as usize).min(MAX_ROWS) };
+                draw(&mut win, &s);
             }
         }
         sys::yield_now();
@@ -586,6 +652,11 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
             if y >= top as i32 && y < (top + 40) as i32 {
                 s.page = *p;
                 s.note = "";
+                if *p == Page::Update {
+                    s.svc = sys::update_status();
+                    let n = sys::update_list(&mut s.updates);
+                    s.n_updates = if n < 0 { 0 } else { (n as usize).min(MAX_ROWS) };
+                }
                 return;
             }
         }
@@ -739,6 +810,32 @@ fn handle_click(w: &mut wm::Win, s: &mut State, x: i32, y: i32, sys_port: u64) {
                         Some(-100) => "该应用已在运行",
                         _ => "无法启动该应用",
                     };
+                    return;
+                }
+            }
+        }
+        Page::Update => {
+            let bx = CONTENT_X + CONTENT_W - 132;
+
+            if x >= bx as i32 && x < (bx + 116) as i32
+                && y >= 196 && y < 222
+            {
+                sys::update_check();
+                s.svc = sys::update_status();
+                s.note = "已请求检查更新";
+                return;
+            }
+            if s.n_updates > 0 {
+                let shown = if s.n_updates > 6 { 6 } else { s.n_updates };
+                let by = 286 + shown as i16 * 40 + 8;
+
+                if x >= bx as i32 && x < (bx + 116) as i32
+                    && y >= by as i32 && y < (by + 26) as i32
+                {
+                    let u = s.updates[0].uuid;
+                    let rc = sys::update_rollback(u);
+                    s.note = if rc == 0 { "已回滚最近更新" } else { "回滚失败" };
+                    s.svc = sys::update_status();
                     return;
                 }
             }

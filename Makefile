@@ -64,6 +64,10 @@ CPPCC_RUN_DEP := $(if $(filter y,$(CONFIG_USER_CPPCC)),cppcc-demo,)
 # Guest memory handed to QEMU by 'make run'.
 MEM ?= 4G
 
+# When set to 1, the kernel performs a one-shot HTTPS probe at boot (logged to
+# the serial console) for end-to-end verification against a local updatesrv.
+E2E ?= 0
+
 # ---------------------------------------------------------------------------
 # Sources and flags
 # ---------------------------------------------------------------------------
@@ -135,6 +139,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/net_virtio.c \
        kernel/net_rtl8139.c \
        kernel/net_wifi.c \
+       kernel/net_http.c \
        wm/novus-wm/nwm.c \
        wm/novus-wm/nwm_demo.c \
        fs/novusfs/super.c \
@@ -158,14 +163,46 @@ SRC := arch/x86_64/boot/main.c \
        fs/ext4/inode.c \
        fs/ext4/dir.c \
        fs/ext4/vfs_ext4.c \
-       security/nkm/nkm.c
+       security/nkm/nkm.c \
+       security/novu/novu_verify.c \
+       security/novu/novu_queue.c \
+       security/novu/novu_index.c \
+       security/novu/novu_delta.c \
+       security/novu/novu_manifest.c \
+       security/novu/novu_service.c \
+       security/novu/novu_apply.c \
+       security/novu/cabundle.c \
+       security/tls/aes.c \
+       security/tls/gcm.c \
+       security/tls/hkdf.c \
+       security/tls/x25519.c \
+       security/tls/asn1.c \
+       security/tls/chacha20poly1305.c \
+       security/tls/rsa.c \
+       security/tls/p256.c \
+       security/tls/csprng.c \
+       security/tls/x509.c \
+       security/tls/hmac.c \
+       security/tls/prf.c \
+       security/tls/chain.c \
+       security/tls/record.c \
+       security/tls/tls13_keys.c \
+       security/tls/tls13_msg.c \
+       security/tls/tls13_client.c \
+       security/tls/tls12_client.c
+
+# The QEMU test CA is trusted ONLY in an E2E build. Production images carry
+# the real vendor root set alone (security/novu/cabundle.c).
+ifeq ($(E2E),1)
+SRC += security/novu/cabundle_e2e.c
+endif
 
 # Assembly sources. Uppercase .S (case-sensitive) makes gcc run the C
 # preprocessor over the file first; gcc invokes the assembler itself.
 ASM_SRC := arch/x86_64/kernel/entry.S arch/x86_64/kernel/trap.S arch/x86_64/kernel/chkstk.S
 
 INC := -Iarch/x86_64/include -Ikernel -Igraphics -Iwm/novus-wm -Ifs/novusfs -Ifs \
-       -Ifs/fat -Ifs/iso9660 -Isecurity/nkm -Ibuild
+       -Ifs/fat -Ifs/iso9660 -Isecurity/nkm -Isecurity/novu -Isecurity/tls -Ibuild
 
 # Freestanding UEFI environment: no libc, no host runtime, no stack
 # protector, no PIC, no Red Zone (interrupts may clobber it), small code
@@ -191,11 +228,14 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_IPC=$(if $(filter y,$(CONFIG_NOVUS_IPC)),1,0) \
           -DCONFIG_NOVUS_PCI=$(if $(filter y,$(CONFIG_NOVUS_PCI)),1,0) \
           -DCONFIG_NOVUS_NET=$(if $(filter y,$(CONFIG_NOVUS_NET)),1,0) \
-          -DCONFIG_NOVUS_WIN32=$(if $(filter y,$(CONFIG_NOVUS_WIN32)),1,0)
+          -DCONFIG_NOVUS_WIN32=$(if $(filter y,$(CONFIG_NOVUS_WIN32)),1,0) \
+          -DNOVUS_HTTPS_E2E_PROBE=$(E2E) \
+          $(if $(filter 1,$(E2E)),-DTLS13_KERN_DEBUG=1,)
 
 # Link as a PE32+ EFI application: subsystem 10 = EFI application,
 # image entry point is efi_main.
-LDFLAGS := -shared -nostdlib -Wl,-dll -Wl,--subsystem,10 -Wl,-e,efi_main
+LDFLAGS := -shared -nostdlib -Wl,-dll -Wl,--subsystem,10 -Wl,-e,efi_main \
+           -Wl,--strip-debug
 
 # Flat object naming: path separators become underscores, e.g.
 #   arch/x86_64/boot/main.c -> build/arch_x86_64_boot_main.o
@@ -203,6 +243,20 @@ LDFLAGS := -shared -nostdlib -Wl,-dll -Wl,--subsystem,10 -Wl,-e,efi_main
 # list: no two entries collapse onto the same build/xxx.o; the explicit
 # per-file rules below never need the reverse mapping).
 OBJS := $(foreach src,$(SRC) $(ASM_SRC),build/$(subst /,_,$(basename $(src))).o)
+
+# make does not track changes to a rule's command line or CFLAGS, so switching
+# E2E=0 <-> E2E=1 would otherwise silently reuse objects compiled with the
+# other flag set (e.g. a probe with no test anchor, or production objects with
+# E2E-only symbols). Record the full flag string in a stamp whose mtime only
+# changes when the flags change, and make every object depend on it.
+CFLAGS_STAMP := build/.cflags
+$(shell mkdir -p build && \
+  printf '%s\n' '$(CFLAGS)' > build/.cflags.tmp && \
+  if ! cmp -s build/.cflags.tmp $(CFLAGS_STAMP); then \
+    mv build/.cflags.tmp $(CFLAGS_STAMP); \
+  else \
+    rm -f build/.cflags.tmp; \
+  fi)
 
 # ---------------------------------------------------------------------------
 # Rust static library (lib/novuslib-rs)
@@ -402,7 +456,7 @@ $(TRAMP_BLOB_OBJ): $(TRAMP_BLOB_S) | build
 # path):
 #   arch/x86_64/boot/main.c -> build/arch_x86_64_boot_main.o
 define COMPILE_rule
-build/$(subst /,_,$(basename $(1))).o: $(1) | build
+build/$(subst /,_,$(basename $(1))).o: $(1) $(CFLAGS_STAMP) | build
 	$$(CC) $$(CFLAGS) -c $$< -o $$@
 endef
 $(foreach src,$(SRC) $(ASM_SRC),$(eval $(call COMPILE_rule,$(src))))

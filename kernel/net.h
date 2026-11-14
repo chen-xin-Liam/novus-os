@@ -105,7 +105,7 @@ UINT32 net_tcp_bytes(void);
 
 /* The same client, generalised: connect, push one request, collect the reply
  * into a fixed buffer. One session at a time, no window scaling. */
-#define NET_TCP_RX_CAP 2048u
+#define NET_TCP_RX_CAP 4096u
 #define NET_TCP_TX_CAP 192u
 
 #define NET_TCP_IDLE   0u
@@ -119,6 +119,11 @@ void         net_tcp_close(void);
 int          net_tcp_phase(void);
 UINT32       net_tcp_rx_len(void);
 const UINT8 *net_tcp_rx_data(void);
+
+/* Streaming extensions for TLS: send arbitrary bytes in <=MSS segments and
+ * consume received bytes so the buffer drains as the peer is read. */
+int  net_tcp_send(const UINT8 *data, UINT32 len);
+void net_tcp_consume(UINT32 n);
 
 /* ---- DNS: one A query over UDP ---------------------------------------- */
 

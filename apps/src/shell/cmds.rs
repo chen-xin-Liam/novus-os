@@ -8,6 +8,7 @@
 //! another program simply runs it as a nested pipeline stage.
 
 use super::{to_str, Cmd, MAX_ARGS, PATH_MAX, Shell, Sink};
+use super::update::cmd_update;
 use crate::fs;
 use crate::sinfo;
 
@@ -1332,4 +1333,5 @@ const BUILTINS: &[(&str, Bfn)] = &[
     ("mount", cmd_mount),
     ("umount", cmd_umount),
     ("nuomi", cmd_nuomi),
+    ("update", cmd_update),
 ];

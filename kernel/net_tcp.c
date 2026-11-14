@@ -176,6 +176,48 @@ void net_tcp_close(void) {
   g_sent = 0;
 }
 
+/*
+ * Streaming send for TLS: split into MSS-sized segments and push each with
+ * PSH. The local link acknowledges promptly; the per-record sizes here are
+ * small (a ClientHello, a Finished, an HTTP request), so this stays a
+ * bounded, best-effort sender rather than a general retransmit engine.
+ */
+int net_tcp_send(const UINT8 *data, UINT32 len) {
+  UINT32 off = 0;
+
+  if (g_phase != NET_TCP_OPEN || data == (const UINT8 *)0) {
+    return -1;
+  }
+  while (off < len) {
+    UINT32 take = len - off;
+    if (take > NET_TCP_TX_CAP) {
+      take = NET_TCP_TX_CAP;
+    }
+    if (tcp_emit(g_snd, TF_ACK | TF_PSH, data + off, take) != 0) {
+      return -1;
+    }
+    g_snd += take;
+    off += take;
+  }
+  return 0;
+}
+
+/* Drop `n` bytes from the head of the receive buffer. */
+void net_tcp_consume(UINT32 n) {
+  UINT32 i;
+
+  if (n > g_rxlen) {
+    n = g_rxlen;
+  }
+  if (n == 0u) {
+    return;
+  }
+  for (i = 0; i + n < g_rxlen; i++) {
+    g_rx[i] = g_rx[i + n];
+  }
+  g_rxlen -= n;
+}
+
 /* Echo probe kept for the network app: push a short line to a known peer. */
 int net_tcp_test(UINT32 ip, UINT16 port) {
   static const char hello[] = "hello from novus\n";
@@ -277,8 +319,19 @@ void net_tcp_input(const UINT8 *p, UINT32 len, UINT32 src) {
     g_tries = 0;
     g_deadline = sched_ticks() + 100u;
   }
-  if (plen > 0u) {
-    if (seq == g_rcv) {
+  {
+    static UINT32 g_seg_seen = 0;
+    static UINT32 g_seg_ooo = 0;
+    g_seg_seen++;
+    kputs("[TCP] in seq="); kputs_hex((UINT64)seq);
+    kputs(" ack="); kputs_hex((UINT64)ack);
+    kputs(" rcv="); kputs_hex((UINT64)g_rcv);
+    kputs(" plen="); kputs_hex((UINT64)plen);
+    kputs(" fl=0x"); kputs_hex((UINT64)flags);
+    kputs("\n");
+    if (plen == 0u) {
+      /* pure ACK / window probe: already ACKed below */
+    } else if (seq == g_rcv) {
       UINT32 free = NET_TCP_RX_CAP - g_rxlen;
       UINT32 take = (plen < free) ? plen : free;
 
@@ -290,6 +343,12 @@ void net_tcp_input(const UINT8 *p, UINT32 len, UINT32 src) {
       kputs("[NET] tcp rx ");
       kputs_hex((UINT64)g_rxlen);
       kputs(" bytes\n");
+    } else {
+      g_seg_ooo++;
+      kputs("[TCP] OOO drop seq="); kputs_hex((UINT64)seq);
+      kputs(" expect="); kputs_hex((UINT64)g_rcv);
+      kputs(" seen="); kputs_hex((UINT64)g_seg_seen);
+      kputs("\n");
     }
     (void)tcp_emit(g_snd, TF_ACK, 0, 0);
   }
@@ -311,6 +370,8 @@ int          net_tcp_open(UINT32 ip, UINT16 port, const UINT8 *tx, UINT32 l) {
   return -1;
 }
 void net_tcp_close(void) {}
+int net_tcp_send(const UINT8 *data, UINT32 len) { (void)data; (void)len; return -1; }
+void net_tcp_consume(UINT32 n) { (void)n; }
 int net_tcp_test(UINT32 ip, UINT16 port) { (void)ip; (void)port; return -1; }
 int net_tcp_status(void) { return 0; }
 UINT32 net_tcp_bytes(void) { return 0; }

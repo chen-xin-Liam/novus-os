@@ -90,3 +90,23 @@ dkms.conf
 # 
 apps/target/
 target/
+
+# 私钥，绝对禁止提交
+private/*.pem
+private/*.key
+private/*.crt
+# 校验哈希文件
+*.sha256
+# rehash生成的软链接
+*.0
+*.1
+# 临时下载缓存
+*.tmp
+tools/updatesrv/server.key
+tools/updatesrv/server.crt
+security/tls/*.key
+user/ssl/*.key
+tools/updatesrv/*.key
+security/tls/*.key
+user/ssl/*.key
+scripts/__pycache__/

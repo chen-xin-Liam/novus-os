@@ -16,4 +16,8 @@
  * settle (or the machine has no RTC), in which case nothing is written. */
 int rtc_now(UINT8 *hour, UINT8 *minute);
 
+/* Current Unix timestamp (seconds since 1970-01-01) from the CMOS RTC, or 0
+ * when the clock reads invalid. Used for TLS certificate validity checks. */
+UINT64 rtc_unix(void);
+
 #endif /* NOVUS_RTC_H */

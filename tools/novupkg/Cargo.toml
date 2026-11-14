@@ -1,0 +1,17 @@
+# Novus OS - host-side update package tool (tools/novupkg).
+#
+# Runs on the build host (default target), not inside the kernel image.
+# It reuses the kernel's own crypto sources through #[path] includes, so a
+# package signed here is signed with the identical arithmetic the OS uses
+# to verify it. Built by the top-level Makefile (see tools/tools.mk).
+
+[package]
+name = "novupkg"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[[bin]]
+name = "novupkg"
+path = "src/main.rs"

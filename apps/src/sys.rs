@@ -82,3 +82,86 @@ pub fn ipc_send(port: u64, ty: u16, flags: u16, payload: &[u8]) -> i64 {
 pub fn ipc_recv(port: u64, buf: &mut [u8], flags: u64) -> i64 {
     call(5, port, buf.as_mut_ptr() as u64, buf.len() as u64, flags)
 }
+
+/* ---- SYS_UPDATE control ABI (mirrors security/novu/novu_format.h) ---- */
+
+pub const UPDATE_OP_STATUS: u32 = 0;
+pub const UPDATE_OP_LIST: u32 = 1;
+pub const UPDATE_OP_CHECK: u32 = 2;
+pub const UPDATE_OP_INSTALL: u32 = 3;
+pub const UPDATE_OP_DEFER: u32 = 4;
+pub const UPDATE_OP_IGNORE: u32 = 5;
+pub const UPDATE_OP_ROLLBACK: u32 = 6;
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct UpdateReq {
+    pub op: u32,
+    pub uuid: [u8; 8],
+    pub path: [u8; 128],
+    pub url: [u8; 192],
+    pub level: u8,
+    pub flags: u8,
+    pub reserved: [u8; 2],
+}
+const _: [(); 336] = [(); core::mem::size_of::<UpdateReq>()];
+
+#[repr(C, packed)]
+#[derive(Clone, Copy)]
+pub struct UpdateInfo {
+    pub uuid: [u8; 8],
+    pub ty: u8,
+    pub level: u8,
+    pub state: u8,
+    pub lock: u8,
+    pub installed_at: u32,
+    pub expires_at: u32,
+    pub before_ver: u64,
+    pub after_ver: u64,
+    pub name: [u8; 48],
+}
+const _: [(); 84] = [(); core::mem::size_of::<UpdateInfo>()];
+
+impl UpdateInfo {
+    pub fn zeroed() -> Self {
+        UpdateInfo {
+            uuid: [0; 8], ty: 0, level: 0, state: 0, lock: 0,
+            installed_at: 0, expires_at: 0, before_ver: 0, after_ver: 0,
+            name: [0; 48],
+        }
+    }
+}
+
+fn update_req(op: u32, uuid: [u8; 8]) -> UpdateReq {
+    UpdateReq {
+        op, uuid,
+        path: [0; 128], url: [0; 192],
+        level: 0, flags: 0, reserved: [0; 2],
+    }
+}
+
+pub fn update_status() -> i64 {
+    let req = update_req(UPDATE_OP_STATUS, [0; 8]);
+    call(25, &req as *const UpdateReq as u64, 0, 0, 0)
+}
+
+pub fn update_check() -> i64 {
+    let req = update_req(UPDATE_OP_CHECK, [0; 8]);
+    call(25, &req as *const UpdateReq as u64, 0, 0, 0)
+}
+
+pub fn update_list(info: &mut [UpdateInfo]) -> i64 {
+    let req = update_req(UPDATE_OP_LIST, [0; 8]);
+    call(25, &req as *const UpdateReq as u64, info.as_mut_ptr() as u64,
+         info.len() as u64, 0)
+}
+
+pub fn update_rollback(uuid: [u8; 8]) -> i64 {
+    let req = update_req(UPDATE_OP_ROLLBACK, uuid);
+    call(25, &req as *const UpdateReq as u64, 0, 0, 0)
+}
+
+pub fn update_defer(uuid: [u8; 8]) -> i64 {
+    let req = update_req(UPDATE_OP_DEFER, uuid);
+    call(25, &req as *const UpdateReq as u64, 0, 0, 0)
+}

@@ -41,213 +41,306 @@ todos:
       - shell-gui
 ---
 
-## 用户要求
+## User Requirements
+按 `docs/Novus OS 自研分级增量更新体系完整规范.md` 完善 Novus OS：代码与文档都做，且本次一次做完规范要求的能力闭环，而不是只交付最小可用版本。用户明确要求远程通道可与任意公网安全更新服务通信并完成证书可信校验；同时把规范修订为与实现一致的真实状态。保留上一轮已完成的三套镜像目录树、真实挂载与启动安装能力，不破坏现有构建与冒烟结果。
 
-把用户给出的根目录树同时落实到 ISO 安装镜像、运行时系统盘与 ESP 安装模板；现有散落在根目录的配置文件迁入新树并同步修改引用；`disk0`、`disk1`、`media/cdrom0`、`media/usb0`、`media/usb1` 不能只是空目录，必须真正能够挂载，并且终端能进入、列出、读取其中内容；U 盘与光盘介质上的常见文件系统也要能读。
+## Product Overview
+在现有 Novus OS 上补齐一套完整可用的分级增量更新体系：四类更新载体、五级推送通道、统一更新大表、优先级队列、后台常驻服务、原子事务与回滚、撤回与更新索引、差分与断点续传、灰度与状态上报、设置中心与终端命令全部可用。用户可在图形界面查看更新、安装、延后、撤回和配置策略，也可在终端完成同样操作；后台在无前台参与时自动完成检测、下载、校验、安装、清理与上报。规范文档同步修正编号、能力状态、格式矛盾与落地清单。
 
-## 产品概述
-
-Novus OS 的启动介质、安装模板与系统根分区统一呈现同一套目录结构：既包含 `.novusfs` 元数据与挂载点，也包含 `Novus`、`ProgramData`、`Users` 等系统与用户目录。打开安装镜像、进入文件管理器或在终端列出根目录时，看到的结构一致；插入磁盘、U 盘或光盘后，对应挂载点下出现真实内容，而不是空占位。
-
-## 核心功能
-
-- 三套镜像统一目录树：系统盘为可写真实目录树；ISO 与 ESP 为静态镜像，名称按各自格式限制做确定性转写，引导必需文件位置保持不变，安装与 UEFI 启动不受影响。
-- `.novusfs/fsinfo` 与 `mounts.json` 具备真实可读内容：前者描述卷信息，后者是可被系统读取的挂载表；`.novusfs/trash` 为可用目录。
-- 原有字体、语言、用户账户、注册表配置迁入新树对应位置，功能不丢失，首次启动与安装后均正常读写。
-- 真实挂载：`disk0`、`disk1`、`media/*` 可挂载启动期探测到的卷，支持现有系统卷与其他常见介质格式；提供 `mount`、`umount`、`drives` 命令，`ls`、`cd`、`cat`、`tree` 可跨挂载点访问。
-- 文件管理器与设备管理器展示新目录、常用位置与设备名；终端主目录指向 `/Users/alice`。
-- 构建校验、自检、启动与安装冒烟同步更新，文档给出目录、名称映射与挂载表规范。
+## Core Features
+- 四类更新载体与五级通道的完整生命周期管理，紧急修复最高优先级且不可延后
+- 统一更新大表、设备维度百分比灰度、白名单、批次与机型策略
+- 更新包来源可信校验、事务化安装、前置快照、异常自动回滚
+- 已完成更新的索引登记、依赖检测、分层撤回、快照保留与固化锁定
+- 差分传输、下载与安装双阶段断点续传、失败梯度重试与设备自愈降级
+- 后台常驻轮询、空闲与免打扰时段调度、延后次数管控、低资源节流
+- 状态上报、批量撤回指令、灰度降级与问题补丁下架
+- 设置中的更新中心、终端 `update` 命令、服务状态与日志可视化
+- 规范文档能力状态、章节编号、头部偏移、格式边界与落地清单修订
 
 ## 视觉与交互效果
+设置应用新增「更新」入口，采用 Novus Fluent 卡片分层与深浅色令牌。顶部显示通道与服务状态徽标，内容区以状态卡、更新列表、进度条、历史索引和策略设置组织，底部常驻状态栏显示上次检查、网络、证书与结果。紧急补丁用红色高亮并置顶，可撤回项显示撤回按钮，锁定项显示锁定说明。进度条、卡片悬停抬升、状态色渐变与列表刷新提供轻量微动画；窗口按桌面尺寸自适应，不是移动端放大版。
 
-打开 ISO 可见完整目录层级；启动后文件管理器左侧出现「磁盘、用户、媒体、元数据」等快捷位置，根目录列表显示 `.novusfs`、`disk0`、`disk1`、`media`、`Novus`、`Program Files`、`Program Files (Windows)`、`ProgramData`、`temp`、`Users`。终端 `ls /` 得到同一结果，`drives` 以表格列出挂载点、设备、卷类型与只读状态；插入 U 盘后 `ls /media/usb0` 显示文件，`cd /media/cdrom0` 与 `cat` 可读。
 
-## 技术栈选择
+## Tech Stack Selection
+完全复用现有工程，不引入新框架或第三方架构依赖：
 
-完全复用现有工程，不引入新框架或第三方依赖：
+- 内核与更新引擎：freestanding C，`Makefile:SRC/INC` 编译进 `out/NOVUS.EFI`；沿用 `fs/novusfs/`、`fs/vfs.c`、`kernel/net*.c`、`kernel/sched.c` 的静态表、无分配器、有界缓冲风格。
+- 用户态：`apps/` 为 Rust `no_std`、无分配器，通过 `APPS_NAMES` 嵌入内核；新增 `apps/src/update.rs`，在 `apps/src/lib.rs` 注册模块；沿用 `sys::call` 与 `#[repr(C)]` ABI。
+- 图形界面：沿用 `apps/src/ui.rs` 的 `page/card/section/row/button/ghost/nav/progress` 与 Novus-WM 显示列表，不引入 React/Vue/MUI。
+- 密码学：复用 `lib/novuslib_rs.h` 的 CRC32、SHA-256、SHA-512、Ed25519 verify 与 `security/nkm/nkm.c` 签名校验闭环；标准 TLS 与 WebPKI 所需的大数、ASN.1、X.509、RSA、P-256、X25519、AES-GCM、ChaCha20-Poly1305、HKDF、PRF、CSPRNG 全部自研补齐。根证书为信任数据，不是第三方架构依赖。
+- 宿主工具：C11 与 Python3 标准库，仅用于构建、打包、大表生成、证书包生成与 QEMU 参考服务端，不进入 OS 镜像。
+- 构建：WSL 中 `PATH=/home/dev/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:/home/dev/.cargo/bin:$PATH`。
 
-- 内核与文件系统：freestanding C（`Makefile:SRC` 编译进 `out/NOVUS.EFI`），沿用 `fs/novusfs/`、`fs/vfs.c`、`kernel/blkdev.c` 的静态表、无分配器、有界缓冲风格。
-- 用户态：`apps/` 为 Rust `no_std`、无分配器，通过 `APPS_NAMES` 嵌入内核；沿用 `sys::call` 直接编号调用与 `BUILTINS` 命令表。
-- 主机镜像工具：C11 + `_GNU_SOURCE`，`tools/mkfsnovus`、`tools/mkiso`、`tools/mkfat`；`mkfsnovus` 与内核共享 `NOVUSFS_HOST_SRCS`。
-- 校验与冒烟：Python 脚本 + QEMU（OVMF）启动/安装；ISO 采用 ISO9660 主描述符加 Joliet 补充描述符，ESP 为 FAT 8.3。
-- WSL 下 Rust 工具链位于 `/home/dev/.rustup` 与 `/home/dev/.cargo`，构建需显式设置 `PATH` 指向 `stable-x86_64-unknown-linux-gnu/bin`。
+## Implementation Approach
+**总体策略**：按「格式与密码学底座 → 事务与队列 → 服务与界面 → 服务端与文档」的依赖顺序一次落地全量能力。以一份冻结的 128B 头与共享头驱动宿主打包器、内核校验器、镜像内自检和文档；以内核 tick 驱动的常驻状态机实现后台守护，避免新增调度原语；以 `SYS_UPDATE`/`SYS_HTTPS` 两个新 syscall 把能力暴露给设置与终端。
 
-## 实现方案
+**关键决策与权衡**：
+1. **头部矛盾修正**：规范 7.3 的字段偏移按注释累加为 168 字节，与「128Byte 固定」冲突。保持 128B 冻结，修正为 `file_sha256` 在 0x48、`sig_offset/sig_len` 在 0x68、`patch_uuid_bin` 在 0x70、`reserved_fill[8]` 在 0x78；7.8 的固定区块排布用于推导差分表偏移，不新增字段。文档同步改为真实布局。
+2. **标准 TLS 与 WebPKI 自研**：实现 TLS 1.3 与 TLS 1.2 回退，支持 `TLS_AES_128_GCM_SHA256`、`TLS_AES_256_GCM_SHA384`、`TLS_CHACHA20_POLY1305_SHA256`、TLS 1.2 ECDHE-RSA/ECDSA 的 AES-GCM 与 ChaCha20 套件；支持 X.509 链、基本约束、密钥用途、SAN 主机名、有效期、RSA-PKCS1v15/RSA-PSS 与 ECDSA P-256 验签。不支持 0-RTT、客户端证书、HTTP/2、QUIC、OCSP 硬失败；遇到不支持扩展明确拒绝而非静默跳过。能力范围写入文档。
+3. **单会话流式网络**：现有 `net_tcp_open()` TX 192B / RX 2048B 不足以承载证书链。在 `kernel/net_tcp.c` 与 `kernel/net.h` 增加 16KB 有界双缓冲流式收发，保留 `net_tcp_test()` 兼容；仍为单会话、轮询、非阻塞。
+4. **无新目录、无新常驻进程**：复用上一轮 77 项目录树中的现有目录存放索引、日志、缓存、配置与快照文件，不新增目录项，从而保持三套镜像别名表与 `scripts/check_rootfs.py` 的 435 项断言不变。后台服务实现为 `update_service_tick()` 状态机加持久化 journal，不新增 `kernel/apps.c` 内嵌应用。
+5. **Merkle 一致性**：运行时写系统分区会使既有 Merkle 根失效；提交与回滚成功后必须调用 `novusfs_merkle_build()` 重算并写回超级块。`.novusfs` 只读静态元数据不参与写入。live 会话默认只检测与缓存，安装到系统根要求 `vfs_root_persistent()` 为真。
+6. **差分与性能**：采用 4KiB 固定块 + 滚动弱校验 + SHA-256 强校验的 copy/literal 差分流，O(n) 时间、O(1) 内存、流式处理，不整文件载入；索引固定 64 条、队列固定 64 项、证书链深度上限 6、根证书约 140 张，DER 解析线性无递归。瓶颈是证书链解析、16KB 单会话吞吐与 Merkle 重算，缓解方式为静态表、批量提交、提交窗口内禁止其他写者、按 40 tick 周期调度。
 
-**总体策略**：以一份共享声明作为唯一真源，驱动「镜像生成」与「运行时格式化」两条链路；用固定容量挂载表把现有单根 VFS 扩展为按路径切换的多挂载点，再通过三个新系统调用把能力暴露给终端。分三阶段落地：目录树与路径迁移、多挂载框架与终端、只读介质后端。
+**避免技术债**：复用 `tools/wpkg` 的「宿主打包 + 双端共享头」、`tools/nkmgen` 的 Ed25519 签名、`kernel/win32.c` 的定长注册表、`kernel/mountcfg.c` 的固定键解析、`apps/src/ui.rs` 控件与 `install_authorize()` 的能力授权模式。新增 `CONFIG_NOVUS_UPDATE` 默认开启，关闭时新代码不链接，便于回归对比。
 
-**1. 单一真源与目录树生成**
-新增 `fs/novusfs/rootfs_layout.h`，以宏与条件编译数组定义约 77 个目录路径、2 个元数据文件、FAT/ISO 主描述符的 8.3 大写别名表、允许的挂载点列表，以及 `fsinfo`、`mounts.json` 的内联文本。各消费方按需定义 `NOVUS_LAYOUT_WANT_*` 后包含，避免静态数组未使用告警。
-新增 `fs/novusfs/rootfs.c`（同时编入内核与宿主 `mkfsnovus`），实现 `novusfs_mkdir_p()`（先 `novusfs_dir_lookup` 再 `novusfs_mkdir`，规避 `novusfs_dir_add` 不查重）、`novusfs_seed_root()` 与 `novusfs_root_top_count()`，由 `novusfs_format()` 末尾调用。这样 `out/novus.img`、安装后的 GPT 分区、以及 live 会话实际使用的 ramdisk 根都得到同一棵树，**无需改写 live root 采用逻辑**：当前 `novusfs_set_root()` 一旦指向 liveimg 会让 `vfs_root_persistent()` 误判为已安装系统并强制登录，改动面大且风险高。代价是 `novusfs_selftest()` 的「root 只有 2 项」断言需改为按 `novusfs_root_top_count()` 校验，这是唯一受影响的既有断言。
+## Implementation Notes
+- **Grounded reuse**：`security/novu/novu_format.h` 与 `tools/novupkg` 共享；校验流水线复用 `novus_rs_sha256` 与 `novus_rs_ed25519_verify`；回滚事务使用现有 `SYS_RENAME 21` 对应的 `vfs_rename_path()`；跨挂载点 rename 与只读挂载判定沿用 `fs/vfs_mount.c`。
+- **Blast radius**：保持 syscall 1..24、40、60 不变，新增 25、26；保持 `SYSINFO_DIR_*`、`user_stat_t`、`user_dirent_t`、引导文件路径、驱动设备名与上一轮 `mount/umount/drives` 行为不变；`make check-rootfs` 仍应为 435 检查 0 错误。
+- **Merkle 与 WAL**：所有 stage、snapshot、commit、rollback 写入都走 NovusFS，提交或回滚末尾重算 Merkle；journal 记录 `PREPARED/STAGED/COMMITTED/ROLLED_BACK` 与完成位图，启动时重放未完成任务。
+- **安全**：新增 `update_authorize()/update_owner()`，仅 settings、nsh、setup 可获授权；路径白名单限定 `/Novus`、`/ProgramData/NovusApps`、`/temp/system`、`/Novus/logs/service`、`/Users/alice/.novus`；签名与 8 步校验在任何写操作之前完成；设备 ID 上报前哈希；日志不含 URL 凭证、用户数据与明文设备标识。
+- **Logging**：复用 `kputs`，统一 `[UPDATE]`、`[TLS]`、`[HTTPS]` 前缀；启动自检只打印一次汇总，失败信息含 UUID、级别、步骤与错误码，按 40 tick 采样避免刷屏。
+- **Performance**：`update_service_tick()` 每 40 ticks 触发；`update list` 与 `drives` 一次 syscall 返回全表；差分块匹配避免 N+1 目录遍历；DER 与 JSON 解析使用固定栈缓冲，禁止递归与重复扫描。
+- **Edge cases**：规范 7.3 偏移矛盾、`.novu` 与 `.nup` 边界、`.hotpth` 用户禁止撤回、基线固化、开发者豁免、无电池驱动时的低电量策略为配置模拟、无锁屏驱动时新增 `session_screen_locked()` 最小标志、`rtc_now()` 仅有时分需补 `rtc_date()` 与 Unix 天数换算、RTC 无效时拒绝 TLS 握手。
+- **Docs truthfulness**：第 4 节能力表改为「已实现 / 部分实现 / 未实现」三态；修正重复 3.4/3.5、错序第 7 节、`.novu` 与 `.nup` 表述；新增 TLS 与 WebPKI 支持范围、已知限制、头部真实偏移与完整落地清单。
 
-**2. 三套镜像的名称映射**
-
-- NovusFS：原名逐字写入，大小写敏感；`NOVUSFS_NAME_MAX 56`、`NOVUSFS_MAX_INODES 1024` 足够（约 80 个 inode），`SYS_SIZE_MB ?= 8` 不变。
-- ISO：主描述符使用 8.3 大写别名（保持标准合规与 `dir_find` 自检），Joliet SVD 使用 UCS-2BE 原名（含空格、大小写、前导点）。`mkiso` 的 `node_t` 增加 `jname/jlen/jlba`，`assign_dirs` 为主树与 Joliet 树各分配目录扇区，`write_dir` 支持跨扇区目录 extent（现有单扇区假定在 13 条根记录加长名时接近上限），写四张路径表（主/Joliet × 大小端），并把 `PVD/BRVD/SVD/TERM/PATH/ROOT` 的 LBA 常量整体后移。`MAX_NODES` 提到 256、`MAX_NAME` 提到 128；引导文件 `EFI/BOOT/BOOTX64.EFI`、`SYSTEM.IMG`、`ESP.IMG` 仍在主描述符根，El Torito 目录与 isohybrid 分区表完全不动。
-- FAT ESP：`mkfat` 按别名表预建目录树，`dir_pool[16]` 提到 128，`dir_get_or_create()` 改为按名返回已存在的 `dir_t`（现有实现每次都新建池项，树中有重名父目录会写坏），`make_short_name` 接受显式别名；`fsinfo`、`mounts.json` 以内联数据写入（`file_arg_t` 增加内存数据源），不新增宿主临时文件。
-- ISO 与 ESP 上的 `disk0`、`media/*` 只是静态目录镜像，真实挂载语义只存在于可写的 NovusFS 根，文档中明确说明。
-
-**3. 配置路径迁移**
-新增 `kernel/nvus_paths.h` 集中定义：`/Novus/fonts/font.bin`、`/Novus/kernel/core/language.cfg`、`/ProgramData/Security/users.db`、`/Novus/wincompat/system32/registry.cfg`、`/.novusfs/fsinfo`、`/.novusfs/mounts.json`、`/Users/alice`。同步修改 `graphics/nd_font.c`（`kmain.c:274` 与 `:343` 两处调用同一函数）、`kernel/lang.c`、`kernel/session.c`、`kernel/win32.c`、`kernel/install.c:write_language()`（改为按嵌套路径查父目录再创建，写入后仍重建 Merkle）。`tools/tools.mk` 的 `--put` 目标改为 `/Novus/fonts/font.bin`，`mkfsnovus:inject_file()` 支持嵌套路径且对已存在文件直接覆盖写入。
-
-**4. 多挂载点框架**
-新增 `fs/vfs_mount.h/c`：固定 8 项挂载表（根 + 5 个挂载点 + 余量），`vfs_resolve_path()` 从 `vfs_root()` 起逐组件遍历，每解析一级就把累积路径与挂载表比对，命中则切换到该 `vfs_fs_t` 的根 inode。复杂度 O(路径深度 × 8)，无分配、无额外遍历，天然支持嵌套挂载。`vfs_resolve_parent()` 供创建/删除/改名使用，并拒绝挂载点本身被删除。
-保留 `vfs_lookup_path()`、`vfs_parent_path()`、`vfs_novusfs_wrap()`、`ext4_vfs()` 作为 wrapper（后者新增 `*_init(view, fs)` 非单例版本），把 `fs/vfs.c` 与 `fs/ext4/vfs_ext4.c` 的静态单例改为可注入，避免技术债。`kernel/sched.h` 的 FD 增加 `struct vfs_fs *fs`；`kernel/trap.c` 九处 `vfs_root()` 改为解析结果，FD 读写从 FD 取 fs，避免跨挂载点用错后端。
-新增空闲号 `SYS_MOUNT 22`、`SYS_UMOUNT 23`、`SYS_MOUNTS 24`，沿用 `user_path()` 的有界 UTF-8 校验；`user_mount_t` 加入 `_Static_assert`。挂载/卸载要求已登录、路径必须在 `rootfs_layout.h` 白名单内、禁止覆盖根、禁止跨挂载点 rename、只读挂载的写操作直接失败。
-
-**5. 挂载表与自动挂载**
-新增 `kernel/mountcfg.c/h`：以 `vfs_lookup_path` + `stat` + `read` 精确读取 `/.novusfs/mounts.json`（现有 `vfs_read_file` 要求长度完全相等，不能直接读变长文本），实现 4KB 有界、最多 8 条、仅识别固定键、无转义的极简 JSON 扫描器（内核无 JSON 库，也不引入通用解析器）。条目形如「路径、逻辑设备名、卷类型、读写标志」。`mountcfg_apply()` 在 `kmain.c` 的 `vfs_selftest()`/`ext4_selftest()` 之后调用，通过 `blkdev_get_at()` 按 `REMOVABLE/READONLY` 标志把设备分类为 `diskN`、`usbN`、`cdromN`（不改驱动现有名字，缩小爆炸半径），跳过 `BOOT_ONLY` 与已作为根的设备，读取前 4096 字节与 LBA16 扇区按魔数识别卷类型，再挂到静态后端槽并调用 `vfs_mount_add()`。运行时状态通过 `SYS_MOUNTS` 返回，**不回写 `.novusfs`**：现有 Merkle 在提交写后会失效，运行时写元数据会破坏启动校验。`fsinfo` 只含静态卷信息，`cat` 可读。
-
-**6. 只读介质后端（分阶段第二步）**
-
-- `fs/fat/`：把 `arch/x86_64/boot/stage3.c:360-398` 的 FAT16/32 读取器移植为内核版，去掉 UEFI 池分配，改为每实例静态 512 字节扇区缓存与有界目录遍历，支持 FAT12/16/32、8.3 短名、LFN 跳过、4Kn 的 `blkdev_sectors_per_block()` 换算。
-- `fs/iso9660/`：解析卷描述符序列，优先选带 `%/E` 转义的 Joliet SVD 根目录记录，把 UCS-2BE 文件标识转成 ASCII，剥离 `;1`，支持多扇区目录 extent 与按 extent 顺序读文件；无 Joliet 时回退主描述符。
-- 两者都实现 `vfs_fs_t` 全部操作，写类操作返回失败，`VFS_KIND_FAT`/`VFS_KIND_ISO9660` 加入枚举与 `vfs_kind_name()`。不实现 NTFS（现有只有枚举、无后端，遵循 YAGNI），不实现硬件热插拔事件（挂载发生在启动与显式 `mount -a`）。
-
-**7. 终端、GUI 与验证**
-`apps/src/fs.rs` 增加三个 syscall 包装与 `user_mount_t`；`apps/src/shell/cmds.rs` 增加 `mount`、`umount` 内建命令并重写 `cmd_drives`（一次 syscall 拿全表，替代硬编码「single root」），`help` 自动包含；`apps/src/shell/mod.rs` 的 `HOME` 与 `path.rs` 的 `~` 基准改为 `/Users/alice`，词法折叠 `..` 逻辑不变。`apps/src/bin/fileman.rs` 在磁盘页增加常用路径快捷项，不改现有 5 个虚拟目录标签；`kernel/sysinfo.c` 的 `/dev` 列表附带逻辑设备名。
-校验侧：`scripts/inspect_img.py` 改为递归列树并对照期望布局；`scripts/_extract_sys.py`、`scripts/_iso_find.py` 去掉「inode2 就是 font.bin」的假设，改为按路径查找；新增 `scripts/check_rootfs.py` 对三套镜像做结构与元数据断言；`scripts/font_smoke.sh`、`qtest.sh`、`scripts/run-install-test.sh` 更新日志标记。新增规范文档并修正 `docs/` 中旧 `/system`、`/home/user` 等路径。
-
-**关键权衡**：Joliet 双树使 ISO 增加约 200KB 目录扇区，远小于内嵌 ESP，换来「打开镜像看到原始目录名」且主描述符仍合规；FAT 8.3 无法与原名完全一致（用户已确认接受）；把目录树放在 `novusfs_format()` 而非仅镜像注入，保证 live 会话与安装后系统一致，代价是格式化自检断言需同步；不改动 live root 采用逻辑，避免会话持久化语义回归。
-
-## 实现说明（执行要点）
-
-- 热路径：`vfs_resolve_path()` 一次遍历完成前缀匹配；`sys_fs_read/readdir` 必须从 `t->fd[index].fs` 取后端，禁止再调 `vfs_root()`；`drives` 一次 `SYS_MOUNTS` 返回全表，避免逐项开文件。
-- 日志：复用 `kputs`，统一 `[MOUNT]` 前缀；设备不存在时启动只打印一次汇总，失败信息含路径与卷类型，不含用户数据，不逐设备刷屏。
-- 兼容性：保持全部既有 syscall 编号、`user_stat_t`/`user_dirent_t` ABI、`SYSINFO_DIR_*` 编号、引导文件路径与驱动设备名；新增 API 一律以 wrapper 保留旧入口；`NOVUSFS_NAME_MAX`、`VFS_PATH_MAX`、`FS_PATH_MAX` 不变。
-- Merkle：所有 seed 与 `--put` 注入都在 `novusfs_merkle_build()` 之前；`kernel/install.c` 写语言后仍重建；运行时不写 `.novusfs`，避免根哈希失效。
-- 易错点：NovusFS 大小写敏感，路径宏必须逐字一致；别名表与目录数组同索引，构建时用 `_Static_assert` 校验数量；`novusfs_dir_add()` 不查重，seed 必须先 lookup；`mkfat:dir_get_or_create()` 必须返回已有 `dir_t`；`mkiso:write_dir()` 需支持目录 extent 跨扇区。
-- 资源：挂载表 8 项、后端槽按类型各 8 个静态实例；`ext4_fs_t` 含 64 个组描述符，静态占用约数十 KB，控制在可接受范围；FAT/ISO 后端每实例一个扇区缓存，读取受 `FS_IO_MAX 4096` 限制。
-- 构建：WSL 中执行需 `PATH=/home/dev/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin:...`；`make tools novus-img esp iso` 后依次运行 `scripts/check_rootfs.py`、`scripts/font_smoke.sh`、`scripts/run-install-test.sh`。
-
-## 架构设计
+## Architecture Design
+现有架构为「内核 freestanding C + 内嵌 Rust 应用 + 宿主工具链」。本次在其上增加四条链：格式校验链、HTTPS 链、事务链、服务与界面链。数据流为：设置或 nsh 发起 `SYS_UPDATE` → 内核更新服务读取配置与大表 → HTTPS 客户端经 TLS 获取索引与补丁 → 五级队列排序 → 校验流水线 → 快照与差分应用 → VFS 原子替换与 Merkle 重算 → 索引/journal/日志落盘 → 状态回传界面与服务端。
 
 ```mermaid
 flowchart TD
-  L["fs/novusfs/rootfs_layout.h 单一目录树定义"] --> R["fs/novusfs/rootfs.c novusfs_seed_root"]
-  L --> I["tools/mkiso/mkiso.c 主描述符加 Joliet"]
-  L --> F["tools/mkfat/mkfat.c FAT 8.3 别名树"]
-  L --> C["kernel/mountcfg.c mounts.json 解析"]
-  L --> P["kernel/nvus_paths.h 配置路径宏"]
-  R --> SYS["out/novus.img 与运行时根"]
-  I --> ISO["out/novus-live.iso"]
-  F --> ESP["out/esp-tpl.img 与 out/esp.img"]
-  P --> K["kernel 各配置读写模块"]
-  C --> MT["fs/vfs_mount.c 挂载表"]
-  MT --> V["fs/vfs.c 路径解析"]
-  V --> B["NovusFS / ext4 / 只读 FAT / 只读 ISO9660"]
-  V --> T["kernel/trap.c 新 syscall"]
-  T --> S["apps/src/shell mount umount drives"]
-  B --> D["blkdev 设备枚举"]
+  SPEC["规范文档"] --> FMT["security/novu 格式与校验"]
+  FMT --> PKG["tools/novupkg 打包器"]
+  CA["tools/cabundle 根证书数据"] --> TLS["security/tls 标准 TLS 与 WebPKI"]
+  TLS --> HTTP["kernel/net_http.c HTTPS 客户端"]
+  SRV["tools/updatesrv 统一大表服务"] --> HTTP
+  PKG --> LOCAL["本地包或挂载卷"]
+  LOCAL --> QUEUE["五级优先级队列"]
+  HTTP --> QUEUE
+  QUEUE --> SVC["内核常驻更新服务"]
+  SVC --> APPLY["事务引擎 快照 差分 续传"]
+  APPLY --> VFS["VFS 与 NovusFS Merkle"]
+  APPLY --> IDX["更新索引与撤回"]
+  IDX --> UI["settings 与 nsh update"]
+  SVC --> LOG["Novus/logs/service 日志"]
+  UI --> SYSUPDATE["SYS_UPDATE 与 SYS_HTTPS"]
+  SYSUPDATE --> SVC
 ```
 
-## 目录结构
+## Directory Structure
+本次以新增模块为主，少量修改既有装配点；不新增根目录项、不改动三套镜像目录树定义。
 
 ```
 novus-os/
-├── Makefile                                   # [MODIFY] 在 SRC 增加 fs/novusfs/rootfs.c、fs/vfs_mount.c、fs/fat/*.c、fs/iso9660/*.c、kernel/mountcfg.c；INC 增加 -Ifs/fat 与 -Ifs/iso9660；保持 OBJS 规则不变。
-├── fs/
-│   ├── novusfs/
-│   │   ├── rootfs_layout.h                    # [NEW] 唯一真源：路径宏、条件编译的目录数组/元数据文件数组/8.3 别名数组/挂载点白名单，以及 fsinfo 与 mounts.json 内联文本；纯 C，不依赖内核头。
-│   │   ├── rootfs.c                          # [NEW] novusfs_mkdir_p()、novusfs_seed_root()、novusfs_root_top_count()；兼容宿主与内核编译，先 lookup 再 mkdir，写入两个文本文件。
-│   │   ├── novusfs.h                         # [MODIFY] 声明 seed/mkdir_p/top_count 接口；保持既有 ABI 与常量不变。
-│   │   └── novusfs.c                         # [MODIFY] novusfs_format() 末尾调用 novusfs_seed_root()；自检 root 条目断言改为按 top_count 校验；保留 /system 测试。
-│   ├── vfs.h                                 # [MODIFY] vfs_kind_t 增加 VFS_KIND_FAT 与 VFS_KIND_ISO9660；保留 VFS_KIND_NTFS 占位；不改名长度与路径上限。
-│   ├── vfs.c                                 # [MODIFY] vfs_kind_name() 覆盖新类型；nv_fill 抽成 vfs_novusfs_init(view, fs)，保留 vfs_novusfs_wrap/vfs_set_root/vfs_lookup_path/vfs_parent_path wrapper。
-│   ├── vfs_mount.h                           # [NEW] 挂载表类型与 vfs_mount_add/remove/at、vfs_resolve_path、vfs_resolve_parent 的接口声明。
-│   ├── vfs_mount.c                           # [NEW] 固定 8 项挂载表；逐组件遍历时按累积路径切换 fs；父路径解析拒绝挂载点被删除；有界栈缓冲。
-│   ├── ext4/vfs_ext4.c                       # [MODIFY] 抽出 ext4_vfs_init(view, fs) 非单例版本，ext4_vfs() 保留为兼容 wrapper；补齐 rename 缺失时的失败返回。
-│   ├── fat/fat.h                             # [NEW] fat_fs_t、fat_mount/unmount、目录项解码与只读语义声明。
-│   ├── fat/fat.c                             # [NEW] 移植 stage3.c 的 FAT16/32 读取器为内核版：静态扇区缓存、8.3 短名、跳过 LFN、支持 4Kn 换算；实现 lookup/read/stat/readdir。
-│   ├── fat/vfs_fat.c                         # [NEW] 把 fat_fs_t 包装为 vfs_fs_t 的全部操作，写类操作返回失败。
-│   ├── iso9660/iso9660.h                     # [NEW] iso9660_fs_t、iso9660_mount/unmount 与 Joliet 选择开关声明。
-│   ├── iso9660/iso9660.c                     # [NEW] 扫描卷描述符，优先 Joliet SVD，UCS-2BE 转 ASCII，剥离 ;1，支持多扇区目录 extent 与按 extent 读文件。
-│   └── iso9660/vfs_iso9660.c                 # [NEW] 只读 vfs_fs_t 适配器。
+├── Makefile                                   # [MODIFY] 在 SRC 增加 security/novu/*、security/tls/*、kernel/net_http.c；INC 增加 -Isecurity/novu -Isecurity/tls；加入 CONFIG_NOVUS_UPDATE 开关；保持 APPS_NAMES 与 OBJS 规则不变。
+├── security/
+│   ├── novu/
+│   │   ├── novu_format.h                      # [NEW] 冻结的 128B 头、四魔数、类型/级别/flag、manifest 项、delta 块、快照项、索引记录、journal 与配置结构；修正 7.3 偏移矛盾；带 _Static_assert。
+│   │   ├── novu_verify.c                      # [NEW] 8 步校验流水线：头完整性、魔数、版本、UUID 双向、版本区间、SHA256、Ed25519、入队；纯 C，可被宿主工具与内核共用。
+│   │   ├── novu_queue.c                      # [NEW] 固定 64 项五级队列，按 .hotpth/.npth/.apth/预览/可选/Dev 串行排序，处理插队、延后、忽略与开发者模式。
+│   │   ├── novu_delta.c                      # [NEW] 4KiB 滚动弱校验加 SHA256 强校验的 copy/literal 差分流；流式应用，O(n) 时间、O(1) 内存。
+│   │   ├── novu_apply.c                      # [NEW] 事务引擎：临时区暂存、原文件增量快照、逐项 rename、完成位图、失败逆序回滚、Merkle 重算钩子。
+│   │   ├── novu_index.c                      # [NEW] 固定 64 条更新索引注册表，记录 UUID、类型、级别、时间、状态、依赖、快照路径、锁定与过期；提供撤回 7 步流程。
+│   │   ├── novu_service.c                   # [NEW] tick 驱动常驻状态机：轮询、下载预载、校验、空闲安装、残留清理、上报、梯度重试、断电续任务重放。
+│   │   ├── novu_service.h                   # [NEW] 服务状态枚举、配置结构、tick 入口、空闲探测、能力授权与白名单接口声明。
+│   │   └── novu_cap.c                       # [NEW] 仿 install_authorize 的 update_authorize/update_owner，限制可调用进程与路径白名单。
+│   └── tls/
+│       ├── tls.h                             # [NEW] TLS 会话、套件、证书链、错误码与记录层统一接口。
+│       ├── bigint.c                          # [NEW] 定长大数运算，支持 RSA 模幂与 P-256 域运算，无动态分配。
+│       ├── asn1.c                            # [NEW] 有界 DER 解析，线性无递归，拒绝超深嵌套与超长字段。
+│       ├── x509.c                            # [NEW] X.509 解析、链构建、基本约束、密钥用途、SAN、有效期与根锚定匹配。
+│       ├── rsa.c                             # [NEW] RSA-PKCS1v15 与 RSA-PSS 验签，支持 SHA256/SHA384。
+│       ├── p256.c                            # [NEW] P-256 ECDSA 验签与 ECDHE 共享秘密计算。
+│       ├── x25519.c                          # [NEW] X25519 ECDHE 与 TLS 1.3 密钥交换。
+│       ├── aes_gcm.c                         # [NEW] AES-128/256-GCM AEAD 记录保护。
+│       ├── chacha20poly1305.c                # [NEW] ChaCha20-Poly1305 AEAD 记录保护。
+│       ├── hkdf.c                            # [NEW] HKDF-Extract/Expand 与 TLS 1.3 密钥调度。
+│       ├── prf.c                             # [NEW] HMAC、TLS 1.2 PRF 与 Finished 校验。
+│       ├── csprng.c                          # [NEW] 基于 RDTSC、RTC、网络事件与 SHA512 的 CTR DRBG，不把单一熵源当随机。
+│       ├── tls12.c                          # [NEW] TLS 1.2 握手、ECDHE 套件、证书验签、PRF 与 Finished。
+│       ├── tls13.c                          # [NEW] TLS 1.3 握手、密钥调度、EncryptedExtensions、证书验签与 Finished。
+│       ├── tls_record.c                     # [NEW] 记录层分片、AEAD 加解密、序列号与告警处理。
+│       └── ca_bundle.h                       # [NEW] 由 tools/cabundle 生成的根证书 DER 数组，约 140 张，构建不联网。
 ├── kernel/
-│   ├── nvus_paths.h                          # [NEW] 集中定义字体/语言/用户库/注册表/元数据/HOME 的规范路径宏，供各模块引用。
-│   ├── mountcfg.h                            # [NEW] mountcfg_apply/mount/umount/list/logical_name 接口与 user_mount_t 相关声明。
-│   ├── mountcfg.c                            # [NEW] 4KB 有界极简 JSON 扫描器、设备逻辑名分类、按魔数识别卷类型、静态后端槽、启动自动挂载、跳过根设备与 BOOT_ONLY 设备。
-│   ├── trap.c                                # [MODIFY] 新增 SYS_MOUNT/UMOUNT/MOUNTS 定义、user_mount_t 与静态断言、三个处理函数、g_syscalls 三行；九处 vfs_root() 改为解析结果，FD 携带 fs，只读挂载拒绝写。
-│   ├── sched.h                               # [MODIFY] fd 结构增加 struct vfs_fs *fs 前向指针，memset 清零逻辑不变。
-│   ├── kmain.c                               # [MODIFY] 在 vfs_selftest/ext4_selftest 之后调用 mountcfg_apply()；不改动 live root 采用与字体加载顺序。
-│   ├── lang.c                                # [MODIFY] LANG_FILE 改为 /Novus/kernel/core/language.cfg，逻辑不变。
-│   ├── session.c                             # [MODIFY] users.db 读写改为 /ProgramData/Security/users.db，保留首次启动缺文件分支。
-│   ├── win32.c                               # [MODIFY] WIN32_REG_PATH 改为 /Novus/wincompat/system32/registry.cfg，定长二进制格式与校验不变。
-│   ├── install.c                             # [MODIFY] write_language() 按新嵌套路径查父目录并创建，写入后仍重建 Merkle。
-│   └── sysinfo.c                             # [MODIFY] /dev 列表附带 diskN/usbN/cdromN 逻辑名，保持 SYSINFO_DIR_* 编号不变。
-├── graphics/nd_font.c                        # [MODIFY] novusfs_lookup_path 目标改为 /Novus/fonts/font.bin，日志文案同步，覆盖 kmain.c 两处调用。
-├── tools/
-│   ├── tools.mk                              # [MODIFY] NOVUSFS_HOST_SRCS 增加 rootfs.c；mkiso/mkfat 编译加 -Ifs/novusfs；NOVUS_IMG 的 --put 目标改为新字体路径；ISO/ESP 规则保留原有引导文件参数；新增 check-rootfs 目标。
-│   ├── mkfsnovus/mkfsnovus.c                 # [MODIFY] inject_file() 支持嵌套路径与覆盖已存在文件；在 Merkle 重建前完成注入；保留校验输出。
-│   ├── mkiso/mkiso.c                         # [MODIFY] MAX_NODES 256、MAX_NAME 128；node_t 增加 jname/jlen/jlba 与内联数据源；按共享布局建主树与 Joliet 树；新增 SVD、四张路径表、跨扇区目录 extent；LBA 常量后移；自检改查主根新 LBA。
-│   └── mkfat/mkfat.c                         # [MODIFY] dir_pool 提到 128；dir_get_or_create 按名复用；按别名表预建目录树；支持内联 fsinfo/mounts.json 文件；保留 8.3 与 FAT16/32 选择逻辑。
+│   ├── net_http.c                            # [NEW] HTTPS GET/HEAD/POST 状态机，支持 SNI、Range、chunked、Content-Length、状态码与有界响应；由 net_tick 驱动。
+│   ├── net_http.h                            # [NEW] HTTPS 请求与响应 ABI、错误码、进度回调与 net_http_tick 声明。
+│   ├── net.c                                 # [MODIFY] 在现有 net_tick 链中调用 net_http_tick；不改变 DHCP/DNS/NCSI 行为。
+│   ├── net_tcp.c                             # [MODIFY] 增加 16KB 有界双缓冲流式收发 net_tcp_push/net_tcp_pull，保留 net_tcp_open/net_tcp_test 兼容。
+│   ├── net.h                                 # [MODIFY] 声明流式 TCP 与 net_http_tick 入口，保留 NET_TCP_RX_CAP/TX_CAP 旧常量。
+│   ├── trap.c                                # [MODIFY] 新增 SYS_UPDATE 25、SYS_HTTPS 26、user_update_req_t/user_update_info_t/user_https_req_t 静态断言与分派；保持旧编号不变。
+│   ├── sched.c                               # [MODIFY] 在现有 40 tick 周期调用 update_service_tick；不新增 workqueue。
+│   ├── kmain.c                               # [MODIFY] 在 net_init、devtab_refresh、mountcfg_apply 之后初始化 TLS、CA 包、更新服务并重放 journal。
+│   ├── sysinfo.c                             # [MODIFY] 增加 SYSINFO_REQ_UPDATE 与回复，服务列表加入 updatesvc，向任务管理器暴露状态。
+│   ├── sysinfo.h                             # [MODIFY] 定义 0x031F 请求与 0x0320 回复，保持既有编号不变。
+│   ├── rtc.c                                 # [MODIFY] 增加 rtc_date 与 Unix 天数换算，供证书有效期、快照保留期与夜间策略使用。
+│   ├── rtc.h                                 # [MODIFY] 声明 rtc_date，保留 rtc_now。
+│   ├── session.c                             # [MODIFY] 增加最小 session_screen_locked 标志与开发者模式查询，供空闲与豁免策略使用。
+│   └── nvus_paths.h                          # [MODIFY] 增加 updates.idx、updates.jnl、快照前缀、stage、cache、update.log、update.cfg、device.id 路径宏。
+├── fs/
+│   ├── novusfs/merkle.c                      # [MODIFY] 增加提交后重算 Merkle 的薄封装，复用 novusfs_merkle_build/verify。
+│   ├── novusfs/novusfs.h                     # [MODIFY] 声明上述重算入口，保持既有 ABI 与常量。
+│   ├── vfs_mount.c                           # [MODIFY] 暴露路径只读判定与挂载点保护辅助函数，供更新事务拒绝只读卷与跨挂载点 rename。
+│   └── vfs_mount.h                           # [MODIFY] 声明新增辅助函数，保持 vfs_resolve_path 接口。
+├── graphics/
+│   ├── nd_input.c                            # [MODIFY] 记录最近键鼠事件 tick，供空闲判定，IRQ 关键路径只写一个计数器。
+│   └── nd_input.h                            # [MODIFY] 声明 nd_input_last_event_ticks。
 ├── apps/src/
-│   ├── fs.rs                                 # [MODIFY] 增加 mount/umount/mounts 三个 syscall 包装、user_mount_t 与静态断言；沿用 path_arg 有界校验。
-│   ├── shell/mod.rs                          # [MODIFY] HOME 改为 /Users/alice，cd 无参数回主目录。
-│   ├── shell/path.rs                         # [MODIFY] ~ 基准改为 HOME 常量，保持词法 .. 折叠与 PATH_MAX 不变。
-│   ├── shell/cmds.rs                         # [MODIFY] 新增 mount/umount 内建命令，重写 cmd_drives 用 SYS_MOUNTS 打印真实挂载表，BUILTINS 增加两行。
-│   └── bin/fileman.rs                        # [MODIFY] 磁盘页增加 /Users/alice、/media、/.novusfs 等快捷入口；不改五个虚拟目录标签与 View 结构。
+│   ├── lib.rs                                # [MODIFY] 注册 pub mod update；保持现有模块与 panic handler 不变。
+│   ├── update.rs                             # [NEW] SYS_UPDATE/SYS_HTTPS 的 no_std 包装、#[repr(C)] ABI 镜像、列表解析、状态与错误码格式化。
+│   ├── sinfo.rs                              # [MODIFY] 增加 SYSINFO_REQ_UPDATE 查询包装，复用现有 IPC 分页读取。
+│   ├── shell/cmds.rs                         # [MODIFY] 新增 cmd_update 与 BUILTINS 条目，支持 check/list/install/defer/rollback/retry/config/log。
+│   └── bin/settings.rs                       # [MODIFY] 新增「更新」导航页与四个子页面；修正文件头「Nothing is persisted」注释为更新策略经 SYS_UPDATE 持久化。
+├── tools/
+│   ├── novupkg/novupkg.c                     # [NEW] 宿主打包器，生成四类包、128B 头、UUID、SHA256、Ed25519 签名、meta/table/delta/data/snapshot/sig 固定排布。
+│   ├── novutable/novutable.py                # [NEW] 统一大表筛选器，按设备 ID、批次、机型、版本、分组、百分比、白名单生成已签名 index.json。
+│   ├── updatesrv/table.json                  # [NEW] 全局唯一大表样例与字段规范：uuid、type、level、版本区间、灰度、依赖、URL、哈希、签名、撤回策略。
+│   ├── updatesrv/updatesrv.py                # [NEW] Python3 标准库 HTTPS 参考服务端，仅用于 QEMU 端到端测试，托管 index 与补丁并接收状态上报。
+│   ├── updatesrv/test_ca.pem                 # [NEW] 测试根证书，SAN 含 10.0.2.2，供 QEMU 证书链校验。
+│   ├── updatesrv/test_ca.key                 # [NEW] 测试根私钥，仅测试使用，不进入 OS 镜像。
+│   ├── cabundle/roots.pem                    # [NEW] 提交到仓库的根证书数据，注明来源与许可，构建不联网。
+│   ├── cabundle/gen_ca_bundle.py             # [NEW] 解析 roots.pem，去重并生成 security/tls/ca_bundle.h。
+│   └── tools.mk                              # [MODIFY] 增加 novupkg、novutable、updatesrv、ca-bundle、check-update 目标；保持 iso、esp、novus-img 规则不变。
 ├── scripts/
-│   ├── inspect_img.py                        # [MODIFY] 递归打印 NovusFS 目录树并对照期望布局输出，供 build-img.sh/build-all.sh 调用。
-│   ├── _extract_sys.py                       # [MODIFY] 不再假设 inode2 是 font.bin，按 /Novus/fonts/font.bin 路径查找。
-│   ├── _iso_find.py                          # [MODIFY] 去掉 (itbl, inode2_size) 分组假设，改用超块字段统计，适配新 Merkle 根。
-│   ├── list_fat16.py                         # [MODIFY] 支持列嵌套 FAT 目录。
-│   ├── font_smoke.sh                         # [MODIFY] 更新 [FONT] 与新增 [MOUNT] 日志匹配。
-│   ├── run-install-test.sh                   # [MODIFY] 更新安装冒烟期望标记与目录断言。
-│   └── check_rootfs.py                       # [NEW] 对 novus.img、novus-live.iso、esp-tpl.img、esp.img 校验目录树、别名映射、fsinfo 与 mounts.json 内容。
-├── qtest.sh                                  # [MODIFY] 更新启动冒烟的日志标记与新增挂载自检断言。
+│   ├── check_update.py                       # [NEW] 校验打包产物头、UUID、哈希、签名、区块排布、index 与 journal 一致性。
+│   ├── update-smoke.sh                       # [NEW] 启动 updatesrv，QEMU 以 netdev user 访问 10.0.2.2:8443，验证 HTTPS、下载、断点续传、安装、回滚与撤回日志。
+│   ├── build-all.sh                          # [MODIFY] 在 check_rootfs 之后调用 check_update.py。
+│   └── font_smoke.sh                         # [MODIFY] 日志匹配增加 [UPDATE] 与 [TLS] 标记，保持 -net none 启动回归。
 ├── docs/
-│   ├── 根目录结构与挂载规范.md                # [NEW] 目录树、三套镜像名称映射表、mounts.json 字段、fsinfo 格式、挂载点设备映射、新 syscall ABI 与已知限制。
-│   ├── INS 快捷方式文件格式规范 V1.0.md       # [MODIFY] /system/share/applications 等旧路径改为新树路径。
-│   ├── NUP 应用安装包格式规范 V1.0.md        # [MODIFY] /system/bin 与 /var/db 旧路径改为新树路径。
-│   ├── Novus OS Debug 级接口手册 V1.0.md     # [MODIFY] novus-settings 路径与挂载调试接口说明。
-│   ├── 用户会话与文件API.md                  # [MODIFY] users.db 新路径与多挂载点访问说明。
-│   ├── 终端与命令解释器设计.md               # [MODIFY] 单根假设改为多挂载点，补充 mount/umount/drives 与 HOME。
-│   └── M9 Win32 兼容层原型.md                # [MODIFY] 注册表路径与 winprefix 目录说明。
+│   ├── Novus OS 自研分级增量更新体系完整规范.md # [MODIFY] 修正章节编号、重复 3.4/3.5、7.3 头部真实偏移、能力表三态、.novu 与 .nup 边界、TLS/WebPKI 范围与完整落地清单。
+│   ├── 更新体系实现与运维手册.md              # [NEW] 架构、文件格式、ABI、大表字段、灰度算法、证书与套件范围、QEMU 测试、已知限制与运维命令。
+│   ├── 根目录结构与挂载规范.md                # [MODIFY] 补充更新运行时文件落点、Merkle 重算与只读挂载约束，不新增目录项。
+│   ├── 终端与命令解释器设计.md                # [MODIFY] 增加 update 命令、队列与撤回说明。
+│   ├── NUP 应用安装包格式规范 V1.0.md         # [MODIFY] 明确 .nup 为应用安装包、.apth 为应用更新、.novu 为全量系统包，消除格式冲突。
+│   ├── 用户会话与文件API.md                   # [MODIFY] 增加更新能力授权、开发者模式与多用户全局服务说明。
+│   └── README.md                             # [MODIFY] 增加更新体系概览、make update-smoke 与 CONFIG_NOVUS_UPDATE 说明。
 ```
 
-## 关键代码结构
+## Key Code Structures
+```c
+/* security/novu/novu_format.h —— 按规范 7.3 修正后的 128B 冻结布局 */
+#define NOVUS_UPDATE_HDR_VER_MAJOR 1u
+#define NOVUS_UPDATE_HDR_VER_MINOR 0u
+#define NOVU_TYPE_FULL       0u
+#define NOVU_TYPE_SYS_PATCH  1u
+#define NOVU_TYPE_APP_PATCH  2u
+#define NOVU_TYPE_HOT_PATCH  3u
+#define UPDATE_LVL_OPTIONAL  0u
+#define UPDATE_LVL_RECOMMEND 1u
+#define UPDATE_LVL_PREVIEW   2u
+#define UPDATE_LVL_URGENT    3u
+#define UPDATE_LVL_DEV       4u
+
+typedef struct __attribute__((packed)) {
+    UINT32 magic;
+    UINT16 ver_major;
+    UINT16 ver_minor;
+    UINT8  file_type;
+    UINT8  update_level;
+    UINT8  remote_support;
+    UINT8  reserved_0;
+    UINT32 flag_bits;
+    UINT64 target_os_ver;
+    UINT64 min_compat_ver;
+    UINT32 entry_count;
+    UINT32 delta_block_count;
+    UINT32 meta_offset;
+    UINT32 meta_len;
+    UINT32 table_offset;
+    UINT32 table_len;
+    UINT32 data_offset;
+    UINT32 data_len;
+    UINT32 snapshot_offset;
+    UINT32 snapshot_len;
+    UINT8  file_sha256[32];     /* 0x48 */
+    UINT32 sig_offset;          /* 0x68 */
+    UINT32 sig_len;
+    UINT8  patch_uuid_bin[8];   /* 0x70 */
+    UINT8  reserved_fill[8];    /* 0x78 */
+} novus_update_header_t;
+_Static_assert(sizeof(novus_update_header_t) == 128u, "update header drift");
+```
 
 ```c
-/* fs/vfs_mount.h —— 挂载表与跨挂载点解析（接口级） */
-#define VFS_MOUNT_MAX 8u
+/* kernel/trap.c 与 apps/src/update.rs 共享的控制 ABI */
+#define SYS_UPDATE 25u
+#define SYS_HTTPS  26u
 
-typedef struct vfs_mount {
-  char        path[VFS_PATH_MAX];
-  vfs_fs_t   *fs;
-  blkdev_t   *dev;
-  UINT8       readonly;
-  UINT8       active;
-} vfs_mount_t;
+typedef struct __attribute__((packed)) {
+    UINT32 op;
+    UINT8  uuid[8];
+    char   path[128];
+    char   url[192];
+    UINT8  level;
+    UINT8  flags;
+    UINT8  reserved[2];
+} user_update_req_t;
+_Static_assert(sizeof(user_update_req_t) == 336u, "update req ABI drift");
 
-int    vfs_mount_add(const char *path, vfs_fs_t *fs,
-                     blkdev_t *dev, int readonly);
-int    vfs_mount_remove(const char *path);
-UINT32 vfs_resolve_path(const char *path, vfs_fs_t **out_fs);
-int    vfs_resolve_parent(char *path, vfs_fs_t **out_fs,
-                          UINT32 *parent, char **leaf);
-const vfs_mount_t *vfs_mount_at(int index);
+typedef struct __attribute__((packed)) {
+    UINT8  uuid[8];
+    UINT8  type;
+    UINT8  level;
+    UINT8  state;
+    UINT8  lock;
+    UINT32 installed_at;
+    UINT32 expires_at;
+    UINT64 before_ver;
+    UINT64 after_ver;
+    char   name[48];
+} user_update_info_t;
+_Static_assert(sizeof(user_update_info_t) == 84u, "update info ABI drift");
+
+typedef struct __attribute__((packed)) {
+    char   host[128];
+    char   path[192];
+    UINT16 port;
+    UINT8  method;
+    UINT8  reserved;
+    UINT64 range_start;
+    UINT32 range_len;
+    UINT32 response_cap;
+} user_https_req_t;
+_Static_assert(sizeof(user_https_req_t) == 340u, "https req ABI drift");
 ```
 
-```c
-/* kernel/trap.c 与 apps/src/fs.rs 共享的挂载表 ABI */
-typedef struct {
-  char   path[64];
-  char   dev[16];
-  char   fstype[12];
-  UINT8  active;
-  UINT8  readonly;
-  UINT8  pad[2];
-} user_mount_t;
-_Static_assert(sizeof(user_mount_t) == 96u, "mount ABI drift");
-```
 
-`/.novusfs/mounts.json` 采用固定键的扁平数组：`path`、`dev`、`fstype`、`options`，每行一条、无嵌套与转义、总长不超过 4KB、最多 8 条；`path` 必须是 `rootfs_layout.h` 白名单中的绝对路径，`dev` 为 `root` 或 `diskN`/`usbN`/`cdromN` 逻辑名，`fstype` 取 `auto`、`novusfs`、`ext4`、`fat`、`iso9660`，`options` 取 `rw` 或 `ro`。内核解析器逐字符扫描并拒绝未知键，shell 可直接 `cat` 查看。
+## Application Type
+桌面操作系统内置设置应用，按桌面窗口设计，不是 Web 页面，也不是放大的移动端。沿用 `apps/src/bin/settings.rs` 的 720×560 窗口、左侧导航轨与 Novus-WM 显示列表；组件来自 `apps/src/ui.rs`，无第三方组件库。
+
+## Design Style
+采用 Novus Fluent 设计语言：深浅色跟随时间、Mica 玻璃顶栏、半透明卡片、柔和渐变强调色、清晰层级与克制的微动画。紧急更新用红色状态带，推荐更新用蓝色，预览与开发通道用紫与石墨。卡片悬停轻微抬升，进度条带流光，状态切换用 180ms 色彩过渡；所有动画尊重低资源模式。
+
+## Shared Shell
+四个页面共用顶部导航栏：窗口标题、当前通道徽标、刷新按钮、开发者模式指示；共用左侧「系统 / 个性化 / 应用 / 更新 / 关于」导航；共用底部状态栏：服务状态、上次检查、网络、证书可信状态、结果提示。底部栏跨页面复用，保证后台任务在任何页面可见。
+
+## Page 1 更新中心概览
+1. 状态卡：显示当前版本、可更新数量、紧急补丁数与后台服务状态，提供「立即检查」。
+2. 通道筛选：五级通道标签与计数，紧急项置顶且红色高亮，开发通道默认折叠。
+3. 更新列表：卡片显示名称、级别、类型、体积、来源与状态，支持滚动与选中。
+4. 操作区：安装、延后、忽略、查看详情；紧急项隐藏延后与忽略。
+5. 底部提示：显示延后剩余次数、免打扰时段与下次轮询倒计时。
+
+## Page 2 更新详情与安装
+1. 摘要块：UUID、类型、级别、目标版本区间、签名状态与压缩包体积。
+2. 内容块：变更说明、修改文件数、差分块数、预计快照占用与依赖列表。
+3. 进度块：下载、校验、快照、安装、提交五段进度条与当前步骤文字。
+4. 安全块：证书链结果、SHA256 摘要、签名者、来源域名与只读卷提示。
+5. 结果块：成功、失败、重试次数、自动回滚结果与日志入口。
+
+## Page 3 更新历史与撤回
+1. 索引表：按时间与类型展示已安装更新、状态、前后基线、是否生效或已撤回。
+2. 筛选块：时间、类型、级别、版本、可撤回状态与固化锁定项过滤。
+3. 撤回块：依赖检测提示、连带撤回选项、锁定原因与开发者豁免开关。
+4. 快照块：快照保留期、占用、过期倒计时与自动清理状态。
+5. 日志块：撤回时间、操作主体、结果、归档记录与服务端同步状态。
+
+## Page 4 更新策略设置
+1. 通道块：默认通道、预览可见性、开发者模式与白名单设备标识展示。
+2. 时段块：免打扰起止时间、夜间静默、锁屏安装与前台活跃限流。
+3. 延后块：稳定版延后次数 1 至 3 次、耗尽强制安装与紧急补丁豁免说明。
+4. 网络块：服务端地址、证书根状态、计量网络节流、低电量策略与代理提示。
+5. 维护块：缓存清理、日志归档、失败设备兼容标记重置与批量撤回指令入口。
+
+## Responsiveness
+窗口随 WM 缩放，内容区在窄宽度下由双列卡片转单列；列表保持最小行高与滚动命中区；底部状态栏在最小尺寸下折叠为单行摘要。高对比主题下状态色仍可区分，不依赖颜色单独传达语义。
 
 ## Agent Extensions
-
 ### SubAgent
-
 - **code-explorer**
-- Purpose: 在动工前跨文件复核 `vfs_root()` 调用点、硬编码根级路径、构建规则依赖与镜像校验脚本假设。
-- Expected outcome: 产出带行号的完整受影响文件清单，确认无遗漏的九处 syscall 后端取值、四个配置路径、ISO/ESP 引导文件引用与「inode2 即 font.bin」类假设。
+  - Purpose: 在动工前跨文件复核更新、TLS、网络、调度、syscall、VFS、镜像校验与 QEMU 冒烟的全部调用点，确认零实现清单与可复用基础。
+  - Expected outcome: 产出带行号的完整受影响文件清单，确认新增 syscall 25/26、77 项目录树、435 项镜像检查、boot 与 install 冒烟均未被破坏。
+### Skill
+- **lsp-code-analysis**
+  - Purpose: 对新增的 `novus_update_header_t`、`user_update_req_t`、`SYS_UPDATE`、`SYS_HTTPS`、`net_tcp_push`、`novus_rs_sha256` 与 Rust 镜像做定义、引用与实现关系分析。
+  - Expected outcome: 产出跨 C 与 Rust 的符号依赖图，确认 ABI 静态断言、模块注册、syscall 分派表与共享头引用完整且无悬空符号。

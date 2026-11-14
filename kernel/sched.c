@@ -20,6 +20,7 @@
 #include "nwm.h"
 #include "sysinfo.h"
 #include "net.h"
+#include "novu_service.h"
 #include "nuc.h"
 #include "win32.h"
 
@@ -562,6 +563,9 @@ void sched_tick(void) {
   /* M10: drain network receive queues and run DHCP/ICMP/TCP timers. Bounded work
    * per tick - eight frames and a handful of timers. */
   net_tick();
+  /* Update daemon: rate-limited state machine / journal replay. Bounded,
+   * sampled every NOVU_TICK_INTERVAL ticks. */
+  novu_service_tick((UINT32)g_ticks);
 #elif CONFIG_NOVUS_DISPLAY
   /* M5: NovusDisplay shares the tick. Input is decoded from the IRQ queue
    * and at most one damage rectangle is repainted per event, so the cost

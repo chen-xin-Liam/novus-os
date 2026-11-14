@@ -45,6 +45,12 @@
 #include "session.h"
 #include "nksym.h"
 #include "nkm.h"
+#include "novu_verify.h"
+#include "novu_queue.h"
+#include "novu_index.h"
+#include "novu_service.h"
+#include "cabundle.h"
+#include "net_http.h"
 /* M9: Win32 compatibility layer and its PE loader. */
 #include "win32.h"
 #include "pe.h"
@@ -398,6 +404,48 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   if (nkm_selftest() != 0) {
     kputs("[WARN] NKM selftest failed, continuing degraded\n");
   }
+
+  /* Update subsystem foundation: the frozen 128-byte header, the 8-step
+   * verification pipeline and the five-level queue are linked and ready.
+   * The active daemon and HTTPS/TLS transport are layered on next. */
+  novu_queue_init();
+  novu_index_init();
+  novu_service_init(0);
+  if (novus_cabundle_count > 0u &&
+      novus_cabundle_count <= NOVUS_CABUNDLE_MAX) {
+    if (net_http_set_ca_set(novus_cabundle_der, novus_cabundle_off,
+                            novus_cabundle_root_len,
+                            novus_cabundle_count) == 0) {
+      kputs("[NET] https cabundle: vendor roots=");
+      kputs_hex((UINT64)novus_cabundle_count);
+      kputs("\n");
+    }
+  } else {
+    kputs("[NET] https fail-closed: no cabundle\n");
+  }
+#if NOVUS_HTTPS_E2E_PROBE
+  /* The QEMU reference server uses a dedicated test CA. It is trusted ONLY in
+   * an E2E build, and its private key never enters the OS image. */
+  if (net_http_add_ca(novus_e2e_root_der, novus_e2e_root_len) == 0) {
+    kputs("[E2E] QEMU test anchor added, total roots=");
+    kputs_hex((UINT64)net_http_root_count());
+    kputs("\n");
+  }
+#endif
+  kputs("[NOVU] update format hdr=");
+  {
+    char n[8];
+    UINT32 v = (UINT32)sizeof(novus_update_header_t);
+    int i = 0;
+    char rev[8];
+    int j = 0;
+    if (v == 0) { rev[j++] = '0'; }
+    while (v > 0 && j < 8) { rev[j++] = (char)('0' + (v % 10u)); v /= 10u; }
+    while (j > 0) { n[i++] = rev[--j]; }
+    n[i] = 0;
+    kputs(n);
+  }
+  kputs("B, verify+queue ready\n");
 
   /* LAPIC bring-up, then wake the B core (AP) with the kernel CR3. */
   nd_boot_stage(97, "唤醒多核");
