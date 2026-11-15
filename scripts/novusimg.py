@@ -133,6 +133,8 @@ class FatFS:
     """FAT12/16/32 reader (8.3 short names only)."""
 
     def __init__(self, data):
+        if len(data) < 64:
+            raise ValueError('truncated FAT boot sector')
         self.data = data
         self.bps = u16(data, 11)
         self.spc = data[13]
@@ -140,26 +142,73 @@ class FatFS:
         self.nf = data[16]
         self.root_ent = u16(data, 17)
         self.fat_sz = u16(data, 22) or u32(data, 36)
+        total_sectors = u16(data, 19) or u32(data, 32)
+        if (self.bps not in (512, 1024, 2048, 4096) or
+                self.spc == 0 or self.spc & (self.spc - 1) or
+                self.res == 0 or self.nf == 0 or self.fat_sz == 0 or
+                total_sectors == 0 or total_sectors * self.bps > len(data)):
+            raise ValueError('invalid FAT geometry')
         self.rds = (self.root_ent * 32 + self.bps - 1) // self.bps
+        overhead = self.res + self.nf * self.fat_sz + self.rds
+        if overhead >= total_sectors:
+            raise ValueError('no FAT data clusters')
+        self.cluster_bytes = self.spc * self.bps
+        count = (total_sectors - overhead) // self.spc
+        self.fat_type = 12 if count < 4085 else (16 if count < 65525 else 32)
+        if (self.fat_type == 32 and self.root_ent != 0 or
+                self.fat_type != 32 and self.root_ent == 0):
+            raise ValueError('FAT type/root-directory mismatch')
+        self.max_cluster = count + 1
+        self.eoc = {12: 0xFF8, 16: 0xFFF8, 32: 0x0FFFFFF8}[self.fat_type]
+        self.root_cluster = u32(data, 44) & 0x0FFFFFFF if self.fat_type == 32 else 0
+        if self.fat_type == 32 and not 2 <= self.root_cluster <= self.max_cluster:
+            raise ValueError('invalid FAT32 root cluster')
         self.fat_off = self.res * self.bps
         self.root_off = (self.res + self.nf * self.fat_sz) * self.bps
         self.data_off = self.root_off + self.rds * self.bps
-        self.eoc = 0xFFF8
+        self.fat_end = self.fat_off + self.fat_sz * self.bps
+
+    def _next_cluster(self, cluster):
+        if self.fat_type == 12:
+            off = self.fat_off + cluster * 3 // 2
+            width = 2
+        else:
+            width = 2 if self.fat_type == 16 else 4
+            off = self.fat_off + cluster * width
+        if off + width > self.fat_end:
+            raise ValueError('FAT entry outside table')
+        if self.fat_type == 12:
+            value = u16(self.data, off)
+            return (value >> 4 if cluster & 1 else value & 0xFFF)
+        if self.fat_type == 16:
+            return u16(self.data, off)
+        return u32(self.data, off) & 0x0FFFFFFF
+
+    def _clusters(self, first):
+        seen = set()
+        cluster = first
+        while cluster < self.eoc:
+            if cluster < 2 or cluster > self.max_cluster or cluster in seen:
+                raise ValueError('invalid or cyclic FAT cluster chain')
+            seen.add(cluster)
+            yield cluster
+            cluster = self._next_cluster(cluster)
+
+    def _cluster_bytes(self, cluster):
+        off = self.data_off + (cluster - 2) * self.cluster_bytes
+        end = off + self.cluster_bytes
+        if end > len(self.data):
+            raise ValueError('cluster outside FAT image')
+        return self.data[off:end]
 
     def _raw_dir(self, cluster):
         if cluster == 0:
             return self.data[self.root_off:self.root_off + self.root_ent * 32]
-        out = bytearray()
-        seen = set()
-        c = cluster
-        while 2 <= c < self.eoc and c not in seen:
-            seen.add(c)
-            off = self.data_off + (c - 2) * self.spc * self.bps
-            out += self.data[off:off + self.spc * self.bps]
-            c = u16(self.data, self.fat_off + c * 2)
-        return bytes(out)
+        return b''.join(self._cluster_bytes(c) for c in self._clusters(cluster))
 
     def entries(self, cluster=0):
+        if cluster == 0 and self.fat_type == 32:
+            cluster = self.root_cluster
         raw = self._raw_dir(cluster)
         out = []
         for off in range(0, len(raw), 32):
@@ -170,7 +219,10 @@ class FatFS:
                 continue
             if e[11] & 0x08 or (e[11] & 0x0F) == 0x0F:
                 continue
-            first = u16(e, 26) | (u16(e, 20) << 16)
+            first = u16(e, 26)
+            if self.fat_type == 32:
+                first |= u16(e, 20) << 16
+                first &= 0x0FFFFFFF
             out.append((e[:11], first, u32(e, 28), bool(e[11] & 0x10)))
         return out
 
@@ -178,6 +230,8 @@ class FatFS:
         cluster = 0
         result = None
         for comp in [c for c in path.split('/') if c]:
+            if result is not None and not result[2]:
+                return None
             want = short_name(comp)
             result = None
             for nm, first, size, is_dir in self.entries(cluster):
@@ -200,16 +254,14 @@ class FatFS:
         if found is None or found[2]:
             return None
         first, size, _ = found
+        if size == 0:
+            return b''
         out = bytearray()
-        c = first
-        seen = set()
-        while 2 <= c < self.eoc and c not in seen and len(out) < size:
-            seen.add(c)
-            off = self.data_off + (c - 2) * self.spc * self.bps
-            out += self.data[off:off + self.spc * self.bps]
-            c = u16(self.data, self.fat_off + c * 2)
-        return bytes(out[:size])
-
+        for c in self._clusters(first):
+            out.extend(self._cluster_bytes(c))
+            if len(out) >= size:
+                return bytes(out[:size])
+        raise ValueError('truncated FAT cluster chain')
 
 class IsoFS:
     """ISO 9660 primary (8.3) or Joliet (UCS-2BE) directory reader."""
