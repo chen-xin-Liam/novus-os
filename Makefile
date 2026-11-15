@@ -45,7 +45,7 @@ OBJCOPY := $(CROSS)objcopy
 ifeq ($(shell command -v $(CC) 2>/dev/null),)
 ifeq ($(strip $(MAKECMDGOALS)),)
 $(error $(CC) not found in PATH. Install the mingw-w64 x86-64 cross toolchain (e.g. package gcc-mingw-w64-x86-64) or set CROSS=<toolchain-prefix>.)
-else ifneq ($(filter-out cppcc cppcc-demo,$(MAKECMDGOALS)),)
+else ifneq ($(filter-out clean cppcc cppcc-demo,$(MAKECMDGOALS)),)
 $(error $(CC) not found in PATH. Install the mingw-w64 x86-64 cross toolchain (e.g. package gcc-mingw-w64-x86-64) or set CROSS=<toolchain-prefix>.)
 endif
 endif
@@ -317,7 +317,7 @@ all: banner out/NOVUS.EFI
 
 # Configuration summary printed before anything is built.
 banner:
-    @echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER) display=$(CONFIG_NOVUS_DISPLAY) gui=$(CONFIG_NOVUS_GUI) ipc=$(CONFIG_NOVUS_IPC) wm=$(CONFIG_NOVUS_WM) cppcc=$(CONFIG_USER_CPPCC) win32=$(CONFIG_NOVUS_WIN32)"
+	@echo "Novus OS build: arch=$(CONFIG_NOVUS_ARCH) min_mem=$(CONFIG_NOVUS_MIN_MEMORY_MB)MB smp=$(CONFIG_NOVUS_SMP) a_core_disable=$(CONFIG_NOVUS_A_CORE_DISABLE) novusfs=$(CONFIG_NOVUS_NOVUSFS) wal=$(CONFIG_NOVUS_WAL) merkle=$(CONFIG_NOVUS_MERKLE) nkm=$(CONFIG_NOVUS_NKM) installer=$(CONFIG_NOVUS_INSTALLER) display=$(CONFIG_NOVUS_DISPLAY) gui=$(CONFIG_NOVUS_GUI) ipc=$(CONFIG_NOVUS_IPC) wm=$(CONFIG_NOVUS_WM) cppcc=$(CONFIG_USER_CPPCC) win32=$(CONFIG_NOVUS_WIN32)"
 
 # ---------------------------------------------------------------------------
 # Wallpaper photos (assets/backgrounds)
