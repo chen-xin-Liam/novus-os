@@ -370,9 +370,18 @@ int wal_commit(novusfs_fs_t *fs, UINT64 txid) {
   if (wal_append_entry(fs, txid, NOVUSFS_TX_COMMIT, 0, NULL, 0) != 0) {
     return -1;
   }
-  /* The current ordering is marker append, block redo, then superblock
-   * pointer flush; the commit marker alone does not immediately flush that
-   * pointer, and the redo loop's result is not used to gate this flush. */
+  /* The marker is what makes the transaction durable at recovery, and it
+   * only counts once the ring bytes behind it have reached the medium: left
+   * in the device's write cache, a power loss would let recovery replay a
+   * transaction whose records were never stored, or drop one that was
+   * already applied. */
+  if (blkdev_flush(fs->dev) != 0) {
+    return -1;
+  }
+  /* Ordering is marker (now durable), block redo, then the superblock
+   * pointer write. Only the flush inside novusfs_super_flush() persists the
+   * redo loop's result: the loop returns before the pointer moves, so a
+   * failure there still leaves blocks that a later mount will re-redo. */
   wal_redo_txid(fs, txid);
   /* The transaction has changed protected blocks, so the stored Merkle
    * root no longer describes the image. Clearing the flag here is what

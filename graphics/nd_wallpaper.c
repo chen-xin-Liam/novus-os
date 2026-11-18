@@ -31,13 +31,18 @@
  * picker lists every wallpaper even on a medium without the package - such a
  * selection simply keeps the flat colour. */
 static const char *const g_names[ND_WALLPAPER_COUNT] = {
-  "pexels-snapsbyclark-12981877",
+  "novus-paper-polar",
+  "novus-paper-ring",
+  "novus-paper-strata",
+  "novus-paper-lattice",
+  "novus-paper-daylight",
   "pexels-codioful-6985184",
   "pexels-ian-panelo-40321675",
   "mrbinz-vietnam-10445204",
   "pexels-thales13-40360883",
   "pexels-tu-n-vu-40278712",
   "treptoweralex-usa-9889580",
+  "pexels-snapsbyclark-12981877",
 };
 
 static nd_surface_t g_img;   /* decoded and cover-scaled for the screen */

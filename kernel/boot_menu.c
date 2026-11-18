@@ -167,8 +167,12 @@ void boot_menu_select(void) {
    * daemon) behind g_sched_started, which is still 0 while the menu is up; a
    * timer tick during the menu only advances the tick counter. A device IRQ
    * merely appends bytes to a ring and trap_dispatch returns the same kernel
-   * frame, so no task state is touched and no context switch can happen
-   * (no tasks exist yet). */
+   * frame. Tasks do already exist at this point (the idle, spin and NX probe
+   * tasks were created just above), so the guarantee rests on two guards in
+   * sched.c: sched_tick() only asks for a reschedule once g_sched_started is
+   * set, and sched_switch_frame() returns the incoming frame untouched until
+   * then. Without them the first tick after cpu_sti() enters the idle task
+   * and this menu never returns. */
   nd_surface_t *s = nd_screen();
   UINT32 sel = 0u;
   UINT32 chosen = 0u;

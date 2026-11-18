@@ -44,6 +44,9 @@
 #define AHCI_CMD_IDENTIFY 0xECu
 #define AHCI_CMD_READ_DMA_EXT 0x25u
 #define AHCI_CMD_WRITE_DMA_EXT 0x35u
+#define AHCI_CMD_FLUSH_EXT 0xEAu
+#define AHCI_CMD_FLUSH 0xE7u
+#define AHCI_CMD_STANDBY_IMM 0xE0u
 
 typedef struct {
   UINT32 dba;
@@ -80,6 +83,7 @@ typedef struct {
   UINT32 block_size;
   UINT32 sectors_per_block;
   UINT64 block_count;
+  int lba48;
   volatile int locked;
   blkdev_t dev;
   char name[8];
@@ -197,12 +201,18 @@ static int ahci_issue(ahci_port_t *p, UINT8 command, UINT64 lba,
   memset(p->table, 0, sizeof(*p->table));
   memset(header, 0, sizeof(*header));
   header->flags = (UINT16)(5u | (write ? 1u << 6 : 0));
-  header->prdtl = 1;
   header->ctba = (UINT32)p->table_phys;
   header->ctbau = (UINT32)(p->table_phys >> 32);
-  p->table->prdt[0].dba = (UINT32)p->data_phys;
-  p->table->prdt[0].dbau = (UINT32)(p->data_phys >> 32);
-  p->table->prdt[0].dbc = (bytes - 1u) & 0x003FFFFFu;
+  if (bytes != 0u) {
+    /* Data commands carry one PRD covering the whole transfer. A command
+     * with no data phase (FLUSH CACHE) leaves prdtl zero, as the memset
+     * above set it: a PRD there would describe bytes the drive is not
+     * going to move, and some controllers fault on the mismatch. */
+    header->prdtl = 1;
+    p->table->prdt[0].dba = (UINT32)p->data_phys;
+    p->table->prdt[0].dbau = (UINT32)(p->data_phys >> 32);
+    p->table->prdt[0].dbc = (bytes - 1u) & 0x003FFFFFu;
+  }
 
   /* The single command slot and shared data page are reused for every
    * request, so callers serialize access to this port. Publish the filled
@@ -245,6 +255,7 @@ static int ahci_identify(ahci_port_t *p) {
     return -1;
   }
   if ((id[83] & (1u << 10)) != 0) {
+    p->lba48 = 1;
     blocks = (UINT64)id[100] | ((UINT64)id[101] << 16) |
              ((UINT64)id[102] << 32) | ((UINT64)id[103] << 48);
   } else {
@@ -379,6 +390,46 @@ static int ahci_blk_write(void *ctx, UINT64 sector, UINTN count,
   return ahci_xfer((ahci_port_t *)ctx, sector, count, (void *)buf, 1);
 }
 
+static int ahci_blk_flush(void *ctx) {
+  ahci_port_t *p = (ahci_port_t *)ctx;
+  int rc;
+
+  if (p == NULL || ahci_lock(p) != 0) {
+    return -1;
+  }
+  /* FLUSH CACHE EXT drains the drive's write cache for the whole device, so
+   * LBA and count stay zero and the command has no data phase. Devices that
+   * do not advertise LBA48 fall back to the 28-bit form. */
+  rc = ahci_issue(p, p->lba48 ? AHCI_CMD_FLUSH_EXT : AHCI_CMD_FLUSH,
+                  0, 0, 0, 0);
+  ahci_unlock(p);
+  return rc;
+}
+
+/* STANDBY IMMEDIATE (0xE0) unloads the heads and stops the spindle now,
+ * with no LBA and no data phase. A drive that supports the command
+ * reports completion once the platter is at rest; one that does not
+ * (most solid-state SATA devices) leaves it a no-op that still completes
+ * cleanly. The next read or write spins the drive back up by itself, so
+ * no explicit wake-up is needed anywhere above this. */
+static int ahci_blk_powerdown(void *ctx) {
+  ahci_port_t *p = (ahci_port_t *)ctx;
+  int rc;
+
+  if (p == NULL || ahci_lock(p) != 0) {
+    return -1;
+  }
+  rc = ahci_issue(p, AHCI_CMD_STANDBY_IMM, 0, 0, 0, 0);
+  ahci_unlock(p);
+  return rc;
+}
+
+/* CHECK POWER MODE is a PIO-data command, and AHCI only moves data through
+ * a PRDT/DMA engine: issuing it here would complete with no transfer and
+ * leave the previous DRQ buffer as if it were the answer. The block layer
+ * therefore reports UNKNOWN for an AHCI drive rather than a state nobody
+ * can vouch for. */
+
 static int ahci_port_init(volatile UINT32 *hba, UINT32 index,
                           UINT64 controller_id) {
   ahci_port_t *p;
@@ -444,6 +495,9 @@ static int ahci_port_init(volatile UINT32 *hba, UINT32 index,
   p->dev.ctx = p;
   p->dev.read = ahci_blk_read;
   p->dev.write = ahci_blk_write;
+  p->dev.flush = ahci_blk_flush;
+  p->dev.powerdown = ahci_blk_powerdown;
+  p->dev.power_irq_safe = 1;
   p->name[0] = 'a'; p->name[1] = 'h'; p->name[2] = 'c'; p->name[3] = 'i';
   p->name[4] = (char)('0' + (ahci_port_count / 10));
   p->name[5] = (char)('0' + (ahci_port_count % 10));

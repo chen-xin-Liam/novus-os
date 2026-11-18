@@ -8,6 +8,7 @@
 
 #include "kernel.h"
 #include "sched.h"
+#include "blkdev.h"
 #include "gdt.h"
 #include "idt.h"
 #include "lapic.h"
@@ -257,9 +258,21 @@ static void sched_dump_tasks(void) {
   }
 }
 
+/* Kernel idle. Nothing is runnable, so this is the only place the machine
+ * can look at its disks without racing a transfer: a device that has seen
+ * no I/O for the configured timeout gets spun down here (blkdev.h). The
+ * timer still wakes the loop every tick, so the table is examined once a
+ * second rather than on every wake-up - a spin-down is a command round
+ * trip, not a comparison. */
 static void sched_kernel_idle(void) {
+  UINT64 last_sweep = 0;
+
   for (;;) {
     __asm__ volatile("sti; hlt");
+    if (sched_ticks() - last_sweep >= 100u) {
+      last_sweep = sched_ticks();
+      blkdev_idle_sweep(0);
+    }
   }
 }
 
@@ -432,6 +445,15 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
     task_reap(dead);
   }
 
+  /* Before sched_start() nothing may be switched in: the frame being
+   * returned belongs to kernel code on the BSP (the boot menu or the
+   * desktop bring-up), there is no task frame to save, and entering the
+   * idle task from here loses the kernel thread for good. Return the frame
+   * untouched and let the caller iretq straight back. */
+  if (!g_sched_started) {
+    return current_frame;
+  }
+
   if (g_current != NULL) {
     if (g_current->state == TASK_RUNNING) {
       /* Save the frame and put the task back in the ring: without the
@@ -538,14 +560,18 @@ void sched_tick(void) {
       kputs(g_current->name);
       kputs("\n");
     }
-  } else {
+  } else if (g_sched_started) {
     /* Kernel idle: ask for a switch every tick so the first process that
-     * becomes runnable (a taskbar click forks one) is entered promptly. */
+     * becomes runnable (a taskbar click forks one) is entered promptly.
+     *
+     * This must not happen before sched_start(). The boot menu runs on the
+     * BSP with interrupts enabled and g_current is still NULL, so a request
+     * here would send the timer's return path through sched_switch_frame(),
+     * which would pick the idle task and iretq into ring 3 - the menu never
+     * finishes, the desktop is never painted and the machine looks frozen on
+     * the splash. A tick before start only advances the counter. */
     g_need_resched = 1;
-    /* Before sched_start() the boot menu is running on the BSP with
-     * interrupts enabled; its own kputs must not be clobbered by a concurrent
-     * tick print, so stay silent here until the scheduler is live. */
-    if (g_sched_started && ((g_ticks % 40u) == 0u)) {
+    if ((g_ticks % 40u) == 0u) {
       kputs("[SCHED] ticks=");
       kputs_hex(g_ticks);
       kputs(" current=(kernel idle)\n");
@@ -585,6 +611,16 @@ void sched_tick(void) {
      * stays bounded and the scheduler's own work is unaffected. */
     nd_demo_tick();
 #endif
+  }
+
+  /* Storage idle sweep, once a second, outside the per-subsystem hooks: a
+   * desktop shell always leaves a task runnable, so the kernel idle loop is
+   * never reached and this tick is the only periodic point the machine
+   * gets. Only backends that can be entered from an IRQ take part
+   * (blkdev.h); the sweep itself is two comparisons per disk until one has
+   * really been quiet for the whole timeout. */
+  if ((g_ticks % 100u) == 0u) {
+    blkdev_idle_sweep(1);
   }
 }
 
@@ -631,6 +667,12 @@ void sched_park(UINT64 port, UINT32 timeout_ticks) {
   g_current->wait_err = 0;
   g_current->state = TASK_BLOCKED;
   g_need_resched = 1;
+  /* Parking on IPC is as close to "nothing to do" as this scheduler gets
+   * while a desktop task still exists - the idle loop below is only
+   * reached once no task is runnable at all. Both call the same sweep,
+   * which is a couple of integer comparisons until a disk has actually
+   * been quiet for the whole timeout. */
+  blkdev_idle_sweep(0);
 }
 
 void sched_wake_port(UINT64 port) {

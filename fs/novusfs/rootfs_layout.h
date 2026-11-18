@@ -37,6 +37,7 @@
   X("Novus",                                 "NOVUS",    0)                  \
   X("Novus/bin",                             "BIN",      0)                  \
   X("Novus/boot",                            "BOOT",     0)                  \
+  X("Novus/font",                            "FONT",     0)                  \
   X("Novus/fonts",                           "FONTS",    0)                  \
   X("Novus/kernel",                          "KERNEL",   0)                  \
   X("Novus/kernel/core",                     "CORE",     0)                  \
@@ -105,7 +106,7 @@
   X("Users/Public/SharedApps",               "SHAREDAP", 0)
 
 /* Number of directory entries in the table. */
-#define NOVUS_LAYOUT_DIR_COUNT 77u
+#define NOVUS_LAYOUT_DIR_COUNT 78u
 
 /* Two text files under .novusfs. `alias` is the 8.3 form for ISO/FAT. */
 #define NOVUS_FSINFO_TEXT                                                     \

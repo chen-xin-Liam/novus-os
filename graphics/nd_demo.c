@@ -705,6 +705,11 @@ static void on_paper3(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallp
 static void on_paper4(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(4); }
 static void on_paper5(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(5); }
 static void on_paper6(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(6); }
+static void on_paper7(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(7); }
+static void on_paper8(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(8); }
+static void on_paper9(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(9); }
+static void on_paper10(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(10); }
+static void on_paper11(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wallpaper_set(11); }
 
 static void on_shutdown(ng_ctx_t *c, ng_widget_t *w) {
   (void)c;
@@ -732,7 +737,7 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   INT32 mx = tx;
   INT32 my = ty - 8 - 560;
   INT32 qx = tx + tw - 340;
-  INT32 qy = ty - 8 - 330;
+  INT32 qy = ty - 8 - 352;
   INT32 i;
 
   if (my < 8) {
@@ -895,7 +900,7 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
           on_shutdown);
 
   /* Quick settings: theme, accent, wallpaper, network, power. */
-  g_quick = ng_panel(ng_create(ctx->root, NG_PANEL, qx, qy, 340, 330),
+  g_quick = ng_panel(ng_create(ctx->root, NG_PANEL, qx, qy, 340, 352),
                      ctx->theme.win_bg);
   ng_panel_frame(g_quick, 1);
   ng_set_overlay(g_quick, 1);
@@ -925,25 +930,31 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
            ctx->theme.text_dim, 1);
   {
     /* One swatch per embedded photo; the theme's paper colour stands in
-     * for the image until it is decoded. */
+     * for the image until it is decoded.
+     *
+     * Twelve swatches do not fit on one 340 px row (6 * 38 + 32 = 260 is
+     * the practical limit), and the table has to carry a handler for every
+     * index: a short table leaves entries 7..11 NULL and a click on one of
+     * them jumps through a null pointer. */
     static ng_action_fn paper_acts[ND_WALLPAPER_COUNT] = {
-      on_paper0, on_paper1, on_paper2, on_paper3,
-      on_paper4, on_paper5, on_paper6
+      on_paper0, on_paper1, on_paper2, on_paper3, on_paper4, on_paper5,
+      on_paper6, on_paper7, on_paper8, on_paper9, on_paper10, on_paper11
     };
     int pi;
 
     for (pi = 0; pi < ND_WALLPAPER_COUNT; pi++) {
-      ng_swatch(ng_create(g_quick, NG_SWATCH, 20 + pi * 38, 204, 32, 32),
+      ng_swatch(ng_create(g_quick, NG_SWATCH, 20 + (pi % 6) * 38,
+                          204 + (pi / 6) * 38, 32, 32),
                 nd_theme_paper_top(pi), (int)nd_theme_wallpaper() == pi,
                 paper_acts[pi]);
     }
   }
-  ng_label(ng_create(g_quick, NG_LABEL, 20, 252, 300, 16), "网络已连接",
+  ng_label(ng_create(g_quick, NG_LABEL, 20, 286, 300, 16), "网络已连接",
            ctx->theme.text_dim, 1);
-  ng_button(ng_create(g_quick, NG_BUTTON, 20, 282, 92, 32), "重启", on_reboot);
-  ng_button(ng_create(g_quick, NG_BUTTON, 120, 282, 92, 32), "关机",
+  ng_button(ng_create(g_quick, NG_BUTTON, 20, 310, 92, 32), "重启", on_reboot);
+  ng_button(ng_create(g_quick, NG_BUTTON, 120, 310, 92, 32), "关机",
             on_shutdown);
-  ng_icon(ng_create(g_quick, NG_ICON, 272, 278, 36, 36), NG_ICON_POWER, 18,
+  ng_icon(ng_create(g_quick, NG_ICON, 272, 306, 36, 36), NG_ICON_POWER, 18,
           on_shutdown);
 
   /* Taskbar: one floating pill. Centre apps, clock and quick settings on

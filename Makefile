@@ -107,6 +107,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/gpt.c \
        kernel/nksym.c \
        graphics/nd_font.c \
+       graphics/nd_ttf.c \
        graphics/nd_font_uni.c \
        graphics/nd_ime_dict.c \
        graphics/nd_ime.c \
@@ -338,13 +339,18 @@ banner:
 # after the 'all' target on purpose: make takes the first target it sees as
 # the default.
 WP_DIR    := assets/backgrounds-screen
-WP_IMGS := $(WP_DIR)/pexels-snapsbyclark-12981877.jpg \
+WP_IMGS := $(WP_DIR)/novus-paper-polar.jpg \
+           $(WP_DIR)/novus-paper-ring.jpg \
+           $(WP_DIR)/novus-paper-strata.jpg \
+           $(WP_DIR)/novus-paper-lattice.jpg \
+           $(WP_DIR)/novus-paper-daylight.jpg \
            $(WP_DIR)/pexels-codioful-6985184.jpg \
            $(WP_DIR)/pexels-ian-panelo-40321675.jpg \
            $(WP_DIR)/mrbinz-vietnam-10445204_1920.jpg \
            $(WP_DIR)/pexels-thales13-40360883.jpg \
            $(WP_DIR)/pexels-tu-n-vu-2153773491-40278712.jpg \
-           $(WP_DIR)/treptoweralex-usa-9889580.jpg
+           $(WP_DIR)/treptoweralex-usa-9889580.jpg \
+           $(WP_DIR)/pexels-snapsbyclark-12981877.jpg
 
 FONT_UI_SOURCES := $(wildcard graphics/*.c kernel/*.c wm/novus-wm/*.c) \
                    $(shell find apps/src -name '*.rs' -type f)

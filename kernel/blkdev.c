@@ -39,6 +39,7 @@
 #include "kernel.h"
 #include "mm.h"
 #include "pmm.h"
+#include "sched.h"
 
 #define RD_PAGE_SIZE   4096ULL
 #define RD_MAX_BYTES   (16ULL * 1024ULL * 1024ULL) /* 16 MiB */
@@ -166,6 +167,12 @@ int blkdev_read(blkdev_t *dev, UINT64 sector, UINTN count, void *buf) {
       (UINT64)count > dev->sector_count - sector) {
     return -1;
   }
+  /* Mark the device busy before the transfer starts: an idle sweep running
+   * on another context reads these fields, and seeing an old timestamp
+   * while a transfer is already in flight is how a disk gets spun down in
+   * the middle of a read. */
+  dev->last_active_tick = sched_ticks();
+  dev->power = BLKDEV_POWER_ACTIVE;
   return dev->read(dev->ctx, sector, count, buf);
 }
 
@@ -184,7 +191,102 @@ int blkdev_write(blkdev_t *dev, UINT64 sector, UINTN count,
       (UINT64)count > dev->sector_count - sector) {
     return -1;
   }
+  dev->last_active_tick = sched_ticks();
+  dev->power = BLKDEV_POWER_ACTIVE;
   return dev->write(dev->ctx, sector, count, buf);
+}
+
+/* ---- automatic spin-down ---------------------------------------------- */
+
+/* The scheduler runs at 100 Hz (net.c and net_dhcp.c both read a tick as
+ * ten milliseconds), so an idle timeout in seconds converts exactly. */
+#define BLKDEV_TICKS_PER_SECOND 100u
+
+static UINT32 g_idle_seconds = BLKDEV_IDLE_SECONDS_DEFAULT;
+/* One shot per device per boot, so a backend that refuses the spin-down
+ * says so once instead of every second. */
+static UINT32 g_spin_fail_mask;
+
+void blkdev_set_idle_timeout(UINT32 seconds) { g_idle_seconds = seconds; }
+
+UINT32 blkdev_idle_timeout(void) { return g_idle_seconds; }
+
+void blkdev_idle_sweep(int irq_context) {
+  UINT64 now;
+  UINT64 idle_ticks;
+  UINTN  i;
+
+  if (g_idle_seconds == 0u) {
+    return;
+  }
+  now = sched_ticks();
+  idle_ticks = (UINT64)g_idle_seconds * BLKDEV_TICKS_PER_SECOND;
+  for (i = 0; i < blkdev_used; i++) {
+    blkdev_t *dev = blkdev_table[i];
+
+    /* Firmware devices are detached before this can run, but a device
+     * flagged boot-only must never be poked through a stale pointer. */
+    if (dev->powerdown == NULL ||
+        (dev->flags & (BLKDEV_FLAG_READONLY | BLKDEV_FLAG_BOOT_ONLY)) != 0) {
+      continue;
+    }
+    if (irq_context != 0 && dev->power_irq_safe == 0) {
+      continue; /* USB BOT: task context only */
+    }
+    if (dev->power != BLKDEV_POWER_ACTIVE) {
+      continue; /* already at rest, or the state is not known */
+    }
+    if (now - dev->last_active_tick < idle_ticks) {
+      continue;
+    }
+    /* Diagnostics, printed at most once per device per boot: which disk
+     * qualified and whether the backend accepted the command. A drive that
+     * aborts STANDBY IMMEDIATE would otherwise spin forever with no
+     * evidence in the log. */
+    if (blkdev_powerdown(dev) != 0) {
+      if ((g_spin_fail_mask & (1u << i)) == 0u) {
+        g_spin_fail_mask |= (1u << i);
+        kputs("[BLK] spin-down refused by ");
+        kputs(dev->name);
+        kputs("\n");
+      }
+      continue;
+    }
+    /* The command completing is the whole story here: CHECK POWER MODE is
+     * a PIO-data request that many controllers (QEMU's IDE among them)
+     * answer without a data block, so reading a state back would either
+     * stall for the whole polling timeout or report a stale byte as
+     * "still active" and have the sweep re-issue STOP every second. */
+    dev->power = BLKDEV_POWER_STANDBY;
+    kputs("[BLK] spun down ");
+    kputs(dev->name);
+    kputs(" after ");
+    kputs_hex((UINT64)g_idle_seconds);
+    kputs("s idle\n");
+  }
+}
+
+UINTN blkdev_standby_all(void) {
+  UINTN stopped = 0;
+  UINTN i;
+
+  for (i = 0; i < blkdev_used; i++) {
+    blkdev_t *dev = blkdev_table[i];
+
+    if (dev->powerdown == NULL ||
+        (dev->flags & (BLKDEV_FLAG_READONLY | BLKDEV_FLAG_BOOT_ONLY)) != 0) {
+      continue;
+    }
+    /* Whatever is still in a write cache has to reach the medium before
+     * the platter stops; the drive would keep the cache alive on standby,
+     * but a machine that loses power next does not. */
+    (void)blkdev_flush(dev);
+    if (blkdev_powerdown(dev) == 0) {
+      dev->power = BLKDEV_POWER_STANDBY;
+      stopped++;
+    }
+  }
+  return stopped;
 }
 
 typedef struct {

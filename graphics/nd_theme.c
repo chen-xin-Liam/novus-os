@@ -58,24 +58,39 @@ static const nd_metrics_t g_metrics = {
     14, /* shadow_spread */
 };
 
+/* One pair per wallpaper, index-aligned with graphics/nd_wallpaper.c's
+ * g_names. The first five are the hand-drawn papers under
+ * assets/backgrounds-src: their colours are sampled from the JPEGs (mean of
+ * the whole frame) so a medium without WPAPERS.PKG still paints the same
+ * mood instead of a stranger's. */
 static const UINT32 g_light_papers[][2] = {
-    {0xFF9E8AB5u, 0xFF0279A4u},
+    {0xFF1B2736u, 0xFF060A12u}, /* novus-paper-polar */
+    {0xFF171A22u, 0xFF06070Bu}, /* novus-paper-ring */
+    {0xFF1D2C42u, 0xFF0A111Cu}, /* novus-paper-strata */
+    {0xFF181B23u, 0xFF07080Cu}, /* novus-paper-lattice */
+    {0xFFF2F2F0u, 0xFFE2E6EDu}, /* novus-paper-daylight */
     {0xFFBFE3C1u, 0xFF25657Du},
     {0xFF3499E4u, 0xFF6FA5CEu},
     {0xFF5B6D80u, 0xFF2B4308u},
     {0xFF813562u, 0xFF7A1D74u},
     {0xFFCC7505u, 0xFF30221Du},
     {0xFF733641u, 0xFF7E475Fu},
+    {0xFF4991B2u, 0xFF2A4453u}, /* pexels-snapsbyclark */
 };
 
 static const UINT32 g_dark_papers[][2] = {
-    {0xFF3A3145u, 0xFF023A4Eu},
+    {0xFF151F2Eu, 0xFF05080Eu}, /* novus-paper-polar */
+    {0xFF12141Au, 0xFF05060Au}, /* novus-paper-ring */
+    {0xFF172337u, 0xFF080D16u}, /* novus-paper-strata */
+    {0xFF131620u, 0xFF06070Bu}, /* novus-paper-lattice */
+    {0xFFEDEEF2u, 0xFFDCE0E8u}, /* novus-paper-daylight */
     {0xFF3E5240u, 0xFF12313Du},
     {0xFF1A4C77u, 0xFF37566Bu},
     {0xFF2D3740u, 0xFF152208u},
     {0xFF401B31u, 0xFF3D0E3Au},
     {0xFF663A02u, 0xFF181110u},
     {0xFF391B20u, 0xFF3E2330u},
+    {0xFF26526Fu, 0xFF152430u}, /* pexels-snapsbyclark */
 };
 
 static nd_theme_mode_t g_mode = ND_THEME_AUTO;

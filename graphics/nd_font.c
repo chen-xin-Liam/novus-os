@@ -13,6 +13,7 @@
 #include "nd_internal.h"
 #include "nd_font_uni.h"
 #include "nd_lang.h"
+#include "nd_ttf.h"
 #include "heap.h"
 #include "../fs/novusfs/novusfs.h"
 #include "../kernel/nvus_paths.h"
@@ -274,8 +275,36 @@ int nd_font_load_from(struct novusfs_fs *fs) {
   return 0;
 }
 
+/* Antialiased variant of nd_glyph_find: returns the 16-row 4-bit coverage
+ * map (128 bytes, row-major, high nibble is the even column) for codepoints
+ * the outline face covers, or NULL so the caller falls back to the packed
+ * 1bpp cell. Only the outline path has sub-pixel coverage; the shipped
+ * bitmap table has none by definition. */
+const UINT8 *nd_glyph_gray(UINT32 cp, UINT32 *wide) {
+  if (cp >= 0x80u && nd_ttf_active() != 0) {
+    const UINT8 *gray = nd_ttf_glyph_gray(cp, wide);
+
+    if (gray != 0) {
+      return gray;
+    }
+  }
+  return 0;
+}
+
 const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide) {
   UINT16       slot;
+
+  /* A TrueType face dropped into /Novus/font wins over the shipped bitmap
+   * table: the user put it there precisely to change how text looks. Any
+   * codepoint the face does not cover falls through to the bitmap paths
+   * below, so a Latin-only face does not lose CJK. */
+  if (cp >= 0x80u && nd_ttf_active() != 0) {
+    const UINT8 *rows = nd_ttf_glyph(cp, wide);
+
+    if (rows != 0) {
+      return rows;
+    }
+  }
 
   if (g_font_data == NULL) {
     UINT32 lo = 0, hi = sizeof(g_fallback_font) / sizeof(g_fallback_font[0]);
@@ -327,12 +356,20 @@ const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide) {
 UINT32 nd_uni_adv(UINT32 cp) {
   UINT32 lo = 0;
   UINT32 hi = g_uni_width_count;
+  UINT32 ttf;
 
   if (cp < 0x20u) {
     return 0u;
   }
   if (cp < 0x80u) {
     return ND_FONT_ADV;
+  }
+  /* The advance must come from whatever face actually draws the glyph,
+   * otherwise a loaded TTF renders into a column width taken from the
+   * bitmap table and the text drifts apart. */
+  ttf = nd_ttf_advance(cp);
+  if (ttf != 0u) {
+    return ttf;
   }
   while (lo < hi) {
     UINT32 mid = (lo + hi) / 2u;
@@ -413,3 +450,205 @@ UINT32 nd_text_height(const char *text, UINT32 scale) {
 }
 
 UINT32 nd_font_height(UINT32 scale) { return (scale != 0u) ? ND_GLYPH_H * scale : 0u; }
+
+/* ---- TrueType faces from the system tree -------------------------------- */
+
+#define FONT_CAND_MAX 8u
+
+typedef struct {
+  char   name[FONT_CAND_MAX][NOVUSFS_NAME_MAX];
+  UINT32 n;
+} font_cands_t;
+
+static UINT8 *g_ttf_file; /* the face's bytes: owned here, never freed */
+
+static char font_lower(char c) {
+  return (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
+}
+
+static int font_is_sfnt(const char *name) {
+  UINT32 len = 0;
+  const char *ext;
+
+  while (name[len] != '\0') {
+    len++;
+  }
+  if (len < 5u) {
+    return 0;
+  }
+  ext = name + len - 4u;
+  if (ext[0] != '.') {
+    return 0;
+  }
+  if (font_lower(ext[1]) != 't') {
+    return 0;
+  }
+  if (font_lower(ext[2]) == 't' && font_lower(ext[3]) == 'f') {
+    return 1; /* .ttf */
+  }
+  if (font_lower(ext[2]) == 't' && font_lower(ext[3]) == 'c') {
+    return 1; /* .ttc */
+  }
+  if (font_lower(ext[2]) == 'o' && font_lower(ext[3]) == 'f') {
+    return 1; /* .otf */
+  }
+  return 0;
+}
+
+static void font_collect(void *ctx, UINT32 ino, const char *name) {
+  font_cands_t *c = (font_cands_t *)ctx;
+  UINT32        i = 0;
+
+  (void)ino;
+  if (c->n >= FONT_CAND_MAX || font_is_sfnt(name) == 0) {
+    return;
+  }
+  while (name[i] != '\0' && i + 1u < NOVUSFS_NAME_MAX) {
+    c->name[c->n][i] = name[i];
+    i++;
+  }
+  c->name[c->n][i] = '\0';
+  c->n++;
+}
+
+static int font_load_one(struct novusfs_fs *fs, const char *dir,
+                         const char *name) {
+  char   path[96];
+  UINT32 ino;
+  UINT64 size = 0;
+  UINT16 mode = 0;
+  UINT8 *buf;
+  INT64  n;
+  UINT32 k = 0;
+  UINT32 i = 0;
+  int    rc;
+
+  while (dir[k] != '\0' && k + 1u < sizeof(path)) {
+    path[k] = dir[k];
+    k++;
+  }
+  if (k > 0u && k + 1u < sizeof(path) && path[k - 1u] != '/') {
+    path[k++] = '/';
+  }
+  while (name[i] != '\0' && k + 1u < sizeof(path)) {
+    path[k++] = name[i++];
+  }
+  path[k] = '\0';
+
+  ino = novusfs_lookup_path(fs, NOVUSFS_ROOT_INO, path);
+  if (ino == 0) {
+    return -1;
+  }
+  if (novusfs_stat(fs, ino, &size, &mode) != 0 || size < 64u ||
+      size > (32u * 1024u * 1024u)) {
+    kputs("[FONT] ");
+    kputs(path);
+    kputs(": size out of range, skipped\n");
+    return -1;
+  }
+  buf = (UINT8 *)kmalloc(size);
+  if (buf == NULL) {
+    kputs("[FONT] ");
+    kputs(path);
+    kputs(": no memory for ");
+    kputs_hex(size);
+    kputs(" bytes\n");
+    return -1;
+  }
+  n = novusfs_read(fs, ino, 0, buf, size);
+  if (n < 0 || (UINT64)n != size) {
+    kputs("[FONT] ");
+    kputs(path);
+    kputs(": read failed\n");
+    kfree(buf);
+    return -1;
+  }
+  rc = nd_ttf_load_image(buf, size, name);
+  if (rc != 0) {
+    kfree(buf);
+    return -1;
+  }
+  if (g_ttf_file != NULL) {
+    kfree(g_ttf_file); /* replace the previous face */
+  }
+  g_ttf_file = buf;
+  kputs("[FONT] outline face ");
+  kputs(name);
+  kputs(": ");
+  kputs_hex(size);
+  kputs(" bytes, ");
+  kputs_hex(nd_ttf_glyph_count());
+  kputs(" glyphs, ");
+  kputs_hex(ND_CJK_ADV);
+  kputs("px cell\n");
+  /* Boot-time proof that the outline path really produces ink: rasterise
+   * one Han glyph and one Latin glyph through the same call the renderer
+   * uses, and report the number of set bits in each cell. A zero here
+   * means the face loaded but nothing would be drawn. */
+  {
+    static const UINT32 probes[2] = {0x4E2Du /* 中 */, 0x41u /* A */};
+    UINT32 p;
+
+    for (p = 0; p < 2u; p++) {
+      UINT32 wide = 0u;
+      const UINT8 *cell = nd_ttf_glyph(probes[p], &wide);
+      UINT32 ink = 0u;
+      UINT32 i;
+
+      if (cell == NULL) {
+        continue;
+      }
+      for (i = 0; i < 32u; i++) {
+        UINT8 v = cell[i];
+
+        while (v != 0u) {
+          ink += (v & 1u);
+          v = (UINT8)(v >> 1);
+        }
+      }
+      kputs("[FONT] self-check U+");
+      kputs_hex(probes[p]);
+      kputs(": ");
+      kputs_hex(wide);
+      kputs("px advance, ");
+      kputs_hex(ink);
+      kputs(" covered pixels\n");
+    }
+  }
+  return 0;
+}
+
+/* Scan the drop folder (and the older fonts folder) for a usable outline
+ * face. Files are tried in directory order: the first one that parses wins,
+ * which is why a bad download does not disable the whole feature. */
+int nd_font_load_ttf(struct novusfs_fs *fs) {
+  static font_cands_t cands;
+  static const char  *dirs[2] = {NVUS_FONT_DIR, "/Novus/fonts"};
+  UINT32              d;
+  UINT32              i;
+
+  if (fs == NULL) {
+    return -1;
+  }
+  for (d = 0; d < 2u; d++) {
+    UINT32 dir_ino = novusfs_lookup_path(fs, NOVUSFS_ROOT_INO, dirs[d]);
+
+    if (dir_ino == 0) {
+      continue;
+    }
+    cands.n = 0;
+    (void)novusfs_dir_readdir(fs, dir_ino, font_collect, &cands);
+    if (cands.n == 0u) {
+      if (d == 0u) {
+        kputs("[FONT] " NVUS_FONT_DIR ": no .ttf/.otf present, bitmap font in use\n");
+      }
+      continue;
+    }
+    for (i = 0; i < cands.n; i++) {
+      if (font_load_one(fs, dirs[d], cands.name[i]) == 0) {
+        return 0;
+      }
+    }
+  }
+  return -1;
+}

@@ -629,6 +629,47 @@ static void draw_uni_bits(nd_surface_t *s, INT32 x, INT32 y,
   }
 }
 
+/* Draw one Unicode glyph from the 4-bit coverage map: the antialiased
+ * sibling of draw_uni_bits. Each covered cell is blended at its coverage
+ * level, so thin strokes and diagonal edges keep a soft edge instead of
+ * snapping to a black-and-white staircase. */
+static void draw_uni_gray(nd_surface_t *s, INT32 x, INT32 y,
+                          const UINT8 *gray, UINT32 wide, nd_color_t c,
+                          UINT32 scale) {
+  UINT32 gy;
+
+  if (scale == 0u) {
+    scale = 1u;
+  }
+  if (wide > ND_CJK_W) {
+    wide = ND_CJK_W;
+  }
+  for (gy = 0; gy < ND_CJK_H; gy++) {
+    const UINT8 *row = &gray[gy * 8u];
+    UINT32       gx;
+
+    for (gx = 0; gx < wide; gx++) {
+      UINT8 b = row[gx >> 1u];
+      UINT8 nib = (gx & 1u) != 0u ? (UINT8)(b & 0x0Fu) : (UINT8)(b >> 4);
+      UINT8 a = (UINT8)(nib * 17u); /* 15 -> 255 */
+
+      if (a == 0u) {
+        continue;
+      }
+      if (scale == 1u) {
+        if (nd_visible(s, x + (INT32)gx, y + (INT32)gy)) {
+          nd_span_blend_raw(s, x + (INT32)gx, y + (INT32)gy, 1, c, a);
+        }
+      } else {
+        nd_blend_rect(s, nd_rect(x + (INT32)gx * (INT32)scale,
+                                 y + (INT32)gy * (INT32)scale,
+                                 (INT32)scale, (INT32)scale),
+                      c, (UINT8)(nib * 17u));
+      }
+    }
+  }
+}
+
 void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
                    UINT32 max_px, nd_color_t c, UINT32 scale) {
   const char *p;
@@ -670,6 +711,20 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
        * which is how Unifont's 8x16/16x16 combining cells are designed. */
       if (adv == 0u && prev_adv != 0u) {
         gx = cx - (INT32)prev_adv;
+      }
+      {
+        UINT32       gw = 8u;
+        const UINT8 *gray = nd_glyph_gray(cp, &gw);
+
+        if (gray != 0) {
+          draw_uni_gray(s, gx, y + (INT32)(cell - ND_CJK_H * scale), gray, gw,
+                        c, scale);
+          if (adv != 0u) {
+            prev_adv = adv;
+          }
+          cx += (INT32)adv;
+          continue;
+        }
       }
       rows = nd_glyph_find(cp, &wide);
       if (rows == 0) {

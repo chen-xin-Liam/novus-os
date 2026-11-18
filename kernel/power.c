@@ -1,5 +1,6 @@
 #include "power.h"
 #include "acpi.h"
+#include "blkdev.h"
 #include "cpu.h"
 #include "irq.h"
 #include "kernel.h"
@@ -331,6 +332,11 @@ void power_off(void) {
     kputs("[POWER] shutdown unavailable: ACPI _S5_ not initialized\n");
     return;
   }
+  /* Cache contents have to reach the medium, and every platter should be
+   * at rest, before the platform drops power. Done with interrupts still
+   * enabled: the flush and the spin-down are polling commands and there
+   * is no reason to hold the machine with IRQs masked for them. */
+  (void)blkdev_standby_all();
   /* Preserve unrelated PM1 control bits and mask interrupts while both
    * control registers are updated, since the SLP_TYP/SLP_EN pair requests
    * the platform transition. The CPU halts if firmware does not power off. */
@@ -350,7 +356,12 @@ void power_off(void) {
 }
 
 void power_reboot(void) {
-  UINT64 flags = irq_save();
+  UINT64 flags;
+
+  /* A reset pulls the disks' power without warning too: flush the caches
+   * and stop the platters first, then take over the reset registers. */
+  (void)blkdev_standby_all();
+  flags = irq_save();
 
   /* Use the FADT reset register when available; otherwise try the legacy
    * chipset reset ports in order. A successful reset does not return, so

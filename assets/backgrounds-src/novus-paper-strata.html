@@ -1,0 +1,64 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; width: 1280px; height: 960px; overflow: hidden; background: #070A11; }
+  #stage { position: relative; width: 1280px; height: 960px; overflow: hidden; }
+  #stage svg { position: absolute; inset: 0; width: 1280px; height: 960px; }
+</style>
+</head>
+<body>
+<div id="stage">
+<svg viewBox="0 0 1280 960" preserveAspectRatio="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="sky" x1="0" y1="0" x2="0.2" y2="1">
+      <stop offset="0"    stop-color="#0C1526"/>
+      <stop offset="0.55" stop-color="#0A1120"/>
+      <stop offset="1"    stop-color="#070B14"/>
+    </linearGradient>
+    <radialGradient id="sun" cx="0.28" cy="0.30" r="0.55">
+      <stop offset="0"    stop-color="#AFC4E8" stop-opacity="0.10"/>
+      <stop offset="0.5"  stop-color="#7C93B8" stop-opacity="0.04"/>
+      <stop offset="1"    stop-color="#000000" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="vig" cx="0.5" cy="0.4" r="0.85">
+      <stop offset="0.55" stop-color="#000000" stop-opacity="0"/>
+      <stop offset="1"    stop-color="#000000" stop-opacity="0.40"/>
+    </radialGradient>
+    <filter id="grain" x="0" y="0" width="100%" height="100%">
+      <feTurbulence type="fractalNoise" baseFrequency="0.85" numOctaves="3" seed="19" stitchTiles="stitch"/>
+      <feColorMatrix type="saturate" values="0"/>
+    </filter>
+  </defs>
+
+  <rect width="1280" height="960" fill="url(#sky)"/>
+  <rect width="1280" height="960" fill="url(#sun)"/>
+
+  <!-- five ridges, each one a shade deeper than the last; the crest line of
+       every ridge carries a hairline of light so the layers read as depth -->
+  <path d="M -20 560 C 180 470 360 500 560 545 C 760 590 940 470 1300 505 L 1300 980 L -20 980 Z"
+        fill="#111C2E"/>
+  <path d="M -20 560 C 180 470 360 500 560 545 C 760 590 940 470 1300 505"
+        fill="none" stroke="#C4D6F2" stroke-opacity="0.055" stroke-width="1"/>
+
+  <path d="M -20 640 C 220 560 420 600 640 645 C 860 690 1040 585 1300 620 L 1300 980 L -20 980 Z"
+        fill="#0C1626"/>
+  <path d="M -20 640 C 220 560 420 600 640 645 C 860 690 1040 585 1300 620"
+        fill="none" stroke="#C4D6F2" stroke-opacity="0.045" stroke-width="1"/>
+
+  <path d="M -20 726 C 240 665 460 700 680 740 C 900 780 1080 690 1300 720 L 1300 980 L -20 980 Z"
+        fill="#08101C"/>
+
+  <path d="M -20 814 C 260 762 500 792 720 828 C 940 864 1120 792 1300 818 L 1300 980 L -20 980 Z"
+        fill="#050A13"/>
+
+  <path d="M -20 890 C 280 852 540 878 760 902 C 980 926 1140 872 1300 892 L 1300 980 L -20 980 Z"
+        fill="#03060C"/>
+
+  <rect width="1280" height="960" fill="url(#vig)"/>
+  <rect width="1280" height="960" filter="url(#grain)" opacity="0.020"/>
+</svg>
+</div>
+</body>
+</html>
