@@ -36,6 +36,9 @@
 #define NWM_CORNER   10
 #define NWM_MIN_W    120
 #define NWM_MIN_H    48
+/* Bottom strip the shell's floating taskbar pill occupies: 56 px of pill
+ * plus its 10 px gap to the screen edge. */
+#define NWM_BAR_H    66
 /* Windows 11 caption buttons: 46x32 hit areas, flush with the top-right
  * corner, no gaps - the hover highlight is the only affordance. */
 #define NWM_BTN      46
@@ -286,7 +289,16 @@ static void clamp_rect(nd_rect_t *r) {
   nd_surface_t *s = screen();
   INT32         sw = (s != 0) ? s->w : 1024;
   INT32         sh = (s != 0) ? s->h : 768;
+  /* The shell floats its taskbar pill over the bottom of the screen (56 px
+   * tall, 10 px above the edge). A window that reached the raw screen edge
+   * lost its last line behind the pill - the file manager's status hint and
+   * the settings window's footer both did. Keep NWM_BAR_H free so a window
+   * always ends above the bar. */
+  INT32 work_h = sh - NWM_BAR_H;
 
+  if (work_h < NWM_MIN_H) {
+    work_h = NWM_MIN_H;
+  }
   if (r->w < NWM_MIN_W) {
     r->w = NWM_MIN_W;
   }
@@ -296,8 +308,8 @@ static void clamp_rect(nd_rect_t *r) {
   if (r->w > sw) {
     r->w = sw;
   }
-  if (r->h > sh) {
-    r->h = sh;
+  if (r->h > work_h) {
+    r->h = work_h;
   }
   if (r->x < 0) {
     r->x = 0;
@@ -308,8 +320,8 @@ static void clamp_rect(nd_rect_t *r) {
   if (r->x + r->w > sw) {
     r->x = sw - r->w;
   }
-  if (r->y + r->h > sh) {
-    r->y = sh - r->h;
+  if (r->y + r->h > work_h) {
+    r->y = work_h - r->h;
   }
 }
 

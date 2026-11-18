@@ -436,14 +436,18 @@ fn draw(w: &mut wm::Win, s: &State) {
     w.fill(0, 0, CW, CH, ui::bg());
     nav(w, s);
 
-    w.text_big(CONTENT_X, 24, ui::text(), PAGE_NAMES[match s.page {
+    /* The page title now sits on the same line as the nav heading and the
+     * subtitle gets 10 px of air above the first card: at 24/60 the 32 px
+     * title and the 16 px subtitle left only 4 px before the card edge,
+     * which read as the text touching the card. */
+    w.text_big(CONTENT_X, 18, ui::text(), PAGE_NAMES[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
         Page::Update => 3,
         Page::About => 4,
     }]);
-    w.text(CONTENT_X, 60, ui::dim(), PAGE_SUB[match s.page {
+    w.text(CONTENT_X, 54, ui::dim(), PAGE_SUB[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
