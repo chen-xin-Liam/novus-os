@@ -117,6 +117,7 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_input.c \
        graphics/nd_jpeg.c \
        graphics/nd_wallpaper.c \
+       graphics/nd_icon.c \
        graphics/nvgui.c \
        graphics/nd_theme.c \
        graphics/nd_lang.c \
@@ -358,6 +359,33 @@ build/nd_font_fallback.h: tools/fontgen/fallback.py graphics/nd_font_data.bin $(
 	python3 tools/fontgen/fallback.py $@
 
 build/graphics_nd_font.o: build/nd_font_fallback.h
+
+# ---------------------------------------------------------------------------
+# Shell icons (assets/icons)
+# ---------------------------------------------------------------------------
+# The SVG sources are rendered to ICO by tools/icons/mkico.py on the host and
+# committed; the Makefile only needs to turn those ICO files into C blobs so
+# the decoder in graphics/nd_icon.c has a built-in set on a medium with no
+# system partition. A matching file in /Novus/icons/<name>.ico still wins at
+# runtime - see graphics/nd_icon.h.
+ICON_DIR  := assets/icons
+ICON_IMGS := $(wildcard $(ICON_DIR)/*.ico)
+ICON_BLOB_H := build/icons_blobs.h
+
+$(ICON_BLOB_H): $(ICON_IMGS) | build
+	@{ \
+	  echo '/* generated from assets/icons by the Makefile - do not edit */'; \
+	  echo '#ifndef NOVUS_ICONS_BLOBS_H'; \
+	  echo '#define NOVUS_ICONS_BLOBS_H'; \
+	  for f in $(ICON_IMGS); do \
+	    n=`basename $$f .ico`; \
+	    echo '/* '"$$n"'.ico */'; \
+	    xxd -i -n k_ico_$$n $$f; \
+	  done; \
+	  echo '#endif'; \
+	} > $@
+
+build/graphics_nd_icon.o: $(ICON_BLOB_H)
 
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the

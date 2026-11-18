@@ -61,6 +61,7 @@
 #include "nd_input.h"
 #include "con.h"
 #include "nd_font_uni.h"
+#include "nd_icon.h"
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
 #include "ipc.h"
 #include "nwm.h"
@@ -304,6 +305,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * codepoints that face does not cover. */
   nd_font_load_from(novusfs_root());
   (void)nd_font_load_ttf(novusfs_root());
+  /* Shell icons: the built-in ICO set is in the loader already; telling
+   * the decoder where the system partition is lets a user icon dropped
+   * into /Novus/icons override one of them. */
+  nd_icon_init(novusfs_root());
   if (vfs_selftest() != 0) {
     kputs("[WARN] VFS selftest failed, continuing degraded\n");
   }
@@ -376,6 +381,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
            * off, so session_init() still starts a login-free live desktop. */
           nd_font_load_from(&livefs);
           (void)nd_font_load_ttf(&livefs);
+          nd_icon_init(&livefs);
           novusfs_set_root(&livefs);
         }
       }

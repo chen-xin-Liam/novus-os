@@ -67,6 +67,41 @@ int rtc_now(UINT8 *hour, UINT8 *minute) {
   return 1;
 }
 
+int rtc_now_date(UINT16 *year, UINT8 *month, UINT8 *day) {
+  UINT8 d;
+  UINT8 mo;
+  UINT8 y;
+  UINT8 b;
+  UINT32 spins;
+
+  if (year == 0 || month == 0 || day == 0) {
+    return 0;
+  }
+  for (spins = 0; spins < 100000u; spins++) {
+    if ((cmos_read(RTC_STAT_A) & 0x80u) == 0u) {
+      break;
+    }
+  }
+  d = cmos_read(0x07);
+  mo = cmos_read(0x08);
+  y = cmos_read(0x09);
+  b = cmos_read(RTC_STAT_B);
+  if ((b & 0x04u) == 0u) { /* BCD mode */
+    d = bcd_to_bin(d);
+    mo = bcd_to_bin(mo);
+    y = bcd_to_bin(y);
+  }
+  if (mo < 1u || mo > 12u || d < 1u || d > 31u) {
+    return 0;
+  }
+  /* The chip stores two digits; Novus has no century register, so the
+   * usual 1970..2069 window applies. */
+  *year = (UINT16)(2000u + y);
+  *month = mo;
+  *day = d;
+  return 1;
+}
+
 /* Days since 1970-01-01 (Howard Hinnant's civil-from-days), 32-bit years. */
 static UINT64 rtc_days_from_civil(int y, int m, int d) {
   int era, yoe, doy, doe;

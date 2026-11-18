@@ -28,6 +28,7 @@
 #include "nwm.h"
 #include "power.h"
 #include "install.h"
+#include "nd_icon.h"
 
 #if CONFIG_NOVUS_GUI
 
@@ -469,10 +470,12 @@ static ng_widget_t *g_win_widgets;
 static ng_widget_t *g_start_menu;
 static ng_widget_t *g_quick;
 static ng_widget_t *g_clock_label;
+static ng_widget_t *g_date_label;
 static ng_widget_t *g_run_dot[6];
 static UINT32       g_theme_seen;
 static UINT32       g_lang_seen;
 static char         g_clock[8] = "00:00";
+static char         g_date[12] = "----/--/--";
 static char         g_search[48];
 
 /* Taskbar running indicators follow the scheduler, not a private list:
@@ -483,38 +486,76 @@ static const char *const g_app_names[6] = {"fileman", "taskman", "settings",
 
 /* The RTC is optional: without one the taskbar just keeps the placeholder. */
 static void clock_refresh(void) {
-  UINT8 h = 0;
-  UINT8 m = 0;
-  char  buf[8];
+  UINT8  h = 0;
+  UINT8  m = 0;
+  UINT16 y = 0;
+  UINT8  mo = 0;
+  UINT8  d = 0;
+  char   buf[8];
+  char   dstr[12];
   UINT32 i;
+  int    changed = 0;
 
-  if (!rtc_now(&h, &m)) {
+  if (rtc_now(&h, &m)) {
+    buf[0] = (char)('0' + (h / 10u) % 10u);
+    buf[1] = (char)('0' + h % 10u);
+    buf[2] = ':';
+    buf[3] = (char)('0' + (m / 10u) % 10u);
+    buf[4] = (char)('0' + m % 10u);
+    buf[5] = '\0';
+    for (i = 0; i < sizeof(g_clock); i++) {
+      if (g_clock[i] != buf[i]) {
+        changed = 1;
+      }
+      g_clock[i] = buf[i];
+      if (buf[i] == '\0') {
+        break;
+      }
+    }
+  }
+  /* The second line mirrors Windows 11: year/month/day, right aligned,
+   * dimmed against the time above it. */
+  if (rtc_now_date(&y, &mo, &d)) {
+    UINT32 n = 0;
+    UINT32 k;
+
+    for (k = 0; k < 4u; k++) {
+      UINT32 div = 1000u;
+
+      if (k == 1u) {
+        div = 100u;
+      } else if (k == 2u) {
+        div = 10u;
+      } else if (k == 3u) {
+        div = 1u;
+      }
+      dstr[n++] = (char)('0' + (y / div) % 10u);
+    }
+    dstr[n++] = '/';
+    dstr[n++] = (char)('0' + (mo / 10u) % 10u);
+    dstr[n++] = (char)('0' + mo % 10u);
+    dstr[n++] = '/';
+    dstr[n++] = (char)('0' + (d / 10u) % 10u);
+    dstr[n++] = (char)('0' + d % 10u);
+    dstr[n] = '\0';
+    for (i = 0; i < sizeof(g_date); i++) {
+      if (g_date[i] != dstr[i]) {
+        changed = 1;
+      }
+      g_date[i] = dstr[i];
+      if (dstr[i] == '\0') {
+        break;
+      }
+    }
+  }
+  if (!changed) {
     return;
   }
-  buf[0] = (char)('0' + (h / 10u) % 10u);
-  buf[1] = (char)('0' + h % 10u);
-  buf[2] = ':';
-  buf[3] = (char)('0' + (m / 10u) % 10u);
-  buf[4] = (char)('0' + m % 10u);
-  buf[5] = '\0';
-  for (i = 0; i < sizeof(g_clock); i++) {
-    if (g_clock[i] == buf[i]) {
-      if (buf[i] == '\0') {
-        return; /* same minute: nothing to repaint */
-      }
-      continue;
-    }
-    break;
-  }
-  for (i = 0; i < sizeof(g_clock); i++) {
-    g_clock[i] = buf[i];
-    if (buf[i] == '\0') {
-      break;
-    }
-  }
   if (g_clock_label != 0) {
-    g_clock_label->u.label.text = g_clock;
     ng_damage_widget(g_clock_label);
+  }
+  if (g_date_label != 0) {
+    ng_damage_widget(g_date_label);
   }
 }
 
@@ -816,7 +857,7 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
 
   /* Sample the actual photo, not the current light/dark theme. */
   {
-    nd_rect_t area = nd_rect(16, H - 104, 162, 100);
+    nd_rect_t area = nd_rect(16, H - 174, 162, 100);
     int light = nd_wallpaper_luma(area, ctx->theme.desktop_bottom) >= 150u;
     nd_color_t ink = light ? ND_RGB(24, 32, 44) : ND_RGB(255, 255, 255);
     ng_widget_t *brand = ng_panel(
@@ -894,10 +935,16 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_label(ng_create(g_start_menu, NG_LABEL, 20, 526, 220, 20),
            session_live() ? ND_L("Live 会话", "Live session") : "Novus 用户",
            ctx->theme.text_dim, 1);
-  ng_icon(ng_create(g_start_menu, NG_ICON, 372, 520, 36, 36), NG_ICON_SETTINGS,
-          18, on_launch_settings);
-  ng_icon(ng_create(g_start_menu, NG_ICON, 416, 520, 36, 36), NG_ICON_POWER, 18,
-          on_shutdown);
+  {
+    ng_widget_t *ic;
+
+    ic = ng_icon(ng_create(g_start_menu, NG_ICON, 372, 520, 36, 36),
+                 NG_ICON_SETTINGS, 20, on_launch_settings);
+    ng_icon_image(ic, nd_icon_get("settings", 20));
+    ic = ng_icon(ng_create(g_start_menu, NG_ICON, 416, 520, 36, 36),
+                 NG_ICON_POWER, 20, on_shutdown);
+    ng_icon_image(ic, nd_icon_get("power", 20));
+  }
 
   /* Quick settings: theme, accent, wallpaper, network, power. */
   g_quick = ng_panel(ng_create(ctx->root, NG_PANEL, qx, qy, 340, 352),
@@ -954,8 +1001,10 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_button(ng_create(g_quick, NG_BUTTON, 20, 310, 92, 32), "重启", on_reboot);
   ng_button(ng_create(g_quick, NG_BUTTON, 120, 310, 92, 32), "关机",
             on_shutdown);
-  ng_icon(ng_create(g_quick, NG_ICON, 272, 306, 36, 36), NG_ICON_POWER, 18,
-          on_shutdown);
+  ng_icon_image(
+      ng_icon(ng_create(g_quick, NG_ICON, 272, 306, 36, 36), NG_ICON_POWER, 20,
+              on_shutdown),
+      nd_icon_get("power", 18));
 
   /* Taskbar: one floating pill. Centre apps, clock and quick settings on
    * the right, search on the left. Running dots sit under their app. */
@@ -964,22 +1013,33 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
                                 ctx->theme.win_bg);
 
     ng_panel_frame(bar, 1);
-    ng_icon(ng_create(ctx->root, NG_ICON, tx + 8, ty + 6, 44, 44),
-            NG_ICON_START, 22, on_start);
-    ng_icon(ng_create(ctx->root, NG_ICON, tx + 56, ty + 6, 44, 44),
-            NG_ICON_SEARCH, 18, on_start);
+    {
+      ng_widget_t *ic;
+
+      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + 8, ty + 6, 44, 44),
+                   NG_ICON_START, 24, on_start);
+      ng_icon_image(ic, nd_icon_get("start", 24));
+      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + 56, ty + 6, 44, 44),
+                   NG_ICON_SEARCH, 20, on_start);
+      ng_icon_image(ic, nd_icon_get("search", 20));
+    }
 
     {
       static const ng_icon_kind_t kinds[6] = {
           NG_ICON_FILES, NG_ICON_TASKS, NG_ICON_SETTINGS, NG_ICON_NET,
           NG_ICON_TERM, NG_ICON_DEVICES};
+      static const char *const icon_names[6] = {"files", "tasks", "settings",
+                                                "net", "term", "devices"};
       ng_action_fn acts[6] = {on_launch_files, on_launch_tasks,
                               on_launch_settings, on_launch_net,
                               on_launch_terminal, on_launch_devmgmt};
 
       for (i = 0; i < 6; i++) {
-        ng_icon(ng_create(ctx->root, NG_ICON, tx + 116 + i * 46, ty + 6, 44, 44),
-                kinds[i], 20, acts[i]);
+        ng_widget_t *ic = ng_icon(
+            ng_create(ctx->root, NG_ICON, tx + 116 + i * 46, ty + 6, 44, 44),
+            kinds[i], 24, acts[i]);
+
+        ng_icon_image(ic, nd_icon_get(icon_names[i], 24));
         if (i < 6) {
           g_run_dot[i] = ng_panel(
               ng_create(ctx->root, NG_PANEL, tx + 116 + i * 46 + 14, ty + th - 7,
@@ -989,12 +1049,29 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
       }
     }
 
+    /* Right cluster, in the Windows 11 order: network, volume, then the
+     * clock as two right-aligned rows (time over date). The icons are
+     * real images - nd_icon_get pulls /Novus/icons/<name>.ico or falls
+     * back to the built-in blob - so the shell no longer draws them from
+     * a vector shape. */
+    {
+      ng_widget_t *ic;
+
+      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + tw - 196, ty + 10, 36, 36),
+                   NG_ICON_WIFI, 20, on_quick);
+      ng_icon_image(ic, nd_icon_get("wifi", 20));
+      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + tw - 156, ty + 10, 36, 36),
+                   NG_ICON_VOLUME, 20, on_quick);
+      ng_icon_image(ic, nd_icon_get("volume", 20));
+    }
     g_clock_label = ng_label(
-        ng_create(ctx->root, NG_LABEL, tx + tw - 178, ty + 10, 120, 36),
-        g_clock, ctx->theme.text, 2);
+        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 4, 96, 32), g_clock,
+        ctx->theme.text, 2);
     g_clock_label->u.label.align = 2; /* right aligned */
-    ng_icon(ng_create(ctx->root, NG_ICON, tx + tw - 50, ty + 6, 44, 44),
-            NG_ICON_VOLUME, 20, on_quick);
+    g_date_label = ng_label(
+        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 36, 96, 18), g_date,
+        ctx->theme.text_dim, 1);
+    g_date_label->u.label.align = 2;
   }
 
   ng_layout();
@@ -1060,6 +1137,7 @@ void nd_demo_theme_sync(void) {
   g_start_menu = 0;
   g_quick = 0;
   g_clock_label = 0;
+  g_date_label = 0;
   g_status_label = 0;
   memset(g_run_dot, 0, sizeof(g_run_dot));
 

@@ -43,6 +43,11 @@
  * corner, no gaps - the hover highlight is the only affordance. */
 #define NWM_BTN      46
 #define NWM_BTN_GAP  0
+/* Frames the open animation runs for. The compositor ticks once per timer
+ * tick, so this is roughly an eighth of a second at 60 Hz - short enough
+ * that a window never feels unresponsive, long enough that the ease is
+ * visible. */
+#define NWM_REVEAL_FRAMES 8u
 
 typedef struct {
   UINT8     used;
@@ -52,6 +57,9 @@ typedef struct {
   nd_rect_t rect;  /* frame rect, title bar included */
   UINT8     state; /* 0 normal, 1 minimized, 2 maximized */
   UINT8     alpha; /* content effect: 255 opaque .. 0 invisible */
+  /* Open animation: frames still to play. The shell fades a new window in
+   * along an ease-out curve instead of having it appear at full strength. */
+  UINT8     reveal;
   /* v1.3: NWM_F_CREATE_MODAL. A modal window is the only one that sees the
    * pointer and the keyboard while it is up (see modal_index()). */
   UINT8     modal;
@@ -458,6 +466,7 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_rect_t         vis;
   nd_rect_t         client;
   nd_color_t        title_bg;
+  UINT8             eff;
   UINT32            i;
 
   if (w->state == 1u) {
@@ -471,6 +480,21 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   }
   t = &ng_ctx_get()->theme;
   nd_surface_set_clip(s, vis);
+
+  /* Combined opacity: the client's own effect (255 by default) and the
+   * open animation. The curve is ease-out cubic: fast first paint, then a
+   * decelerating finish, so the window settles instead of blinking on. */
+  eff = w->alpha;
+  if (w->reveal != 0u) {
+    UINT32 t01 = NWM_REVEAL_FRAMES - w->reveal; /* 0 .. FRAMES-1 */
+    UINT32 x   = (t01 * 1000u) / NWM_REVEAL_FRAMES;
+    UINT32 e   = 1000u - ((1000u - x) * (1000u - x) * (1000u - x)) / 1000000u;
+    UINT32 a   = 90u + (165u * e) / 1000u;
+
+    if (a < (UINT32)eff) {
+      eff = (UINT8)a;
+    }
+  }
 
   save_corners(s, w->rect);
   nd_round_rect(s, w->rect, 10, t->win_bg);
@@ -487,8 +511,8 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_hline(s, w->rect.x + 1, w->rect.x + w->rect.w - 2,
            w->rect.y + NWM_TITLE_H - 1, t->win_border);
   nd_text(s, w->rect.x + 12,
-          w->rect.y + (NWM_TITLE_H - (INT32)nd_text_height(w->title, 2)) / 2,
-          w->title, t->text, 2);
+          w->rect.y + (NWM_TITLE_H - (INT32)nd_text_height(w->title, 1)) / 2,
+          w->title, t->text, 1);
 
   /* Caption buttons, drawn by the same helper the shell windows use. A
    * sheet cannot be minimized or maximized, so it only gets a close box. */
@@ -519,9 +543,9 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
               (tx->scale != 0u) ? tx->scale : 1u);
     }
   }
-  if (w->alpha < 255u) {
+  if (eff < 255u) {
     /* Fade effect: the content is dimmed towards the background. */
-    nd_blend_rect(s, client, ND_RGB(0, 0, 0), (UINT8)(255u - w->alpha));
+    nd_blend_rect(s, client, ND_RGB(0, 0, 0), (UINT8)(255u - eff));
   }
   /* Content painted square over the bottom arcs; give the corners back and
    * draw the hairline last so nothing can cut through it. */
@@ -605,6 +629,9 @@ static void req_create(const ipc_msg_t *m) {
   }
   w->owner = m->hdr.sender;
   w->alpha = 255u;
+  /* A new window opens with a short ease-out fade rather than appearing
+   * fully opaque in one frame. */
+  w->reveal = NWM_REVEAL_FRAMES;
   w->modal = (c.flags & NWM_F_CREATE_MODAL) != 0u ? 1u : 0u;
   w->rect = nd_rect(c.x, c.y, c.w, c.h);
   clamp_rect(&w->rect);
@@ -1446,6 +1473,20 @@ void nwm_tick(void) {
   }
   pump();
   sweep_owners();
+  /* Advance any open animation one frame and repaint just that window. */
+  {
+    UINT32 i;
+
+    for (i = 0; i < NWM_MAX_WINDOWS; i++) {
+      nwm_window_t *w = &g_wins[i];
+
+      if (w->used == 0u || w->reveal == 0u) {
+        continue;
+      }
+      w->reveal--;
+      damage(w->rect);
+    }
+  }
   /* The shell owns the taskbar clock; the WM owns the tick. */
   nd_demo_idle();
 

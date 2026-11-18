@@ -678,12 +678,12 @@ fn draw(w: &mut wm::Win, st: &mut State, accent: u32) {
 
     /* Status bar. */
     w.fill(0, CH - STATUS_H, CW, 1, ui::line());
-    w.text(12, CH - STATUS_H + 7, ui::dim(), st.status);
+    w.text(12, CH - STATUS_H + 6, ui::dim(), st.status);
     {
         let mut cb = ui::Buf::new();
 
         cb.num(st.total as u32).s(" ").s(ui::l("项", "items"));
-        w.text(CW - 12 - ui::width(cb.str()), CH - STATUS_H + 7, ui::dim(),
+        w.text(CW - 12 - ui::width(cb.str()), CH - STATUS_H + 6, ui::dim(),
                cb.str());
     }
 

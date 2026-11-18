@@ -18,6 +18,7 @@
 #include "nd_theme.h"
 #include "nd_wallpaper.h"
 #include "nd_ime.h"
+#include "nd_icon.h"
 
 static ng_ctx_t    g_ctx;
 static ng_widget_t g_pool[NG_POOL_SIZE];
@@ -369,7 +370,16 @@ ng_widget_t *ng_icon(ng_widget_t *w, ng_icon_kind_t kind, UINT32 size,
                      ng_action_fn fn) {
   w->u.icon.kind = (UINT8)kind;
   w->u.icon.size = (UINT8)((size != 0u) ? size : 20u);
+  w->u.icon.img = 0;
   w->on_action = fn;
+  return w;
+}
+
+ng_widget_t *ng_icon_image(ng_widget_t *w, const nd_icon_t *img) {
+  if (w != 0) {
+    w->u.icon.img = img;
+    ng_damage_widget(w);
+  }
   return w;
 }
 
@@ -1205,6 +1215,19 @@ static void icon_glyph(nd_surface_t *s, INT32 cx, INT32 cy, INT32 b,
     nd_hline(s, cx - 1, cx + 1, cy - h - 2, c);
     nd_hline(s, cx - 1, cx + 1, cy + h + 1, c);
     break;
+  case NG_ICON_WIFI:
+    /* Two arcs opening upwards plus the dot, the Windows 11 signal
+     * shape - the vector fallback for a medium without the ICO. */
+    {
+      INT32 r = h + 1;
+
+      nd_line(s, cx - r, cy + 2, cx, cy - r + 1, c);
+      nd_line(s, cx, cy - r + 1, cx + r, cy + 2, c);
+      nd_line(s, cx - r / 2, cy + 6, cx, cy + 1, c);
+      nd_line(s, cx, cy + 1, cx + r / 2, cy + 6, c);
+      nd_hline(s, cx - 1, cx + 1, cy + h + 1, c);
+    }
+    break;
   default:
     break;
   }
@@ -1229,6 +1252,16 @@ static void draw_icon(ng_widget_t *w) {
   }
   if ((w->flags & NG_WF_ENABLED) == 0u) {
     fg = t->text_dim;
+  }
+  if (w->u.icon.img != 0) {
+    /* A decoded image icon: blitted at the requested size, centred in the
+     * widget, tinted with the same colour the vector shape would use so
+     * light and dark themes both stay legible. */
+    const nd_icon_t *ic = w->u.icon.img;
+
+    nd_icon_blit(s, ic, cx - (INT32)(ic->w / 2u), cy - (INT32)(ic->h / 2u), fg,
+                 (UINT8)((w->flags & NG_WF_ENABLED) == 0u ? 150u : 255u));
+    return;
   }
   icon_glyph(s, cx, cy, (INT32)b, w->u.icon.kind, fg);
 }
