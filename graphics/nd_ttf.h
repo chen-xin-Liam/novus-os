@@ -35,7 +35,10 @@ const UINT8 *nd_ttf_glyph(UINT32 cp, UINT32 *wide);
 /* Antialiased companion: 16 rows of 16 4-bit coverage levels (128 bytes,
  * row-major, high nibble is the even column), 0 = no ink, 15 = full. Same
  * cache and same `*wide` rule as nd_ttf_glyph. */
-const UINT8 *nd_ttf_glyph_gray(UINT32 cp, UINT32 *wide);
+/* Coverage map for `cp` rasterised at `px` pixels per em (clamped to
+ * [16, 48]): px rows of px 4-bit nibbles, high nibble first. `*wide` gets
+ * the cell width that glyph's advance justifies. */
+const UINT8 *nd_ttf_glyph_gray(UINT32 cp, UINT32 px, UINT32 *wide);
 
 /* Pixel advance for `cp`, or 0 when the font has no glyph for it. */
 UINT32 nd_ttf_advance(UINT32 cp);

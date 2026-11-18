@@ -633,22 +633,27 @@ static void draw_uni_bits(nd_surface_t *s, INT32 x, INT32 y,
  * sibling of draw_uni_bits. Each covered cell is blended at its coverage
  * level, so thin strokes and diagonal edges keep a soft edge instead of
  * snapping to a black-and-white staircase. */
+/* `gray` holds px rows of px nibbles, already rasterised for the size the
+ * text is drawn at; `blk` is how many screen pixels each coverage cell
+ * covers (1 whenever the raster was produced at the final size). */
 static void draw_uni_gray(nd_surface_t *s, INT32 x, INT32 y,
-                          const UINT8 *gray, UINT32 wide, nd_color_t c,
-                          UINT32 scale) {
+                          const UINT8 *gray, UINT32 px, UINT32 blk,
+                          nd_color_t c) {
   UINT32 gy;
+  UINT32 stride;
 
-  if (scale == 0u) {
-    scale = 1u;
+  if (px == 0u) {
+    return;
   }
-  if (wide > ND_CJK_W) {
-    wide = ND_CJK_W;
+  if (blk == 0u) {
+    blk = 1u;
   }
-  for (gy = 0; gy < ND_CJK_H; gy++) {
-    const UINT8 *row = &gray[gy * 8u];
+  stride = px / 2u;
+  for (gy = 0; gy < px; gy++) {
+    const UINT8 *row = &gray[gy * stride];
     UINT32       gx;
 
-    for (gx = 0; gx < wide; gx++) {
+    for (gx = 0; gx < px; gx++) {
       UINT8 b = row[gx >> 1u];
       UINT8 nib = (gx & 1u) != 0u ? (UINT8)(b & 0x0Fu) : (UINT8)(b >> 4);
       UINT8 a = (UINT8)(nib * 17u); /* 15 -> 255 */
@@ -656,15 +661,15 @@ static void draw_uni_gray(nd_surface_t *s, INT32 x, INT32 y,
       if (a == 0u) {
         continue;
       }
-      if (scale == 1u) {
+      if (blk == 1u) {
         if (nd_visible(s, x + (INT32)gx, y + (INT32)gy)) {
           nd_span_blend_raw(s, x + (INT32)gx, y + (INT32)gy, 1, c, a);
         }
       } else {
-        nd_blend_rect(s, nd_rect(x + (INT32)gx * (INT32)scale,
-                                 y + (INT32)gy * (INT32)scale,
-                                 (INT32)scale, (INT32)scale),
-                      c, (UINT8)(nib * 17u));
+        nd_blend_rect(s, nd_rect(x + (INT32)gx * (INT32)blk,
+                                 y + (INT32)gy * (INT32)blk, (INT32)blk,
+                                 (INT32)blk),
+                      c, a);
       }
     }
   }
@@ -700,6 +705,30 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
     if (cp < 0x20u) {
       continue; /* control codes carry no shape and no advance */
     }
+    /* Combining marks advance by zero and stack on the previous glyph,
+     * which is how Unifont's 8x16/16x16 combining cells are designed. */
+    if (adv == 0u && prev_adv != 0u) {
+      gx = cx - (INT32)prev_adv;
+    }
+    /* Any glyph the loaded face covers is painted from its 4-bit coverage
+     * map, ASCII included. The 5x7 cell below is only a fallback now: it
+     * made digits and letters roughly half the height of the hanzi beside
+     * them and left every edge a black-and-white staircase. */
+    {
+      UINT32       gpx = ND_CJK_W;
+      UINT32       gblk = 1u;
+      const UINT8 *gray = nd_glyph_gray(cp, scale, &gpx, &gblk);
+
+      if (gray != 0) {
+        draw_uni_gray(s, gx, y + (INT32)(cell - ND_CJK_H * scale), gray, gpx,
+                      gblk, c);
+        if (adv != 0u) {
+          prev_adv = adv;
+        }
+        cx += (INT32)adv;
+        continue;
+      }
+    }
     if (cp < 0x80u) {
       draw_ascii(s, gx, y + (INT32)(cell - ND_GLYPH_H * scale), (UINT8)cp, c,
                  scale);
@@ -707,25 +736,6 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
       UINT32       wide = 8u;
       const UINT8 *rows;
 
-      /* Combining marks advance by zero and stack on the previous glyph,
-       * which is how Unifont's 8x16/16x16 combining cells are designed. */
-      if (adv == 0u && prev_adv != 0u) {
-        gx = cx - (INT32)prev_adv;
-      }
-      {
-        UINT32       gw = 8u;
-        const UINT8 *gray = nd_glyph_gray(cp, &gw);
-
-        if (gray != 0) {
-          draw_uni_gray(s, gx, y + (INT32)(cell - ND_CJK_H * scale), gray, gw,
-                        c, scale);
-          if (adv != 0u) {
-            prev_adv = adv;
-          }
-          cx += (INT32)adv;
-          continue;
-        }
-      }
       rows = nd_glyph_find(cp, &wide);
       if (rows == 0) {
         UINT32 w = (adv != 0u) ? adv : wide * scale;

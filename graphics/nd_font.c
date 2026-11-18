@@ -280,11 +280,48 @@ int nd_font_load_from(struct novusfs_fs *fs) {
  * the outline face covers, or NULL so the caller falls back to the packed
  * 1bpp cell. Only the outline path has sub-pixel coverage; the shipped
  * bitmap table has none by definition. */
-const UINT8 *nd_glyph_gray(UINT32 cp, UINT32 *wide) {
-  if (cp >= 0x80u && nd_ttf_active() != 0) {
-    const UINT8 *gray = nd_ttf_glyph_gray(cp, wide);
+/* Pick the raster cell for a text scale: one em is ND_CJK_W pixels, and
+ * larger text is rasterised larger rather than magnified, up to three times
+ * the base cell. A scale that is not a clean multiple of that falls back to
+ * plain magnification of the 16 pixel raster.
+ * `*px` is the cell in pixels, `*blk` how many pixels each coverage cell
+ * covers on screen. */
+const UINT8 *nd_glyph_gray(UINT32 cp, UINT32 scale, UINT32 *px,
+                           UINT32 *blk) {
+  UINT32 k;
+  UINT32 b;
+  UINT32 cell;
+
+  if (scale == 0u) {
+    scale = 1u;
+  }
+  /* Largest cell multiplier the cache holds that divides the scale, so
+   * text is rasterised as close to its final size as possible: 1 -> 16 px,
+   * 2 -> 32 px, 4 -> 32 px at 2x, 6 -> 48 px at 2x. */
+  k = 1u;
+  if ((scale & 1u) == 0u && scale >= 6u) {
+    k = 3u;
+  } else if ((scale & 1u) == 0u) {
+    k = 2u;
+  } else if (scale >= 3u) {
+    k = 3u;
+  }
+  if (k > scale) {
+    k = scale;
+  }
+  b = scale / k;
+  cell = ND_CJK_W * k;
+  if (cp >= 0x20u && nd_ttf_active() != 0) {
+    UINT32       wide = cell;
+    const UINT8 *gray = nd_ttf_glyph_gray(cp, cell, &wide);
 
     if (gray != 0) {
+      if (px != 0) {
+        *px = cell;
+      }
+      if (blk != 0) {
+        *blk = b;
+      }
       return gray;
     }
   }
@@ -298,7 +335,7 @@ const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide) {
    * table: the user put it there precisely to change how text looks. Any
    * codepoint the face does not cover falls through to the bitmap paths
    * below, so a Latin-only face does not lose CJK. */
-  if (cp >= 0x80u && nd_ttf_active() != 0) {
+  if (cp >= 0x20u && nd_ttf_active() != 0) {
     const UINT8 *rows = nd_ttf_glyph(cp, wide);
 
     if (rows != 0) {
@@ -361,15 +398,17 @@ UINT32 nd_uni_adv(UINT32 cp) {
   if (cp < 0x20u) {
     return 0u;
   }
-  if (cp < 0x80u) {
-    return ND_FONT_ADV;
-  }
   /* The advance must come from whatever face actually draws the glyph,
    * otherwise a loaded TTF renders into a column width taken from the
-   * bitmap table and the text drifts apart. */
+   * bitmap table and the text drifts apart. ASCII is no exception: the
+   * 6 pixel monospace cell made digits and letters narrower and shorter
+   * than the hanzi they sit next to. */
   ttf = nd_ttf_advance(cp);
   if (ttf != 0u) {
     return ttf;
+  }
+  if (cp < 0x80u) {
+    return ND_FONT_ADV;
   }
   while (lo < hi) {
     UINT32 mid = (lo + hi) / 2u;
@@ -427,10 +466,11 @@ UINT32 nd_text_width_n(const char *text, UINT32 bytes, UINT32 scale) {
   return w;
 }
 
-/* Height is chosen for the whole line: any codepoint that actually takes
- * space and lives outside ASCII selects the 16 pixel cell, so mixed
- * Latin/CJK text shares one baseline. Combining marks advance by zero and
- * therefore never raise the line on their own. */
+/* Height is chosen for the whole line: any codepoint the TrueType face can
+ * actually draw selects the 16 pixel cell, so mixed Latin/CJK text shares
+ * one baseline and one cap height. Only text that still falls back to the
+ * built-in 5x7 cells stays on the short line. Combining marks advance by
+ * zero and never raise the line on their own. */
 UINT32 nd_text_height(const char *text, UINT32 scale) {
   const char *p = nd_lang_tr(text);
   UINT32      h = (scale != 0u) ? ND_GLYPH_H * scale : ND_GLYPH_H;
@@ -442,8 +482,13 @@ UINT32 nd_text_height(const char *text, UINT32 scale) {
   while (p != 0 && *p != '\0') {
     UINT32 cp = nd_utf8_next(&p);
 
-    if (cp >= 0x80u && nd_uni_adv(cp) != 0u) {
-      return (h > uni) ? h : uni;
+    if (cp < 0x20u) {
+      continue;
+    }
+    if (nd_uni_adv(cp) != 0u) {
+      if (cp >= 0x80u || (nd_ttf_active() != 0 && nd_ttf_advance(cp) != 0u)) {
+        return (h > uni) ? h : uni;
+      }
     }
   }
   return h;

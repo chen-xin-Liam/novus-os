@@ -828,7 +828,9 @@ static void draw_progress(ng_widget_t *w) {
   if (w->u.progress.text != 0) {
     text[0] = '\0';
     nd_text(s, w->abs.x + NG_PAD,
-            w->abs.y + (w->abs.h - (INT32)nd_font_height(NG_TEXT_SCALE)) / 2,
+            w->abs.y +
+                (w->abs.h - (INT32)nd_text_height(w->u.progress.text,
+                                                  NG_TEXT_SCALE)) / 2,
             w->u.progress.text, t->text, NG_TEXT_SCALE);
   } else {
     fmt_int(text, pw / 10);
@@ -842,7 +844,8 @@ static void draw_progress(ng_widget_t *w) {
     }
     tw = nd_text_width(text, NG_TEXT_SCALE);
     nd_text(s, w->abs.x + (w->abs.w - (INT32)tw) / 2,
-            w->abs.y + (w->abs.h - (INT32)nd_font_height(NG_TEXT_SCALE)) / 2,
+            w->abs.y +
+                (w->abs.h - (INT32)nd_text_height(text, NG_TEXT_SCALE)) / 2,
             text, t->accent_text, NG_TEXT_SCALE);
   }
 }

@@ -46,7 +46,10 @@ const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide);
 /* Antialiased coverage map for the same codepoint (16 rows x 16 nibbles,
  * 128 bytes, high nibble is the even column) when the outline face covers
  * it, else NULL. */
-const UINT8 *nd_glyph_gray(UINT32 cp, UINT32 *wide);
+/* Antialiased coverage map for `cp`, rasterised at a cell that suits the
+ * text scale; `*px` receives the cell size and `*blk` the pixels-per-cell
+ * magnification. Returns 0 when no face covers the codepoint. */
+const UINT8 *nd_glyph_gray(UINT32 cp, UINT32 scale, UINT32 *px, UINT32 *blk);
 
 /* Advance in pixels at 1x: 0 for combining marks, 6 for printable ASCII,
  * 8 or 16 for everything else. */

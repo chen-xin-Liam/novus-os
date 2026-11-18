@@ -11,24 +11,29 @@
 #include "nd_internal.h"
 #include "../kernel/kernel.h"
 
-#define TTF_EM_PX      16u
+#define TTF_EM_PX      16u /* base cell: one em, sixteen pixels */
+#define TTF_EM_MAX     48u /* largest cell a UI text scale asks for */
 #define TTF_MAX_POINTS  1536u
 #define TTF_MAX_CONTS   64u
 #define TTF_MAX_EDGES   3072u
-#define TTF_CACHE_N     256u
+#define TTF_CACHE_N     192u
 #define TTF_MAX_FILE    (32u * 1024u * 1024u)
 #define TTF_MAX_DEPTH   4u
 
-/* One cache slot per (codepoint). Each slot carries the 1bpp cell (32 bytes)
- * the bitmap path expects plus a 4-bit antialiased coverage map (16 rows of
- * 16 nibbles = 128 bytes), so the renderer can blend grey edges instead of
- * thresholding them into staircases. A miss only costs one raster. */
+/* One cache slot per (codepoint, cell size). Each slot carries the 1bpp
+ * cell the bitmap path expects plus a 4-bit antialiased coverage map, so
+ * the renderer can blend grey edges instead of thresholding them into
+ * staircases. Slots are sized for the largest cell (TTF_EM_MAX): keeping
+ * one raster resolution would hand a 32 pixel heading the 16 pixel bitmap
+ * blown up twice, which is the stair-step the UI showed. A miss costs one
+ * raster. */
 typedef struct {
   UINT32 cp;
-  UINT8  cell[32];
-  UINT8  gray[128];
+  UINT32 px;                                        /* cell, in pixels */
   UINT32 wide;
   UINT32 used;
+  UINT8  cell[TTF_EM_MAX * (TTF_EM_MAX / 8u)];      /* 1bpp rows */
+  UINT8  gray[TTF_EM_MAX * (TTF_EM_MAX / 2u)];      /* 4bpp rows */
 } ttf_cache_t;
 
 typedef struct {
@@ -76,7 +81,11 @@ typedef struct {
 static ttf_edge_t g_edge[TTF_MAX_EDGES];
 static UINT32     g_edge_n;
 
-static UINT16 g_cov[TTF_EM_PX][TTF_EM_PX];
+static UINT16 g_cov[TTF_EM_MAX][TTF_EM_MAX];
+
+/* Cell size the current raster is being drawn at, in pixels. Everything
+ * below that maps design units to pixels reads it instead of a constant. */
+static UINT32 g_px = TTF_EM_PX;
 
 /* Per-glyph working arrays. Static on purpose: a Han glyph carries
  * hundreds of points and the kernel stack is measured in kilobytes. */
@@ -303,7 +312,7 @@ static UINT32 gid_for(UINT32 cp) {
   return gid;
 }
 
-static UINT32 advance_px(UINT32 gid) {
+static UINT32 advance_px(UINT32 gid, UINT32 px) {
   const UINT8 *h;
   UINT32       aw;
 
@@ -321,7 +330,7 @@ static UINT32 advance_px(UINT32 gid) {
   if (aw == 0u) {
     aw = (UINT32)g_face.upem / 2u;
   }
-  return aw * TTF_EM_PX / g_face.upem;
+  return aw * px / g_face.upem;
 }
 
 /* -------------------------------------------------------------- outline */
@@ -337,10 +346,10 @@ static void push_edge(INT32 x0, INT32 y0, INT32 x1, INT32 y1) {
   g_edge_n++;
 }
 
-/* Design units to sixteenths of a pixel: one unit is upem/TTF_EM_PX of a
- * pixel, so the multiplier is TTF_EM_PX*16/upem. */
+/* Design units to sixteenths of a pixel: one unit is upem/g_px of a
+ * pixel, so the multiplier is g_px*16/upem. */
 static INT32 to_16(INT32 v) {
-  return v * (INT32)(TTF_EM_PX * 16u) / (INT32)g_face.upem;
+  return v * (INT32)(g_px * 16u) / (INT32)g_face.upem;
 }
 
 /* y is flipped about the baseline so row 0 is the top of the cell. */
@@ -668,7 +677,7 @@ static void raster(void) {
     contour_edges(start, end);
     start = end + 1u;
   }
-  for (row = 0; row < TTF_EM_PX; row++) {
+  for (row = 0; row < g_px; row++) {
     for (sub = 0; sub < 4u; sub++) {
       INT32  y = (INT32)(row * 16u + sub * 4u + 2u);
       UINT32 n = 0u;
@@ -726,15 +735,15 @@ static void raster(void) {
           if (a < 0) {
             a = 0;
           }
-          if (b > (INT32)(TTF_EM_PX * 16u)) {
-            b = (INT32)(TTF_EM_PX * 16u);
+          if (b > (INT32)(g_px * 16u)) {
+            b = (INT32)(g_px * 16u);
           }
           while (a < b) {
             UINT32 px = (UINT32)(a / 16);
             INT32  edge = (INT32)((px + 1u) * 16u);
             INT32  hi = (b < edge) ? b : edge;
 
-            if (px >= TTF_EM_PX) {
+            if (px >= g_px) {
               break;
             }
             g_cov[row][px] = (UINT16)(g_cov[row][px] + (UINT16)(hi - a));
@@ -748,14 +757,15 @@ static void raster(void) {
 
 /* -------------------------------------------------------------- caching */
 
-static ttf_cache_t *cache_slot(UINT32 cp) {
-  UINT32 h = (cp * 2654435761u) % TTF_CACHE_N;
+static ttf_cache_t *cache_slot(UINT32 cp, UINT32 px) {
+  UINT32 h = (cp * 2654435761u + px * 40503u) % TTF_CACHE_N;
   UINT32 i;
 
   for (i = 0; i < TTF_CACHE_N; i++) {
     UINT32 idx = (h + i) % TTF_CACHE_N;
 
-    if (g_cache[idx].cp == cp && g_cache[idx].used != 0u) {
+    if (g_cache[idx].cp == cp && g_cache[idx].px == px &&
+        g_cache[idx].used != 0u) {
       return &g_cache[idx];
     }
     if (g_cache[idx].used == 0u) {
@@ -780,21 +790,29 @@ static ttf_cache_t *cache_slot(UINT32 cp) {
   }
 }
 
-const UINT8 *nd_ttf_glyph(UINT32 cp, UINT32 *wide) {
+/* Rasterise one glyph at `px` pixels per em, or hand back the slot that
+ * already holds it. The slot is returned so both the 1bpp cell and the 4-bit
+ * coverage map can be used without a second lookup. */
+static ttf_cache_t *glyph_build(UINT32 cp, UINT32 px, UINT32 *wide) {
   ttf_cache_t *c;
   UINT32       gid;
-  UINT32       i;
 
   if (g_face.loaded == 0 || cp > 0x10FFFFu) {
     return 0;
   }
-  c = cache_slot(cp);
-  if (c->used != 0u && c->cp == cp) {
+  if (px < TTF_EM_PX) {
+    px = TTF_EM_PX;
+  }
+  if (px > TTF_EM_MAX) {
+    px = TTF_EM_MAX;
+  }
+  c = cache_slot(cp, px);
+  if (c->used != 0u && c->cp == cp && c->px == px) {
     c->used = ++g_cache_clock;
     if (wide != 0) {
       *wide = c->wide;
     }
-    return c->cell;
+    return c;
   }
   gid = gid_for(cp);
   if (gid == 0u) {
@@ -806,67 +824,67 @@ const UINT8 *nd_ttf_glyph(UINT32 cp, UINT32 *wide) {
   zero(c->gray, sizeof(c->gray));
   g_pts_n = 0u;
   g_cont_n = 0u;
+  g_px = px;
   if (glyph_outline(gid, 0u) != 0) {
     return 0; /* malformed: fall through to the bitmap font upstream */
   }
   if (g_cont_n != 0u) {
-    raster();
-    for (i = 0; i < TTF_EM_PX; i++) {
-      UINT32 col;
-      UINT16 bits = 0u;
+    UINT32 row;
+    UINT32 gstride = px / 2u; /* one nibble per pixel, high nibble first */
+    UINT32 cstride = px / 8u; /* one bit per pixel, MSB leftmost */
 
-      for (col = 0; col < TTF_EM_PX; col++) {
+    raster();
+    for (row = 0; row < px; row++) {
+      UINT32 col;
+
+      for (col = 0; col < px; col++) {
         /* Four sub-scanlines times 16 steps is full coverage 64; the
          * 4-bit map keeps 16 levels so edges can be blended. The 1bpp
          * cell stays as the thresholded fallback (34% ink) for the
          * monochrome path. */
-        UINT32 cov = g_cov[i][col];
+        UINT32 cov = g_cov[row][col];
         UINT32 lev = (cov * 15u + 32u) / 64u;
-        UINT8 *row = &c->gray[i * 8u];
 
         if (lev != 0u) {
-          UINT8 nib = (UINT8)lev;
+          UINT8 *grow = &c->gray[row * gstride];
+          UINT8  nib = (UINT8)lev;
 
           if ((col & 1u) != 0u) {
-            row[col >> 1] = (UINT8)(row[col >> 1] | nib);
+            grow[col >> 1] = (UINT8)(grow[col >> 1] | nib);
           } else {
-            row[col >> 1] = (UINT8)(row[col >> 1] | (UINT8)(nib << 4));
+            grow[col >> 1] = (UINT8)(grow[col >> 1] | (UINT8)(nib << 4));
           }
         }
         if (cov >= 34u) {
-          bits = (UINT16)(bits | (UINT16)(1u << (15u - col)));
+          UINT8 *crow = &c->cell[row * cstride + (col >> 3)];
+
+          *crow = (UINT8)(*crow | (UINT8)(0x80u >> (col & 7u)));
         }
       }
-      c->cell[i * 2u] = (UINT8)(bits >> 8);
-      c->cell[i * 2u + 1u] = (UINT8)(bits & 0xFFu);
     }
   }
   c->cp = cp;
-  c->wide = (advance_px(gid) >= 13u) ? 16u : 8u;
+  c->px = px;
+  /* Full width when the advance fills most of the cell: the bitmap path
+   * uses this to decide how many columns it may paint. */
+  c->wide = (advance_px(gid, px) * 16u >= px * 13u) ? px : px / 2u;
   c->used = ++g_cache_clock;
   if (wide != 0) {
     *wide = c->wide;
   }
-  return c->cell;
+  return c;
 }
 
-const UINT8 *nd_ttf_glyph_gray(UINT32 cp, UINT32 *wide) {
-  (void)nd_ttf_glyph(cp, wide);
-  {
-    ttf_cache_t *c;
+const UINT8 *nd_ttf_glyph(UINT32 cp, UINT32 *wide) {
+  ttf_cache_t *c = glyph_build(cp, TTF_EM_PX, wide);
 
-    if (g_face.loaded == 0 || cp > 0x10FFFFu) {
-      return 0;
-    }
-    c = cache_slot(cp);
-    if (c->used != 0u && c->cp == cp) {
-      if (wide != 0) {
-        *wide = c->wide;
-      }
-      return c->gray;
-    }
-  }
-  return 0;
+  return (c != 0) ? c->cell : 0;
+}
+
+const UINT8 *nd_ttf_glyph_gray(UINT32 cp, UINT32 px, UINT32 *wide) {
+  ttf_cache_t *c = glyph_build(cp, px, wide);
+
+  return (c != 0) ? c->gray : 0;
 }
 
 UINT32 nd_ttf_advance(UINT32 cp) {
@@ -879,7 +897,7 @@ UINT32 nd_ttf_advance(UINT32 cp) {
   if (gid == 0u) {
     return 0u;
   }
-  return advance_px(gid);
+  return advance_px(gid, TTF_EM_PX);
 }
 
 int nd_ttf_active(void) { return g_face.loaded; }
