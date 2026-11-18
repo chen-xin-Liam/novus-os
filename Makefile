@@ -379,9 +379,23 @@ $(ICON_BLOB_H): $(ICON_IMGS) | build
 	  echo '#define NOVUS_ICONS_BLOBS_H'; \
 	  for f in $(ICON_IMGS); do \
 	    n=`basename $$f .ico`; \
+	    c=`echo $$n | tr '-' '_'`; \
 	    echo '/* '"$$n"'.ico */'; \
-	    xxd -i -n k_ico_$$n $$f; \
+	    xxd -i -n k_ico_$$c $$f; \
 	  done; \
+	  echo 'typedef struct {'; \
+	  echo '  const char        *name;'; \
+	  echo '  const unsigned char *data;'; \
+	  echo '  unsigned int       len;'; \
+	  echo '} nd_icon_blob_row_t;'; \
+	  echo 'static const nd_icon_blob_row_t g_icon_blob_rows[] = {'; \
+	  for f in $(ICON_IMGS); do \
+	    n=`basename $$f .ico`; \
+	    c=`echo $$n | tr '-' '_'`; \
+	    echo '  {"'"$$n"'", k_ico_'"$$c"', (unsigned int)sizeof(k_ico_'"$$c"')},'; \
+	  done; \
+	  echo '};'; \
+	  echo '#define ND_ICON_BLOB_COUNT (sizeof(g_icon_blob_rows) / sizeof(g_icon_blob_rows[0]))'; \
 	  echo '#endif'; \
 	} > $@
 

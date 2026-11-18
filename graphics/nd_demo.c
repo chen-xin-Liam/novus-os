@@ -29,6 +29,7 @@
 #include "power.h"
 #include "install.h"
 #include "nd_icon.h"
+#include "net.h"
 
 #if CONFIG_NOVUS_GUI
 
@@ -569,11 +570,142 @@ static void running_refresh(void) {
   }
 }
 
+/* ---- taskbar status icons --------------------------------------------- */
+
+/* Nothing in the tree drives a speaker yet (there is no AC'97 / HDA
+ * driver), so the level is the shell's own state: 0 is muted, 1..3 is the
+ * number of arcs the icon draws. Clicking the taskbar icon steps it, which
+ * keeps the picture honest about what the setting actually is. */
+static UINT32       g_volume = 2u;
+static ng_widget_t *g_net_icon_w;
+static ng_widget_t *g_vol_icon_w;
+static char         g_net_icon_name[16] = "";
+static char         g_vol_icon_name[16] = "";
+
+/* Which picture describes the link right now: Wi-Fi arcs on an associated
+ * wireless link, a monitor with its cable on a wired one, and the crossed
+ * globe whenever there is nothing usable underneath. */
+static const char *net_icon_name(void) {
+  netdev_t *d = net_active();
+
+  if (d == 0) {
+    return "wifi-off";
+  }
+  if (d->state != NET_STATE_UP || net_dhcp_state() != NET_DHCP_BOUND) {
+    return "wifi-off";
+  }
+  if (d->link == NET_LINK_WIFI) {
+    return "wifi";
+  }
+  return "net-wired";
+}
+
+static const char *volume_icon_name(void) {
+  switch (g_volume) {
+    case 0: return "volume-mute";
+    case 1: return "volume-1";
+    case 2: return "volume-2";
+    default: return "volume-3";
+  }
+}
+
+static int same_name(const char *a, const char *b) {
+  while (*a != '\0' && *a == *b) {
+    a++;
+    b++;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
+static void copy_name(char *dst, UINT32 cap, const char *src) {
+  UINT32 i = 0;
+
+  while (src[i] != '\0' && i + 1u < cap) {
+    dst[i] = src[i];
+    i++;
+  }
+  dst[i] = '\0';
+}
+
+/* The quick-settings card states the same two facts the icons do, so the
+ * icons never claim something the card contradicts. */
+static char         g_status_text[64] = "";
+static ng_widget_t *g_status_label;
+
+static UINT32 put_text(char *dst, UINT32 n, UINT32 cap, const char *src) {
+  while (*src != '\0' && n + 1u < cap) {
+    dst[n++] = *src++;
+  }
+  dst[n] = '\0';
+  return n;
+}
+
+static UINT32 put_char(char *dst, UINT32 n, UINT32 cap, char c) {
+  if (n + 1u < cap) {
+    dst[n++] = c;
+    dst[n] = '\0';
+  }
+  return n;
+}
+
+static void status_text_refresh(const char *net_name, const char *vol_name) {
+  char  buf[64];
+  UINT32 n = 0;
+
+  buf[0] = '\0';
+  if (same_name(net_name, "wifi")) {
+    n = put_text(buf, n, sizeof(buf), "网络：Wi-Fi 已连接");
+  } else if (same_name(net_name, "net-wired")) {
+    n = put_text(buf, n, sizeof(buf), "网络：有线已连接");
+  } else {
+    n = put_text(buf, n, sizeof(buf), "网络：未连接");
+  }
+  n = put_text(buf, n, sizeof(buf), "  |  ");
+  if (same_name(vol_name, "volume-mute")) {
+    n = put_text(buf, n, sizeof(buf), "音量：静音");
+  } else {
+    char digit = (char)('0' + (char)g_volume);
+
+    n = put_text(buf, n, sizeof(buf), "音量：");
+    n = put_char(buf, n, sizeof(buf), digit);
+    (void)n;
+  }
+  if (same_name(g_status_text, buf)) {
+    return;
+  }
+  copy_name(g_status_text, sizeof(g_status_text), buf);
+  if (g_status_label != 0) {
+    ng_damage_widget(g_status_label);
+  }
+}
+
+static void status_refresh(void) {
+  const char *nn = net_icon_name();
+  const char *vn = volume_icon_name();
+
+  if (!same_name(g_net_icon_name, nn)) {
+    copy_name(g_net_icon_name, sizeof(g_net_icon_name), nn);
+    if (g_net_icon_w != 0) {
+      ng_icon_image(g_net_icon_w, nd_icon_get(g_net_icon_name, 20));
+      ng_damage_widget(g_net_icon_w);
+    }
+  }
+  if (!same_name(g_vol_icon_name, vn)) {
+    copy_name(g_vol_icon_name, sizeof(g_vol_icon_name), vn);
+    if (g_vol_icon_w != 0) {
+      ng_icon_image(g_vol_icon_w, nd_icon_get(g_vol_icon_name, 20));
+      ng_damage_widget(g_vol_icon_w);
+    }
+  }
+  status_text_refresh(g_net_icon_name, g_vol_icon_name);
+}
+
 /* Called from the window manager's tick: the shell owns the clock, but the
  * WM owns the timer path once it is running. */
 void nd_demo_idle(void) {
   clock_refresh();
   running_refresh();
+  status_refresh();
   /* Auto mode flips at 19:00 and 07:00; a manual change bumps the version
    * from the settings panel or the quick-settings card. Either way the
    * static widget tree is rebuilt once, not repainted colour by colour. */
@@ -622,6 +754,15 @@ static void on_quick(ng_ctx_t *ctx, ng_widget_t *w) {
   if (g_quick != 0) {
     ng_show(g_quick, (g_quick->flags & NG_WF_VISIBLE) == 0u);
   }
+}
+
+/* A speaker click steps the level (3 -> muted -> 1 -> 2 -> 3) and the icon
+ * follows in the same frame, so the taskbar always shows what is set. */
+static void on_volume(ng_ctx_t *ctx, ng_widget_t *w) {
+  (void)ctx;
+  (void)w;
+  g_volume = (g_volume >= 3u) ? 0u : g_volume + 1u;
+  status_refresh();
 }
 
 static void on_open_demo(ng_ctx_t *ctx, ng_widget_t *w) {
@@ -996,8 +1137,8 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
                 paper_acts[pi]);
     }
   }
-  ng_label(ng_create(g_quick, NG_LABEL, 20, 286, 300, 16), "网络已连接",
-           ctx->theme.text_dim, 1);
+  g_status_label = ng_label(ng_create(g_quick, NG_LABEL, 20, 286, 300, 16),
+                            g_status_text, ctx->theme.text_dim, 1);
   ng_button(ng_create(g_quick, NG_BUTTON, 20, 310, 92, 32), "重启", on_reboot);
   ng_button(ng_create(g_quick, NG_BUTTON, 120, 310, 92, 32), "关机",
             on_shutdown);
@@ -1055,21 +1196,21 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
      * back to the built-in blob - so the shell no longer draws them from
      * a vector shape. */
     {
-      ng_widget_t *ic;
-
-      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + tw - 196, ty + 10, 36, 36),
-                   NG_ICON_WIFI, 20, on_quick);
-      ng_icon_image(ic, nd_icon_get("wifi", 20));
-      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + tw - 156, ty + 10, 36, 36),
-                   NG_ICON_VOLUME, 20, on_quick);
-      ng_icon_image(ic, nd_icon_get("volume", 20));
+      g_net_icon_w = ng_icon(
+          ng_create(ctx->root, NG_ICON, tx + tw - 196, ty + 10, 36, 36),
+          NG_ICON_WIFI, 20, on_quick);
+      g_vol_icon_w = ng_icon(
+          ng_create(ctx->root, NG_ICON, tx + tw - 156, ty + 10, 36, 36),
+          NG_ICON_VOLUME, 20, on_volume);
     }
+    /* Time over date, both at the same small size and right aligned, so
+     * the pair reads as one block the way Windows 11 draws it. */
     g_clock_label = ng_label(
-        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 4, 96, 32), g_clock,
-        ctx->theme.text, 2);
+        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 9, 96, 18), g_clock,
+        ctx->theme.text, 1);
     g_clock_label->u.label.align = 2; /* right aligned */
     g_date_label = ng_label(
-        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 36, 96, 18), g_date,
+        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 31, 96, 18), g_date,
         ctx->theme.text_dim, 1);
     g_date_label->u.label.align = 2;
   }
@@ -1077,6 +1218,7 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_layout();
   clock_refresh();
   running_refresh();
+  status_refresh();
   ng_show(g_win_demo, 0);
   ng_show(g_win_widgets, 0);
   ng_show(g_start_menu, 0);
@@ -1139,6 +1281,10 @@ void nd_demo_theme_sync(void) {
   g_clock_label = 0;
   g_date_label = 0;
   g_status_label = 0;
+  g_net_icon_w = 0;
+  g_vol_icon_w = 0;
+  g_net_icon_name[0] = '\0';
+  g_vol_icon_name[0] = '\0';
   memset(g_run_dot, 0, sizeof(g_run_dot));
 
   /* Rebuild into the compositor buffer, never onto the framebuffer: a

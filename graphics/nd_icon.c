@@ -23,7 +23,7 @@
 
 #include <icons_blobs.h>
 
-#define ND_ICON_CACHE    20u
+#define ND_ICON_CACHE    32u
 #define ND_ICON_PATH_MAX 48u
 
 static struct novusfs_fs *g_fs;
@@ -39,45 +39,26 @@ static UINT32 rd32(const UINT8 *p) {
 static INT32 rds32(const UINT8 *p) { return (INT32)rd32(p); }
 
 /* Built-in set: the same names the shell asks for, generated from the
- * .ico files in assets/icons by the Makefile. sizeof() rather than the
- * generated _len variables, which are not constant expressions. */
-typedef struct {
-  const char  *name;
-  const UINT8 *data;
-  UINT32       len;
-} nd_icon_blob_t;
+ * .ico files in assets/icons by the Makefile. The table itself lives in
+ * build/icons_blobs.h so a new icon needs no edit here. */
+#define ND_ICON_BLOBS ((UINT32)ND_ICON_BLOB_COUNT)
 
-static const nd_icon_blob_t g_blobs[] = {
-    {"devices", k_ico_devices, (UINT32)sizeof(k_ico_devices)},
-    {"files", k_ico_files, (UINT32)sizeof(k_ico_files)},
-    {"net", k_ico_net, (UINT32)sizeof(k_ico_net)},
-    {"power", k_ico_power, (UINT32)sizeof(k_ico_power)},
-    {"search", k_ico_search, (UINT32)sizeof(k_ico_search)},
-    {"settings", k_ico_settings, (UINT32)sizeof(k_ico_settings)},
-    {"start", k_ico_start, (UINT32)sizeof(k_ico_start)},
-    {"tasks", k_ico_tasks, (UINT32)sizeof(k_ico_tasks)},
-    {"term", k_ico_term, (UINT32)sizeof(k_ico_term)},
-    {"volume", k_ico_volume, (UINT32)sizeof(k_ico_volume)},
-    {"wifi", k_ico_wifi, (UINT32)sizeof(k_ico_wifi)},
-};
-
-#define ND_ICON_BLOBS (sizeof(g_blobs) / sizeof(g_blobs[0]))
-
-static const nd_icon_blob_t *find_blob(const char *name) {
+/* Index of the built-in blob with this name, or -1. */
+static INT32 find_blob(const char *name) {
   UINT32 i;
 
   for (i = 0; i < ND_ICON_BLOBS; i++) {
-    const char *a = g_blobs[i].name;
+    const char *a = g_icon_blob_rows[i].name;
     const char *b = name;
     while (*a != '\0' && *a == *b) {
       a++;
       b++;
     }
     if (*a == '\0' && *b == '\0') {
-      return &g_blobs[i];
+      return (INT32)i;
     }
   }
-  return NULL;
+  return -1;
 }
 
 /* ---- scaling --------------------------------------------------------- */
@@ -342,7 +323,7 @@ int nd_icon_decode(const UINT8 *data, UINT64 len, UINT32 px, nd_icon_t *out) {
 
 /* ---- loading --------------------------------------------------------- */
 
-#define ND_ICON_CACHE_N 20u
+#define ND_ICON_CACHE_N 32u
 
 static nd_icon_t g_cache[ND_ICON_CACHE_N];
 static char      g_cache_name[ND_ICON_CACHE_N][16];
@@ -426,11 +407,12 @@ const nd_icon_t *nd_icon_get(const char *name, UINT32 px) {
     }
   }
   if (rc != 0) {
-    const nd_icon_blob_t *b = find_blob(name);
-    if (b == NULL) {
+    INT32 bi = find_blob(name);
+    if (bi < 0) {
       return NULL;
     }
-    rc = nd_icon_decode(b->data, b->len, px, &tmp);
+    rc = nd_icon_decode(g_icon_blob_rows[bi].data, g_icon_blob_rows[bi].len,
+                        px, &tmp);
     if (rc != 0) {
       kputs("[ICON] builtin decode failed\n");
       return NULL;
