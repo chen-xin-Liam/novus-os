@@ -69,6 +69,7 @@
 #include "install.h"
 #include "lang.h"
 #include "sysinfo.h"
+#include "gpu.h"
 #include "net.h"
 #include "irq.h"
 
@@ -565,6 +566,11 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * apps are Rust programs embedded in this image (kernel/apps.c); the
        * launcher buttons on the shell's taskbar start the same three later,
        * which is why apps_launch() refuses a second copy. */
+      /* GPU bring-up, step 1: find the display controller and prove its
+       * register window is reachable. The desktop keeps drawing on the
+       * GOP framebuffer; this puts the chip where the settings page and
+       * the boot log can show it. */
+      gpu_init();
       sysinfo_init();
       {
         int install_mode = (shared_mem_get() != NULL &&

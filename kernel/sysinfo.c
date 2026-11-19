@@ -14,6 +14,7 @@
 #include "nwm.h"
 #include "sched.h"
 #include "sysinfo.h"
+#include "gpu.h"
 #include "devtab.h"
 #include "net.h"
 #include "blkdev.h"
@@ -552,6 +553,17 @@ static void req_display(const ipc_msg_t *m) {
                      (outs[i].primary != 0u ? 2u : 0u);
   }
   r.count = count;
+  /* The controller behind the outputs, as gpu.c identified it. */
+  {
+    const char *g = gpu_summary();
+    UINT32      i = 0u;
+
+    while (g[i] != '\0' && i + 1u < sizeof(r.gpu)) {
+      r.gpu[i] = g[i];
+      i++;
+    }
+    r.gpu[i] = '\0';
+  }
   answer(m, SYSINFO_RSP_DISPLAY, &r, sizeof(r));
 }
 

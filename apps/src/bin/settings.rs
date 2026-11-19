@@ -171,6 +171,12 @@ fn page_system(w: &mut wm::Win, s: &State) {
      * preferred timing comes from the display's EDID; the link type says
      * whether it hangs off DP/eDP/HDMI or VGA. */
     card(w, CONTENT_X, 242, CONTENT_W, 136, "显示输出");
+    /* The controller behind the outputs, on the title line: kernel/gpu.c
+     * put its name in the display reply. */
+    let gpu = s.displays.gpu_name();
+    if !gpu.is_empty() {
+        w.text(CONTENT_X + 84, 254, ui::dim(), gpu);
+    }
     if s.displays.count == 0 {
         w.text(CONTENT_X + 14, 286, ui::dim(), "没有可用的图形输出");
     } else {
@@ -542,6 +548,7 @@ pub extern "C" fn _start() -> ! {
                 pref_height: 0,
                 flags: 0,
             }; 4],
+            gpu: [0; 24],
         },
         st: sinfo::Stats {
             uptime: 0,
