@@ -60,6 +60,14 @@ static UINT32     g_mmio_bytes;
 static int        g_mmio_ok;
 static char       g_summary[64];
 
+/* The windows a driver needs before it can touch the controller. */
+static UINT64     g_mmio_phys;
+static int        g_mmio_64;
+static UINT64     g_aper_phys;
+static UINT64     g_aper_bytes;
+static UINT64     g_stolen_phys;
+static UINT64     g_stolen_bytes;
+
 /* Where the pixels the compositor writes actually live, and which PCI
  * window a driver would have to reach them through. A real driver has to
  * know this before it touches anything: a scanout inside the controller's
@@ -150,6 +158,39 @@ void gpu_init(void) {
   g_device = d.device;
   base = d.bar[0];
   g_mmio_bytes = (UINT32)d.bar_size[0];
+  g_mmio_phys = base;
+  g_aper_phys = d.bar[2];
+  g_aper_bytes = d.bar_size[2];
+
+  /* The BAR type bits say whether a window is a 64-bit BAR (type 10b) or a
+   * plain 32-bit one (00b). A driver that has to move a window needs this
+   * before it writes the address back: writing the upper half of a 32-bit
+   * BAR lands in the neighbouring slot and takes the next window with it. */
+  {
+    UINT32 bar0 = pci_read32(d.bus, d.dev, d.func, 0x10u);
+    UINT32 bar2 = pci_read32(d.bus, d.dev, d.func, 0x18u);
+
+    g_mmio_64 = (((bar0 >> 1) & 0x3u) == 0x2u) ? 1 : 0;
+    (void)bar2;
+  }
+
+  /* Integrated Intel graphics keep a slice of system RAM that the firmware
+   * carved out for them, described by BDSM in PCI config 0x5C: bits 31:20
+   * are the base in 1 MiB units. It is not a hint - it is memory that
+   * already belongs to the controller, and a driver that ignores it will
+   * overwrite whatever the firmware left there. AMD APUs use their BAR 2
+   * aperture for the same purpose, so there is nothing to read here. */
+  if (d.vendor == GPU_VENDOR_INTEL) {
+    UINT32 bdsm = pci_read32(d.bus, d.dev, d.func, 0x5Cu);
+
+    if (bdsm != 0u && bdsm != 0xFFFFFFFFu) {
+      g_stolen_phys = (UINT64)(bdsm & 0xFFF00000u);
+      /* The size lives in GGC, which is MMIO, per generation. Report the
+       * base now and leave the size to the driver: a wrong size here would
+       * be worse than none. */
+      g_stolen_bytes = 0u;
+    }
+  }
 
   name = name_for(d.vendor, d.device);
   if (base != 0u && (base >> 32) == 0u && g_mmio_bytes != 0u) {
@@ -181,6 +222,23 @@ void gpu_init(void) {
     kputs_hex(d.device);
     kputs(" has no reachable BAR 0\n");
   }
+
+  /* Windows a driver needs, printed together for the boot log. The
+   * aperture line matters on both vendors: on Intel it is the GTT window
+   * through which the GPU reads system memory, on AMD it is the VRAM
+   * aperture. A zero here means the firmware never assigned BAR 2, which
+   * is a machine a driver cannot start on without reassigning it first. */
+  kputs("[GPU] mmio=");
+  kputs_hex(g_mmio_phys);
+  kputs(" aperture=");
+  kputs_hex(g_aper_phys);
+  kputs(" aper_bytes=");
+  kputs_hex(g_aper_bytes);
+  kputs(" bar0_64bit=");
+  kputs_hex((UINT64)g_mmio_64);
+  kputs(" stolen=");
+  kputs_hex(g_stolen_phys);
+  kputs("\n");
 
   /* Second step: locate the scanout. The firmware handed us a linear
    * framebuffer; the question a driver asks next is whether that memory is
@@ -272,6 +330,15 @@ UINT64 gpu_framebuffer_bytes(void) { return g_fb_bytes; }
 /* Index of the BAR that covers the scanout, or -1 when the pixels sit in
  * memory no controller window reaches. */
 int gpu_framebuffer_bar(void) { return g_fb_bar; }
+
+UINT64 gpu_mmio_phys(void) { return g_mmio_phys; }
+UINT64 gpu_mmio_bytes(void) { return (UINT64)g_mmio_bytes; }
+UINT64 gpu_aperture_phys(void) { return g_aper_phys; }
+UINT64 gpu_aperture_bytes(void) { return g_aper_bytes; }
+int    gpu_mmio_is_64bit(void) { return g_mmio_64; }
+
+UINT64 gpu_stolen_phys(void) { return g_stolen_phys; }
+UINT64 gpu_stolen_bytes(void) { return g_stolen_bytes; }
 
 const char *gpu_summary(void) {
   if (g_present == 0) {

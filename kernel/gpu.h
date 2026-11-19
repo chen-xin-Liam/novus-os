@@ -47,6 +47,28 @@ UINT64 gpu_framebuffer_phys(void);
 UINT64 gpu_framebuffer_bytes(void);
 int    gpu_framebuffer_bar(void);
 
+/* Third step: the two windows any driver has to know about before it can
+ * touch the controller. gpu_mmio_phys() is BAR 0 (the register file),
+ * gpu_aperture_phys() is BAR 2 (the window through which the GPU's own
+ * memory is visible - GTT aperture on Intel, VRAM/framebuffer aperture on
+ * AMD). Both are 0 when that BAR is missing or sits above the identity
+ * map. gpu_mmio_is_64bit() says whether the register window is a 64-bit
+ * BAR, which is what decides if a driver can move it freely. */
+UINT64 gpu_mmio_phys(void);
+UINT64 gpu_mmio_bytes(void);
+UINT64 gpu_aperture_phys(void);
+UINT64 gpu_aperture_bytes(void);
+int    gpu_mmio_is_64bit(void);
+
+/* Intel only, and only when the firmware programmed it: the base of the
+ * stolen graphics memory the BIOS carved out of system RAM (PCI config
+ * 0x5C, BDSM). Integrated Intel graphics keep their own buffers there
+ * before any driver allocates anything, so a driver that ignores it writes
+ * into memory the firmware believes it owns. Zero on AMD and on a machine
+ * where the register is empty. */
+UINT64 gpu_stolen_phys(void);
+UINT64 gpu_stolen_bytes(void);
+
 /* Non-zero once a display controller was located. */
 int gpu_present(void);
 
