@@ -1207,7 +1207,7 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
      * the pair reads as one block the way Windows 11 draws it. */
     g_clock_label = ng_label(
         ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 9, 96, 18), g_clock,
-        ctx->theme.text, 1);
+        ctx->theme.text_dim, 1);
     g_clock_label->u.label.align = 2; /* right aligned */
     g_date_label = ng_label(
         ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 31, 96, 18), g_date,
