@@ -71,6 +71,7 @@ _Static_assert(sizeof(win32_reg_entry_t) == 168u, "registry ABI drift");
 _Static_assert(sizeof(win32_reg_file_t) == 2704u, "registry file ABI drift");
 
 static void win32_mem_owner_exit(UINT64 pid);
+static void win32_gui_owner_exit(UINT64 pid);
 
 static win32_reg_file_t g_reg;
 static win32_key_t      g_keys[WIN32_KEY_MAX];
@@ -110,6 +111,25 @@ enum {
   WIN32_API_IS_DEBUGGER_PRESENT,
   WIN32_API_GET_SYSTEM_INFO,
   WIN32_API_SET_UNHANDLED_EXCEPTION_FILTER,
+  /* Third block: a window and a message loop. */
+  WIN32_API_REGISTER_CLASS,
+  WIN32_API_CREATE_WINDOW,
+  WIN32_API_DESTROY_WINDOW,
+  WIN32_API_SHOW_WINDOW,
+  WIN32_API_GET_MESSAGE,
+  WIN32_API_PEEK_MESSAGE,
+  WIN32_API_DISPATCH_MESSAGE,
+  WIN32_API_DEF_WINDOW_PROC,
+  WIN32_API_TRANSLATE_MESSAGE,
+  WIN32_API_GET_CLIENT_RECT,
+  WIN32_API_GET_DC,
+  WIN32_API_RELEASE_DC,
+  WIN32_API_BEGIN_PAINT,
+  WIN32_API_END_PAINT,
+  WIN32_API_FILL_RECT,
+  WIN32_API_TEXT_OUT,
+  WIN32_API_SET_TEXT_COLOR,
+  WIN32_API_CREATE_SOLID_BRUSH,
 };
 
 typedef struct {
@@ -148,6 +168,27 @@ static const win32_api_t g_api[] = {
     {"kernel32.dll", "IsDebuggerPresent", WIN32_API_IS_DEBUGGER_PRESENT},
     {"kernel32.dll", "GetSystemInfo", WIN32_API_GET_SYSTEM_INFO},
     {"kernel32.dll", "SetUnhandledExceptionFilter", WIN32_API_SET_UNHANDLED_EXCEPTION_FILTER},
+    /* Third block: the window. A program that draws registers a class,
+     * opens a window, pumps messages and paints into it. user32 owns the
+     * message and window half, gdi32 the pixels. */
+    {"user32.dll", "RegisterClassExA", WIN32_API_REGISTER_CLASS},
+    {"user32.dll", "CreateWindowExA", WIN32_API_CREATE_WINDOW},
+    {"user32.dll", "DestroyWindow", WIN32_API_DESTROY_WINDOW},
+    {"user32.dll", "ShowWindow", WIN32_API_SHOW_WINDOW},
+    {"user32.dll", "GetMessageA", WIN32_API_GET_MESSAGE},
+    {"user32.dll", "PeekMessageA", WIN32_API_PEEK_MESSAGE},
+    {"user32.dll", "DispatchMessageA", WIN32_API_DISPATCH_MESSAGE},
+    {"user32.dll", "DefWindowProcA", WIN32_API_DEF_WINDOW_PROC},
+    {"user32.dll", "TranslateMessage", WIN32_API_TRANSLATE_MESSAGE},
+    {"user32.dll", "GetClientRect", WIN32_API_GET_CLIENT_RECT},
+    {"user32.dll", "GetDC", WIN32_API_GET_DC},
+    {"user32.dll", "ReleaseDC", WIN32_API_RELEASE_DC},
+    {"user32.dll", "BeginPaint", WIN32_API_BEGIN_PAINT},
+    {"user32.dll", "EndPaint", WIN32_API_END_PAINT},
+    {"gdi32.dll", "FillRect", WIN32_API_FILL_RECT},
+    {"gdi32.dll", "TextOutA", WIN32_API_TEXT_OUT},
+    {"gdi32.dll", "SetTextColor", WIN32_API_SET_TEXT_COLOR},
+    {"gdi32.dll", "CreateSolidBrush", WIN32_API_CREATE_SOLID_BRUSH},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -221,13 +262,17 @@ static int read_user_str(UINT64 cr3, UINT64 va, char *out, UINT32 cap) {
 }
 
 /* Argument 4 and above lives on the caller's stack. */
+/* The fifth and later Windows x64 arguments live above the shadow space:
+ * the return address sits at rsp, the four register slots below it, and
+ * argument 5 at rsp+0x28. n is the real argument number, so 5 is the first
+ * one that ever reaches the stack. */
 static int stack_arg(trap_frame_t *f, task_t *t, UINT32 n, UINT64 *out) {
   UINT64 va;
 
-  if (t == NULL || n < 4u) {
+  if (t == NULL || n < 5u) {
     return -1;
   }
-  va = f->rsp + 0x28u + (UINT64)(n - 4u) * 8u;
+  va = f->rsp + 0x28u + (UINT64)(n - 5u) * 8u;
   return user_copy(t->cr3, va, out, 8u, 0);
 }
 
@@ -361,6 +406,7 @@ void win32_owner_exit(UINT64 pid) {
     }
   }
   win32_mem_owner_exit(pid);
+  win32_gui_owner_exit(pid);
 }
 
 /* ---- key handles ------------------------------------------------------- */
@@ -641,7 +687,7 @@ static void api_reg_open(trap_frame_t *f) {
   UINT64  handle = 0;
 
   if (t == NULL || key_path(t->cr3, f->rdi, f->rdx, path, sizeof(path)) != 0 ||
-      stack_arg(f, t, 4u, &out_va) != 0 || out_va == 0u) {
+      stack_arg(f, t, 5u, &out_va) != 0 || out_va == 0u) {
     if (t != NULL) {
       t->win32_last_error = WIN32_ERROR_FILE_NOT_FOUND;
     }
@@ -672,8 +718,8 @@ static void api_reg_query(trap_frame_t *f) {
 
   if (t == NULL || key_path(t->cr3, f->rdi, 0, path, sizeof(path)) != 0 ||
       read_user_str(t->cr3, f->rdx, name, sizeof(name)) != 0 ||
-      stack_arg(f, t, 4u, &data_va) != 0 ||
-      stack_arg(f, t, 5u, &size_va) != 0) {
+      stack_arg(f, t, 5u, &data_va) != 0 ||
+      stack_arg(f, t, 6u, &size_va) != 0) {
     f->rax = WIN32_ERROR_INVALID_PARAM;
     return;
   }
@@ -729,8 +775,8 @@ static void api_reg_set(trap_frame_t *f) {
 
   if (t == NULL || key_path(t->cr3, f->rdi, 0, path, sizeof(path)) != 0 ||
       read_user_str(t->cr3, f->rdx, name, sizeof(name)) != 0 ||
-      stack_arg(f, t, 4u, &data_va) != 0 ||
-      stack_arg(f, t, 5u, &data_len) != 0) {
+      stack_arg(f, t, 5u, &data_va) != 0 ||
+      stack_arg(f, t, 6u, &data_len) != 0) {
     f->rax = WIN32_ERROR_INVALID_PARAM;
     return;
   }
@@ -969,9 +1015,817 @@ static void api_set_filter(trap_frame_t *f) {
   f->rax = f->rdi;
 }
 
+/* ---- third block: user32 and gdi32 ------------------------------------- */
+
+/* A Win32 program that draws does four things in order: register a window
+ * class (which carries its window procedure), create a window, pump the
+ * message queue, and paint. This block implements exactly those four, and
+ * the state they need is per process because a class registration and a
+ * window handle belong to the program that made them.
+ *
+ * Two structural choices are worth naming:
+ *
+ *   - The window itself is a Novus-WM window. The kernel drives the WM's
+ *     request handlers with the process id as owner (nwm_owner_*), so the
+ *     desktop's z-order, focus, drag and close button all work on a Win32
+ *     window without a second geometry model to drift.
+ *   - Painting is a display list, not a pixel buffer: FillRect and TextOut
+ *     append items that BeginPaint cleared, and EndPaint commits them. That
+ *     is the WM's existing protocol, so a Win32 window paints through the
+ *     same path as a native app - and it is why the layer needs no shared
+ *     memory yet.
+ *
+ * Message routing: the WM sends events to the owner's inbox (the process
+ * id is the port), so the pump here drains that inbox and turns NWM events
+ * into the WM_* messages a Windows program expects. Nothing is lost when
+ * the program is busy: events queue in the inbox, and the pump runs at the
+ * top of every GetMessage/PeekMessage.
+ */
+
+#include "../wm/novus-wm/nwm.h"
+#include "../wm/novus-wm/nwm_proto.h"
+#include "../graphics/nd_input.h"
+
+#define WIN32_GUI_MAX_PROCS   4u
+#define WIN32_GUI_MAX_CLASSES 6u
+#define WIN32_GUI_MAX_WINDOWS 4u
+#define WIN32_GUI_MSGQ        16u
+#define WIN32_HWND_BASE       0x40000000u
+
+#define WM_CREATE     0x0001u
+#define WM_DESTROY    0x0002u
+#define WM_SIZE       0x0005u
+#define WM_PAINT      0x000Fu
+#define WM_CLOSE      0x0010u
+#define WM_QUIT       0x0012u
+#define WM_KEYDOWN    0x0100u
+#define WM_KEYUP      0x0101u
+#define WM_CHAR       0x0102u
+#define WM_MOUSEMOVE  0x0200u
+#define WM_LBUTTONDOWN 0x0201u
+#define WM_LBUTTONUP  0x0202u
+
+#define WIN32_ERROR_INVALID_HANDLE 6u
+#define WIN32_ERROR_INVALID_PARAM  87u
+
+/* MSG as Windows lays it out for x64: 48 bytes, and the offsets matter
+ * because the user-space dispatch stub reads them directly. */
+typedef struct {
+  UINT64 hwnd;
+  UINT32 message;
+  UINT32 pad;
+  UINT64 wparam;
+  UINT64 lparam;
+  UINT32 time;
+  INT32  x;
+  INT32  y;
+} win32_msg_t;
+
+typedef struct {
+  UINT8  used;
+  char   name[32];
+  UINT64 wndproc;
+  UINT32 bg;      /* 0x00RRGGBB, already converted from COLORREF */
+} win32_class_t;
+
+typedef struct {
+  UINT8  used;
+  UINT32 hwnd;
+  UINT32 win;     /* Novus-WM window id */
+  INT32  w, h;    /* client size */
+  UINT32 bg;
+  UINT8  painting;
+} win32_wnd_t;
+
+typedef struct {
+  UINT8       used;
+  UINT64      pid;
+  UINT8       stub_ready;
+  UINT32      nclass;
+  win32_class_t cls[WIN32_GUI_MAX_CLASSES];
+  win32_wnd_t wnd[WIN32_GUI_MAX_WINDOWS];
+  win32_msg_t q[WIN32_GUI_MSGQ];
+  UINT32      qh, qn;
+  UINT8       quit_pending;
+  UINT32      paint_hwnd;
+  UINT32      text_rgb;
+  UINT32      nshape;   /* diagnostics: what the last paint submitted */
+  UINT32      ntext;
+} win32_gui_t;
+
+static win32_gui_t g_gui[WIN32_GUI_MAX_PROCS];
+
+/* The stub DispatchMessageA runs in the program's own ring. Forty bytes of
+ * x86-64 that call the procedure the kernel stored for this window:
+ *
+ *   mov  rax,[rcx]        ; MSG->hwnd
+ *   and  eax,0xF          ; window slot
+ *   mov  r11,[table+rax*8]
+ *   test r11,r11
+ *   jz   .none
+ *   mov  r8, [rcx+0x10]   ; MSG->wParam
+ *   mov  r9, [rcx+0x18]   ; MSG->lParam
+ *   mov  edx,[rcx+0x08]   ; MSG->message
+ *   mov  rax,rcx
+ *   mov  rcx,[rax]        ; hwnd goes in RCX, the first argument
+ *   sub  rsp,8            ; realign for the call
+ *   call r11
+ *   add  rsp,8
+ *   ret
+ * .none:
+ *   xor  eax,eax
+ *   ret
+ */
+static const UINT8 g_dispatch_stub[] = {
+    0x48, 0x8B, 0x01,             /* mov %rax,(%rcx) */
+    0x83, 0xE0, 0x0F,             /* and $0xF,%eax */
+    0x4C, 0x8B, 0x1C, 0xC5,
+    0x00, 0x3F, 0x00, 0x60,       /* mov 0x60003F00(,%rax,8),%r11 */
+    0x4D, 0x85, 0xDB,             /* test %r11,%r11 */
+    0x74, 0x1D,                   /* jz .none */
+    0x4C, 0x8B, 0x41, 0x10,       /* mov 0x10(%rcx),%r8 */
+    0x4C, 0x8B, 0x49, 0x18,       /* mov 0x18(%rcx),%r9 */
+    0x8B, 0x51, 0x08,             /* mov 0x8(%rcx),%edx */
+    0x48, 0x89, 0xC8,             /* mov %rcx,%rax */
+    0x48, 0x8B, 0x08,             /* mov (%rax),%rcx */
+    0x48, 0x83, 0xEC, 0x08,       /* sub $8,%rsp */
+    0x41, 0xFF, 0xD3,             /* call %r11 */
+    0x48, 0x83, 0xC4, 0x08,       /* add $8,%rsp */
+    0xC3,                         /* ret */
+    0x31, 0xC0,                   /* xor %eax,%eax */
+    0xC3,                         /* ret */
+};
+
+/* COLORREF is 0x00BBGGRR while the WM's display list takes 0x00RRGGBB, so
+ * every colour crosses this one conversion - a channel swap that would
+ * otherwise turn a red rectangle blue. */
+static UINT32 colorref_rgb(UINT32 c) {
+  return ((c & 0xFFu) << 16) | (c & 0xFF00u) | ((c >> 16) & 0xFFu);
+}
+
+/* A background brush is either one of ours (high byte set, a plain colour)
+ * or a system colour index, which the layer flattens to the face colour
+ * because it has no palette yet. */
+static UINT32 brush_rgb(UINT32 brush) {
+  if ((brush & 0xFF000000u) == 0xFF000000u) {
+    return colorref_rgb(brush & 0xFFFFFFu);
+  }
+  return 0x00FFFFFFu;
+}
+
+static win32_gui_t *gui_state(UINT64 pid, int create) {
+  UINT32 i;
+
+  for (i = 0; i < WIN32_GUI_MAX_PROCS; i++) {
+    if (g_gui[i].used && g_gui[i].pid == pid) {
+      return &g_gui[i];
+    }
+  }
+  if (!create) {
+    return NULL;
+  }
+  for (i = 0; i < WIN32_GUI_MAX_PROCS; i++) {
+    if (!g_gui[i].used) {
+      memset(&g_gui[i], 0, sizeof(g_gui[i]));
+      g_gui[i].used = 1u;
+      g_gui[i].pid = pid;
+      g_gui[i].text_rgb = 0x00000000u;
+      return &g_gui[i];
+    }
+  }
+  return NULL;
+}
+
+static win32_wnd_t *gui_window(win32_gui_t *gu, UINT32 hwnd) {
+  UINT32 i;
+
+  if (gu == NULL) {
+    return NULL;
+  }
+  for (i = 0; i < WIN32_GUI_MAX_WINDOWS; i++) {
+    if (gu->wnd[i].used && gu->wnd[i].hwnd == hwnd) {
+      return &gu->wnd[i];
+    }
+  }
+  return NULL;
+}
+
+static void gui_push(win32_gui_t *gu, UINT32 hwnd, UINT32 msg, UINT64 wp,
+                     UINT64 lp) {
+  win32_msg_t *m;
+
+  if (gu == NULL || gu->qn >= WIN32_GUI_MSGQ) {
+    return; /* a program that never pumps loses messages, as on Windows */
+  }
+  m = &gu->q[(gu->qh + gu->qn) % WIN32_GUI_MSGQ];
+  memset(m, 0, sizeof(*m));
+  m->hwnd = hwnd;
+  m->message = msg;
+  m->wparam = wp;
+  m->lparam = lp;
+  m->time = (UINT32)(sched_ticks() * 10u);
+  gu->qn++;
+}
+
+/* Map a window id from an event payload onto our HWND encoding, ignoring
+ * events for windows this process did not open. */
+static UINT32 gui_hwnd_for_win(win32_gui_t *gu, UINT32 win) {
+  UINT32 i;
+
+  for (i = 0; i < WIN32_GUI_MAX_WINDOWS; i++) {
+    if (gu->wnd[i].used && gu->wnd[i].win == win) {
+      return gu->wnd[i].hwnd;
+    }
+  }
+  return 0;
+}
+
+/* Drain the owner's inbox and translate WM events into WM_* messages. */
+/* Translate one delivered message into a queued WM_* message. */
+static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
+  ipc_msg_t m = *msg;
+  UINT32    hwnd;
+  UINT32    win;
+
+  (void)t;
+  if (m.hdr.type == NWM_RSP_OK || m.hdr.type == NWM_RSP_ERR) {
+    return; /* a reply to a request we did not send through IPC */
+  }
+  win = 0;
+  if (m.hdr.len >= 4u) {
+    memcpy(&win, m.payload, 4);
+  }
+  hwnd = gui_hwnd_for_win(gu, win);
+  if (hwnd == 0u) {
+    return;
+  }
+  switch (m.hdr.type) {
+  case NWM_EV_CLOSE:
+    /* The WM has already taken the window down: the close button is the
+     * compositor's, not the client's. Hand the program WM_CLOSE so it can
+     * react, then a WM_DESTROY, then end the loop - the same sequence a
+     * Windows program sees when the user clicks its X. */
+    gui_push(gu, hwnd, WM_CLOSE, 0, 0);
+    gui_push(gu, hwnd, WM_DESTROY, 0, 0);
+    gu->quit_pending = 1u;
+    {
+      win32_wnd_t *w = gui_window(gu, hwnd);
+
+      if (w != NULL) {
+        memset(w, 0, sizeof(*w)); /* the window no longer exists */
+      }
+    }
+    break;
+  case NWM_EV_KEY: {
+    nwm_ev_key_t k;
+
+    if (m.hdr.len >= sizeof(k)) {
+      memcpy(&k, m.payload, sizeof(k));
+      gui_push(gu, hwnd, WM_KEYDOWN, k.key & 0xFFu, 0);
+    }
+    break;
+  }
+  case NWM_EV_RESIZE: {
+    nwm_ev_resize_t r;
+
+    if (m.hdr.len >= sizeof(r)) {
+      win32_wnd_t *w = gui_window(gu, hwnd);
+
+      memcpy(&r, m.payload, sizeof(r));
+      if (w != NULL && r.w > 0 && r.h > 0) {
+        w->w = r.w;
+        w->h = r.h;
+      }
+      gui_push(gu, hwnd, WM_SIZE, 0,
+               (UINT64)(UINT32)r.w | ((UINT64)(UINT32)r.h << 16));
+      /* A resized client has to repaint, and this compositor does not ask
+       * on its own yet. */
+      gui_push(gu, hwnd, WM_PAINT, 0, 0);
+    }
+    break;
+  }
+  case NWM_EV_MOUSE: {
+    nwm_ev_mouse_t mm;
+
+    if (m.hdr.len >= sizeof(mm)) {
+      UINT32 msg = WM_MOUSEMOVE;
+
+      memcpy(&mm, m.payload, sizeof(mm));
+      if (mm.type == ND_EV_MOUSE_DOWN) {
+        msg = WM_LBUTTONDOWN;
+      } else if (mm.type == ND_EV_MOUSE_UP) {
+        msg = WM_LBUTTONUP;
+      }
+      gui_push(gu, hwnd, msg, 0,
+               (UINT64)(UINT32)mm.x | ((UINT64)(UINT32)mm.y << 16));
+    }
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+/* Drain the owner's inbox. */
+static void gui_pump(task_t *t, win32_gui_t *gu) {
+  ipc_msg_t m;
+
+  while (ipc_try_recv(t->pid, &m) == 0) {
+    gui_translate(t, gu, &m);
+  }
+}
+
+/* Map the dispatch stub's page and leave the procedure table zeroed. The
+ * page is user-executable and not user-writable: the table is filled in by
+ * the kernel through user_copy, so a program cannot point it at arbitrary
+ * code after the fact. */
+static int gui_stub_map(task_t *t, win32_gui_t *gu) {
+  void  *page;
+  UINT32 i;
+
+  if (gu->stub_ready) {
+    return 0;
+  }
+  page = pmm_alloc_page();
+  if (page == NULL) {
+    return -1;
+  }
+  memset(page, 0, 4096);
+  memcpy(page, g_dispatch_stub, sizeof(g_dispatch_stub));
+  /* The stub page also carries the dispatch table, and the kernel fills
+   * that table through user_copy(), whose access check demands write
+   * permission. Without VM_PROT_WRITE the table write failed and every
+   * DispatchMessageA returned zero - the window existed but never painted. */
+  if (vm_user_map(&t->space, WIN32_GUI_STUB_VA, (UINT64)(UINTN)page,
+                  VM_PROT_USER | VM_PROT_EXEC | VM_PROT_WRITE) != 0) {
+    pmm_free_page(page);
+    return -1;
+  }
+  for (i = 0; i < WIN32_GUI_SLOTS; i++) {
+    UINT64 zero = 0;
+
+    (void)user_copy(t->cr3, WIN32_GUI_TABLE_VA + (UINT64)i * 8u, &zero, 8u, 1);
+  }
+  gu->stub_ready = 1u;
+  return 0;
+}
+
+static void gui_set_wndproc(task_t *t, UINT32 hwnd, UINT64 proc) {
+  UINT64 slot = WIN32_GUI_TABLE_VA +
+                (UINT64)(hwnd & (WIN32_GUI_SLOTS - 1u)) * 8u;
+  int    rc = user_copy(t->cr3, slot, &proc, 8u, 1);
+
+  (void)rc;
+}
+
+static void api_register_class(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_gui_t  *gu;
+  win32_class_t *c = NULL;
+  UINT8         wc[80];
+  char          name[32];
+  UINT64        proc = 0;
+  UINT64        name_va = 0;
+  UINT32        bg = 0;
+  UINT32        i;
+
+  if (t == NULL || f->rdi == 0u ||
+      user_copy(t->cr3, f->rdi, wc, sizeof(wc), 0) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  gu = gui_state(t->pid, 1);
+  if (gu == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  /* WNDCLASSEXA for x64: cbSize 0, style 4, lpfnWndProc 8,
+   * cbClsExtra 0x10, cbWndExtra 0x14, hInstance 0x18, hIcon 0x20,
+   * hCursor 0x28, hbrBackground 0x30, lpszMenuName 0x38,
+   * lpszClassName 0x40, hIconSm 0x48. */
+  memcpy(&proc, wc + 0x08, 8);
+  memcpy(&bg, wc + 0x30, 4);
+  memcpy(&name_va, wc + 0x40, 8);
+  if (proc == 0u || read_user_str(t->cr3, name_va, name, sizeof(name)) != 0) {
+    t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
+    f->rax = 0u;
+    return;
+  }
+  for (i = 0; i < WIN32_GUI_MAX_CLASSES; i++) {
+    if (gu->cls[i].used && text_equal(gu->cls[i].name, name)) {
+      c = &gu->cls[i];
+      break;
+    }
+  }
+  if (c == NULL) {
+    for (i = 0; i < WIN32_GUI_MAX_CLASSES; i++) {
+      if (!gu->cls[i].used) {
+        c = &gu->cls[i];
+        break;
+      }
+    }
+  }
+  if (c == NULL) {
+    t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
+    f->rax = 0u;
+    return;
+  }
+  memset(c, 0, sizeof(*c));
+  c->used = 1u;
+  copy_text(c->name, sizeof(c->name), name);
+  c->wndproc = proc;
+  c->bg = brush_rgb(bg);
+  gu->nclass++;
+  /* An ATOM is a nonzero small integer; the class name is the lookup key. */
+  f->rax = 0xC000u + (UINT64)i;
+}
+
+static void api_create_window(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_gui_t  *gu;
+  win32_class_t *c = NULL;
+  char          cls[32];
+  char          title[NWM_TITLE_MAX];
+  UINT64        x = 0, y = 0, w = 0, h = 0;
+  UINT32        win = 0;
+  UINT32        hwnd;
+  INT32         cw = 0, ch = 0;
+  UINT32        i;
+
+  if (t == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  gu = gui_state(t->pid, 1);
+  if (gu == NULL || gui_stub_map(t, gu) != 0) {
+    t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
+    f->rax = 0u;
+    return;
+  }
+  if (read_user_str(t->cr3, f->rdx, cls, sizeof(cls)) != 0) {
+    t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
+    f->rax = 0u;
+    return;
+  }
+  (void)read_user_str(t->cr3, f->r8, title, sizeof(title));
+  /* x, y, nWidth, nHeight are arguments 5..8 on the stack. */
+  if (stack_arg(f, t, 5u, &x) != 0 || stack_arg(f, t, 6u, &y) != 0 ||
+      stack_arg(f, t, 7u, &w) != 0 || stack_arg(f, t, 8u, &h) != 0) {
+    t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
+    f->rax = 0u;
+    return;
+  }
+  for (i = 0; i < WIN32_GUI_MAX_CLASSES; i++) {
+    if (gu->cls[i].used && text_equal(gu->cls[i].name, cls)) {
+      c = &gu->cls[i];
+      break;
+    }
+  }
+  if (c == NULL) {
+    t->win32_last_error = 1410u; /* ERROR_CLASS_NOT_FOUND */
+    f->rax = 0u;
+    return;
+  }
+  if (nwm_owner_create(t->pid, title, (INT32)x, (INT32)y, (INT32)w,
+                       (INT32)h, &win) != NWM_OK) {
+    t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
+    f->rax = 0u;
+    return;
+  }
+  (void)nwm_owner_client(win, &cw, &ch);
+  hwnd = WIN32_HWND_BASE | win;
+  /* One window per slot, and the slot is the window id: the stub indexes
+   * the table by that low nibble, so two windows must not share one. */
+  for (i = 0; i < WIN32_GUI_MAX_WINDOWS; i++) {
+    win32_wnd_t *me;
+
+    if (gu->wnd[i].used) {
+      continue;
+    }
+    me = &gu->wnd[i];
+    memset(me, 0, sizeof(*me));
+    me->used = 1u;
+    me->hwnd = hwnd;
+    me->win = win;
+    me->w = cw > 0 ? cw : (INT32)w;
+    me->h = ch > 0 ? ch : (INT32)h;
+    me->bg = c->bg;
+    break;
+  }
+  gui_set_wndproc(t, hwnd, c->wndproc);
+  /* The order a Windows program sees: WM_CREATE first, then a paint. */
+  gui_push(gu, hwnd, WM_CREATE, 0, 0);
+  gui_push(gu, hwnd, WM_PAINT, 0, 0);
+  f->rax = hwnd;
+}
+
+static void api_destroy_window(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+
+  if (w != NULL) {
+    (void)nwm_owner_destroy(t->pid, w->win);
+    gui_set_wndproc(t, w->hwnd, 0u);
+    memset(w, 0, sizeof(*w));
+    f->rax = 1u;
+    return;
+  }
+  f->rax = 0u; /* not ours: the Windows answer is FALSE */
+}
+
+static void api_show_window(trap_frame_t *f) {
+  /* The window is visible from the moment the WM create request is
+   * accepted - there is no separate mapping step in this compositor - so
+   * ShowWindow only has to say so. */
+  f->rax = 1u;
+}
+
+static int gui_pull(trap_frame_t *f, task_t *t, win32_gui_t *gu, int wait) {
+  UINT32 min_msg = (UINT32)f->r8;
+  UINT32 max_msg = (UINT32)f->r9;
+
+  for (;;) {
+    win32_msg_t m;
+    UINT64      lp;
+
+    gui_pump(t, gu);
+    if (gu->qn == 0u) {
+      if (gu->quit_pending) {
+        f->rax = 0u; /* WM_QUIT: the loop ends */
+        return 0;
+      }
+      if (!wait) {
+        f->rax = 0u;
+        return 0;
+      }
+      /* Park on the inbox. A yield loop here does not work: this runs
+       * inside the syscall, and yielding without ever leaving the syscall
+       * starves the WM task that is supposed to produce the event, which
+       * froze the machine the first time this was tried. ipc_recv(block)
+       * parks the task properly and wakes it when a message arrives. */
+      {
+        ipc_msg_t in;
+        int       rc = ipc_recv(t->pid, &in, 1);
+
+        if (rc >= 0) {
+          gui_translate(t, gu, &in); /* take the wake-up, not just discard */
+          continue;
+        }
+        if (rc == IPC_ERETRY) {
+          /* The task is parked and this syscall has to run again when a
+           * message lands. Looping here instead would spin with interrupts
+           * off and stop the whole machine - which is exactly what the
+           * first version did. */
+          return -1;
+        }
+        f->rax = 0u;
+        return 0;
+      }
+    }
+    m = gu->q[gu->qh];
+    gu->qh = (gu->qh + 1u) % WIN32_GUI_MSGQ;
+    gu->qn--;
+    if (min_msg != 0u || max_msg != 0u) {
+      UINT32 lo = min_msg != 0u ? min_msg : 0u;
+      UINT32 hi = max_msg != 0u ? max_msg : 0xFFFFu;
+
+      if (m.message < lo || m.message > hi) {
+        continue;
+      }
+    }
+    if (f->rdi == 0u || user_copy(t->cr3, f->rdi, &m, sizeof(m), 1) != 0) {
+      f->rax = 0u;
+      return 0;
+    }
+    lp = 0;
+    (void)lp;
+    f->rax = 1u;
+    return 1;
+  }
+}
+
+static void api_get_message(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+  int          rc;
+
+  if (gu == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  rc = gui_pull(f, t, gu, 1);
+  if (rc > 0) {
+
+  }
+  if (rc < 0) {
+    /* The task is parked. Rewind to the `syscall` instruction and put the
+     * call number back in RAX, so that when the message lands the same
+     * syscall runs again and finds it in the queue - the same replay the
+     * blocking ipc_recv syscall uses. */
+    f->rax = (UINT64)SYS_WIN32;
+    f->rip -= WIN32_SYSCALL_LEN;
+  }
+}
+
+static void api_peek_message(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+
+  if (gu == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = (UINT64)gui_pull(f, t, gu, 0);
+}
+
+static void api_translate_message(trap_frame_t *f) {
+  /* No keyboard translation table yet: WM_KEYDOWN carries the raw code and
+   * no WM_CHAR is produced. */
+  f->rax = 0u;
+}
+
+static void api_def_window_proc(trap_frame_t *f) {
+  /* Reached only when DispatchMessageA arrives as a syscall instead of
+   * through the user-space stub, which is the diagnostic that the stub
+   * never ran. */
+
+  f->rax = 0u;
+}
+
+static void api_get_client_rect(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+  INT32        r[4];
+
+  if (w == NULL || f->rdx == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  r[0] = 0;
+  r[1] = 0;
+  r[2] = w->w;
+  r[3] = w->h;
+  (void)user_copy(t->cr3, f->rdx, r, sizeof(r), 1);
+  f->rax = 1u;
+}
+
+/* Begin a frame: the display list is emptied, and every FillRect/TextOut
+ * until the matching release fills it. End commits the list and the WM
+ * repaints the client area from it in one go. */
+static void api_begin_frame(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+
+  if (w == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  (void)nwm_owner_clear(t->pid, w->win);
+  w->painting = 1u;
+  gu->paint_hwnd = w->hwnd;
+  gu->nshape = 0u;
+  gu->ntext = 0u;
+  kputs("[WIN32] paint: begin hwnd=");
+  kputs_hex(w->hwnd);
+  kputs("\n");
+  f->rax = (UINT64)w->hwnd; /* the HDC is the window, for this layer */
+}
+
+static void api_end_frame(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+
+  if (w == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  {
+    UINT64 rc = (UINT64)nwm_owner_flush(t->pid, w->win);
+
+    w->painting = 0u;
+    kputs("[WIN32] paint: submitted shapes=");
+    kputs_hex(gu->nshape);
+    kputs(" texts=");
+    kputs_hex(gu->ntext);
+    kputs(" flush->");
+    kputs_hex(rc);
+    kputs("\n");
+  }
+  f->rax = 1u;
+}
+
+static void api_fill_rect(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+  INT32        r[4];
+  UINT32       color;
+
+  if (w == NULL || f->rdx == 0u ||
+      user_copy(t->cr3, f->rdx, r, sizeof(r), 0) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  color = brush_rgb((UINT32)f->r8);
+  (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL,
+                        (INT16)r[0], (INT16)r[1],
+                        (INT16)(r[2] - r[0]), (INT16)(r[3] - r[1]), color);
+  gu->nshape++;
+  f->rax = 1u;
+}
+
+static void api_text_out(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+  char         text[NWM_TEXT_MAX];
+  UINT64       count = 0;
+  UINT32       i;
+
+  if (w == NULL || gu == NULL || f->r9 == 0u ||
+      stack_arg(f, t, 5u, &count) != 0) {
+    kputs("[WIN32] textout: bad args hwnd=");
+    kputs_hex(f->rdi);
+    kputs(" str=");
+    kputs_hex(f->r9);
+    kputs(" count=");
+    kputs_hex(count);
+    kputs("\n");
+    f->rax = 0u;
+    return;
+  }
+  if (count >= NWM_TEXT_MAX) {
+    count = NWM_TEXT_MAX - 1u;
+  }
+  if (count == 0u || user_copy(t->cr3, f->r9, text, count, 0) != 0) {
+    kputs("[WIN32] textout: count=");
+    kputs_hex(count);
+    kputs(" copy failed at ");
+    kputs_hex(f->r9);
+    kputs("\n");
+    f->rax = 0u;
+    return;
+  }
+  text[count] = '\0';
+  /* The display list carries byte strings; drop anything past the cap. */
+  for (i = 0; i < count; i++) {
+    if (text[i] == '\0') {
+      break;
+    }
+  }
+  (void)nwm_owner_text(t->pid, w->win, (INT16)f->rdx, (INT16)f->r8, 1u,
+                       text, (UINT32)i, gu->text_rgb);
+  gu->ntext++;
+  f->rax = 1u;
+}
+
+static void api_set_text_color(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+  UINT32       old;
+
+  if (gu == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  old = gu->text_rgb;
+  /* Answer in COLORREF (BGR) for the caller, keep RGB internally. */
+  f->rax = ((old & 0xFFu) << 16) | (old & 0xFF00u) | ((old >> 16) & 0xFFu);
+  gu->text_rgb = colorref_rgb((UINT32)f->rdx);
+}
+
+static void api_create_solid_brush(trap_frame_t *f) {
+  /* A brush is a colour with the high byte set: no GDI object table, and a
+   * program that never deletes one leaks nothing. */
+  f->rax = 0xFF000000u | ((UINT32)f->rdi & 0xFFFFFFu);
+}
+
+/* Drop every window and every class a dying process left behind. A window
+ * outliving its client would keep a slot in the WM's table forever, and
+ * the desktop would show a frame nobody can paint or close. */
+static void win32_gui_owner_exit(UINT64 pid) {
+  win32_gui_t *gu = gui_state(pid, 0);
+  UINT32       i;
+
+  if (gu == NULL) {
+    return;
+  }
+  for (i = 0; i < WIN32_GUI_MAX_WINDOWS; i++) {
+    if (gu->wnd[i].used) {
+      (void)nwm_owner_destroy(pid, gu->wnd[i].win);
+    }
+  }
+  memset(gu, 0, sizeof(*gu));
+}
+
 void win32_syscall(trap_frame_t *f) {
   task_t *t = sched_current();
   UINT32  api;
+
 
   if (t == NULL || t->abi != TASK_ABI_WIN32) {
     f->rax = (UINT64)-1;
@@ -1075,6 +1929,54 @@ void win32_syscall(trap_frame_t *f) {
   case WIN32_API_REG_CLOSE_KEY:
     api_reg_close(f);
     return;
+  case WIN32_API_REGISTER_CLASS:
+    api_register_class(f);
+    return;
+  case WIN32_API_CREATE_WINDOW:
+    api_create_window(f);
+    return;
+  case WIN32_API_DESTROY_WINDOW:
+    api_destroy_window(f);
+    return;
+  case WIN32_API_SHOW_WINDOW:
+    api_show_window(f);
+    return;
+  case WIN32_API_GET_MESSAGE:
+    api_get_message(f);
+    return;
+  case WIN32_API_PEEK_MESSAGE:
+    api_peek_message(f);
+    return;
+  case WIN32_API_DISPATCH_MESSAGE:
+  case WIN32_API_DEF_WINDOW_PROC:
+    api_def_window_proc(f);
+    return;
+  case WIN32_API_TRANSLATE_MESSAGE:
+    api_translate_message(f);
+    return;
+  case WIN32_API_GET_CLIENT_RECT:
+    api_get_client_rect(f);
+    return;
+  case WIN32_API_GET_DC:
+  case WIN32_API_BEGIN_PAINT:
+    api_begin_frame(f);
+    return;
+  case WIN32_API_RELEASE_DC:
+  case WIN32_API_END_PAINT:
+    api_end_frame(f);
+    return;
+  case WIN32_API_FILL_RECT:
+    api_fill_rect(f);
+    return;
+  case WIN32_API_TEXT_OUT:
+    api_text_out(f);
+    return;
+  case WIN32_API_SET_TEXT_COLOR:
+    api_set_text_color(f);
+    return;
+  case WIN32_API_CREATE_SOLID_BRUSH:
+    api_create_solid_brush(f);
+    return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
     f->rax = (UINT64)-1;
@@ -1086,6 +1988,7 @@ void win32_syscall(trap_frame_t *f) {
 
 int win32_api_lookup(const char *dll, const char *func) {
   UINT32 i;
+  int fallback = -1;
 
   for (i = 0; i < sizeof(g_api) / sizeof(g_api[0]); i++) {
     if (ci_equal(g_api[i].dll, dll) && text_equal(g_api[i].fn, func)) {
@@ -1100,7 +2003,21 @@ int win32_api_lookup(const char *dll, const char *func) {
       return (int)g_api[i].id;
     }
   }
-  return -1;
+
+  /* The DLL column is bookkeeping, not a contract. Windows forwards
+     several of these between modules - FillRect is a USER32 export that
+     most compilers import from GDI32, and a program that links against
+     either must work - so a name that exists under one DLL is accepted
+     under another. An exact match above always wins. */
+  for (i = 0; i < sizeof(g_api) / sizeof(g_api[0]); i++) {
+    if (!text_equal(g_api[i].fn, func) || g_api[i].id >= WIN32_API_COUNT) {
+      continue;
+    }
+    if (fallback < 0) {
+      fallback = (int)g_api[i].id;
+    }
+  }
+  return fallback;
 }
 
 /* mov %rdi,0x8(%rsp) ; mov %rcx,%rdi ; mov $id,%r10d ; mov $40,%eax ;
@@ -1145,4 +2062,15 @@ void win32_thunk_bytes(UINT32 api_id, UINT8 out[WIN32_THUNK_LEN]) {
   for (i = 27u; i < WIN32_THUNK_LEN; i++) {
     out[i] = 0x90;
   }
+}
+
+/* One import, one address. DispatchMessageA is the exception: it has to
+ * call the program's own window procedure, and that call can only happen
+ * in the program's own ring, so its IAT entry points at the stub page
+ * instead of a thunk. */
+UINT64 win32_api_entry(UINT32 api_id) {
+  if (api_id == (UINT32)WIN32_API_DISPATCH_MESSAGE) {
+    return WIN32_GUI_STUB_VA;
+  }
+  return WIN32_THUNK_VA + (UINT64)api_id * WIN32_THUNK_LEN;
 }

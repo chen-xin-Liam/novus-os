@@ -156,6 +156,7 @@ int apps_launch_name(const char *name) {
  * NUC index, which the sysinfo /apps page and every spawn client rely on. */
 static const app_t g_win32[] = {
     {"hello.exe", k_app_hello_exe, &k_app_hello_exe_len},
+    {"window.exe", k_app_window_exe, &k_app_window_exe_len},
 };
 
 UINT32 apps_win32_count(void) {

@@ -455,8 +455,11 @@ static int pe_imports(vm_space_t *sp, const pe_info_t *info) {
         kputs("\n");
         return PE_EIMPORT;
       }
-      thunk_va = WIN32_THUNK_VA + (UINT64)(UINT32)api * WIN32_THUNK_LEN;
-      if (!used[api]) {
+      thunk_va = win32_api_entry((UINT32)api);
+      /* Only thunk slots need their code written; an entry that points at
+       * the dispatch stub page uses the code that page already holds. */
+      if (thunk_va == WIN32_THUNK_VA + (UINT64)(UINT32)api * WIN32_THUNK_LEN &&
+          !used[api]) {
         win32_thunk_bytes((UINT32)api, code);
         if (pe_write(sp, thunk_va, code, WIN32_THUNK_LEN) != 0) {
           return PE_EIMPORT;

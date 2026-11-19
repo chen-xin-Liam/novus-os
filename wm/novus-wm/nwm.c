@@ -241,6 +241,12 @@ static void deliver(UINT64 owner, UINT16 type, const void *payload, UINT32 len) 
   }
 }
 
+/* Kernel-call mode: a Win32 process cannot send IPC, so the kernel drives
+ * these handlers directly and reads the answer from the two words below. */
+static int   g_kernel_call;
+static INT32 g_kernel_status;
+static UINT32 g_kernel_win;
+
 static void reply(UINT64 to, UINT32 win, INT32 status) {
   nwm_rsp_t rsp;
 
@@ -258,6 +264,15 @@ static void reply(UINT64 to, UINT32 win, INT32 status) {
  * get dropped. CREATE must answer (the window id is the result), and an
  * error is always reported so a buggy client can see it. */
 static void ack(const ipc_msg_t *m, UINT32 win, INT32 status) {
+  /* A kernel caller has no inbox to reply to: the answer is handed back
+   * through these two words instead of a message. Everything else about
+   * the handler is unchanged, which is the point - the ownership checks
+   * and the window table are the same ones an IPC client goes through. */
+  if (g_kernel_call) {
+    g_kernel_status = status;
+    g_kernel_win = win;
+    return;
+  }
   if (status != NWM_OK || m->hdr.type == NWM_REQ_CREATE ||
       (m->hdr.flags & IPC_F_SYNC) != 0u) {
     reply(m->hdr.sender, win, status);
@@ -1785,11 +1800,178 @@ int nwm_selftest(void) {
   return pass;
 }
 
+/* ---- kernel-callable API ---------------------------------------------- */
+
+/* One request, driven exactly like a client's: the same handlers, the same
+ * ownership rules, the same window table. The only difference is that the
+ * answer comes back through g_kernel_status instead of an inbox message. */
+static int nwm_kernel_request(UINT64 owner, UINT16 type, const void *payload,
+                              UINT32 len, UINT32 *out_win) {
+  ipc_msg_t m;
+
+  if (!g_ready || owner == 0u) {
+    return NWM_EBADWIN;
+  }
+  if ((len != 0u && payload == 0) || len > IPC_PAYLOAD_MAX) {
+    return NWM_EBADPAY;
+  }
+  memset(&m, 0, sizeof(m));
+  m.hdr.magic = IPC_MAGIC;
+  m.hdr.type = type;
+  m.hdr.sender = owner;
+  m.hdr.target = g_port;
+  m.hdr.len = len;
+  if (len != 0u) {
+    memcpy(m.payload, payload, len);
+  }
+  g_kernel_call = 1;
+  g_kernel_status = NWM_OK;
+  g_kernel_win = 0;
+  handle_request(&m);
+  g_kernel_call = 0;
+  if (out_win != 0) {
+    *out_win = g_kernel_win;
+  }
+  return g_kernel_status;
+}
+
+int nwm_owner_create(UINT64 owner, const char *title, INT32 x, INT32 y,
+                     INT32 w, INT32 h, UINT32 *win) {
+  nwm_create_t c;
+  UINT32       i;
+
+  memset(&c, 0, sizeof(c));
+  c.x = x;
+  c.y = y;
+  c.w = w;
+  c.h = h;
+  if (title != 0) {
+    for (i = 0; i + 1u < NWM_TITLE_MAX && title[i] != '\0'; i++) {
+      c.title[i] = title[i];
+    }
+  }
+  return nwm_kernel_request(owner, NWM_REQ_CREATE, &c, sizeof(c), win);
+}
+
+int nwm_owner_destroy(UINT64 owner, UINT32 win) {
+  return nwm_kernel_request(owner, NWM_REQ_DESTROY, &win, 4u, 0);
+}
+
+int nwm_owner_clear(UINT64 owner, UINT32 win) {
+  nwm_win_t r;
+
+  r.win = win;
+  return nwm_kernel_request(owner, NWM_REQ_CLEAR, &r, sizeof(r), 0);
+}
+
+int nwm_owner_shape(UINT64 owner, UINT32 win, UINT8 op, INT16 x, INT16 y,
+                    INT16 w, INT16 h, UINT32 color) {
+  nwm_shape_t s;
+
+  memset(&s, 0, sizeof(s));
+  s.win = win;
+  s.op = op;
+  s.x = x;
+  s.y = y;
+  s.w = w;
+  s.h = h;
+  s.color = color;
+  return nwm_kernel_request(owner, NWM_REQ_SHAPE, &s, sizeof(s), 0);
+}
+
+int nwm_owner_text(UINT64 owner, UINT32 win, INT16 x, INT16 y, UINT8 scale,
+                   const char *text, UINT32 len, UINT32 color) {
+  nwm_text_t t;
+  UINT32     i;
+
+  memset(&t, 0, sizeof(t));
+  t.win = win;
+  t.x = x;
+  t.y = y;
+  t.scale = scale;
+  t.color = color;
+  if (text != 0) {
+    if (len >= NWM_TEXT_MAX) {
+      len = NWM_TEXT_MAX - 1u;
+    }
+    for (i = 0; i < len && text[i] != '\0'; i++) {
+      t.text[i] = text[i];
+    }
+    t.len = (UINT8)i;
+  }
+  return nwm_kernel_request(owner, NWM_REQ_TEXT, &t, sizeof(t), 0);
+}
+
+int nwm_owner_flush(UINT64 owner, UINT32 win) {
+  nwm_win_t r;
+
+  r.win = win;
+  return nwm_kernel_request(owner, NWM_REQ_INVALIDATE, &r, sizeof(r), 0);
+}
+
+int nwm_owner_title(UINT64 owner, UINT32 win, const char *title) {
+  nwm_title_t t;
+  UINT32      i;
+
+  memset(&t, 0, sizeof(t));
+  t.win = win;
+  if (title != 0) {
+    for (i = 0; i + 1u < NWM_TITLE_MAX && title[i] != '\0'; i++) {
+      t.title[i] = title[i];
+    }
+  }
+  return nwm_kernel_request(owner, NWM_REQ_TITLE, &t, sizeof(t), 0);
+}
+
+int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
+  nwm_window_t *v = win_get(win);
+  nd_rect_t     cr;
+
+  if (v == 0) {
+    return NWM_EBADWIN;
+  }
+  cr = client_rect(v);
+  if (w != 0) {
+    *w = cr.w;
+  }
+  if (h != 0) {
+    *h = cr.h;
+  }
+  return NWM_OK;
+}
+
 #else /* !CONFIG_NOVUS_WM */
 
 void nwm_init(void) {}
 void nwm_tick(void) {}
 int nwm_selftest(void) { return 1; }
 int nwm_activate_owner(UINT64 owner) { (void)owner; return 0; }
+int nwm_owner_create(UINT64 owner, const char *title, INT32 x, INT32 y,
+                     INT32 w, INT32 h, UINT32 *win) {
+  (void)owner; (void)title; (void)x; (void)y; (void)w; (void)h; (void)win;
+  return NWM_EBADWIN;
+}
+int nwm_owner_destroy(UINT64 owner, UINT32 win) { (void)owner; (void)win; return NWM_EBADWIN; }
+int nwm_owner_clear(UINT64 owner, UINT32 win) { (void)owner; (void)win; return NWM_EBADWIN; }
+int nwm_owner_shape(UINT64 owner, UINT32 win, UINT8 op, INT16 x, INT16 y,
+                    INT16 w, INT16 h, UINT32 color) {
+  (void)owner; (void)win; (void)op; (void)x; (void)y; (void)w; (void)h; (void)color;
+  return NWM_EBADWIN;
+}
+int nwm_owner_text(UINT64 owner, UINT32 win, INT16 x, INT16 y, UINT8 scale,
+                   const char *text, UINT32 len, UINT32 color) {
+  (void)owner; (void)win; (void)x; (void)y; (void)scale; (void)text; (void)len;
+  (void)color;
+  return NWM_EBADWIN;
+}
+int nwm_owner_flush(UINT64 owner, UINT32 win) { (void)owner; (void)win; return NWM_EBADWIN; }
+int nwm_owner_title(UINT64 owner, UINT32 win, const char *title) {
+  (void)owner; (void)win; (void)title;
+  return NWM_EBADWIN;
+}
+int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
+  (void)win; (void)w; (void)h;
+  return NWM_EBADWIN;
+}
 
 #endif /* CONFIG_NOVUS_WM */

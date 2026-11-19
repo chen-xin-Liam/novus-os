@@ -264,7 +264,8 @@ scripts/run.sh
 2. **释放不还页。** `VirtualFree`/`HeapFree` 只清表项，页继续映射。层里还没有 unmap 路径，
    而"指针可能还活着"时回收页比泄漏更糟；地址空间随进程退出一起销毁。
 3. **RDI 保存约定不变。** 新 API 都走同一个 thunk（RDI 暂存在 shadow space 里），
-   第 4 个及以后的参数仍从 `rsp + 0x28 + (n-4)*8` 读。
+   第 5 个及以后的参数从 `rsp + 0x28 + (n-5)*8` 读（`n` 是真实参数序号，第 5 个是第一
+   个真正落到栈上的参数；`0x28 = 返回地址 8 字节 + 四个寄存器参数槽 0x20`）。
 
 验收：样例程序 `hello.exe` 在退出前会打印这一段，全部来自第二批 API：
 
@@ -280,3 +281,119 @@ scripts/run.sh
 [WIN32] cpus: ...
 [WIN32] pid: ...
 ```
+
+## 第三批：user32 / gdi32，窗口真的开出来
+
+前两批让程序能跑起来并自己说话；这一批让它有窗口。范围是"能开一个窗口、能画、能收
+消息"的最小闭环，一共 18 个 API：
+
+| 分类 | API | 做法 |
+| --- | --- | --- |
+| 窗口 | `RegisterClassExA` / `CreateWindowExA` / `DestroyWindow` / `ShowWindow` | 窗口就是 Novus-WM 的窗口，owner 记为进程 pid；z-order、焦点、拖拽、关闭按钮全部复用 |
+| 消息 | `GetMessageA` / `PeekMessageA` / `DispatchMessageA` / `TranslateMessage` / `DefWindowProcA` | 每个进程一条 16 条的环形队列，货从 WM 事件翻译而来 |
+| 客户区 | `GetClientRect` | 客户区 = `(w-2) x (h-33)`，边框和标题栏由 WM 画 |
+| 绘制 | `BeginPaint` / `EndPaint` / `GetDC` / `ReleaseDC` / `FillRect` / `TextOutA` / `SetTextColor` / `CreateSolidBrush` | 不是像素缓冲，是**显示列表**：每次调用往 WM 追加一条图元，`EndPaint` 时整体提交 |
+
+### 为什么要有"内核直调"通道
+
+Win32 进程在 ring3 只有 `SYS_WIN32` 一个系统调用入口，它不可能去说 WM 的 IPC 协议
+（那是 Rust 侧应用的私有格式）。所以 `nwm.c` 里加了一条内核侧入口：
+
+```c
+static int g_kernel_call;      /* 置位时 ack() 不发 reply，只记状态 */
+static INT32 g_kernel_status;
+static UINT32 g_kernel_win;
+
+int nwm_kernel_request(owner, type, payload, len, out_win);   /* 造一个 sender=owner 的假报文 */
+int nwm_owner_create(...); nwm_owner_destroy(...); nwm_owner_clear(...);
+int nwm_owner_shape(...);  nwm_owner_text(...);   nwm_owner_flush(...);
+```
+
+内核侧调用是同步的：`handle_request()` 走完，`ack()` 看到 `g_kernel_call` 就只把
+状态码填进 `g_kernel_status` 然后返回。没有新线程、没有额外队列，也没有把 WM 的
+协议暴露给用户态。
+
+### DispatchMessageA 必须回到程序自己的 ring
+
+`WndProc` 是程序里的函数指针，只能由程序自己的 ring3 代码调用。`DispatchMessageA`
+因此不是 thunk，而是一页手写机器码（43 字节）：
+
+```
+mov rax,[rcx]        ; MSG.hwnd
+and eax,0xF
+mov r11,[0x60003F00+rax*8]   ; 表项：该窗口的 WndProc
+test r11,r11 / jz .none
+mov r8,[rcx+0x10]    ; wParam / lParam 按 Win64 顺序摆好
+mov r9,[rcx+0x18]
+mov edx,[rcx+8]      ; message
+mov rax,rcx
+mov rcx,[rax]        ; hwnd 回填 rcx
+sub rsp,8 / call r11 / add rsp,8 / ret
+.none: xor eax,eax / ret
+```
+
+HWND 编码是 `0x40000000 | winid`，表索引 `hwnd & 0xF`（16 槽，对应 10 个窗口足够）。
+`pe.c` 的 IAT 填充从"一律写 thunk"改成"问 `win32_api_entry(id)`"，只有返回值和
+常规 thunk 地址完全相等时才写 thunk，否则直接写 stub 页地址——这样"这个 API 需要
+用户态代码"这件事由 `win32.c` 一处决定。
+
+### 等待不能再忙等
+
+`GetMessageA` 空队列时的第一版是 `sched_yield()` 循环，结果整机冻结：
+syscall 进入时中断是关的，WM 任务永远上不了 CPU。改成 `ipc_recv(pid, &in, 1)` 真
+阻塞，并在 `IPC_ERETRY` 时按 `sys_ipc_recv` 同一套机制处理：
+
+```c
+sched_park(pid, 500);
+f->rax = SYS_WIN32;
+f->rip -= WIN32_SYSCALL_LEN;   /* 回到 syscall，唤醒后原地重放 */
+```
+
+唤醒后 `gui_pull` 在 wait 分支返回 -1，`api_get_message` 负责把 rip 卷回去，重放时
+队列里已经有消息了。
+
+### 这一批真正修掉的 bug（按发现顺序）
+
+1. **无 `.reloc` 的镜像被拒。** 样例程序没有任何绝对地址，链接器不生成重定位表，
+   加载器（有意地）拒绝搬移。解法不是放宽加载器，而是让样例真的持有绝对地址
+   （`static const char *const k_body[]`），`Entry 5` 就有了 3 条 DIR64。
+2. **`FillRect` 的 DLL 名对不上。** Windows 里它是 USER32 导出，多数编译器按 GDI32
+   导入。`win32_api_lookup()` 改成先精确匹配 DLL+函数，再按函数名兜底——DLL 只是
+   记账，不是契约。
+3. **stub 页只给了 `USER|EXEC`。** `user_copy(to_user=1)` 要求写权限，表项写不进
+   去，`WndProc` 永远不被调用（`rc = 0xFFFF...`）。补 `VM_PROT_WRITE` 后
+   `DefWindowProc reached` 立刻出现。
+4. **栈参数偏移整体错一格。** 旧公式 `0x28 + (n-4)*8` 对第 5 个参数读到 `rsp+0x30`。
+   实机栈 dump 是决定性证据：`rsp+0x28` 处正好是 `0x1B`/`0x2D`/`0x27`，和各行文本
+   长度吻合。改成 `0x28 + (n-5)*8`（`n >= 5`）后，同一处调用点
+   `TextOutA(hdc, x, y, str, len)` 立刻拿到 `len`。顺带把三个 `Reg*` 调用点从"为
+   旧公式编的号"改回真实参数号。
+   影响面不止文字：`CreateWindowExA` 的 x/y/w/h 也整体错位，窗口被摆到屏外。
+
+### 验收
+
+样例 `user/win32compat/samples/window.c`（无 CRT，入口 `novus_win32_main`）在 QEMU
+实机里跑出的串口：
+
+```
+[NWM] create win=3 from pid=7
+[WIN32] paint: submitted shapes=2 texts=8 flush->0
+[NWM] first frame win=3 from pid=7
+```
+
+`shapes=2` 是白底 + 左侧 4px 红条，`texts=8` 是 `WndProc` 里八次 `TextOutA`——
+文字第一次真的上了屏。这意味着链路已经闭合：
+
+```
+CreateWindowExA → WM 窗口 → GetMessageA(park) → DispatchMessageA(stub)
+→ 程序自己的 WndProc → BeginPaint → FillRect/TextOutA → EndPaint → 显示列表提交
+```
+
+### 还没做的（别当成已做）
+
+- 只有 scale=1 的单一字号，没有 `GetTextMetrics`；CJK 字形的覆盖按内置子集来。
+- 没有 `WM_CHAR` 翻译（`TranslateMessage` 目前只处理 `WM_KEYDOWN`）。
+- 没有 `SetWindowPos` / `SetWindowLong` / 菜单 / 对话框 / 控件（`comctl32` 整块缺）。
+- 合成器不会主动请求重绘，`WM_PAINT` 只在创建、`EndPaint`、`WM_EV_RESIZE` 时投递。
+- 没有 `ws2_32` / `crypt32` / `ole32` / `shell32` / SEH / TLS / 多线程；
+  微信、QQ 这类大型应用离"能起来"还有相当距离，本层只到"最小窗口程序能跑"。
