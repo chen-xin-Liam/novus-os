@@ -5,6 +5,7 @@
 #include "kernel.h"
 #include "gpu.h"
 #include "pci.h"
+#include "nd.h"
 
 /* A handful of the integrated controllers people actually run Novus on.
  * Unknown ids still get the vendor's family name, so a new part shows up
@@ -58,6 +59,17 @@ static int        g_present;
 static UINT32     g_mmio_bytes;
 static int        g_mmio_ok;
 static char       g_summary[64];
+
+/* Where the pixels the compositor writes actually live, and which PCI
+ * window a driver would have to reach them through. A real driver has to
+ * know this before it touches anything: a scanout inside the controller's
+ * own aperture is memory the GPU can also read, which is what makes
+ * hardware blits and page flips possible at all. */
+static UINT64     g_fb_phys;
+static UINT64     g_fb_bytes;
+static int        g_fb_bar = -1;   /* index of the BAR that covers it */
+static UINT64     g_scanout_base;
+static UINT64     g_scanout_bytes;
 
 /* One register read from the controller's MMIO window. A window that
  * reads back all ones is not decoded - the firmware left it unassigned,
@@ -170,6 +182,56 @@ void gpu_init(void) {
     kputs(" has no reachable BAR 0\n");
   }
 
+  /* Second step: locate the scanout. The firmware handed us a linear
+   * framebuffer; the question a driver asks next is whether that memory is
+   * inside one of the controller's BAR windows. It is when the GPU owns
+   * the display path (the usual case on integrated graphics, where the
+   * aperture is system memory), and it is not when the firmware left the
+   * scanout in plain RAM or on a discrete card's own memory. */
+  {
+    const nd_output_t *outs = 0;
+    UINT32             count = 0;
+    UINT32             i;
+    UINT32             k;
+
+    outs = nd_outputs(&count);
+    if (outs != 0 && count > 0u) {
+      g_fb_phys = outs[0].fb_phys;
+      g_fb_bytes = outs[0].fb_size;
+      for (k = 0; k < 6u; k++) {
+        UINT64 lo = d.bar[k];
+        UINT64 hi = lo + (UINT64)d.bar_size[k];
+
+        if (d.bar_size[k] == 0u || lo == 0u) {
+          continue;
+        }
+        if (g_fb_phys >= lo && g_fb_phys + g_fb_bytes <= hi) {
+          g_fb_bar = (int)k;
+          /* The aperture proper: how much room the controller advertises
+           * on that window, which is what a memory manager budgets with. */
+          g_scanout_base = lo;
+          g_scanout_bytes = (UINT64)d.bar_size[k];
+          break;
+        }
+      }
+      kputs("[GPU] framebuffer=");
+      kputs_hex(g_fb_phys);
+      kputs(" size=");
+      kputs_hex(g_fb_bytes);
+      if (g_fb_bar >= 0) {
+        kputs(" inside BAR ");
+        kputs_hex((UINT64)g_fb_bar);
+        kputs(" (gpu aperture ");
+        kputs_hex(g_scanout_bytes);
+        kputs(")\n");
+      } else {
+        kputs(" outside every BAR (firmware linear framebuffer)\n");
+      }
+    }
+    i = count;
+    (void)i;
+  }
+
   /* Build the one-line summary the settings page shows. It travels in an
    * IPC reply whose payload is 128 bytes, so the room left for it is
    * small: the chip's name only, cut on a UTF-8 boundary so a mixed
@@ -203,6 +265,13 @@ void gpu_init(void) {
 UINT16 gpu_vendor(void) { return g_vendor; }
 UINT16 gpu_device(void) { return g_device; }
 int    gpu_present(void) { return g_present; }
+
+UINT64 gpu_framebuffer_phys(void) { return g_fb_phys; }
+UINT64 gpu_framebuffer_bytes(void) { return g_fb_bytes; }
+
+/* Index of the BAR that covers the scanout, or -1 when the pixels sit in
+ * memory no controller window reaches. */
+int gpu_framebuffer_bar(void) { return g_fb_bar; }
 
 const char *gpu_summary(void) {
   if (g_present == 0) {

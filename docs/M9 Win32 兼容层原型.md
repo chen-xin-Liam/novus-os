@@ -240,3 +240,43 @@ scripts/run.sh
 
 * `CONFIG_NOVUS_WIN32=n` 时仍可构建：`apps.c` 的 Win32 分支整体编译掉，
   sysinfo 的 `/exe` 目录为空。
+
+## 第二批 API：程序启动阶段真正会调的十几个
+
+第一批只有 15 个入口，够证明"PE 能加载、导入表能填、系统调用能回到内核"，
+但任何一个真实程序在画第一个像素之前都要先问三件事：**我能分多少内存、我在哪个路径
+下运行、现在几点**。第二批补的正是这些，合计 30 个入口：
+
+| 组 | API | 实现口径 |
+| --- | --- | --- |
+| 模块 | `GetModuleFileNameA` | 返回加载时的镜像名（不含挂载点，层里还没有路径概念） |
+| 内存 | `VirtualAlloc` / `VirtualFree` | 进程独占 `0x20000000–0x30000000` 的 256 MiB 窗口，逐页映射新物理页；地址参数被忽略 |
+| 堆 | `GetProcessHeap` / `HeapAlloc` / `HeapFree` | 和 VirtualAlloc 同一个窗口；簿记表放在内核（64 项），不放用户内存 |
+| 时钟 | `GetSystemTime` / `GetLocalTime` / `QueryPerformanceCounter` / `QueryPerformanceFrequency` | 日期来自 RTC，计数来自 LAPIC 10 ms 节拍，频率固定 10 MHz |
+| 身份 | `GetCurrentProcessId` / `GetCurrentThreadId` / `IsDebuggerPresent` | 进程 id 即任务 pid（本层没有多线程）；调试器恒为否 |
+| 机器 | `GetSystemInfo` | 48 字节 SYSTEMINFO，页 4 KiB、粒度 64 KiB、CPU 数为当前任务数 |
+| 兜底 | `SetUnhandledExceptionFilter` | 接受并返回旧过滤器，但异常仍然终止进程（不假装有 SEH） |
+
+三条设计取舍，写在这里免得下次又踩：
+
+1. **分配器簿记不放用户内存。** Windows 的堆会在每个块前留头，本层内核不能直接解引用
+   用户地址（要过 `user_copy`），把 64 项 `{owner, va, size}` 表放内核更省事，也更安全。
+2. **释放不还页。** `VirtualFree`/`HeapFree` 只清表项，页继续映射。层里还没有 unmap 路径，
+   而"指针可能还活着"时回收页比泄漏更糟；地址空间随进程退出一起销毁。
+3. **RDI 保存约定不变。** 新 API 都走同一个 thunk（RDI 暂存在 shadow space 里），
+   第 4 个及以后的参数仍从 `rsp + 0x28 + (n-4)*8` 读。
+
+验收：样例程序 `hello.exe` 在退出前会打印这一段，全部来自第二批 API：
+
+```
+[WIN32] image: hello.exe
+[WIN32] virtual: block ok, pagesum=...
+[WIN32] heap: alloc/free ok
+[WIN32] date: 2026
+[WIN32]   month 11  day 19  hour 20  minute 5x
+[WIN32] qpf: 10000000
+[WIN32] qpc: ...
+[WIN32] page: 4096
+[WIN32] cpus: ...
+[WIN32] pid: ...
+```

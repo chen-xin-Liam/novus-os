@@ -20,6 +20,8 @@
 #include "sched.h"
 #include "ipc.h"
 #include "nvus_paths.h"
+#include "pmm.h"
+#include "rtc.h"
 #include "../fs/vfs.h"
 
 #define WIN32_REG_MAX_ENTRIES 16u
@@ -68,6 +70,8 @@ typedef struct {
 _Static_assert(sizeof(win32_reg_entry_t) == 168u, "registry ABI drift");
 _Static_assert(sizeof(win32_reg_file_t) == 2704u, "registry file ABI drift");
 
+static void win32_mem_owner_exit(UINT64 pid);
+
 static win32_reg_file_t g_reg;
 static win32_key_t      g_keys[WIN32_KEY_MAX];
 static int              g_save_failed;
@@ -89,6 +93,23 @@ enum {
   WIN32_API_REG_QUERY_VALUE_EX,
   WIN32_API_REG_SET_VALUE_EX,
   WIN32_API_REG_CLOSE_KEY,
+  /* Second block: the calls a program makes before it draws anything.
+   * Memory, its own path, the clock and the machine description. */
+  WIN32_API_GET_MODULE_FILE_NAME,
+  WIN32_API_VIRTUAL_ALLOC,
+  WIN32_API_VIRTUAL_FREE,
+  WIN32_API_GET_PROCESS_HEAP,
+  WIN32_API_HEAP_ALLOC,
+  WIN32_API_HEAP_FREE,
+  WIN32_API_GET_SYSTEM_TIME,
+  WIN32_API_GET_LOCAL_TIME,
+  WIN32_API_QUERY_PERFORMANCE_COUNTER,
+  WIN32_API_QUERY_PERFORMANCE_FREQUENCY,
+  WIN32_API_GET_CURRENT_PROCESS_ID,
+  WIN32_API_GET_CURRENT_THREAD_ID,
+  WIN32_API_IS_DEBUGGER_PRESENT,
+  WIN32_API_GET_SYSTEM_INFO,
+  WIN32_API_SET_UNHANDLED_EXCEPTION_FILTER,
 };
 
 typedef struct {
@@ -112,6 +133,21 @@ static const win32_api_t g_api[] = {
     {"advapi32.dll", "RegQueryValueExA", WIN32_API_REG_QUERY_VALUE_EX},
     {"advapi32.dll", "RegSetValueExA", WIN32_API_REG_SET_VALUE_EX},
     {"advapi32.dll", "RegCloseKey", WIN32_API_REG_CLOSE_KEY},
+    {"kernel32.dll", "GetModuleFileNameA", WIN32_API_GET_MODULE_FILE_NAME},
+    {"kernel32.dll", "VirtualAlloc", WIN32_API_VIRTUAL_ALLOC},
+    {"kernel32.dll", "VirtualFree", WIN32_API_VIRTUAL_FREE},
+    {"kernel32.dll", "GetProcessHeap", WIN32_API_GET_PROCESS_HEAP},
+    {"kernel32.dll", "HeapAlloc", WIN32_API_HEAP_ALLOC},
+    {"kernel32.dll", "HeapFree", WIN32_API_HEAP_FREE},
+    {"kernel32.dll", "GetSystemTime", WIN32_API_GET_SYSTEM_TIME},
+    {"kernel32.dll", "GetLocalTime", WIN32_API_GET_SYSTEM_TIME},
+    {"kernel32.dll", "QueryPerformanceCounter", WIN32_API_QUERY_PERFORMANCE_COUNTER},
+    {"kernel32.dll", "QueryPerformanceFrequency", WIN32_API_QUERY_PERFORMANCE_FREQUENCY},
+    {"kernel32.dll", "GetCurrentProcessId", WIN32_API_GET_CURRENT_PROCESS_ID},
+    {"kernel32.dll", "GetCurrentThreadId", WIN32_API_GET_CURRENT_THREAD_ID},
+    {"kernel32.dll", "IsDebuggerPresent", WIN32_API_IS_DEBUGGER_PRESENT},
+    {"kernel32.dll", "GetSystemInfo", WIN32_API_GET_SYSTEM_INFO},
+    {"kernel32.dll", "SetUnhandledExceptionFilter", WIN32_API_SET_UNHANDLED_EXCEPTION_FILTER},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -324,6 +360,7 @@ void win32_owner_exit(UINT64 pid) {
       memset(&g_keys[i], 0, sizeof(g_keys[i]));
     }
   }
+  win32_mem_owner_exit(pid);
 }
 
 /* ---- key handles ------------------------------------------------------- */
@@ -395,6 +432,130 @@ static void key_close(UINT64 pid, UINT64 hkey) {
   if (g_keys[i].used && g_keys[i].owner == pid) {
     memset(&g_keys[i], 0, sizeof(g_keys[i]));
   }
+}
+
+/* ---- private memory ---------------------------------------------------- */
+
+/* A compatibility process gets its own window of address space for
+ * VirtualAlloc and the process heap. It sits clear of every fixed region
+ * win32.h reserves (image 0x50000000, thunks 0x60000000, command line
+ * 0x70000000, trampoline 0x90000000, stack 0xA0000000) and leaves room for
+ * a 256 MiB working set, which is more than the 2.5 GiB test machine would
+ * hand out anyway.
+ *
+ * The bookkeeping lives in the kernel, not in the process: a Win32
+ * allocator would normally keep a header in front of every block, but the
+ * kernel cannot write user memory without a copy, so the table is the
+ * cheaper and the safer place. */
+#define WIN32_HEAP_VA    0x0000000020000000ULL
+#define WIN32_HEAP_END   0x0000000030000000ULL
+#define WIN32_HEAP_SLOTS 64u
+#define WIN32_PAGE       4096u
+#define WIN32_HEAP_HANDLE 0x80000001ULL
+
+typedef struct {
+  UINT8  used;
+  UINT64 owner;
+  UINT64 va;
+  UINT64 size;
+} win32_alloc_t;
+
+static win32_alloc_t g_alloc[WIN32_HEAP_SLOTS];
+
+static void win32_mem_owner_exit(UINT64 pid) {
+  UINT32 i;
+
+  for (i = 0; i < WIN32_HEAP_SLOTS; i++) {
+    if (g_alloc[i].used && g_alloc[i].owner == pid) {
+      memset(&g_alloc[i], 0, sizeof(g_alloc[i]));
+    }
+  }
+}
+
+static UINT64 round_page(UINT64 n) {
+  return (n + WIN32_PAGE - 1u) & ~(UINT64)(WIN32_PAGE - 1u);
+}
+
+/* Where the next block for this process goes: after the highest block it
+ * already owns, so the range stays contiguous without a per-task cursor
+ * that a restart would have to reset. */
+static UINT64 arena_next(UINT64 pid) {
+  UINT64 next = WIN32_HEAP_VA;
+  UINT32 i;
+
+  for (i = 0; i < WIN32_HEAP_SLOTS; i++) {
+    if (g_alloc[i].used && g_alloc[i].owner == pid &&
+        g_alloc[i].va + g_alloc[i].size > next) {
+      next = g_alloc[i].va + g_alloc[i].size;
+    }
+  }
+  return next;
+}
+
+static win32_alloc_t *alloc_find(UINT64 pid, UINT64 va) {
+  UINT32 i;
+
+  for (i = 0; i < WIN32_HEAP_SLOTS; i++) {
+    if (g_alloc[i].used && g_alloc[i].owner == pid && g_alloc[i].va == va) {
+      return &g_alloc[i];
+    }
+  }
+  return NULL;
+}
+
+/* Reserve-and-commit `bytes` at the next free address of the process and
+ * map a fresh physical page for every page of it. Pages come zeroed from
+ * pmm_alloc_page(), which is what both VirtualAlloc and HEAP_ZERO_MEMORY
+ * promise. */
+static win32_alloc_t *arena_carve(task_t *t, UINT64 bytes) {
+  win32_alloc_t *slot = NULL;
+  UINT64 base = round_page(arena_next(t->pid));
+  UINT64 size = round_page(bytes == 0u ? WIN32_PAGE : bytes);
+  UINT64 va;
+
+  if (base + size > WIN32_HEAP_END) {
+    return NULL;
+  }
+  for (va = base; va < base + size; va += WIN32_PAGE) {
+    void *page = pmm_alloc_page();
+
+    if (page == NULL) {
+      return NULL;
+    }
+    if (vm_user_map(&t->space, va, (UINT64)(UINTN)page,
+                    VM_PROT_WRITE | VM_PROT_USER) != 0) {
+      pmm_free_page(page);
+      return NULL;
+    }
+  }
+  for (va = 0; va < WIN32_HEAP_SLOTS; va++) {
+    if (!g_alloc[va].used) {
+      slot = &g_alloc[va];
+      break;
+    }
+  }
+  if (slot == NULL) {
+    return NULL;
+  }
+  slot->used = 1u;
+  slot->owner = t->pid;
+  slot->va = base;
+  slot->size = size;
+  return slot;
+}
+
+/* A block is dropped from the bookkeeping but its pages stay mapped: this
+ * layer has no unmap path yet, and handing pages back while a pointer to
+ * them may still be live in the process would be worse than leaking them.
+ * The space itself dies with the process. */
+static int arena_release(UINT64 pid, UINT64 va) {
+  win32_alloc_t *a = alloc_find(pid, va);
+
+  if (a == NULL) {
+    return 0;
+  }
+  memset(a, 0, sizeof(*a));
+  return 1;
 }
 
 /* ---- API handlers ------------------------------------------------------ */
@@ -608,6 +769,206 @@ static void api_reg_close(trap_frame_t *f) {
 
 /* ---- dispatcher -------------------------------------------------------- */
 
+/* ---- second block ------------------------------------------------------ */
+
+static void api_module_file_name(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT32  cap = (UINT32)f->r8;
+  UINT32  n = 0;
+
+  if (t == NULL || f->rdx == 0u || cap == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  /* The image name the loader used, which is also what the desktop shows
+   * for the process. A full path would need the mount point, and nothing
+   * in the layer carries one yet. */
+  while (t->name[n] != '\0' && n + 1u < cap) {
+    UINT8 c = (UINT8)t->name[n];
+
+    if (user_copy(t->cr3, f->rdx + n, &c, 1u, 1) != 0) {
+      f->rax = 0u;
+      return;
+    }
+    n++;
+  }
+  {
+    UINT8 zero = 0u;
+
+    (void)user_copy(t->cr3, f->rdx + n, &zero, 1u, 1);
+  }
+  f->rax = n;
+}
+
+static void api_virtual_alloc(trap_frame_t *f) {
+  task_t        *t = sched_current();
+  win32_alloc_t *a;
+
+  if (t == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  /* The requested address is ignored: the process has one window and no
+   * way to ask for a slot inside it. Every caller in practice passes NULL. */
+  a = arena_carve(t, f->rdx);
+  if (a == NULL) {
+    t->win32_last_error = 8u; /* ERROR_NOT_ENOUGH_MEMORY */
+    f->rax = 0u;
+    return;
+  }
+  f->rax = a->va;
+}
+
+static void api_virtual_free(trap_frame_t *f) {
+  task_t *t = sched_current();
+
+  if (t == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = arena_release(t->pid, f->rdi) ? 1u : 0u;
+}
+
+static void api_get_process_heap(trap_frame_t *f) {
+  f->rax = WIN32_HEAP_HANDLE;
+}
+
+static void api_heap_alloc(trap_frame_t *f) {
+  task_t        *t = sched_current();
+  win32_alloc_t *a;
+
+  if (t == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  a = arena_carve(t, f->r8);
+  f->rax = a != NULL ? a->va : 0u;
+}
+
+static void api_heap_free(trap_frame_t *f) {
+  task_t *t = sched_current();
+
+  if (t == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = arena_release(t->pid, f->rdx) ? 1u : 0u;
+}
+
+/* SYSTEMTIME is eight WORDs: year, month, day of week, day, hour, minute,
+ * second, millisecond - in that order, which is why the day of week sits
+ * between the month and the day. */
+static void api_system_time(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT16 st[8];
+  UINT16 year = 1970u;
+  UINT8  month = 1u;
+  UINT8  day = 1u;
+  UINT8  hour = 0u;
+  UINT8  minute = 0u;
+  UINT64 secs;
+  UINT64 ms;
+
+  if (t == NULL || f->rdi == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  secs = rtc_unix();
+  (void)rtc_now_date(&year, &month, &day);
+  (void)rtc_now(&hour, &minute);
+  ms = (UINT64)sched_ticks() * 10u;
+  st[0] = year;
+  st[1] = month;
+  st[2] = (UINT16)((secs / 86400u + 4u) % 7u); /* 1970-01-01 was a Thursday */
+  st[3] = day;
+  st[4] = hour;
+  st[5] = minute;
+  st[6] = (UINT16)(secs % 60u);
+  st[7] = (UINT16)(ms % 1000u);
+  if (user_copy(t->cr3, f->rdi, st, (UINT32)sizeof(st), 1) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = 0u; /* GetSystemTime returns nothing */
+}
+
+static void api_qpc(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT64 count = (UINT64)sched_ticks() * 10u * 10000u; /* 100 ns units */
+
+  if (t != NULL && f->rdi != 0u) {
+    (void)user_copy(t->cr3, f->rdi, &count, 8u, 1);
+  }
+  f->rax = 1u;
+}
+
+static void api_qpf(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT64 freq = 10000000u;
+
+  if (t != NULL && f->rdi != 0u) {
+    (void)user_copy(t->cr3, f->rdi, &freq, 8u, 1);
+  }
+  f->rax = 1u;
+}
+
+static void api_ids(trap_frame_t *f) {
+  task_t *t = sched_current();
+
+  f->rax = t != NULL ? t->pid : 0u;
+}
+
+/* 48 bytes: architecture, page size, the application address window, the
+ * processor mask and counts, the allocation granularity, then three level
+ * and revision words. A program reads this once at start-up and sizes its
+ * arenas from it; the numbers below describe exactly what this machine is. */
+static void api_system_info(trap_frame_t *f) {
+  task_t *t = sched_current();
+  struct {
+    UINT16 arch;
+    UINT16 reserved;
+    UINT32 page;
+    UINT64 min_addr;
+    UINT64 max_addr;
+    UINT64 mask;
+    UINT32 processors;
+    UINT32 type;
+    UINT32 granularity;
+    UINT16 level;
+    UINT16 revision;
+  } si;
+  UINT32 cpus = sched_task_count();
+
+  if (t == NULL || f->rdi == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  memset(&si, 0, sizeof(si));
+  si.arch = 9u; /* PROCESSOR_ARCHITECTURE_AMD64 */
+  si.page = WIN32_PAGE;
+  si.min_addr = 0x10000ULL;
+  si.max_addr = 0x7FFEFFFFULL;
+  si.mask = cpus >= 64u ? 0xFFFFFFFFFFFFFFFFULL
+                       : ((1ULL << (cpus == 0u ? 1u : cpus)) - 1ULL);
+  si.processors = cpus == 0u ? 1u : cpus;
+  si.type = 8664u;
+  si.granularity = 65536u;
+  si.level = 6u;
+  si.revision = 0x3C03u;
+  if (user_copy(t->cr3, f->rdi, &si, (UINT32)sizeof(si), 1) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = 0u;
+}
+
+/* The handler is accepted, never invoked: an exception in this layer ends
+ * the process, and pretending otherwise would hide the failure. Returning
+ * the previous filter is what the caller expects. */
+static void api_set_filter(trap_frame_t *f) {
+  f->rax = f->rdi;
+}
+
 void win32_syscall(trap_frame_t *f) {
   task_t *t = sched_current();
   UINT32  api;
@@ -671,6 +1032,46 @@ void win32_syscall(trap_frame_t *f) {
   case WIN32_API_REG_SET_VALUE_EX:
     api_reg_set(f);
     return;
+  case WIN32_API_GET_MODULE_FILE_NAME:
+    api_module_file_name(f);
+    return;
+  case WIN32_API_VIRTUAL_ALLOC:
+    api_virtual_alloc(f);
+    return;
+  case WIN32_API_VIRTUAL_FREE:
+    api_virtual_free(f);
+    return;
+  case WIN32_API_GET_PROCESS_HEAP:
+    api_get_process_heap(f);
+    return;
+  case WIN32_API_HEAP_ALLOC:
+    api_heap_alloc(f);
+    return;
+  case WIN32_API_HEAP_FREE:
+    api_heap_free(f);
+    return;
+  case WIN32_API_GET_SYSTEM_TIME:
+    api_system_time(f);
+    return;
+  case WIN32_API_QUERY_PERFORMANCE_COUNTER:
+    api_qpc(f);
+    return;
+  case WIN32_API_QUERY_PERFORMANCE_FREQUENCY:
+    api_qpf(f);
+    return;
+  case WIN32_API_GET_CURRENT_PROCESS_ID:
+  case WIN32_API_GET_CURRENT_THREAD_ID:
+    api_ids(f);
+    return;
+  case WIN32_API_IS_DEBUGGER_PRESENT:
+    f->rax = 0u;
+    return;
+  case WIN32_API_GET_SYSTEM_INFO:
+    api_system_info(f);
+    return;
+  case WIN32_API_SET_UNHANDLED_EXCEPTION_FILTER:
+    api_set_filter(f);
+    return;
   case WIN32_API_REG_CLOSE_KEY:
     api_reg_close(f);
     return;
@@ -688,7 +1089,15 @@ int win32_api_lookup(const char *dll, const char *func) {
 
   for (i = 0; i < sizeof(g_api) / sizeof(g_api[0]); i++) {
     if (ci_equal(g_api[i].dll, dll) && text_equal(g_api[i].fn, func)) {
-      return (int)i;
+      /* The id, not the row number: two names may share one entry point
+       * (GetLocalTime / GetSystemTime), and the dispatcher switches on the
+       * id. Returning the row index worked only while the table happened to
+       * be one row per id, which stopped being true the moment a bad import
+       * was dropped. */
+      if (g_api[i].id >= WIN32_API_COUNT) {
+        return -1;
+      }
+      return (int)g_api[i].id;
     }
   }
   return -1;

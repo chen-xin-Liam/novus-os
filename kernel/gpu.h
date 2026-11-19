@@ -38,6 +38,15 @@ UINT16 gpu_device(void);
  * Never NULL. */
 const char *gpu_summary(void);
 
+/* Second step: the scanout the firmware left behind, and whether the
+ * controller's own aperture covers it. gpu_framebuffer_bar() returns the
+ * PCI BAR index that contains the pixels, or -1 when they live in memory
+ * no controller window reaches - the difference between "a driver could
+ * take over this scanout" and "the framebuffer is just system RAM". */
+UINT64 gpu_framebuffer_phys(void);
+UINT64 gpu_framebuffer_bytes(void);
+int    gpu_framebuffer_bar(void);
+
 /* Non-zero once a display controller was located. */
 int gpu_present(void);
 

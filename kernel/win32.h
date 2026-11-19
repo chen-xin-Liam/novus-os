@@ -49,7 +49,7 @@
 #define WIN32_THUNK_LEN 32u
 
 /* ExitProcess .. RegCloseKey. The id is the thunk's R10 value. */
-#define WIN32_API_COUNT 15u
+#define WIN32_API_COUNT 30u
 
 void win32_init(void);
 
