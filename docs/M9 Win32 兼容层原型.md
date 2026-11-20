@@ -15,14 +15,16 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 * PE32+（x86-64）可执行文件加载，基址 `0x50000000`（无重定位表的镜像按其
   自身的链接基址加载）。
 * DIR64 基址重定位；按名称导入，IAT 填 thunk 地址。
-* 138 条 API（表里 139 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
+* 141 条 API（表里 142 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
   tick、`Sleep`、错误码、命令行、模块基址、注册表读写、堆与 `VirtualAlloc`、
   `user32` 窗口、消息循环、投递与定时器、坐标换算、光标位置、窗口移动、焦点、
   `gdi32` 绘制与形状、TEB / TLS、屏幕度量、字体度量、文字测量与排版（含
   `DT_WORDBREAK` 折行），文件读写、目录枚举、`LoadLibrary` / `GetProcAddress`，
   控件（`STATIC` / `BUTTON` / `EDIT`、`WM_COMMAND`、`GetDlgItem`）、`MessageBoxA`、
   菜单条与下拉菜单（8 条 API）、PE 资源的读取（`FindResource` / `LoadResource` /
-  `LockResource` / `SizeofResource` / `LoadStringA`），
+  `LockResource` / `SizeofResource` / `LoadStringA`）、
+  版本与兼容模式（`GetVersion` / `GetVersionExA` / `IsWow64Process` /
+  `GetCurrentProcess`），
   以及 `ws2_32` 的握手、地址转换与错误码（传输调用如实返回 `WSAENETDOWN`）。
 * 每进程独立地址空间（`vm_space`）、独立的 Win32 ABI 标记，以及 `%fs` 指向的 TEB。
 * 文件管理器 `/exe` 虚拟目录，选中后运行。
@@ -30,6 +32,11 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 未实现：
 
 * 磁盘上任意路径的 `.exe`：镜像来自内核内嵌表（`build/win32_blobs.h`）。
+* 32 位（PE32 / `0x014C`）可执行文件的执行。加载器能识别并如实拒绝，但跑不起来：
+  兼容执行器（32 位代码段的 `CS.L=0`、`iret` 进入、stdcall 栈 ABI、`int 0x80`
+  入口）没有建。
+* 16 位 `.COM`（实模式）与 16 位 NE / LE 可执行文件；`pe_probe` 对裸 MZ 头只输出
+  `DOS MZ executable (16-bit real mode)` 这一句描述，然后按"不是 PE"拒绝。
 * 序号导入、延迟导入、从磁盘映射真实 DLL、PE TLS 目录、多线程、SEH。
 * `DialogBox` 与 `DLGTEMPLATE`（模态框只有 `MessageBoxA` 这一种）、`TrackPopupMenu`
   （下拉菜单只从菜单条展开）、`LoadMenuA`（不从资源里的 `MENU` 模板建菜单）、
@@ -840,3 +847,57 @@ Windows 程序把自己的字符串、图标、对话框模板、菜单模板都
 
 验证：`wsdemo.exe` 在 `-net none` 的机器上跑完整个自测，`[WS] FAIL count = 0x0`、`[WS] PASS`：句柄落在 `0x26000000`、`SOCK_DGRAM` 被 `10041` 拒、`AF_UNIX` 被 `10047` 拒、未知句柄的 `connect` 得 `10038`、127.0.0.1:80 的 `connect` 得 `0x2742`(=10050，无网卡)、`send`/`recv` 在未连接句柄上得 `10057`、关一次成功再关得 `10038`、`inet_addr`/`inet_ntoa` 与动态 `GetProcAddress` 路径仍通过。
 **数据通路没有在实机上验证过**：QEMU 这轮是 `-net none`，没有网卡就没有握手可看；能证的是"API 接上了引擎、失败码说得准确"，不能证"字节真的走通了"。那需要一台有 e1000/virtio 的机器把 `net_tcp` 的握手日志打出来。
+
+## 23. 版本矩阵与兼容模式
+
+这一块不是"多支持几个 API"，是回答一个问题：这份清单上的程序，能不能在这台机器上跑起来，跑不起来的那部分系统有没有说实话。
+
+**`pe_probe` / `pe_describe`（`kernel/pe.c`）**：在正式加载前先把镜像读一遍头，得出机型、魔数、子系统版本、是不是 DLL、入口 RVA。`pe_describe` 把结果写成一句人话，例如：
+
+* `PE32+ x86-64 console EXE, subsystem 6.1 (Windows 7)`
+* `PE32 i386 console EXE, subsystem 6.1 (Windows 7)`
+* `DOS MZ executable (16-bit real mode)`（只有 MZ 头、没有 `PE\0\0` 签名）
+
+`pe_load` 的拒绝日志统一带这行描述，所以串口里看到的是"被拒的是什么"，不只是"被拒了"。
+
+**清单逐条对应的处理**：
+
+| 清单项 | 当前状态 |
+| --- | --- |
+| Windows 11 / 10 / 8.1 / 8（64 位） | 可执行：`PE32+` + `AMD64`，这层默认就是 Win11（10.0 / build 22631） |
+| Windows 7 / Vista（64 位） | 可执行；旧程序按 `GetVersion` 分支时用兼容模式把版本报成 6.1 / 6.0 |
+| Windows 11 … Vista（32 位） | 识别 + 精确拒绝（`PE_E32`），说明"32 位需要 WOW 执行器，没建" |
+| Windows XP / 2000 / NT4 / NT3.51 的 32 位 | 同上：识别 + 拒绝；版本号本身可以用兼容模式报成 5.1 / 5.0 / 4.0 / 3.51 |
+| 16 位 `.COM` | 识别为 DOS 实模式，按"不是 PE"拒绝 |
+| `.dll` 从磁盘加载 | 只认内置 5 个（`kernel32` / `user32` / `gdi32` / `advapi32` / `ws2_32`）；`LoadLibraryA` 对别的名字打印一句"磁盘 DLL 加载没实现"并返回 `ERROR_MOD_NOT_FOUND` |
+
+32 位不是"暂时没空做"，是差一整套执行器：长模式里跑 32 位代码要有兼容代码段（`CS.L=0`、`D=1`）、`iret` 下沉到 32 位栈、stdcall/cdecl 的栈传参与被调者清栈、以及用 `int 0x80` 而不是 `SYSCALL` 进内核（32 位代码下 `SYSCALL` 的 `RCX`/`R11` 语义也不一样）。少任何一样，跑起来的都不是 32 位程序。所以这里的选择是：**认得出来、拒绝得清楚**，而不是拿 64 位路径去糊一个"看起来能跑"。
+
+**兼容模式（注册表两个值）**：`HKLM\Software\Novus\Compat`
+
+* `WinVersion`（`REG_SZ`）：`"10.0"` / `"6.1"` / `"5.1"` / `"4.0"` / `"3.51"`
+* `WinBuild`（`REG_DWORD`）：例如 `7601`（Win7 SP1）、`2600`（XP）
+
+`GetVersion` 按 NT 的打包方式返回（低字主版本、高字次版本），`GetVersionExA` 按 `OSVERSIONINFOA` 的四个 DWORD 填（主 4、次 8、build 12、platform 16、CSD 20，总 148 字节）；两处读同一份值，所以同一台机器上不会出现"一个函数说 6.1、另一个说 10.0"。`IsWow64Process` 报 FALSE（这层只跑 64 位镜像，没有 WOW 可言），`GetCurrentProcess` 返回 `-1` 这个进程伪句柄。
+
+**这一块抓到的两个真 bug**：
+
+1. `OSVERSIONINFOA` 的四个字段按 2 字节写：主版本写在 4，次版本写在 6——6 是主版本的高字节。于是调用者读到的次版本是 build 的低字节、build 读到 platform、platform 读到 0。改成按 4 字节各占一个 DWORD。
+2. `RegSetValueExA` 的第二参数是**值名**，不是子键（子键由已经打开的 key 句柄携带）。原实现按 `RegQueryValueExA` 的样子把 `R8`（保留字段）当值名读，写进去的名字是空串，于是"写成功"但谁都查不到。样例因此改成先 `RegOpenKeyExA` 再把句柄传给 `RegSetValueExA`。
+
+**32 位样例怎么来的**：这台机器的 mingw 没有 32 位目标（`gcc -m32` 静默返回 1，`C:\msys64\mingw32` 是空壳），所以 `tools/mkpe32.py` 按字节写出两张镜像：`hello32.exe`（PE32、`0x014C`、子系统 6.01、一个 `.text` 里 `jmp $`）和 `dosdemo.com`（16 位实模式裸代码）。它们不是"假装跑得起来"的道具，正是要被拒绝的输入。
+
+**验证（`/tmp/serial-t42.log`）**：
+
+* `[PE] hello32.exe: rejected (0xFFFFFFFFFFFFFFF9) PE32 i386 console EXE, subsystem 6.1 (Windows 7) - 32-bit needs the WOW executor, not built`
+* `[PE] dosdemo.com: rejected (0xFFFFFFFFFFFFFFFF) not a PE image`
+* `verdemo.exe` 全部通过：默认 `10.0 build 22631 platform 2 GetVersion=0xa`；改成 `6.1` 后 `6.1 build 22631 GetVersion=0x10006`；改成 `5.1` + build 2600 后 `5.1 build 2600 GetVersion=0x10005`；恢复默认后又回到 `10.0 / 22631`；`IsWow64Process = 0`；最后 `[VER] PASS`。
+* 同一轮里 `[PE] selftest PASS`：合成镜像（裸 MZ 头、i386 PE）也在自测里被拒过一遍。
+
+**仍然没做到的**（照旧照实写）：
+
+* 32 位执行器（WOW）：没有。
+* 从磁盘加载真实 DLL、导出表解析、跨模块 IAT 绑定：没有。
+* 16 位 NE/LE 与 `.COM` 的执行：没有；`.COM` 只被识别成"不是 PE"。
+* `GetVersionExW`、`VerifyVersionInfo`、manifest 里的 `<compatibility>` 段：没有；兼容模式走的是注册表这两个值。
+

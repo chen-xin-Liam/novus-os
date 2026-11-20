@@ -114,7 +114,9 @@ enum {
   WIN32_API_HEAP_ALLOC,
   WIN32_API_HEAP_FREE,
   WIN32_API_GET_SYSTEM_TIME,
-  WIN32_API_GET_LOCAL_TIME,
+  /* GetLocalTime shares this id: the layer has no time zone, so the two
+   * calls answer the same thing and the table gives both names to the one
+   * handler. A separate id for it would be an id nothing can ever reach. */
   WIN32_API_QUERY_PERFORMANCE_COUNTER,
   WIN32_API_QUERY_PERFORMANCE_FREQUENCY,
   WIN32_API_GET_CURRENT_PROCESS_ID,
@@ -269,6 +271,15 @@ enum {
   WIN32_API_LOCK_RESOURCE,
   WIN32_API_SIZE_OF_RESOURCE,
   WIN32_API_LOAD_STRING,
+  /* Sixteenth block: the version the layer reports. Installers and old
+   * programs branch on this, and "run as Windows 7 / XP" is a compatibility
+   * mode a registry value switches. */
+  WIN32_API_GET_VERSION,
+  WIN32_API_GET_VERSION_EX,
+  WIN32_API_IS_WOW64_PROCESS,
+  /* The version calls pair with this one: IsWow64Process takes a process
+   * handle, and the pseudo handle for "this process" is what programs pass. */
+  WIN32_API_GET_CURRENT_PROCESS,
 };
 
 typedef struct {
@@ -385,6 +396,10 @@ static const win32_api_t g_api[] = {
     {"kernel32.dll", "FindClose", WIN32_API_FIND_CLOSE},
     {"kernel32.dll", "LoadLibraryA", WIN32_API_LOAD_LIBRARY},
     {"kernel32.dll", "GetProcAddress", WIN32_API_GET_PROC_ADDRESS},
+    {"kernel32.dll", "GetVersion", WIN32_API_GET_VERSION},
+    {"kernel32.dll", "GetVersionExA", WIN32_API_GET_VERSION_EX},
+    {"kernel32.dll", "IsWow64Process", WIN32_API_IS_WOW64_PROCESS},
+    {"kernel32.dll", "GetCurrentProcess", WIN32_API_GET_CURRENT_PROCESS},
     {"kernel32.dll", "FreeLibrary", WIN32_API_FREE_LIBRARY},
     {"user32.dll", "MoveWindow", WIN32_API_MOVE_WINDOW},
     {"user32.dll", "SetFocus", WIN32_API_SET_FOCUS},
@@ -1018,6 +1033,10 @@ static void api_reg_set(trap_frame_t *f) {
   UINT64  data_va = 0;
   UINT64  data_len = 0;
 
+  /* RegSetValueExA(hkey, value name, reserved, type, data, size): the second
+   * argument names the value, not a subkey - the key handle already carries
+   * the path, which is why a program opens it with RegOpenKeyExA first.
+   * Reserved (R8) is unused. */
   if (t == NULL || key_path(t->cr3, f->rdi, 0, path, sizeof(path)) != 0 ||
       read_user_str(t->cr3, f->rdx, name, sizeof(name)) != 0 ||
       stack_arg(f, t, 5u, &data_va) != 0 ||
@@ -4834,8 +4853,151 @@ static void api_freeaddrinfo(trap_frame_t *f) {
   f->rax = 0u;
 }
 
-/* GetDlgItem(parent, id): a program names its controls by the id it passed
- * to CreateWindowExA, and this layer hands out the index as the id, so the
+/* ---- the version the layer reports ------------------------------------- */
+
+/* Installers and older programs branch on the Windows version they are told
+ * they are running on. The default is the generation this layer behaves
+ * like; a compatibility mode is a pair of registry values under
+ * HKLM\Software\Novus\Compat:
+ *   WinVersion  SZ     "6.1"  (Windows 7), "5.1" (XP), "5.0" (2000), "4.0"
+ *   WinBuild    DWORD  7601
+ * Reading them here means a program sets the mode with RegSetValueExA, the
+ * same way a user sets a compatibility tab on Windows. */
+#define WIN32_COMPAT_KEY "HKLM\\Software\\Novus\\Compat"
+#define WIN32_DEFAULT_MAJOR 10u
+#define WIN32_DEFAULT_MINOR 0u
+#define WIN32_DEFAULT_BUILD 22631u
+
+static void compat_version(UINT32 *maj, UINT32 *min, UINT32 *build) {
+  win32_reg_entry_t *e;
+
+  *maj = WIN32_DEFAULT_MAJOR;
+  *min = WIN32_DEFAULT_MINOR;
+  *build = WIN32_DEFAULT_BUILD;
+  e = reg_find(WIN32_COMPAT_KEY, "WinVersion");
+  if (e != 0 && e->type == WIN32_REG_SZ && e->len >= 3u) {
+    UINT32 m = 0u;
+    UINT32 n = 0u;
+    UINT32 i = 0u;
+
+    while (i < e->len && e->data[i] >= '0' && e->data[i] <= '9') {
+      m = m * 10u + (UINT32)(e->data[i] - '0');
+      i++;
+    }
+    if (i < e->len && e->data[i] == '.') {
+      i++;
+      while (i < e->len && e->data[i] >= '0' && e->data[i] <= '9') {
+        n = n * 10u + (UINT32)(e->data[i] - '0');
+        i++;
+      }
+      *maj = m;
+      *min = n;
+    }
+  }
+  e = reg_find(WIN32_COMPAT_KEY, "WinBuild");
+  if (e != 0 && e->type == WIN32_REG_DWORD && e->len >= 4u) {
+    *build = (UINT32)e->data[0] | ((UINT32)e->data[1] << 8) |
+             ((UINT32)e->data[2] << 16) | ((UINT32)e->data[3] << 24);
+  }
+}
+
+/* OSVERSIONINFOA: 4 + 4 + 4 + 4 + 4 + 128 = 148 bytes. */
+#define WIN32_OSVERSIONINFO_LEN 148u
+
+/* GetVersion packs the Windows way for NT: major in the low word, minor in
+ * the high word (the build number has its own call). Programs that compare
+ * words rather than call GetVersionExA get the same answer. */
+static void api_get_version(trap_frame_t *f) {
+  UINT32 maj, min, build;
+
+  compat_version(&maj, &min, &build);
+  (void)build;
+  f->rax = (UINT64)(UINT32)((maj & 0xFFFFu) | ((min & 0xFFFFu) << 16));
+}
+
+static void api_get_version_ex(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT8   vi[WIN32_OSVERSIONINFO_LEN];
+  UINT32  want;
+  UINT32  size;
+  UINT32  maj, min, build;
+
+  if (t == 0) {
+    f->rax = 0u;
+    return;
+  }
+  if (user_copy(t->cr3, f->rdi, vi, 4u, 0) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  want = (UINT32)vi[0] | ((UINT32)vi[1] << 8) | ((UINT32)vi[2] << 16) |
+         ((UINT32)vi[3] << 24);
+  /* Windows refuses a struct smaller than the fields it has to fill, so a
+   * caller that passed nothing useful gets zero and no garbage written. */
+  if (want < 20u) {
+    f->rax = 0u;
+    return;
+  }
+  /* A program asking for more than plain OSVERSIONINFOA (the EX struct) gets
+   * the same leading fields and its own size echoed back. Its destination
+   * only ever has sizeof here, because everything past platform id is zero. */
+  size = (want > WIN32_OSVERSIONINFO_LEN) ? WIN32_OSVERSIONINFO_LEN : want;
+  memset(vi, 0, sizeof(vi));
+  compat_version(&maj, &min, &build);
+  vi[0] = (UINT8)(want & 0xFFu);
+  vi[1] = (UINT8)((want >> 8) & 0xFFu);
+  vi[2] = (UINT8)((want >> 16) & 0xFFu);
+  vi[3] = (UINT8)((want >> 24) & 0xFFu);
+  /* The four fields are DWORDs: major at 4, minor at 8, build at 12,
+   * platform at 16, then the CSD string. Writing them as words put the build
+   * number into the minor field and the platform id into the build field,
+   * which every caller reads. */
+  vi[4] = (UINT8)(maj & 0xFFu);
+  vi[5] = (UINT8)((maj >> 8) & 0xFFu);
+  vi[6] = (UINT8)((maj >> 16) & 0xFFu);
+  vi[7] = (UINT8)((maj >> 24) & 0xFFu);
+  vi[8] = (UINT8)(min & 0xFFu);
+  vi[9] = (UINT8)((min >> 8) & 0xFFu);
+  vi[10] = (UINT8)((min >> 16) & 0xFFu);
+  vi[11] = (UINT8)((min >> 24) & 0xFFu);
+  vi[12] = (UINT8)(build & 0xFFu);
+  vi[13] = (UINT8)((build >> 8) & 0xFFu);
+  vi[14] = (UINT8)((build >> 16) & 0xFFu);
+  vi[15] = (UINT8)((build >> 24) & 0xFFu);
+  vi[16] = 2u; /* VER_PLATFORM_WIN32_NT */
+  if (user_copy(t->cr3, f->rdi, vi, size, 1) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = 1u;
+}
+
+/* IsWow64Process: false. The layer runs 64-bit images only, so a program is
+ * not a 32-bit one under a 64-bit Windows - there is no WOW to report. */
+static void api_is_wow64(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT32  zero = 0u;
+
+  /* Second argument, so RDX: the thunk moved RDI to RCX for arg one. */
+  if (t == 0 || f->rdx == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  if (user_copy(t->cr3, f->rdx, &zero, 4u, 1) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = 1u;
+}
+
+/* GetCurrentProcess: the pseudo handle Windows hands out for the process
+ * itself, -1. It is not a real handle the layer owns, and no API here
+ * dereferences it. */
+static void api_get_current_process(trap_frame_t *f) {
+  f->rax = ~(UINT64)0u;
+}
+
+/* GetDlgItem(parent, id): a program names its controls by the id it passed * to CreateWindowExA, and this layer hands out the index as the id, so the
  * lookup is the index. */
 static void api_get_dlg_item(trap_frame_t *f) {
   task_t      *t = sched_current();
@@ -6055,6 +6217,14 @@ static void api_load_library(trap_frame_t *f) {
       return;
     }
   }
+  /* A real .dll on disk would need the PE loader to hand back a module with
+   * its exports resolved. The loader maps one image per process today, so
+   * this says what happened and which DLLs do exist, instead of leaving a
+   * program to guess why its GetProcAddress loop never finds anything. */
+  kputs("[WIN32] LoadLibraryA(");
+  kputs(name);
+  kputs("): on-disk DLL loading is not implemented; only ");
+  kputs("kernel32/user32/gdi32/advapi32/ws2_32 are built in\n");
   t->win32_last_error = 126u; /* ERROR_MOD_NOT_FOUND */
   f->rax = 0u;
 }
@@ -6642,6 +6812,18 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_GET_PROC_ADDRESS:
     api_get_proc_address(f);
+    return;
+  case WIN32_API_GET_VERSION:
+    api_get_version(f);
+    return;
+  case WIN32_API_GET_VERSION_EX:
+    api_get_version_ex(f);
+    return;
+  case WIN32_API_IS_WOW64_PROCESS:
+    api_is_wow64(f);
+    return;
+  case WIN32_API_GET_CURRENT_PROCESS:
+    api_get_current_process(f);
     return;
   case WIN32_API_FREE_LIBRARY:
     api_free_library(f);

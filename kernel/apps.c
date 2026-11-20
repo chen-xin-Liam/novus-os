@@ -181,6 +181,15 @@ static const app_t g_win32[] = {
      * the middle, Tab between controls, and a button that prints what the
      * buffer holds so the serial log can be checked against the keystrokes. */
     {"editdemo.exe", k_app_editdemo_exe, &k_app_editdemo_exe_len},
+    /* The reported version and the compatibility mode: default Windows 11,
+     * switched to Windows 7 and XP through the registry, both calls checked
+     * against each other in every mode. */
+    {"verdemo.exe", k_app_verdemo_exe, &k_app_verdemo_exe_len},
+    /* Not runnable, and here to say so out loud: a real 32-bit PE image and a
+     * 16-bit .COM. Opening either has to produce the loader's one honest
+     * rejection line rather than a silent nothing. */
+    {"hello32.exe", k_app_hello32_exe, &k_app_hello32_exe_len},
+    {"dosdemo.com", k_app_dosdemo_com, &k_app_dosdemo_com_len},
 };
 
 UINT32 apps_win32_count(void) {

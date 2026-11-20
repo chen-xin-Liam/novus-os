@@ -22,7 +22,10 @@
 
 #define PE_DOS_SIG       0x5A4Du
 #define PE_NT_SIG        0x00004550u
+#define PE_MACHINE_I386  0x14Cu
 #define PE_MACHINE_AMD64 0x8664u
+#define PE_MACHINE_ARM64 0xAA64u
+#define PE_MAGIC_32      0x010Bu
 #define PE_MAGIC_PLUS    0x020Bu
 
 #define PE_DIR_IMPORT 1u
@@ -62,7 +65,181 @@ typedef struct {
   pe_sec_t sec[PE_MAX_SECTIONS];
 } pe_info_t;
 
-/* ---- little-endian readers --------------------------------------------- */
+/* ---- header probe ------------------------------------------------------- */
+
+/* The byte readers live below with the validator; the probe is above them so
+ * the log and the report can describe an image before any mapping happens. */
+static UINT16 rd16(const UINT8 *p);
+static UINT32 rd32(const UINT8 *p);
+static UINT64 rd64(const UINT8 *p);
+
+/* Reads the DOS/NT headers of any PE image, 32 or 64 bit, and says what it
+ * is. `pe_validate` below keeps to the subset this loader can execute; this
+ * function is the honest "what am I looking at" answer that a compatibility
+ * report and the rejection log both use. */
+int pe_probe(const UINT8 *img, UINT32 size, pe_probe_t *out) {
+  UINT32 e_lfanew;
+  UINT32 opt;
+  UINT32 opt_size;
+
+  if (img == 0 || out == 0 || size < 0x40u || rd16(img) != PE_DOS_SIG) {
+    return PE_ENOTPE;
+  }
+  e_lfanew = rd32(img + 0x3C);
+  if (e_lfanew < 0x40u || e_lfanew > size - 24u ||
+      rd32(img + e_lfanew) != PE_NT_SIG) {
+    return PE_ENOTPE;
+  }
+  memset(out, 0, sizeof(*out));
+  out->machine = rd16(img + e_lfanew + 4);
+  opt = e_lfanew + 24u;
+  opt_size = rd16(img + e_lfanew + 20);
+  if (opt_size < 64u || opt > size || opt_size > size - opt) {
+    return PE_EFORMAT;
+  }
+  out->magic = rd16(img + opt);
+  if (out->magic == PE_MAGIC_32) {
+    out->bits = 32;
+  } else if (out->magic == PE_MAGIC_PLUS) {
+    out->bits = 64;
+  } else {
+    return PE_EFORMAT;
+  }
+  out->subsystem = rd16(img + opt + 68);
+  out->os_major = rd16(img + opt + 40);
+  out->os_minor = rd16(img + opt + 42);
+  out->sub_major = rd16(img + opt + 48);
+  out->sub_minor = rd16(img + opt + 50);
+  out->is_dll = (UINT8)((rd16(img + e_lfanew + 22) & PE_FILE_DLL) != 0u);
+  out->entry_rva = rd32(img + opt + 16);
+  if (out->magic == PE_MAGIC_32) {
+    out->image_base = rd32(img + opt + 28);
+  } else {
+    out->image_base = rd64(img + opt + 24);
+  }
+  return 0;
+}
+
+static void cat_text(char *out, UINT32 cap, const char *s) {
+  UINT32 n = 0;
+  UINT32 i = 0;
+
+  while (n + 1u < cap && out[n] != '\0') {
+    n++;
+  }
+  while (n + 1u < cap && s[i] != '\0') {
+    out[n++] = s[i++];
+  }
+  out[n] = '\0';
+}
+
+static void cat_num(char *out, UINT32 cap, UINT32 v) {
+  char   tmp[12];
+  UINT32 n = 0;
+
+  if (v == 0u) {
+    cat_text(out, cap, "0");
+    return;
+  }
+  while (v != 0u && n < sizeof(tmp)) {
+    tmp[n++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  while (n > 0u) {
+    char one[2];
+
+    one[0] = tmp[--n];
+    one[1] = '\0';
+    cat_text(out, cap, one);
+  }
+}
+
+/* The subsystem version is how a build declares the Windows generation it
+ * expects: 3.51 / 4.0 NT, 5.1 XP, 5.2 XP x64, 6.0 Vista, 6.1 Windows 7,
+ * 6.2 Windows 8, 6.3 Windows 8.1, 10.0 Windows 10 and 11. */
+static const char *subsystem_generation(UINT16 major, UINT16 minor) {
+  if (major <= 3u) {
+    return "NT 3.51";
+  }
+  if (major == 4u) {
+    return "Windows NT 4.0";
+  }
+  if (major == 5u && minor == 0u) {
+    return "Windows 2000";
+  }
+  if (major == 5u && minor == 1u) {
+    return "Windows XP";
+  }
+  if (major == 5u && minor == 2u) {
+    return "Windows XP x64 / Server 2003";
+  }
+  if (major == 6u && minor == 0u) {
+    return "Windows Vista";
+  }
+  if (major == 6u && minor == 1u) {
+    return "Windows 7";
+  }
+  if (major == 6u && minor == 2u) {
+    return "Windows 8";
+  }
+  if (major == 6u && minor == 3u) {
+    return "Windows 8.1";
+  }
+  if (major >= 10u) {
+    return "Windows 10/11";
+  }
+  return "an unknown Windows generation";
+}
+
+int pe_describe(const UINT8 *img, UINT32 size, char *out, UINT32 cap) {
+  pe_probe_t p;
+  int        rc;
+
+  if (out == 0 || cap == 0u) {
+    return PE_EFORMAT;
+  }
+  out[0] = '\0';
+  rc = pe_probe(img, size, &p);
+  if (rc == PE_ENOTPE) {
+    /* An MZ header without a PE signature is a 16-bit DOS image, which is
+     * the only thing a .com-style refusal can be about. */
+    if (size >= 2u && rd16(img) == PE_DOS_SIG) {
+      cat_text(out, cap, "DOS MZ executable (16-bit real mode)");
+      return PE_ENOTPE;
+    }
+    cat_text(out, cap, "not a PE image");
+    return PE_ENOTPE;
+  }
+  if (rc != 0) {
+    cat_text(out, cap, "PE headers damaged");
+    return rc;
+  }
+  cat_text(out, cap, (p.magic == PE_MAGIC_32) ? "PE32 " : "PE32+ ");
+  if (p.machine == PE_MACHINE_AMD64) {
+    cat_text(out, cap, "x86-64 ");
+  } else if (p.machine == PE_MACHINE_I386) {
+    cat_text(out, cap, "i386 ");
+  } else if (p.machine == PE_MACHINE_ARM64) {
+    cat_text(out, cap, "arm64 ");
+  } else {
+    cat_text(out, cap, "machine 0x");
+    cat_num(out, cap, p.machine);
+    cat_text(out, cap, " ");
+  }
+  cat_text(out, cap, (p.subsystem == 3u) ? "console " : "GUI ");
+  cat_text(out, cap, (p.is_dll != 0u) ? "DLL, " : "EXE, ");
+  cat_text(out, cap, "subsystem ");
+  cat_num(out, cap, p.sub_major);
+  cat_text(out, cap, ".");
+  cat_num(out, cap, p.sub_minor);
+  cat_text(out, cap, " (");
+  cat_text(out, cap, subsystem_generation(p.sub_major, p.sub_minor));
+  cat_text(out, cap, ")");
+  return 0;
+}
+
+/* ---- validation --------------------------------------------------------- */
+
 
 static UINT16 rd16(const UINT8 *p) {
   return (UINT16)((UINT16)p[0] | ((UINT16)p[1] << 8));
@@ -203,6 +380,14 @@ static int pe_validate(const UINT8 *img, UINT32 size, pe_info_t *out) {
     return PE_ENOTPE;
   }
   if (rd16(img + e_lfanew + 4) != PE_MACHINE_AMD64) {
+    /* A 32-bit image is well formed and simply not executable here: the
+     * layer runs x86-64 code, and a PE32 needs its own compatibility
+     * executor (a 32-bit code segment, a stack-based ABI and an interrupt
+     * entry instead of syscall). Saying so precisely keeps a .exe from being
+     * written off as a corrupt file. */
+    if (rd16(img + e_lfanew + 4) == PE_MACHINE_I386) {
+      return PE_E32;
+    }
     return PE_EMACHINE;
   }
 
@@ -531,11 +716,21 @@ int pe_load(const char *name, const UINT8 *img, UINT32 size) {
 
   rc = pe_validate(img, size, &info);
   if (rc != 0) {
+    char d[96];
+
+    /* The rejection line names what the image actually is, so "PE32 i386
+     * console EXE, subsystem 5.1 (Windows XP)" is distinguishable from a
+     * truncated file at a glance. */
+    d[0] = '\0';
+    (void)pe_describe(img, size, d, sizeof(d));
     kputs("[PE] ");
     kputs(name);
     kputs(": rejected (");
     kputs_hex((UINT64)(INT64)rc);
-    kputs(")\n");
+    kputs(") ");
+    kputs(d);
+    kputs(rc == PE_E32 ? " - 32-bit needs the WOW executor, not built\n"
+                       : "\n");
     return rc;
   }
   /* An image with no relocation data can only run where it was linked, so
