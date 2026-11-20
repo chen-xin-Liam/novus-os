@@ -22,6 +22,7 @@
 #include "nvus_paths.h"
 #include "pmm.h"
 #include "rtc.h"
+#include "net.h"
 #include "../fs/vfs.h"
 #include "../fs/vfs_mount.h"
 
@@ -4461,18 +4462,48 @@ static void api_get_focus(trap_frame_t *f) {
 
 /* ---- ws2_32: the socket surface ---------------------------------------- */
 
-/* The honest shape of this block: the kernel already owns a TCP engine
- * (net_tcp.c), a resolver (net_dns.c) and DHCP, but that engine is one
- * connection with no descriptor layer over it, so ws2_32 cannot hand a
- * program a socket yet. What this block makes real is the part that needs
- * no connection - the version handshake a program refuses to run without,
- * the address conversions, and error reporting - and every transport call
- * answers WSAENETDOWN with the failure value Windows documents, so a
- * program takes its error path instead of holding a socket that cannot
- * carry a byte. Wiring the descriptors onto net_tcp_* is the next block. */
+/* The kernel owns a TCP engine (net_tcp.c) with a resolver (net_dns.c) and
+ * DHCP behind it, but that engine is *one* connection with no descriptor
+ * layer over it. This block adds the descriptor layer: a socket handle is a
+ * slot in a small table, connect drives net_tcp_open and waits for the
+ * handshake, send goes through net_tcp_send, recv drains the engine's
+ * receive buffer, closesocket frees the engine.
+ *
+ * The honest boundary is the engine's, not the API's: only one socket can
+ * be connected at a time, so a second live connect answers WSAENOBUFS
+ * instead of pretending a connection exists. bind/listen/accept and
+ * select/ioctlsocket need a listening path the engine does not have, so
+ * they answer WSAEOPNOTSUPP; a program takes its error path, and the
+ * document says so. */
+#define WIN32_SOCK_BASE    0x26000000u
+#define WIN32_MAX_SOCKETS  4u
+
 #define WSAENETDOWN       10050u
 #define WSAENOTSOCK       10038u
 #define WSAHOST_NOT_FOUND 11001u
+#define WSAEWOULDBLOCK    10035u
+#define WSAENOTCONN       10057u
+#define WSAETIMEDOUT      10060u
+#define WSAEAFNOSUPPORT   10047u
+#define WSAEPROTOTYPE     10041u
+#define WSAEOPNOTSUPP     10045u
+#define WSAENOBUFS        10055u
+#define WSAEISCONN        10056u
+#define WSAEINVAL         10022u
+
+/* AF_INET is 2, SOCK_STREAM is 1 on Windows. */
+#define WSA_AF_INET   2u
+#define WSA_SOCK_STREAM 1u
+
+typedef struct {
+  UINT8  used;
+  UINT8  connected;
+  UINT64 owner; /* the pid the socket was handed to */
+  UINT32 ip;    /* host order */
+  UINT16 port;
+} win32_sock_t;
+
+static win32_sock_t g_sock[WIN32_MAX_SOCKETS];
 
 /* WSADATA is 2 + 2 + 257 + 129 + 2 + 2 + 8 = 402 bytes; the padding to the
  * vendor pointer rounds the struct to 408 on x64. */
@@ -4509,8 +4540,11 @@ static void api_wsa_startup(trap_frame_t *f) {
   memcpy(d + 0, &ver, 2);   /* wVersion */
   memcpy(d + 2, &high, 2);  /* wHighVersion */
   copy_text((char *)d + 4, 257, "Novus ws2_32");
-  copy_text((char *)d + 261, 129, "socket layer not wired");
-  /* iMaxSockets 0 and iMaxUdpDg 0 are the truth: no transport is open. */
+  copy_text((char *)d + 261, 129, "one TCP connection, no listening");
+  /* iMaxSockets 1 is the truth: the engine behind the descriptor table is a
+   * single connection, so a program that asks for more learns it here. */
+  d[390] = 1;
+  d[391] = 0;
   if (f->rdx != 0u && user_copy(t->cr3, f->rdx, d, sizeof(d), 1) != 0) {
     f->rax = WSAENETDOWN;
     return;
@@ -4542,18 +4576,247 @@ static void api_socket_fail(trap_frame_t *f, UINT32 code, UINT64 value) {
   f->rax = value;
 }
 
-static void api_socket(trap_frame_t *f) {
-  api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+/* A socket handle is the base ORed with its slot, so a stale handle from a
+ * neighbour process cannot name a live slot without passing the owner check. */
+static win32_sock_t *sock_get(task_t *t, UINT64 h) {
+  UINT32 i;
+
+  if (t == NULL || (h & 0xFFFFFF00u) != WIN32_SOCK_BASE || h == (UINT64)-1) {
+    return NULL;
+  }
+  i = (UINT32)(h & 0xFFu);
+  if (i >= WIN32_MAX_SOCKETS || !g_sock[i].used ||
+      g_sock[i].owner != t->pid) {
+    return NULL;
+  }
+  return &g_sock[i];
 }
 
-static void api_socket_call(trap_frame_t *f) {
-  api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+static UINT16 be16(UINT16 v) { return (UINT16)((v >> 8) | (v << 8)); }
+
+static UINT32 be32(UINT32 v) {
+  return ((v & 0xFFu) << 24) | ((v & 0xFF00u) << 8) |
+         ((v >> 8) & 0xFF00u) | ((v >> 24) & 0xFFu);
+}
+
+/* socket(af, type, proto). AF_INET + SOCK_STREAM is the one family the
+ * engine speaks; anything else is refused with the code Windows uses, so a
+ * program does not get a handle it cannot use. */
+static void api_socket(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT32  i;
+
+  if (t == NULL) {
+    api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+    return;
+  }
+  if ((UINT32)f->rdi != WSA_AF_INET) {
+    api_socket_fail(f, WSAEAFNOSUPPORT, (UINT64)-1);
+    return;
+  }
+  if ((UINT32)f->rdx != WSA_SOCK_STREAM) {
+    api_socket_fail(f, WSAEPROTOTYPE, (UINT64)-1);
+    return;
+  }
+  for (i = 0; i < WIN32_MAX_SOCKETS; i++) {
+    if (!g_sock[i].used) {
+      g_sock[i].used = 1u;
+      g_sock[i].connected = 0u;
+      g_sock[i].owner = t->pid;
+      g_sock[i].ip = 0u;
+      g_sock[i].port = 0u;
+      t->win32_last_error = 0u;
+      f->rax = (UINT64)(WIN32_SOCK_BASE | i);
+      return;
+    }
+  }
+  api_socket_fail(f, WSAENOBUFS, (UINT64)-1);
+}
+
+/* connect(s, name, namelen): sockaddr_in is 16 bytes, port and address in
+ * network order. The engine reports "no link" by refusing to open, which is
+ * the only honest answer while no device is up; a handshake that never
+ * completes is a timeout. */
+static void api_connect(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+  UINT8         sa[16];
+  UINT32        i;
+  int           rc;
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (f->r8 < 16u || user_copy(t->cr3, f->rdx, sa, sizeof(sa), 0) != 0) {
+    api_socket_fail(f, WSAEINVAL, (UINT64)-1);
+    return;
+  }
+  {
+    UINT16 fam;
+    UINT16 port;
+    UINT32 addr;
+
+    memcpy(&fam, sa, 2);
+    memcpy(&port, sa + 2, 2);
+    memcpy(&addr, sa + 4, 4);
+    if (fam != WSA_AF_INET) {
+      api_socket_fail(f, WSAEAFNOSUPPORT, (UINT64)-1);
+      return;
+    }
+    port = be16(port);
+    addr = be32(addr);
+    if (s->connected != 0u) {
+      api_socket_fail(f, WSAEISCONN, (UINT64)-1);
+      return;
+    }
+    /* One engine, one connection: a second live socket is refused rather
+     * than handed a share of a connection it would corrupt. */
+    for (i = 0; i < WIN32_MAX_SOCKETS; i++) {
+      if (g_sock[i].used && g_sock[i].connected != 0u && &g_sock[i] != s) {
+        api_socket_fail(f, WSAENOBUFS, (UINT64)-1);
+        return;
+      }
+    }
+    rc = net_tcp_open(addr, port, 0, 0);
+    if (rc != 0) {
+      api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+      return;
+    }
+    s->ip = addr;
+    s->port = port;
+    /* Bounded wait: the engine ticks from the scheduler, so parking the
+     * caller lets the handshake progress. 80 x 50 ms is the same budget the
+     * engine gives its own retries. */
+    for (i = 0; i < 80u; i++) {
+      if (net_tcp_phase() == NET_TCP_OPEN) {
+        break;
+      }
+      if (net_tcp_phase() == NET_TCP_FAIL || net_tcp_phase() == NET_TCP_IDLE) {
+        break;
+      }
+      sched_park(WIN32_SLEEP_PORT, 5);
+    }
+    if (net_tcp_phase() == NET_TCP_OPEN) {
+      s->connected = 1u;
+      t->win32_last_error = 0u;
+      f->rax = 0u;
+      return;
+    }
+    net_tcp_close();
+    s->connected = 0u;
+    api_socket_fail(f, WSAETIMEDOUT, (UINT64)-1);
+  }
+}
+
+/* send(s, buf, len, flags): the engine segments internally, but the user
+ * buffer is copied in windows so a long write never needs a kernel buffer
+ * of the caller's size. */
+static void api_send(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+  UINT8         chunk[256];
+  UINT64        off = 0u;
+  UINT32        len = (UINT32)f->r8;
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (s->connected == 0u) {
+    api_socket_fail(f, WSAENOTCONN, (UINT64)-1);
+    return;
+  }
+  if ((UINT32)f->r9 != 0u) {
+    api_socket_fail(f, WSAEOPNOTSUPP, (UINT64)-1);
+    return;
+  }
+  while (off < (UINT64)len) {
+    UINT32 take = len - (UINT32)off;
+
+    if (take > sizeof(chunk)) {
+      take = (UINT32)sizeof(chunk);
+    }
+    if (user_copy(t->cr3, f->rdx + off, chunk, take, 0) != 0) {
+      api_socket_fail(f, WSAEINVAL, (UINT64)-1);
+      return;
+    }
+    if (net_tcp_send(chunk, take) != 0) {
+      s->connected = 0u;
+      api_socket_fail(f, WSAENOTCONN, (UINT64)-1);
+      return;
+    }
+    off += take;
+  }
+  t->win32_last_error = 0u;
+  f->rax = (UINT64)len;
+}
+
+/* recv(s, buf, len, flags): blocking is reported the way a non-blocking
+ * socket reports it, because the layer cannot sleep a task inside a syscall
+ * that is already parked. A caller that wants to wait loops on WSAEWOULDBLOCK,
+ * which is what a Winsock program with FIONBIO already does. */
+static void api_recv(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+  UINT32        avail;
+  UINT32        n;
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (s->connected == 0u) {
+    api_socket_fail(f, WSAENOTCONN, (UINT64)-1);
+    return;
+  }
+  avail = net_tcp_rx_len();
+  if (avail == 0u) {
+    if (net_tcp_phase() == NET_TCP_CLOSED || net_tcp_phase() == NET_TCP_FAIL) {
+      t->win32_last_error = 0u;
+      f->rax = 0u; /* orderly shutdown: zero bytes, like Windows */
+      return;
+    }
+    api_socket_fail(f, WSAEWOULDBLOCK, (UINT64)-1);
+    return;
+  }
+  n = (UINT32)f->r8;
+  if (n > avail) {
+    n = avail;
+  }
+  if (n > 256u) {
+    n = 256u;
+  }
+  if (user_copy(t->cr3, f->rdx, (void *)net_tcp_rx_data(), n, 1) != 0) {
+    api_socket_fail(f, WSAEINVAL, (UINT64)-1);
+    return;
+  }
+  net_tcp_consume(n);
+  t->win32_last_error = 0u;
+  f->rax = (UINT64)n;
 }
 
 static void api_closesocket(trap_frame_t *f) {
-  /* No socket was ever handed out, so every argument is "not a socket",
-   * including the value Windows spells INVALID_SOCKET. */
-  api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (s->connected != 0u) {
+    net_tcp_close();
+    s->connected = 0u;
+  }
+  s->used = 0u;
+  s->owner = 0u;
+  t->win32_last_error = 0u;
+  f->rax = 0u;
+}
+
+/* The calls the engine cannot honestly serve yet. */
+static void api_socket_unsupported(trap_frame_t *f) {
+  api_socket_fail(f, WSAEOPNOTSUPP, (UINT64)-1);
 }
 
 static void api_gethostbyname(trap_frame_t *f) {
@@ -6408,14 +6671,20 @@ void win32_syscall(trap_frame_t *f) {
     api_socket(f);
     return;
   case WIN32_API_CONNECT:
+    api_connect(f);
+    return;
   case WIN32_API_SEND:
+    api_send(f);
+    return;
   case WIN32_API_RECV:
+    api_recv(f);
+    return;
   case WIN32_API_BIND:
   case WIN32_API_LISTEN:
   case WIN32_API_ACCEPT:
   case WIN32_API_SELECT:
   case WIN32_API_IOCTLSOCKET:
-    api_socket_call(f);
+    api_socket_unsupported(f);
     return;
   case WIN32_API_CLOSESOCKET:
     api_closesocket(f);

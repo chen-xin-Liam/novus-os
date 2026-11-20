@@ -824,3 +824,19 @@ Windows 程序把自己的字符串、图标、对话框模板、菜单模板都
 * 老版本把字符一律追加在末尾，`Delete` / `Home` / 方向键全无效果，插入点只有"末尾"这一个位置；`insert` 现在真的能在中间插入。
 
 验证：`editdemo.exe`（窗口 62,93 起 520×300，编辑框、读取按钮各一）。实机点编辑框（插入点落在点中的位置）→ 敲 `d` `e`；`←` 两次 → 敲 `Z` 得到 `abcZde`；`Delete` 删掉后面的 `d` 得 `abcZe`；`Home` 把插入点移到 0；再敲 `xyz` `1` 得 `abcZexyz1`，串口 `[EDIT] read len=9 text=abcZexyz1` 与屏幕标签一致；两次 `Tab` 先走到按钮（竖线熄灭）再回到编辑框（竖线亮起在末尾）。
+
+## 22. `ws2_32` 的描述符层
+
+第十一块只是把 API 面接通：`socket` 一律返回 `INVALID_SOCKET`、传输调用一律 `WSAENETDOWN`。这一块把描述符真的接上内核的 TCP 引擎（`net_tcp.c`）。
+
+* 句柄是 `0x26000000 | 槽位`，进程内 4 个槽；每个槽记着所有者 pid、目标地址和是否已连接。句柄带槽位、并且校验 pid，所以别的进程手里的旧句柄只会得到 `WSAENOTSOCK`。
+* `socket(af, type, proto)`：只接受 `AF_INET` + `SOCK_STREAM`，其他族/类型返回 `WSAEAFNOSUPPORT` / `WSAEPROTOTYPE`——不给出用不了的句柄。
+* `connect(s, name, len)`：读 16 字节 `sockaddr_in`（端口与地址网络序），调 `net_tcp_open` 发起握手，然后**让调用者 park**、由调度器驱动 engine 的 tick，最多等 80 × 50 ms；成功记 `connected`，失败按原因返回 `WSAENETDOWN`（没有活动网卡或本机没地址）或 `WSAETIMEDOUT`（有链路但对端不应答）。
+* `send` 按 256 字节一段从用户空间拷进内核再交给引擎；`recv` 从引擎的接收缓冲拷出并 `consume`，没有数据时返回 `WSAEWOULDBLOCK`；对端 `FIN` 之后返回 0（有序关闭）。
+* `closesocket` 关引擎、释放槽位；对已释放的句柄返回 `WSAENOTSOCK`。
+* `WSADATA.szSystemStatus` 写的是 "one TCP connection, no listening"，`iMaxSockets` 报 1——引擎就是一条连接，报个好看的数只会骗程序去开它拿不到的 socket。
+
+**诚实边界**：引擎只有一条连接，所以第二个想连的 socket 得到 `WSAENOBUFS`（不是伪造一条连接共享）；`bind` / `listen` / `accept` / `select` / `ioctlsocket` 返回 `WSAEOPNOTSUPP`，因为引擎没有监听路径；`gethostbyname` 仍是空（DNS 解算器存在但还没接进 `HOSTENT` 的返回路径）；UDP 没有。
+
+验证：`wsdemo.exe` 在 `-net none` 的机器上跑完整个自测，`[WS] FAIL count = 0x0`、`[WS] PASS`：句柄落在 `0x26000000`、`SOCK_DGRAM` 被 `10041` 拒、`AF_UNIX` 被 `10047` 拒、未知句柄的 `connect` 得 `10038`、127.0.0.1:80 的 `connect` 得 `0x2742`(=10050，无网卡)、`send`/`recv` 在未连接句柄上得 `10057`、关一次成功再关得 `10038`、`inet_addr`/`inet_ntoa` 与动态 `GetProcAddress` 路径仍通过。
+**数据通路没有在实机上验证过**：QEMU 这轮是 `-net none`，没有网卡就没有握手可看；能证的是"API 接上了引擎、失败码说得准确"，不能证"字节真的走通了"。那需要一台有 e1000/virtio 的机器把 `net_tcp` 的握手日志打出来。
