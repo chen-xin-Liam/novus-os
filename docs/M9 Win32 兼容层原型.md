@@ -15,11 +15,12 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 * PE32+（x86-64）可执行文件加载，基址 `0x50000000`（无重定位表的镜像按其
   自身的链接基址加载）。
 * DIR64 基址重定位；按名称导入，IAT 填 thunk 地址。
-* 104 条 API（表里 105 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
+* 123 条 API（表里 124 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
   tick、`Sleep`、错误码、命令行、模块基址、注册表读写、堆与 `VirtualAlloc`、
   `user32` 窗口、消息循环、投递与定时器、坐标换算、光标位置、窗口移动、焦点、
   `gdi32` 绘制与形状、TEB / TLS、屏幕度量、字体度量、文字测量与排版（含
-  `DT_WORDBREAK` 折行），以及文件读写、目录枚举、`LoadLibrary` / `GetProcAddress`。
+  `DT_WORDBREAK` 折行），文件读写、目录枚举、`LoadLibrary` / `GetProcAddress`，
+  以及 `ws2_32` 的握手、地址转换与错误码（传输调用如实返回 `WSAENETDOWN`）。
 * 每进程独立地址空间（`vm_space`）、独立的 Win32 ABI 标记，以及 `%fs` 指向的 TEB。
 * 文件管理器 `/exe` 虚拟目录，选中后运行。
 
@@ -27,7 +28,8 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 
 * 磁盘上任意路径的 `.exe`：镜像来自内核内嵌表（`build/win32_blobs.h`）。
 * 序号导入、延迟导入、从磁盘映射真实 DLL、PE TLS 目录、多线程、SEH。
-* 菜单、对话框、控件、`ws2_32`、`crypt32`、`comctl32`、`ole32`、`shell32`。
+* 菜单、对话框、控件、`ws2_32` 的传输部分（本块只起了握手与地址转换）、
+  `crypt32`、`comctl32`、`ole32`、`shell32`。
 
 ---
 
@@ -684,6 +686,36 @@ TextOutA`。
   且行数在 2..8 之间；
 * 目视：`window.exe` 被点击后置顶、获得焦点，键入 `abcd` 以红色画在窗口里。
 
-仍未做（别当成已做）：菜单、对话框与控件、`ws2_32`、`crypt32`、`comctl32`、
-`ole32`、`shell32`、SEH、PE TLS 目录、多线程、D3D。微信 / QQ 那一层还没碰。
+仍未做（别当成已做）：菜单、对话框与控件、`ws2_32` 的传输部分、`crypt32`、
+`comctl32`、`ole32`、`shell32`、SEH、PE TLS 目录、多线程、D3D。微信 / QQ
+那一层还没碰。
+
+## 15. 第十一块：`ws2_32` 起头
+
+内核其实已经有 TCP 引擎（`net_tcp.c`）、解析器（`net_dns.c`）与 DHCP，但那套
+引擎是**一条连接**，不是描述符表；`ws2_32` 还没有描述符层可以落到它上面。所以
+这块只做**不需要连接**的那部分，剩下的如实失败，下一块才把描述符接到
+`net_tcp_*` 上：
+
+* `WSAStartup` / `WSACleanup`：握手成功，`wVersion` 与 `wHighVersion` = 0x0202，
+  `szDescription` = "Novus ws2_32"，`szSystemStatus` = "socket layer not wired"，
+  `iMaxSockets` 与 `iMaxUdpDg` 都是 0——没有描述符层，就不给一个看起来能用的数字。
+* `WSAGetLastError` / `WSASetLastError`：沿用每个任务已有的错误槽，读写一致。
+* `inet_addr` / `inet_ntoa`：真转换。`inet_addr` 逐段解析、越界与段数不足都回
+  `INADDR_NONE`（0xFFFFFFFF）；`inet_ntoa` 按网络字节序展开，文本写进 TEB 第二页
+  尾部 `+0x1700` 的 16 字节缓冲并返回该地址（Windows 用它自己的线程缓冲，这里用
+  线程块尾部，语义上是同一个东西）。
+* `socket` / `connect` / `send` / `recv` / `bind` / `listen` / `accept` / `select` /
+  `ioctlsocket`：返回失败值（`INVALID_SOCKET` 或 `SOCKET_ERROR`）并把
+  `WSAGetLastError` 置为 `WSAENETDOWN`（10050）。
+* `closesocket`：没有句柄被发放过，任何值都是 `WSAENOTSOCK`（10038）。
+* `gethostbyname`：回 0，错误 `WSAHOST_NOT_FOUND`（11001）；`getaddrinfo` 回
+  `EAI_FAIL`（-4，按 x64 符号扩展返回），`freeaddrinfo` 是空操作。
+* `LoadLibraryA("ws2_32.dll")` 现在给得出句柄，`GetProcAddress` 能解析出同名
+  thunk——动态加载和导入表走同一条路。
+
+验证：`wsdemo.exe` 在 QEMU/TCG 上 `[WS] PASS`，`FAIL count = 0x0`，29 项 `ok`：
+握手与 `WSADATA` 各字段、`inet_addr` 三个拒绝用例、`inet_ntoa` 三组往返字符串、
+`socket`/`connect`/`gethostbyname`/`closesocket` 的失败值与错误码、`WSASetLastError(0)`
+回读，以及经 `GetProcAddress` 取到的 `inet_ntoa` 指针调用结果。
 

@@ -221,6 +221,30 @@ enum {
   WIN32_API_MOVE_WINDOW,
   WIN32_API_SET_FOCUS,
   WIN32_API_GET_FOCUS,
+  /* Eleventh block: ws2_32, started honestly. This kernel has no TCP/IP
+   * stack yet, so what exists is the part that does not need one - the
+   * version handshake a program calls first, the address conversions, and
+   * error reporting - while every call that would need a transport answers
+   * WSAENETDOWN instead of inventing a connection. */
+  WIN32_API_WSA_STARTUP,
+  WIN32_API_WSA_CLEANUP,
+  WIN32_API_WSA_GET_LAST_ERROR,
+  WIN32_API_WSA_SET_LAST_ERROR,
+  WIN32_API_SOCKET,
+  WIN32_API_CONNECT,
+  WIN32_API_SEND,
+  WIN32_API_RECV,
+  WIN32_API_BIND,
+  WIN32_API_LISTEN,
+  WIN32_API_ACCEPT,
+  WIN32_API_CLOSESOCKET,
+  WIN32_API_GETHOSTBYNAME,
+  WIN32_API_GETADDRINFO,
+  WIN32_API_FREEADDRINFO,
+  WIN32_API_SELECT,
+  WIN32_API_IOCTLSOCKET,
+  WIN32_API_INET_ADDR,
+  WIN32_API_INET_NTOA,
 };
 
 typedef struct {
@@ -341,6 +365,27 @@ static const win32_api_t g_api[] = {
     {"user32.dll", "MoveWindow", WIN32_API_MOVE_WINDOW},
     {"user32.dll", "SetFocus", WIN32_API_SET_FOCUS},
     {"user32.dll", "GetFocus", WIN32_API_GET_FOCUS},
+    /* Eleventh block: ws2_32. The handshake and the conversions work; the
+     * transport calls fail, because there is no transport. */
+    {"ws2_32.dll", "WSAStartup", WIN32_API_WSA_STARTUP},
+    {"ws2_32.dll", "WSACleanup", WIN32_API_WSA_CLEANUP},
+    {"ws2_32.dll", "WSAGetLastError", WIN32_API_WSA_GET_LAST_ERROR},
+    {"ws2_32.dll", "WSASetLastError", WIN32_API_WSA_SET_LAST_ERROR},
+    {"ws2_32.dll", "socket", WIN32_API_SOCKET},
+    {"ws2_32.dll", "connect", WIN32_API_CONNECT},
+    {"ws2_32.dll", "send", WIN32_API_SEND},
+    {"ws2_32.dll", "recv", WIN32_API_RECV},
+    {"ws2_32.dll", "bind", WIN32_API_BIND},
+    {"ws2_32.dll", "listen", WIN32_API_LISTEN},
+    {"ws2_32.dll", "accept", WIN32_API_ACCEPT},
+    {"ws2_32.dll", "closesocket", WIN32_API_CLOSESOCKET},
+    {"ws2_32.dll", "gethostbyname", WIN32_API_GETHOSTBYNAME},
+    {"ws2_32.dll", "getaddrinfo", WIN32_API_GETADDRINFO},
+    {"ws2_32.dll", "freeaddrinfo", WIN32_API_FREEADDRINFO},
+    {"ws2_32.dll", "select", WIN32_API_SELECT},
+    {"ws2_32.dll", "ioctlsocket", WIN32_API_IOCTLSOCKET},
+    {"ws2_32.dll", "inet_addr", WIN32_API_INET_ADDR},
+    {"ws2_32.dll", "inet_ntoa", WIN32_API_INET_NTOA},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -2666,6 +2711,207 @@ static void api_get_focus(trap_frame_t *f) {
   f->rax = (w != NULL) ? w->hwnd : 0u;
 }
 
+/* ---- ws2_32: the socket surface ---------------------------------------- */
+
+/* The honest shape of this block: the kernel already owns a TCP engine
+ * (net_tcp.c), a resolver (net_dns.c) and DHCP, but that engine is one
+ * connection with no descriptor layer over it, so ws2_32 cannot hand a
+ * program a socket yet. What this block makes real is the part that needs
+ * no connection - the version handshake a program refuses to run without,
+ * the address conversions, and error reporting - and every transport call
+ * answers WSAENETDOWN with the failure value Windows documents, so a
+ * program takes its error path instead of holding a socket that cannot
+ * carry a byte. Wiring the descriptors onto net_tcp_* is the next block. */
+#define WSAENETDOWN       10050u
+#define WSAENOTSOCK       10038u
+#define WSAHOST_NOT_FOUND 11001u
+
+/* WSADATA is 2 + 2 + 257 + 129 + 2 + 2 + 8 = 402 bytes; the padding to the
+ * vendor pointer rounds the struct to 408 on x64. */
+#define WSA_DATA_LEN 408u
+
+/* inet_ntoa answers a pointer, so the text has to live somewhere the
+ * program can read. The TEB pages already carry the layer's scratch space
+ * (TLS slots end at +0x1680, the syscall scratch word sits there); the
+ * tail of the second page, +0x1700, is reserved for this 16-byte buffer. */
+#define WIN32_INET_NTOA_OFF 0x1700u
+
+static void wsa_fail(task_t *t, UINT32 code) {
+  if (t != NULL) {
+    t->win32_last_error = code;
+  }
+}
+
+static void api_wsa_startup(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT8   d[WSA_DATA_LEN];
+  UINT16  want = (UINT16)f->rdi;
+  UINT16  ver;
+  UINT16  high = 0x0202u;
+
+  if (t == NULL) {
+    f->rax = WSAENETDOWN;
+    return;
+  }
+  ver = (want >= 0x0202u) ? 0x0202u : want;
+  if (ver < 0x0101u) {
+    ver = 0x0101u;
+  }
+  memset(d, 0, sizeof(d));
+  memcpy(d + 0, &ver, 2);   /* wVersion */
+  memcpy(d + 2, &high, 2);  /* wHighVersion */
+  copy_text((char *)d + 4, 257, "Novus ws2_32");
+  copy_text((char *)d + 261, 129, "socket layer not wired");
+  /* iMaxSockets 0 and iMaxUdpDg 0 are the truth: no transport is open. */
+  if (f->rdx != 0u && user_copy(t->cr3, f->rdx, d, sizeof(d), 1) != 0) {
+    f->rax = WSAENETDOWN;
+    return;
+  }
+  t->win32_last_error = 0u;
+  f->rax = 0u;
+}
+
+static void api_wsa_cleanup(trap_frame_t *f) {
+  wsa_fail(sched_current(), 0u);
+  f->rax = 0u;
+}
+
+static void api_wsa_get_last_error(trap_frame_t *f) {
+  task_t *t = sched_current();
+
+  f->rax = (t != NULL) ? (UINT64)t->win32_last_error : 0u;
+}
+
+static void api_wsa_set_last_error(trap_frame_t *f) {
+  wsa_fail(sched_current(), (UINT32)f->rdi);
+  f->rax = 0u;
+}
+
+/* Every transport call lands here: the shape of the answer follows what
+ * Windows returns on failure, so a caller's error handling still works. */
+static void api_socket_fail(trap_frame_t *f, UINT32 code, UINT64 value) {
+  wsa_fail(sched_current(), code);
+  f->rax = value;
+}
+
+static void api_socket(trap_frame_t *f) {
+  api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+}
+
+static void api_socket_call(trap_frame_t *f) {
+  api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+}
+
+static void api_closesocket(trap_frame_t *f) {
+  /* No socket was ever handed out, so every argument is "not a socket",
+   * including the value Windows spells INVALID_SOCKET. */
+  api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+}
+
+static void api_gethostbyname(trap_frame_t *f) {
+  api_socket_fail(f, WSAHOST_NOT_FOUND, 0u);
+}
+
+static void api_getaddrinfo(trap_frame_t *f) {
+  /* EAI_FAIL is a negative int; returning it as x64 -4 keeps the caller's
+   * "nonzero means failure" test working. */
+  wsa_fail(sched_current(), 0u);
+  f->rax = (UINT64)(INT64)-4;
+}
+
+static void api_freeaddrinfo(trap_frame_t *f) {
+  f->rax = 0u;
+}
+
+static void inet_ntoa_text(UINT32 v, char *out) {
+  UINT32 i;
+  UINT32 n = 0;
+
+  for (i = 0; i < 4u; i++) {
+    char   tmp[4];
+    UINT32 k = 0;
+    UINT32 b = (v >> (i * 8u)) & 0xFFu;
+
+    if (b == 0u) {
+      tmp[k++] = '0';
+    }
+    while (b > 0u) {
+      tmp[k++] = (char)('0' + (b % 10u));
+      b /= 10u;
+    }
+    while (k > 0u) {
+      out[n++] = tmp[--k];
+    }
+    if (i < 3u) {
+      out[n++] = '.';
+    }
+  }
+  out[n] = '\0';
+}
+
+static UINT32 inet_addr_value(const char *s) {
+  UINT32      parts[4];
+  UINT32      i;
+  const char *p = s;
+
+  for (i = 0; i < 4u; i++) {
+    UINT32 x = 0;
+    UINT32 digits = 0;
+
+    while (*p >= '0' && *p <= '9') {
+      x = x * 10u + (UINT32)(*p - '0');
+      if (x > 255u) {
+        return 0xFFFFFFFFu;
+      }
+      p++;
+      digits++;
+    }
+    if (digits == 0u || digits > 3u) {
+      return 0xFFFFFFFFu;
+    }
+    parts[i] = x;
+    if (i < 3u) {
+      if (*p != '.') {
+        return 0xFFFFFFFFu;
+      }
+      p++;
+    }
+  }
+  if (*p != '\0') {
+    return 0xFFFFFFFFu;
+  }
+  return parts[0] | (parts[1] << 8) | (parts[2] << 16) | (parts[3] << 24);
+}
+
+static void api_inet_addr(trap_frame_t *f) {
+  task_t *t = sched_current();
+  char    s[32];
+
+  if (t == NULL || read_user_str(t->cr3, f->rdi, s, sizeof(s)) != 0) {
+    f->rax = 0xFFFFFFFFu; /* INADDR_NONE */
+    return;
+  }
+  f->rax = (UINT64)inet_addr_value(s);
+}
+
+static void api_inet_ntoa(trap_frame_t *f) {
+  task_t *t = sched_current();
+  char    s[16];
+  UINT64  dst;
+
+  if (t == NULL || t->teb_va == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  inet_ntoa_text((UINT32)f->rdi, s);
+  dst = t->teb_va + WIN32_INET_NTOA_OFF;
+  if (user_copy(t->cr3, dst, s, sizeof(s), 1) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = dst;
+}
+
 static void api_get_window_text(trap_frame_t *f) {
   task_t      *t = sched_current();
   win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
@@ -3757,7 +4003,7 @@ static void api_load_library(trap_frame_t *f) {
   char    name[32];
   UINT32  i;
   static const char *known[] = {"kernel32.dll", "user32.dll", "gdi32.dll",
-                                "advapi32.dll"};
+                                "advapi32.dll", "ws2_32.dll"};
 
   if (t == NULL || read_user_str(t->cr3, f->rdi, name, sizeof(name)) != 0) {
     f->rax = 0u;
@@ -3789,14 +4035,14 @@ static void api_get_proc_address(trap_frame_t *f) {
     return;
   }
   d = ((UINT32)f->rdi & 0xFFu);
-  if (d == 0u || d > 4u) {
+  if (d == 0u || d > 5u) {
     t->win32_last_error = 127u; /* ERROR_PROC_NOT_FOUND */
     f->rax = 0u;
     return;
   }
   {
     static const char *known[] = {"kernel32.dll", "user32.dll", "gdi32.dll",
-                                  "advapi32.dll"};
+                                  "advapi32.dll", "ws2_32.dll"};
     copy_text(dll, sizeof(dll), known[d - 1u]);
   }
   for (i = 0; i < sizeof(fn) - 1u && name[i] != '\0'; i++) {
@@ -4368,6 +4614,49 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_GET_FOCUS:
     api_get_focus(f);
+    return;
+  case WIN32_API_WSA_STARTUP:
+    api_wsa_startup(f);
+    return;
+  case WIN32_API_WSA_CLEANUP:
+    api_wsa_cleanup(f);
+    return;
+  case WIN32_API_WSA_GET_LAST_ERROR:
+    api_wsa_get_last_error(f);
+    return;
+  case WIN32_API_WSA_SET_LAST_ERROR:
+    api_wsa_set_last_error(f);
+    return;
+  case WIN32_API_SOCKET:
+    api_socket(f);
+    return;
+  case WIN32_API_CONNECT:
+  case WIN32_API_SEND:
+  case WIN32_API_RECV:
+  case WIN32_API_BIND:
+  case WIN32_API_LISTEN:
+  case WIN32_API_ACCEPT:
+  case WIN32_API_SELECT:
+  case WIN32_API_IOCTLSOCKET:
+    api_socket_call(f);
+    return;
+  case WIN32_API_CLOSESOCKET:
+    api_closesocket(f);
+    return;
+  case WIN32_API_GETHOSTBYNAME:
+    api_gethostbyname(f);
+    return;
+  case WIN32_API_GETADDRINFO:
+    api_getaddrinfo(f);
+    return;
+  case WIN32_API_FREEADDRINFO:
+    api_freeaddrinfo(f);
+    return;
+  case WIN32_API_INET_ADDR:
+    api_inet_addr(f);
+    return;
+  case WIN32_API_INET_NTOA:
+    api_inet_ntoa(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;

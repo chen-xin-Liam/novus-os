@@ -168,6 +168,10 @@ static const app_t g_win32[] = {
      * a file, reads it back, enumerates the directory, deletes it, and asks
      * for the three built-in DLLs. */
     {"fileio.exe", k_app_fileio_exe, &k_app_fileio_exe_len},
+    /* Console self-test for the socket surface: the ws2_32 handshake, the
+     * address conversions, and the honest failure a transport call gets
+     * while the kernel has no network stack. */
+    {"wsdemo.exe", k_app_wsdemo_exe, &k_app_wsdemo_exe_len},
 };
 
 UINT32 apps_win32_count(void) {
