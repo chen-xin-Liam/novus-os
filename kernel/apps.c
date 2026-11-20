@@ -172,6 +172,10 @@ static const app_t g_win32[] = {
      * address conversions, and the honest failure a transport call gets
      * while the kernel has no network stack. */
     {"wsdemo.exe", k_app_wsdemo_exe, &k_app_wsdemo_exe_len},
+    /* Dialog controls: a window with STATIC, BUTTON and EDIT children, the
+     * click path into WM_COMMAND and typing into an edit. */
+    {"ctrldemo.exe", k_app_ctrldemo_exe, &k_app_ctrldemo_exe_len},
+    {"menudemo.exe", k_app_menudemo_exe, &k_app_menudemo_exe_len},
 };
 
 UINT32 apps_win32_count(void) {

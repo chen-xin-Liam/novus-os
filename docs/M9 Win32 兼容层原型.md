@@ -15,11 +15,12 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 * PE32+（x86-64）可执行文件加载，基址 `0x50000000`（无重定位表的镜像按其
   自身的链接基址加载）。
 * DIR64 基址重定位；按名称导入，IAT 填 thunk 地址。
-* 123 条 API（表里 124 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
+* 125 条 API（表里 126 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
   tick、`Sleep`、错误码、命令行、模块基址、注册表读写、堆与 `VirtualAlloc`、
   `user32` 窗口、消息循环、投递与定时器、坐标换算、光标位置、窗口移动、焦点、
   `gdi32` 绘制与形状、TEB / TLS、屏幕度量、字体度量、文字测量与排版（含
   `DT_WORDBREAK` 折行），文件读写、目录枚举、`LoadLibrary` / `GetProcAddress`，
+  控件（`STATIC` / `BUTTON` / `EDIT`、`WM_COMMAND`、`GetDlgItem`）、`MessageBoxA`，
   以及 `ws2_32` 的握手、地址转换与错误码（传输调用如实返回 `WSAENETDOWN`）。
 * 每进程独立地址空间（`vm_space`）、独立的 Win32 ABI 标记，以及 `%fs` 指向的 TEB。
 * 文件管理器 `/exe` 虚拟目录，选中后运行。
@@ -28,7 +29,7 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 
 * 磁盘上任意路径的 `.exe`：镜像来自内核内嵌表（`build/win32_blobs.h`）。
 * 序号导入、延迟导入、从磁盘映射真实 DLL、PE TLS 目录、多线程、SEH。
-* 菜单、对话框、控件、`ws2_32` 的传输部分（本块只起了握手与地址转换）、
+* 菜单、模态对话框（`DialogBox` 与模板）、`ws2_32` 的传输部分（本块只起了握手与地址转换）、
   `crypt32`、`comctl32`、`ole32`、`shell32`。
 
 ---
@@ -686,7 +687,7 @@ TextOutA`。
   且行数在 2..8 之间；
 * 目视：`window.exe` 被点击后置顶、获得焦点，键入 `abcd` 以红色画在窗口里。
 
-仍未做（别当成已做）：菜单、对话框与控件、`ws2_32` 的传输部分、`crypt32`、
+仍未做（别当成已做）：菜单、模态对话框、`ws2_32` 的传输部分、`crypt32`、
 `comctl32`、`ole32`、`shell32`、SEH、PE TLS 目录、多线程、D3D。微信 / QQ
 那一层还没碰。
 
@@ -719,3 +720,35 @@ TextOutA`。
 `socket`/`connect`/`gethostbyname`/`closesocket` 的失败值与错误码、`WSASetLastError(0)`
 回读，以及经 `GetProcAddress` 取到的 `inet_ntoa` 指针调用结果。
 
+
+## 16. 第十二块：控件
+
+Windows 的对话框本质是"带子窗口的窗口"，所以这块先把子窗口做出来，而不是先
+做 `DialogBox` 的模板解析：没有控件，对话框只是一个空框。
+
+* `CreateWindowExA` 的类名为 `STATIC` / `BUTTON` / `EDIT`（大小写不敏感）且第 9
+  个参数（父窗）非零时，不建顶层窗口，而是在父窗里建一个子控件，句柄从
+  `0x41000000` 起按槽位编号。控件不经过 Novus-WM：它不是窗口管理器的对象，
+  只占父窗客户区里的一个矩形，与 Windows 的 child window 一致。
+* 每个控件有自己的文本缓冲（96 字节），`SetWindowTextA` / `GetWindowTextA` 对
+  控件同样有效——这也是 `WM_INITDIALOG` 里填初值的做法。
+* 绘制由父窗这一帧统一发出：`EndPaint` 之后、`nwm_owner_flush` 之前把控件矩形
+  逐个画进去。`STATIC` 不画底（透出父窗背景），`BUTTON` 圆角填充加描边、文字
+  居中，`EDIT` 白底加 1 像素边框、有插入符时画一根竖线。
+* 命中测试跳过 `STATIC`（它不接收鼠标），从最上层往下找。按下 `BUTTON` 记下
+  按压态，同一个控件上松开才发 `WM_COMMAND`：`wParam` 高 16 位是控件 id
+  （约定为 `(hwnd & 0xFF) + 1`），低 16 位是通知码 `BN_CLICKED`（0），`lParam`
+  是控件句柄。按下 `EDIT` 则把焦点交给它并画插入符。
+* 键盘：焦点在 `EDIT` 上时，字符与退格直接改它的缓冲。**这里是明说的差异**：
+  Windows 会把按键先给控件再以 `WM_CHAR` 形式投给控件的过程，这里只有父窗一个
+  过程，键消息仍投父窗，父窗看不到子控件的键盘。真正的 `SetFocus` 到子控件、
+  控件自绘的 `WM_PAINT`，要等子窗口有自己的过程时才能对齐。
+* `GetDlgItem(parent, id)`：按 id 反查子控件句柄，校验父窗归属。
+
+验证：`ctrldemo.exe` 建 520×300 窗口加三个控件，控制台断言
+`RegisterClassExA`、三个句柄非零且互异、`GetDlgItem(hwnd, 2)` 等于按钮句柄、
+控件上的文本往返；画面上点按钮后标签变成 `btn #1`，在编辑框里键入字符可见。
+
+仍未做：菜单（`CreateMenu` / `AppendMenu` / 菜单栏由谁画还没定，见下）、
+`DialogBox` 与 `DLGTEMPLATE`、`SendMessage` 的同步语义、子控件自己的窗口过程、
+`comctl32` 的通用控件。

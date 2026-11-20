@@ -245,6 +245,22 @@ enum {
   WIN32_API_IOCTLSOCKET,
   WIN32_API_INET_ADDR,
   WIN32_API_INET_NTOA,
+  /* Twelfth block: controls. A dialog is a window with STATIC, BUTTON and
+   * EDIT children; these are the calls that reach them. */
+  WIN32_API_GET_DLG_ITEM,
+  /* Thirteenth block: the modal box. It is the layer's own window, so it
+   * exercises the controls without needing a dialog template. */
+  WIN32_API_MESSAGE_BOX,
+  /* Fourteenth block: menus. The bar is the layer's furniture drawn over the
+   * client's top strip, and a click in it becomes WM_COMMAND. */
+  WIN32_API_CREATE_MENU,
+  WIN32_API_CREATE_POPUP_MENU,
+  WIN32_API_APPEND_MENU,
+  WIN32_API_GET_MENU_ITEM_COUNT,
+  WIN32_API_SET_MENU,
+  WIN32_API_GET_MENU,
+  WIN32_API_DESTROY_MENU,
+  WIN32_API_DRAW_MENU_BAR,
 };
 
 typedef struct {
@@ -386,6 +402,16 @@ static const win32_api_t g_api[] = {
     {"ws2_32.dll", "ioctlsocket", WIN32_API_IOCTLSOCKET},
     {"ws2_32.dll", "inet_addr", WIN32_API_INET_ADDR},
     {"ws2_32.dll", "inet_ntoa", WIN32_API_INET_NTOA},
+    {"user32.dll", "GetDlgItem", WIN32_API_GET_DLG_ITEM},
+    {"user32.dll", "MessageBoxA", WIN32_API_MESSAGE_BOX},
+    {"user32.dll", "CreateMenu", WIN32_API_CREATE_MENU},
+    {"user32.dll", "CreatePopupMenu", WIN32_API_CREATE_POPUP_MENU},
+    {"user32.dll", "AppendMenuA", WIN32_API_APPEND_MENU},
+    {"user32.dll", "GetMenuItemCount", WIN32_API_GET_MENU_ITEM_COUNT},
+    {"user32.dll", "SetMenu", WIN32_API_SET_MENU},
+    {"user32.dll", "GetMenu", WIN32_API_GET_MENU},
+    {"user32.dll", "DestroyMenu", WIN32_API_DESTROY_MENU},
+    {"user32.dll", "DrawMenuBar", WIN32_API_DRAW_MENU_BAR},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -1288,6 +1314,53 @@ static void api_set_filter(trap_frame_t *f) {
 #define WM_LBUTTONUP  0x0202u
 #define WM_TIMER      0x0113u
 #define WM_ERASEBKGND 0x0014u
+#define WM_COMMAND    0x0111u
+
+/* Control notification codes, the ones a button posts to its parent. */
+#define BN_CLICKED    0u
+
+/* Child controls. They are not compositor windows: a control is a small
+ * record the layer draws at the end of its parent's paint and hit-tests
+ * during its parent's mouse messages, which is what Windows does behind
+ * CreateWindowExA("BUTTON", ...) anyway. The handle carries its own base so
+ * a program can tell a control from a top-level window by the high bits. */
+#define WIN32_GUI_MAX_CHILDREN 8u
+#define WIN32_CHILD_HWND_BASE  0x41000000u
+#define WIN32_CHILD_STATIC     1u
+#define WIN32_CHILD_BUTTON     2u
+#define WIN32_CHILD_EDIT       3u
+#define WIN32_CHILD_TEXT_MAX   96u
+
+/* MessageBoxA. The ids it returns are the ones Windows uses, and the button
+ * sets it knows are the three a message box is actually asked for. */
+#define WIN32_MB_OK       0x00000000u
+#define WIN32_MB_OKCANCEL 0x00000001u
+#define WIN32_MB_YESNO    0x00000004u
+#define WIN32_IDOK        1u
+#define WIN32_IDCANCEL    2u
+#define WIN32_IDYES       6u
+#define WIN32_IDNO        7u
+#define WIN32_MSGBOX_MAX_LINES 4u
+#define WIN32_MSGBOX_LINE_H    16
+
+/* Menus. A menu is a small table of items owned by the layer, attached to a
+ * window and drawn as a strip along the top of its client area. Windows puts
+ * the bar in the non-client area; this compositor has no menu strip of its
+ * own yet, so the bar covers the top WIN32_MENU_BAR_H pixels of the client
+ * and the layer takes the clicks in that band before the program sees them.
+ * That is a visible difference, not a hidden one. */
+#define WIN32_GUI_MAX_MENUS     4u
+#define WIN32_GUI_MAX_MENU_ITEMS 8u
+#define WIN32_MENU_HANDLE_BASE  0x24000000u
+#define WIN32_MENU_TEXT_MAX     24u
+#define WIN32_MENU_BAR_H        20
+#define WIN32_MENU_ITEM_H       18
+#define WIN32_MENU_POPUP_W      140
+#define WIN32_MENU_POPUP_PAD    4
+#define MF_SEPARATOR 0x00000800u
+#define MF_CHECKED   0x00000008u
+#define MF_DISABLED  0x00000002u
+#define MF_GRAYED    0x00000001u
 
 #define WIN32_ERROR_INVALID_HANDLE 6u
 #define WIN32_ERROR_INVALID_PARAM  87u
@@ -1323,7 +1396,39 @@ typedef struct {
   UINT8  dirty;   /* InvalidateRect asked for a repaint */
   char   title[NWM_TITLE_MAX];
   UINT64 userdata; /* SetWindowLongPtrA(GWLP_USERDATA) */
+  /* The menu attached with SetMenu, and the popup the user has open. The
+   * popup is a state the layer keeps, not a separate window. */
+  UINT32 menu;
+  UINT8  menu_open;
+  UINT8  menu_open_idx;
 } win32_wnd_t;
+
+typedef struct {
+  UINT8  used;
+  UINT32 hwnd;
+  UINT32 parent;   /* the top-level window this control belongs to */
+  UINT8  kind;     /* WIN32_CHILD_STATIC / _BUTTON / _EDIT */
+  UINT8  pressed;  /* button: the pointer is down inside it */
+  UINT8  caret;    /* edit: draw the insertion bar */
+  INT32  x, y, w, h;
+  char   text[WIN32_CHILD_TEXT_MAX];
+} win32_child_t;
+
+typedef struct {
+  UINT8 used;
+  UINT32 id;      /* the id WM_COMMAND carries, for a real item */
+  UINT32 sub;     /* MF_POPUP: the menu this bar item drops down */
+  UINT8 sep;      /* separator: a line, not a command */
+  UINT8 checked;
+  UINT8 disabled;
+  char  text[WIN32_MENU_TEXT_MAX];
+} win32_mitem_t;
+
+typedef struct {
+  UINT8         used;
+  UINT8         n;    /* how many items have been appended */
+  win32_mitem_t item[WIN32_GUI_MAX_MENU_ITEMS];
+} win32_menu_t;
 
 typedef struct {
   UINT8       used;
@@ -1332,12 +1437,22 @@ typedef struct {
   UINT32      nclass;
   win32_class_t cls[WIN32_GUI_MAX_CLASSES];
   win32_wnd_t wnd[WIN32_GUI_MAX_WINDOWS];
+  win32_child_t kid[WIN32_GUI_MAX_CHILDREN];
+  win32_menu_t  menu[WIN32_GUI_MAX_MENUS];
+  UINT32      focus_child; /* the control that owns typing, 0 = the window */
   win32_msg_t q[WIN32_GUI_MSGQ];
   UINT32      qh, qn;
   UINT8       quit_pending;
   UINT32      quit_code;
   UINT32      paint_hwnd;
   UINT32      focus_hwnd; /* the window the WM is routing keys to */
+  /* A message box: the layer's own modal window, no class and no procedure.
+   * While it is up the program is parked inside MessageBoxA, so its events
+   * are settled here rather than handed to a window procedure. */
+  UINT32      msgbox_hwnd;
+  UINT32      msgbox_result; /* 0 = still open, else the id to return */
+  UINT32      msgbox_owner;  /* the window that asked, for centring */
+  UINT32      msgbox_type;   /* MB_OK / MB_OKCANCEL / MB_YESNO */
   UINT32      text_rgb;
   UINT32      bk_ref;   /* SetBkColor, kept as COLORREF */
   UINT8       bk_mode;  /* 1 = TRANSPARENT, 2 = OPAQUE */
@@ -1549,6 +1664,20 @@ static void gui_flush_dirty(win32_gui_t *gu) {
 }
 
 /* Drain the owner's inbox and translate WM events into WM_* messages. */
+static win32_child_t *gui_child(win32_gui_t *gu, UINT32 hwnd);
+static win32_child_t *gui_child_new(win32_gui_t *gu, UINT32 parent,
+                                    UINT8 kind, INT32 x, INT32 y, INT32 w,
+                                    INT32 h);
+static win32_child_t *gui_child_hit(win32_gui_t *gu, UINT32 parent, INT32 x,
+                                    INT32 y);
+static INT32 measure_text(const char *s, UINT32 len, INT32 extra);
+/* A message box has no class and no procedure: its events are handled by the
+ * layer, so the translator needs these before the drawing helpers exist. */
+static void msgbox_paint(task_t *t, win32_gui_t *gu, win32_wnd_t *w);
+static int  msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
+                         const ipc_msg_t *m);
+static int  gui_menu_click(task_t *t, win32_gui_t *gu, win32_wnd_t *w, INT32 x,
+                           INT32 y, int down);
 /* Translate one delivered message into a queued WM_* message. */
 static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
   ipc_msg_t m = *msg;
@@ -1573,6 +1702,13 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
       kputs_hex(win);
       kputs("\n");
     }
+    return;
+  }
+  /* The message box is the layer's own window, so it takes its events here:
+   * a click on one of its buttons settles the result and there is no
+   * procedure to call. */
+  if (gu->msgbox_hwnd != 0u && hwnd == gu->msgbox_hwnd) {
+    (void)msgbox_event(t, gu, hwnd, &m);
     return;
   }
   switch (m.hdr.type) {
@@ -1601,6 +1737,38 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
        * way to tell "the WM routed the key elsewhere" apart from "the
        * program ignored it". */
       kputs("[WIN32] key event reached the layer\n");
+      /* An edit control with the caret eats the text before the parent's
+       * procedure sees it. Windows sends the key to the control and lets it
+       * post its own WM_CHAR; this layer keeps one procedure per window, so
+       * the buffer is edited here and the key messages still go to the
+       * parent, which is where a program's accelerator handling lives. */
+      {
+        win32_child_t *ec = gui_child(gu, gu->focus_child);
+
+        if (ec != NULL && ec->kind == WIN32_CHILD_EDIT && ec->parent == hwnd) {
+          UINT32 n = 0;
+
+          while (n + 1u < WIN32_CHILD_TEXT_MAX && ec->text[n] != '\0') {
+            n++;
+          }
+          if (k.key < ND_KEY_BASE && (k.key == 8u || k.key == 0x7Fu)) {
+            if (n > 0u) {
+              ec->text[n - 1u] = '\0';
+            }
+          } else if (k.key >= 0x20u && k.key < 0x7Fu &&
+                     n + 1u < WIN32_CHILD_TEXT_MAX) {
+            ec->text[n] = (char)k.key;
+            ec->text[n + 1u] = '\0';
+          }
+          {
+            win32_wnd_t *pw = gui_window(gu, hwnd);
+
+            if (pw != NULL) {
+              pw->dirty = 1u;
+            }
+          }
+        }
+      }
       if (k.key >= ND_KEY_BASE) {
         UINT32 vk = vk_for_special(k.key - ND_KEY_BASE);
 
@@ -1664,7 +1832,9 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
     nwm_ev_mouse_t mm;
 
     if (m.hdr.len >= sizeof(mm)) {
-      UINT32 msg = WM_MOUSEMOVE;
+      UINT32         msg = WM_MOUSEMOVE;
+      UINT64         lp;
+      win32_child_t *hit;
 
       memcpy(&mm, m.payload, sizeof(mm));
       if (mm.type == ND_EV_MOUSE_DOWN) {
@@ -1672,8 +1842,66 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
       } else if (mm.type == ND_EV_MOUSE_UP) {
         msg = WM_LBUTTONUP;
       }
-      gui_push(gu, hwnd, msg, 0,
-               (UINT64)(UINT32)mm.x | ((UINT64)(UINT32)mm.y << 16));
+      lp = (UINT64)(UINT32)mm.x | ((UINT64)(UINT32)mm.y << 16);
+      /* The menu strip and its popup belong to the layer: a click there is
+       * consumed here and either opens a menu or turns into WM_COMMAND, and
+       * the program never sees the raw mouse message. */
+      {
+        win32_wnd_t *mw = gui_window(gu, hwnd);
+
+        if (mw != NULL && mw->menu != 0u &&
+            gui_menu_click(t, gu, mw, mm.x, mm.y,
+                           (mm.type == ND_EV_MOUSE_DOWN) ? 1 : 0)) {
+          break;
+        }
+      }
+      /* Controls take the click the way Windows gives it to them: a press
+       * inside a button puts it in and marks the parent dirty, a release
+       * inside the same button takes it out and posts WM_COMMAND, and an
+       * edit keeps the caret once it has been clicked. */
+      hit = gui_child_hit(gu, hwnd, mm.x, mm.y);
+      if (msg == WM_LBUTTONDOWN) {
+        if (hit != NULL && hit->kind == WIN32_CHILD_BUTTON) {
+          hit->pressed = 1u;
+        }
+        if (hit != NULL && hit->kind == WIN32_CHILD_EDIT) {
+          gu->focus_child = hit->hwnd;
+          hit->caret = 1u;
+        } else if (hit == NULL && gu->focus_child != 0u) {
+          win32_child_t *old = gui_child(gu, gu->focus_child);
+
+          if (old != NULL) {
+            old->caret = 0u;
+          }
+          gu->focus_child = 0u;
+        }
+      } else if (msg == WM_LBUTTONUP) {
+        UINT32 i;
+
+        for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+          win32_child_t *c = &gu->kid[i];
+
+          if (!c->used || !c->pressed) {
+            continue;
+          }
+          c->pressed = 0u;
+          if (c == hit) {
+            /* wParam carries the notification the way Windows packs it:
+             * control id in the high word, BN_CLICKED in the low one. */
+            UINT64 wp = (UINT64)(((c->hwnd & 0xFFu) + 1u) << 16);
+
+            gui_push(gu, hwnd, WM_COMMAND, wp, (UINT64)c->hwnd);
+          }
+        }
+      }
+      {
+        win32_wnd_t *pw = gui_window(gu, hwnd);
+
+        if (pw != NULL) {
+          pw->dirty = 1u; /* pressed state or caret moved */
+        }
+      }
+      gui_push(gu, hwnd, msg, 0, lp);
     }
     break;
   }
@@ -1846,6 +2074,50 @@ static void api_create_window(trap_frame_t *f) {
     f->rax = 0u;
     return;
   }
+  /* CreateWindowExA with a system class name makes a control, not a
+   * compositor window. STATIC, BUTTON and EDIT are the three every dialog
+   * is built out of, and the layer draws them into the parent's frame. */
+  {
+    UINT8  kind = 0;
+    UINT64 parent = 0;
+
+    if (ci_equal(cls, "STATIC")) {
+      kind = WIN32_CHILD_STATIC;
+    } else if (ci_equal(cls, "BUTTON")) {
+      kind = WIN32_CHILD_BUTTON;
+    } else if (ci_equal(cls, "EDIT")) {
+      kind = WIN32_CHILD_EDIT;
+    }
+    if (kind != 0u) {
+      char           ctext[WIN32_CHILD_TEXT_MAX];
+      win32_child_t *k;
+      win32_wnd_t   *pw;
+
+      if (stack_arg(f, t, 9u, &parent) != 0 || parent == 0u ||
+          gui_window(gu, (UINT32)parent) == NULL) {
+        t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
+        f->rax = 0u;
+        return;
+      }
+      k = gui_child_new(gu, (UINT32)parent, kind, (INT32)x, (INT32)y,
+                        (INT32)w, (INT32)h);
+      if (k == NULL) {
+        t->win32_last_error = 0x00000417u; /* ERROR_TOO_MANY_CONTROLS */
+        f->rax = 0u;
+        return;
+      }
+      memset(ctext, 0, sizeof(ctext));
+      (void)read_user_str(t->cr3, f->r8, ctext, sizeof(ctext));
+      copy_text(k->text, sizeof(k->text), ctext);
+      pw = gui_window(gu, (UINT32)parent);
+      if (pw != NULL) {
+        pw->dirty = 1u; /* the control has to appear */
+      }
+      f->rax = (UINT64)k->hwnd;
+      return;
+    }
+  }
+
   for (i = 0; i < WIN32_GUI_MAX_CLASSES; i++) {
     if (gu->cls[i].used && text_equal(gu->cls[i].name, cls)) {
       c = &gu->cls[i];
@@ -1917,8 +2189,19 @@ static void api_destroy_window(trap_frame_t *f) {
   win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
 
   if (w != NULL) {
+    UINT32 i;
+
     (void)nwm_owner_destroy(t->pid, w->win);
     gui_set_wndproc(t, w->hwnd, 0u);
+    /* Controls live in the window, so they go with it. */
+    for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+      if (gu->kid[i].used && gu->kid[i].parent == w->hwnd) {
+        if (gu->focus_child == gu->kid[i].hwnd) {
+          gu->focus_child = 0u;
+        }
+        memset(&gu->kid[i], 0, sizeof(gu->kid[i]));
+      }
+    }
     memset(w, 0, sizeof(*w));
     f->rax = 1u;
     return;
@@ -2143,6 +2426,853 @@ static void api_begin_frame(trap_frame_t *f) {
   f->rax = (UINT64)w->hwnd; /* the HDC is the window, for this layer */
 }
 
+/* ---- child controls: static, button, edit ------------------------------ */
+
+static win32_child_t *gui_child(win32_gui_t *gu, UINT32 hwnd) {
+  UINT32 i;
+
+  if (gu == NULL || (hwnd & 0xFF000000u) != WIN32_CHILD_HWND_BASE) {
+    return NULL;
+  }
+  i = hwnd & 0xFFu;
+  if (i >= WIN32_GUI_MAX_CHILDREN || !gu->kid[i].used ||
+      gu->kid[i].hwnd != hwnd) {
+    return NULL;
+  }
+  return &gu->kid[i];
+}
+
+static win32_child_t *gui_child_new(win32_gui_t *gu, UINT32 parent,
+                                    UINT8 kind, INT32 x, INT32 y, INT32 w,
+                                    INT32 h) {
+  UINT32 i;
+
+  for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+    win32_child_t *c;
+
+    if (gu->kid[i].used) {
+      continue;
+    }
+    c = &gu->kid[i];
+    memset(c, 0, sizeof(*c));
+    c->used = 1u;
+    c->kind = kind;
+    c->parent = parent;
+    c->hwnd = WIN32_CHILD_HWND_BASE | i;
+    c->x = x;
+    c->y = y;
+    c->w = w;
+    c->h = h;
+    return c;
+  }
+  return NULL;
+}
+
+/* One control, drawn into the parent's display list. Everything here is a
+ * shape or a string, so a control costs the compositor nothing new: the
+ * frame a program paints and the widgets on top of it are one list. */
+static void gui_child_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w,
+                           win32_child_t *c) {
+  UINT32 len = 0;
+  INT32  ty;
+
+  while (len < WIN32_CHILD_TEXT_MAX - 1u && c->text[len] != '\0') {
+    len++;
+  }
+  ty = c->y + (c->h - 10) / 2;
+  if (ty < c->y) {
+    ty = c->y;
+  }
+  switch (c->kind) {
+  case WIN32_CHILD_STATIC:
+    if (len > 0u) {
+      (void)nwm_owner_text(t->pid, w->win, (INT16)(c->x + 4), (INT16)ty, 1u,
+                           c->text, len, 0x202020u);
+      gu->ntext++;
+    }
+    break;
+  case WIN32_CHILD_BUTTON: {
+    UINT32 bg = c->pressed ? 0xC6C6C6u : 0xE6E6E6u;
+    INT32  tw;
+
+    (void)nwm_owner_shape(t->pid, w->win, NWM_OP_ROUND_FILL, (INT16)c->x,
+                          (INT16)c->y, (INT16)c->w, (INT16)c->h, bg);
+    (void)nwm_owner_shape(t->pid, w->win, NWM_OP_ROUND_FRAME, (INT16)c->x,
+                          (INT16)c->y, (INT16)c->w, (INT16)c->h, 0x707070u);
+    gu->nshape += 2u;
+    if (len > 0u) {
+      tw = measure_text(c->text, len, 0);
+      (void)nwm_owner_text(t->pid, w->win,
+                           (INT16)(c->x + (c->w - tw) / 2), (INT16)ty, 1u,
+                           c->text, len, 0x1A1A1Au);
+      gu->ntext++;
+    }
+    break;
+  }
+  case WIN32_CHILD_EDIT: {
+    INT32 tw;
+
+    (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL, (INT16)c->x,
+                          (INT16)c->y, (INT16)c->w, (INT16)c->h, 0xFFFFFFu);
+    (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FRAME, (INT16)c->x,
+                          (INT16)c->y, (INT16)c->w, (INT16)c->h, 0x909090u);
+    gu->nshape += 2u;
+    if (len > 0u) {
+      (void)nwm_owner_text(t->pid, w->win, (INT16)(c->x + 5), (INT16)ty, 1u,
+                           c->text, len, 0x101010u);
+      gu->ntext++;
+    }
+    if (c->caret) {
+      /* The insertion bar sits after the text, which is where a real edit
+       * control keeps it while the pointer is at the end. */
+      tw = (len > 0u) ? measure_text(c->text, len, 0) : 0;
+      (void)nwm_owner_shape(t->pid, w->win, NWM_OP_VLINE,
+                            (INT16)(c->x + 5 + tw), (INT16)(c->y + 3), 1,
+                            (INT16)(c->h - 6), 0x303030u);
+      gu->nshape++;
+    }
+    break;
+  }
+  default:
+    break;
+  }
+}
+
+static void gui_children_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
+  UINT32 i;
+
+  for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+    if (gu->kid[i].used && gu->kid[i].parent == w->hwnd) {
+      gui_child_draw(t, gu, w, &gu->kid[i]);
+    }
+  }
+}
+
+/* The control under a client-area point, if any. Later controls win, which
+ * matches the paint order: the list draws front to back is not the same
+ * thing, so the search runs backwards over creation order. */
+static win32_child_t *gui_child_hit(win32_gui_t *gu, UINT32 parent, INT32 x,
+                                    INT32 y) {
+  UINT32 i = WIN32_GUI_MAX_CHILDREN;
+
+  while (i > 0u) {
+    win32_child_t *c;
+
+    i--;
+    c = &gu->kid[i];
+    if (!c->used || c->parent != parent || c->kind == WIN32_CHILD_STATIC) {
+      continue;
+    }
+    if (x >= c->x && x < c->x + c->w && y >= c->y && y < c->y + c->h) {
+      return c;
+    }
+  }
+  return NULL;
+}
+
+/* ---- menus ------------------------------------------------------------ */
+
+static UINT32 menu_text_len(const char *s) {
+  UINT32 n = 0;
+
+  while (s[n] != '\0' && n < WIN32_MENU_TEXT_MAX) {
+    n++;
+  }
+  return n;
+}
+
+static win32_menu_t *win32_menu(win32_gui_t *gu, UINT32 h) {
+  UINT32 i;
+
+  if (gu == NULL || (h & 0xFF000000u) != WIN32_MENU_HANDLE_BASE) {
+    return NULL;
+  }
+  i = h & 0xFFu;
+  if (i >= WIN32_GUI_MAX_MENUS || !gu->menu[i].used) {
+    return NULL;
+  }
+  return &gu->menu[i];
+}
+
+static UINT32 win32_menu_new(win32_gui_t *gu) {
+  UINT32 i;
+
+  for (i = 0; i < WIN32_GUI_MAX_MENUS; i++) {
+    if (!gu->menu[i].used) {
+      memset(&gu->menu[i], 0, sizeof(gu->menu[i]));
+      gu->menu[i].used = 1u;
+      return WIN32_MENU_HANDLE_BASE | i;
+    }
+  }
+  return 0u;
+}
+
+/* Where the n-th bar item starts and how wide it is. The same layout has to
+ * serve the drawing and the hit test, so it lives in one place. */
+static int gui_menu_bar_slot(win32_menu_t *m, UINT32 idx, INT32 *x, INT32 *w) {
+  INT32  px = 8;
+  UINT32 i;
+
+  if (m == NULL || idx >= m->n) {
+    return 0;
+  }
+  for (i = 0; i < m->n; i++) {
+    INT32 tw = measure_text(m->item[i].text,
+                            menu_text_len(m->item[i].text), 0);
+
+    if (i == idx) {
+      *x = px;
+      *w = tw + 20;
+      return 1;
+    }
+    px += tw + 20;
+  }
+  return 0;
+}
+
+static void gui_menu_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
+  win32_menu_t *bar = win32_menu(gu, w->menu);
+  UINT32        i;
+  INT32         px = 8;
+
+  if (bar == NULL || bar->n == 0u) {
+    return;
+  }
+  (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL, 0, 0, (INT16)w->w,
+                        WIN32_MENU_BAR_H, 0xEDEDEDu);
+  (void)nwm_owner_shape(t->pid, w->win, NWM_OP_HLINE, 0, WIN32_MENU_BAR_H - 1,
+                        (INT16)w->w, 1, 0xB0B0B0u);
+  gu->nshape += 2u;
+  for (i = 0; i < bar->n; i++) {
+    win32_mitem_t *it = &bar->item[i];
+    INT32          tw = measure_text(it->text,
+                                     menu_text_len(it->text), 0);
+    UINT32         bg = 0xEDEDEDu;
+
+    if (it->sep) {
+      continue;
+    }
+    if (w->menu_open && w->menu_open_idx == i) {
+      bg = 0xD8D8D8u; /* the open bar item stays pressed, as Windows shows */
+      (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL, (INT16)(px - 4), 2,
+                            (INT16)(tw + 16), WIN32_MENU_BAR_H - 4, bg);
+      gu->nshape++;
+    }
+    (void)nwm_owner_text(t->pid, w->win, (INT16)(px + 2), 4, 1u, it->text,
+                         menu_text_len(it->text),
+                         it->disabled ? 0x909090u : 0x101010u);
+    gu->ntext++;
+    px += tw + 20;
+  }
+  if (w->menu_open && w->menu_open_idx < bar->n) {
+    win32_menu_t *sub = win32_menu(gu, bar->item[w->menu_open_idx].sub);
+    INT32         sx;
+    INT32         sw;
+    INT32         sh;
+    UINT32        k;
+
+    if (sub == NULL || sub->n == 0u) {
+      return;
+    }
+    (void)gui_menu_bar_slot(bar, w->menu_open_idx, &sx, &sw);
+    sh = WIN32_MENU_POPUP_PAD * 2;
+    for (k = 0; k < sub->n; k++) {
+      sh += sub->item[k].sep ? 7 : WIN32_MENU_ITEM_H;
+    }
+    if (sx + WIN32_MENU_POPUP_W > w->w) {
+      sx = w->w - WIN32_MENU_POPUP_W;
+    }
+    if (sx < 0) {
+      sx = 0;
+    }
+    (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL, (INT16)sx,
+                          (INT16)WIN32_MENU_BAR_H, WIN32_MENU_POPUP_W,
+                          (INT16)sh, 0xFAFAFAu);
+    (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FRAME, (INT16)sx,
+                          (INT16)WIN32_MENU_BAR_H, WIN32_MENU_POPUP_W,
+                          (INT16)sh, 0x707070u);
+    gu->nshape += 2u;
+    {
+      INT32 y = WIN32_MENU_BAR_H + WIN32_MENU_POPUP_PAD;
+
+      for (k = 0; k < sub->n; k++) {
+        win32_mitem_t *it = &sub->item[k];
+
+        if (it->sep) {
+          (void)nwm_owner_shape(t->pid, w->win, NWM_OP_HLINE,
+                                (INT16)(sx + 6), (INT16)(y + 3), 
+                                WIN32_MENU_POPUP_W - 12, 1, 0xC0C0C0u);
+          gu->nshape++;
+          y += 7;
+          continue;
+        }
+        if (it->checked) {
+          (void)nwm_owner_text(t->pid, w->win, (INT16)(sx + 5),
+                               (INT16)(y + 2), 1u, "*", 1u, 0x101010u);
+          gu->ntext++;
+        }
+        (void)nwm_owner_text(t->pid, w->win, (INT16)(sx + 20),
+                             (INT16)(y + 2), 1u, it->text,
+                             menu_text_len(it->text),
+                             it->disabled ? 0xA0A0A0u : 0x101010u);
+        gu->ntext++;
+        y += WIN32_MENU_ITEM_H;
+      }
+    }
+  }
+}
+
+/* A click inside the menu strip, or inside the open popup. Returns 1 when the
+ * click belonged to the menu and the program must not see it. */
+static int gui_menu_click(task_t *t, win32_gui_t *gu, win32_wnd_t *w, INT32 x,
+                          INT32 y, int down) {
+  win32_menu_t *bar = win32_menu(gu, w->menu);
+
+  (void)t;
+  if (bar == NULL || bar->n == 0u) {
+    return 0;
+  }
+  if (y < WIN32_MENU_BAR_H) {
+    UINT32 i;
+
+    if (!down) {
+      return 1;
+    }
+    for (i = 0; i < bar->n; i++) {
+      INT32 sx;
+      INT32 sw;
+
+      if (!gui_menu_bar_slot(bar, i, &sx, &sw)) {
+        continue;
+      }
+      if (x >= sx - 4 && x < sx - 4 + sw + 8) {
+        win32_menu_t *sub = win32_menu(gu, bar->item[i].sub);
+
+        if (sub != NULL && sub->n != 0u) {
+          if (w->menu_open && w->menu_open_idx == (UINT8)i) {
+            w->menu_open = 0u;
+          } else {
+            w->menu_open = 1u;
+            w->menu_open_idx = (UINT8)i;
+          }
+          w->dirty = 1u;
+        }
+        return 1;
+      }
+    }
+    if (w->menu_open) {
+      w->menu_open = 0u;
+      w->dirty = 1u;
+    }
+    return 1;
+  }
+  if (!w->menu_open) {
+    return 0;
+  }
+  {
+    win32_menu_t *sub = win32_menu(gu, bar->item[w->menu_open_idx].sub);
+    INT32         sx;
+    INT32         sw;
+    INT32         sh;
+    UINT32        k;
+    INT32         yy;
+
+    if (sub == NULL || sub->n == 0u) {
+      w->menu_open = 0u;
+      return 0;
+    }
+    (void)gui_menu_bar_slot(bar, w->menu_open_idx, &sx, &sw);
+    sh = WIN32_MENU_POPUP_PAD * 2;
+    for (k = 0; k < sub->n; k++) {
+      sh += sub->item[k].sep ? 7 : WIN32_MENU_ITEM_H;
+    }
+    if (sx + WIN32_MENU_POPUP_W > w->w) {
+      sx = w->w - WIN32_MENU_POPUP_W;
+    }
+    if (sx < 0) {
+      sx = 0;
+    }
+    if (x < sx || x >= sx + WIN32_MENU_POPUP_W ||
+        y < WIN32_MENU_BAR_H || y >= WIN32_MENU_BAR_H + sh) {
+      /* A click outside the popup closes it, which is what Windows does. */
+      if (down) {
+        w->menu_open = 0u;
+        w->dirty = 1u;
+      }
+      return 1;
+    }
+    if (!down) {
+      return 1;
+    }
+    yy = WIN32_MENU_BAR_H + WIN32_MENU_POPUP_PAD;
+    for (k = 0; k < sub->n; k++) {
+      win32_mitem_t *it = &sub->item[k];
+      INT32          ih = it->sep ? 7 : WIN32_MENU_ITEM_H;
+
+      if (y >= yy && y < yy + ih) {
+        if (!it->sep && !it->disabled && it->id != 0u) {
+          gui_push(gu, w->hwnd, WM_COMMAND, (UINT64)it->id, 0u);
+        }
+        w->menu_open = 0u;
+        w->dirty = 1u;
+        return 1;
+      }
+      yy += ih;
+    }
+    w->menu_open = 0u;
+    w->dirty = 1u;
+    return 1;
+  }
+}
+
+/* CreateMenu and CreatePopupMenu are the same object here: a menu is a list
+ * of items, and whether it is a bar or a drop-down is decided by where it is
+ * attached. Windows keeps two constructors for the two roles. */
+static void api_create_menu(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+
+  if (gu == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = (UINT64)win32_menu_new(gu);
+}
+
+static void api_append_menu(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_gui_t  *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+  win32_menu_t *m = win32_menu(gu, (UINT32)f->rdi);
+  UINT32        flags = (UINT32)f->rdx;
+
+  if (m == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  if (m->n >= WIN32_GUI_MAX_MENU_ITEMS) {
+    f->rax = 0u; /* the menu is full; Windows would grow it */
+    return;
+  }
+  {
+    win32_mitem_t *it = &m->item[m->n];
+
+    memset(it, 0, sizeof(*it));
+    it->id = (UINT32)f->r8;
+    it->sep = ((flags & MF_SEPARATOR) != 0u) ? 1u : 0u;
+    it->checked = ((flags & MF_CHECKED) != 0u) ? 1u : 0u;
+    it->disabled = ((flags & (MF_DISABLED | MF_GRAYED)) != 0u) ? 1u : 0u;
+    if ((flags & 0x00000010u) != 0u) { /* MF_POPUP: the item opens a menu */
+      it->sub = (UINT32)f->r8;
+      it->id = 0u;
+    }
+    if (it->sep == 0u && f->r9 != 0u) {
+      char text[WIN32_MENU_TEXT_MAX];
+
+      memset(text, 0, sizeof(text));
+      (void)read_user_str(t->cr3, f->r9, text, sizeof(text));
+      copy_text(it->text, sizeof(it->text), text);
+    }
+    m->n++;
+  }
+  f->rax = 1u;
+}
+
+static void api_get_menu_item_count(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_gui_t  *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_menu_t *m = win32_menu(gu, (UINT32)f->rdi);
+
+  f->rax = (m != NULL) ? (UINT64)m->n : 0u;
+}
+
+static void api_set_menu(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+  UINT32       h = (UINT32)f->rdx;
+
+  if (w == NULL || (h != 0u && win32_menu(gu, h) == NULL)) {
+    f->rax = 0u;
+    return;
+  }
+  w->menu = h;
+  w->menu_open = 0u;
+  w->dirty = 1u;
+  f->rax = 1u;
+}
+
+static void api_get_menu(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+
+  f->rax = (w != NULL) ? (UINT64)w->menu : 0u;
+}
+
+static void api_destroy_menu(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_gui_t  *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_menu_t *m = win32_menu(gu, (UINT32)f->rdi);
+  UINT32        i;
+
+  if (m == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  /* A window that still shows this menu loses it, which keeps a destroyed
+   * handle from being drawn. Windows ties the menu's lifetime to the window;
+   * here the program owns it, so this is the explicit cleanup. */
+  for (i = 0; i < WIN32_GUI_MAX_WINDOWS; i++) {
+    if (gu->wnd[i].used && gu->wnd[i].menu == (UINT32)f->rdi) {
+      gu->wnd[i].menu = 0u;
+      gu->wnd[i].menu_open = 0u;
+      gu->wnd[i].dirty = 1u;
+    }
+  }
+  memset(m, 0, sizeof(*m));
+  f->rax = 1u;
+}
+
+static void api_draw_menu_bar(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+
+  if (w == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  w->dirty = 1u;
+  f->rax = 1u;
+}
+
+/* ---- MessageBoxA: a modal box the layer owns --------------------------- */
+
+/* The box is not a program window: it has no class and no procedure, so the
+ * frame it shows is built here instead of arriving from a WM_PAINT. That is
+ * also why its buttons are settled in msgbox_event rather than through
+ * WM_COMMAND - there is no procedure to command. */
+static void msgbox_paint(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
+  (void)nwm_owner_clear(t->pid, w->win);
+  gu->nshape = 0u;
+  gu->ntext = 0u;
+  (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL, 0, 0, (INT16)w->w,
+                        (INT16)w->h, 0xF0F0F0u);
+  gu->nshape++;
+  gui_children_draw(t, gu, w);
+  (void)nwm_owner_flush(t->pid, w->win);
+}
+
+/* Buttons in a box are numbered 1..n; the answer a click carries depends on
+ * the button set the program asked for, exactly as Windows maps them. */
+static UINT32 msgbox_button_id(win32_gui_t *gu, win32_child_t *c) {
+  UINT32 id = (UINT32)(c->hwnd & 0xFFu) + 1u;
+
+  if (gu->msgbox_type == WIN32_MB_YESNO) {
+    return (id == 1u) ? WIN32_IDYES : WIN32_IDNO;
+  }
+  return (id == 1u) ? WIN32_IDOK : WIN32_IDCANCEL;
+}
+
+static int msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
+                        const ipc_msg_t *m) {
+  win32_wnd_t *w = gui_window(gu, hwnd);
+
+  if (w == NULL) {
+    return 0;
+  }
+  if (m->hdr.type == NWM_EV_CLOSE) {
+    /* The close button is the way out that keeps the program running: the
+     * box answers Cancel/No, the same as Windows does for a single-button
+     * box closing with its X. */
+    gu->msgbox_result = WIN32_IDCANCEL;
+    return 0;
+  }
+  if (m->hdr.type != NWM_EV_MOUSE || m->hdr.len < sizeof(nwm_ev_mouse_t)) {
+    return 0;
+  }
+  {
+    nwm_ev_mouse_t mm;
+    win32_child_t *hit;
+    UINT32         i;
+    UINT32         result = 0;
+
+    memcpy(&mm, m->payload, sizeof(mm));
+    hit = gui_child_hit(gu, hwnd, mm.x, mm.y);
+    if (mm.type == ND_EV_MOUSE_DOWN) {
+      if (hit != NULL && hit->kind == WIN32_CHILD_BUTTON) {
+        hit->pressed = 1u;
+        msgbox_paint(t, gu, w);
+      }
+      return 0;
+    }
+    if (mm.type != ND_EV_MOUSE_UP) {
+      return 0;
+    }
+    for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+      win32_child_t *c = &gu->kid[i];
+
+      if (!c->used || !c->pressed || c->parent != hwnd) {
+        continue;
+      }
+      c->pressed = 0u;
+      if (c == hit) {
+        result = msgbox_button_id(gu, c);
+      }
+    }
+    msgbox_paint(t, gu, w);
+    if (result != 0u) {
+      gu->msgbox_result = result;
+    }
+  }
+  return 0;
+}
+
+/* One line of box text per STATIC, wrapped to the box width. */
+static void msgbox_split(task_t *t, const char *text, INT32 max_px,
+                         char lines[WIN32_MSGBOX_MAX_LINES][WIN32_CHILD_TEXT_MAX],
+                         UINT32 *nlines, INT32 *widest) {
+  UINT32 n = 0;
+  UINT32 len = 0;
+  UINT32 i;
+  INT32  widest_px = 0;
+
+  (void)t;
+  while (text[len] != '\0' && len + 1u < WIN32_CHILD_TEXT_MAX) {
+    len++;
+  }
+  if (len == 0u) {
+    lines[0][0] = '\0';
+    *nlines = 1u;
+    *widest = 0;
+    return;
+  }
+  while (n < WIN32_MSGBOX_MAX_LINES && len > 0u) {
+    UINT32 take = len < WIN32_CHILD_TEXT_MAX - 1u ? len : WIN32_CHILD_TEXT_MAX - 1u;
+    INT32  w;
+
+    /* Break at the last space that still fits, so a line does not end in
+     * the middle of a word. A long run with no space just takes what fits. */
+    if (n + 1u < WIN32_MSGBOX_MAX_LINES) {
+      UINT32 fit = 0;
+
+      while (fit < take) {
+        UINT32 cut = fit + 1u;
+        INT32  ww = measure_text(text + 0, cut, 0);
+
+        if (ww > max_px) {
+          break;
+        }
+        fit = cut;
+      }
+      if (fit > 0u) {
+        take = fit;
+      }
+    }
+    {
+      UINT32 skip = 0u;
+
+      /* A newline in the text is a hard break, the way a message box shows
+       * one, and the break character itself is not part of either line. */
+      for (i = 0; i < take; i++) {
+        if (text[i] == '\n' || text[i] == '\r') {
+          take = i;
+          skip = 1u;
+          break;
+        }
+      }
+      while (take > 0u && text[take - 1u] == ' ') {
+        take--;
+      }
+      for (i = 0; i < take; i++) {
+        lines[n][i] = text[i];
+      }
+      lines[n][take] = '\0';
+      w = measure_text(lines[n], take, 0);
+      if (w > widest_px) {
+        widest_px = w;
+      }
+      n++;
+      text += take + skip;
+      len -= take + skip;
+      while (len > 0u && (*text == ' ' || *text == '\r' || *text == '\n')) {
+        text++;
+        len--;
+      }
+    }
+  }
+  if (n == 0u) {
+    lines[0][0] = '\0';
+    n = 1u;
+  }
+  *nlines = n;
+  *widest = widest_px;
+}
+
+static void api_message_box(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+
+  if (gu == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  if (gu->msgbox_hwnd == 0u && gu->msgbox_result == 0u) {
+    char     text[WIN32_MSGBOX_MAX_LINES * WIN32_CHILD_TEXT_MAX];
+    char     caption[NWM_TITLE_MAX];
+    char     lines[WIN32_MSGBOX_MAX_LINES][WIN32_CHILD_TEXT_MAX];
+    UINT32   nlines = 1u;
+    INT32    widest = 0;
+    UINT32   type = (UINT32)f->r9 & 0xFu;
+    UINT32   nbtn = (type == WIN32_MB_OKCANCEL || type == WIN32_MB_YESNO) ? 2u : 1u;
+    INT32    cw;
+    INT32    ch;
+    INT32    bx;
+    INT32    by;
+    UINT32   win = 0;
+    UINT32   i;
+
+    memset(text, 0, sizeof(text));
+    memset(caption, 0, sizeof(caption));
+    (void)read_user_str(t->cr3, f->rdx, text, sizeof(text));
+    (void)read_user_str(t->cr3, f->r8, caption, sizeof(caption));
+    if (caption[0] == '\0') {
+      copy_text(caption, sizeof(caption), "Novus");
+    }
+    /* The box wraps at 320 pixels, which is the width a message box gets in
+     * Windows when the text is short. Newlines are kept as breaks. */
+    msgbox_split(t, text, 320, lines, &nlines, &widest);
+    cw = widest + 32;
+    if (cw < 200) {
+      cw = 200;
+    }
+    if (cw > 360) {
+      cw = 360;
+    }
+    ch = 28 + (INT32)nlines * WIN32_MSGBOX_LINE_H + 44;
+    {
+      const nd_display_t *d = nd_display();
+      INT32 sw = (d != NULL && d->available) ? (INT32)d->width : 1024;
+      INT32 sh = (d != NULL && d->available) ? (INT32)d->height : 768;
+
+      /* nwm_owner_create takes the frame size, which adds the caption and
+       * the border the WM draws around the client. */
+      bx = (sw - (cw + 2)) / 2;
+      by = (sh - (ch + NWM_TITLE_H + 1)) / 2;
+    }
+    if (bx < 0) {
+      bx = 0;
+    }
+    if (by < 0) {
+      by = 0;
+    }
+    if (nwm_owner_create(t->pid, caption, bx, by, cw + 2,
+                         ch + NWM_TITLE_H + 1, &win) != NWM_OK) {
+      gu->msgbox_result = WIN32_IDCANCEL;
+      f->rax = (UINT64)WIN32_IDCANCEL;
+      return;
+    }
+    {
+      win32_wnd_t *w = NULL;
+
+      for (i = 0; i < WIN32_GUI_MAX_WINDOWS; i++) {
+        if (!gu->wnd[i].used) {
+          w = &gu->wnd[i];
+          break;
+        }
+      }
+      if (w == NULL) {
+        (void)nwm_owner_destroy(t->pid, win);
+        gu->msgbox_result = WIN32_IDCANCEL;
+        f->rax = (UINT64)WIN32_IDCANCEL;
+        return;
+      }
+      memset(w, 0, sizeof(*w));
+      w->used = 1u;
+      w->hwnd = WIN32_HWND_BASE | win;
+      w->win = win;
+      w->w = cw;
+      w->h = ch;
+      w->x = bx;
+      w->y = by;
+      w->bg = 0xF0F0F0u;
+      gu->msgbox_hwnd = w->hwnd;
+      gu->msgbox_owner = (UINT32)f->rdi;
+      gu->msgbox_type = type;
+    }
+    /* One STATIC per line, then the button row. The ids are 1..n so the
+     * click handler can turn a button straight into its answer. */
+    for (i = 0; i < nlines; i++) {
+      win32_child_t *k = gui_child_new(gu, gu->msgbox_hwnd, WIN32_CHILD_STATIC,
+                                       16, 20 + (INT32)i * WIN32_MSGBOX_LINE_H,
+                                       cw - 24, WIN32_MSGBOX_LINE_H);
+
+      if (k != NULL) {
+        copy_text(k->text, sizeof(k->text), lines[i]);
+      }
+    }
+    {
+      INT32 bw = 84;
+      INT32 bh = 26;
+      INT32 total = (INT32)nbtn * bw + ((INT32)nbtn - 1) * 12;
+      INT32 rowy = ch - bh - 14;
+      INT32 startx = (cw - total) / 2;
+
+      for (i = 0; i < nbtn; i++) {
+        win32_child_t *k = gui_child_new(gu, gu->msgbox_hwnd, WIN32_CHILD_BUTTON,
+                                         startx + (INT32)i * (bw + 12), rowy, bw,
+                                         bh);
+
+        if (k == NULL) {
+          continue;
+        }
+        if (type == WIN32_MB_YESNO) {
+          copy_text(k->text, sizeof(k->text), (i == 0u) ? "Yes" : "No");
+        } else {
+          copy_text(k->text, sizeof(k->text), (i == 0u) ? "OK" : "Cancel");
+        }
+      }
+    }
+    kputs("[WIN32] msgbox: hwnd=");
+    kputs_hex(gu->msgbox_hwnd);
+    kputs(" buttons=");
+    kputs_hex(nbtn);
+    kputs("\n");
+    msgbox_paint(t, gu, gui_window(gu, gu->msgbox_hwnd));
+  }
+  if (gu->msgbox_result != 0u) {
+    /* Settled: take the box down and hand the id back, which is the one
+     * moment the program resumes. */
+    UINT32 result = gu->msgbox_result;
+    UINT32 hwnd = gu->msgbox_hwnd;
+    win32_wnd_t *w = gui_window(gu, hwnd);
+    UINT32 i;
+
+    if (w != NULL) {
+      (void)nwm_owner_destroy(t->pid, w->win);
+      for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+        if (gu->kid[i].used && gu->kid[i].parent == hwnd) {
+          memset(&gu->kid[i], 0, sizeof(gu->kid[i]));
+        }
+      }
+      memset(w, 0, sizeof(*w));
+    }
+    gu->msgbox_hwnd = 0u;
+    gu->msgbox_result = 0u;
+    gu->msgbox_owner = 0u;
+    kputs("[WIN32] msgbox: result=");
+    kputs_hex(result);
+    kputs("\n");
+    f->rax = (UINT64)result;
+    return;
+  }
+  /* Still open: park the program and replay this call, so that the box keeps
+   * the caller inside it the way a modal box does. */
+  sched_park(t->pid, WIN32_MSG_POLL_TICKS);
+  f->rax = (UINT64)SYS_WIN32;
+  f->rip -= WIN32_SYSCALL_LEN;
+}
+
 static void api_end_frame(trap_frame_t *f) {
   task_t      *t = sched_current();
   win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
@@ -2153,7 +3283,16 @@ static void api_end_frame(trap_frame_t *f) {
     return;
   }
   {
-    UINT64 rc = (UINT64)nwm_owner_flush(t->pid, w->win);
+    UINT64 rc;
+
+    /* Controls belong to the window, so they go out in the same frame the
+     * program just painted: a program that never draws its own button still
+     * gets a drawn one, which is what CreateWindowExA("BUTTON") promises. */
+    gui_children_draw(t, gu, w);
+    /* The menu is the layer's furniture, so it is drawn over whatever the
+     * program painted last, in the same frame. */
+    gui_menu_draw(t, gu, w);
+    rc = (UINT64)nwm_owner_flush(t->pid, w->win);
 
     w->painting = 0u;
     kputs("[WIN32] paint: submitted shapes=");
@@ -2615,11 +3754,33 @@ static void api_update_window(trap_frame_t *f) {
 }
 
 static void api_set_window_text(trap_frame_t *f) {
-  task_t      *t = NULL;
-  win32_gui_t *gu = NULL;
-  win32_wnd_t *w = draw_target(f, &t, &gu);
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
   char         text[NWM_TITLE_MAX];
+  win32_child_t *k;
 
+  /* A control's caption is its text, so SetWindowTextA on a BUTTON or a
+   * STATIC lands in the control's own buffer and the parent repaints. */
+  k = (w == NULL) ? gui_child(gu, (UINT32)f->rdi) : NULL;
+  if (k != NULL) {
+    char ctext[WIN32_CHILD_TEXT_MAX];
+
+    if (read_user_str(t->cr3, f->rdx, ctext, sizeof(ctext)) != 0) {
+      f->rax = 0u;
+      return;
+    }
+    copy_text(k->text, sizeof(k->text), ctext);
+    {
+      win32_wnd_t *pw = gui_window(gu, k->parent);
+
+      if (pw != NULL) {
+        pw->dirty = 1u;
+      }
+    }
+    f->rax = 1u;
+    return;
+  }
   if (w == NULL || read_user_str(t->cr3, f->rdx, text, sizeof(text)) != 0) {
     f->rax = 0u;
     return;
@@ -2823,6 +3984,26 @@ static void api_freeaddrinfo(trap_frame_t *f) {
   f->rax = 0u;
 }
 
+/* GetDlgItem(parent, id): a program names its controls by the id it passed
+ * to CreateWindowExA, and this layer hands out the index as the id, so the
+ * lookup is the index. */
+static void api_get_dlg_item(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  UINT32       i = ((UINT32)f->rdx & 0xFFFFu);
+
+  if (gu == NULL || i == 0u || i > WIN32_GUI_MAX_CHILDREN) {
+    f->rax = 0u;
+    return;
+  }
+  i--;
+  if (!gu->kid[i].used || gu->kid[i].parent != (UINT32)f->rdi) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = (UINT64)gu->kid[i].hwnd;
+}
+
 static void inet_ntoa_text(UINT32 v, char *out) {
   UINT32 i;
   UINT32 n = 0;
@@ -2916,21 +4097,30 @@ static void api_get_window_text(trap_frame_t *f) {
   task_t      *t = sched_current();
   win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
   win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+  win32_child_t *k = gui_child(gu, (UINT32)f->rdi);
   UINT32       i;
   UINT64       bytes;
+  UINT32       cap;
+  const char  *src;
 
-  if (w == NULL || f->rdx == 0u) {
+  if ((w == NULL && k == NULL) || f->rdx == 0u) {
     f->rax = 0u;
     return;
   }
+  if (k != NULL) {
+    src = k->text;
+    cap = WIN32_CHILD_TEXT_MAX;
+  } else {
+    src = w->title;
+    cap = NWM_TITLE_MAX;
+  }
   bytes = f->r8 & 0xFFFFu;
-  for (i = 0; i < NWM_TITLE_MAX && i + 1u < bytes; i++) {
-    if (w->title[i] == '\0') {
+  for (i = 0; i < cap && i + 1u < bytes; i++) {
+    if (src[i] == '\0') {
       break;
     }
   }
-  if (i != 0u &&
-      user_copy(t->cr3, f->rdx, w->title, i, 1) != 0) {
+  if (i != 0u && user_copy(t->cr3, f->rdx, (void *)src, i, 1) != 0) {
     f->rax = 0u;
     return;
   }
@@ -4657,6 +5847,34 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_INET_NTOA:
     api_inet_ntoa(f);
+    return;
+  case WIN32_API_GET_DLG_ITEM:
+    api_get_dlg_item(f);
+    return;
+  case WIN32_API_MESSAGE_BOX:
+    api_message_box(f);
+    return;
+  case WIN32_API_CREATE_MENU:
+  case WIN32_API_CREATE_POPUP_MENU:
+    api_create_menu(f);
+    return;
+  case WIN32_API_APPEND_MENU:
+    api_append_menu(f);
+    return;
+  case WIN32_API_GET_MENU_ITEM_COUNT:
+    api_get_menu_item_count(f);
+    return;
+  case WIN32_API_SET_MENU:
+    api_set_menu(f);
+    return;
+  case WIN32_API_GET_MENU:
+    api_get_menu(f);
+    return;
+  case WIN32_API_DESTROY_MENU:
+    api_destroy_menu(f);
+    return;
+  case WIN32_API_DRAW_MENU_BAR:
+    api_draw_menu_bar(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
