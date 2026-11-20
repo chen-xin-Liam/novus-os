@@ -215,6 +215,12 @@ enum {
   WIN32_API_LOAD_LIBRARY,
   WIN32_API_GET_PROC_ADDRESS,
   WIN32_API_FREE_LIBRARY,
+  /* Tenth block: the window-side semantics a program uses once it is
+   * interactive - it moves and resizes its own frame, and it takes the
+   * keyboard deliberately instead of waiting for a click. */
+  WIN32_API_MOVE_WINDOW,
+  WIN32_API_SET_FOCUS,
+  WIN32_API_GET_FOCUS,
 };
 
 typedef struct {
@@ -332,6 +338,9 @@ static const win32_api_t g_api[] = {
     {"kernel32.dll", "LoadLibraryA", WIN32_API_LOAD_LIBRARY},
     {"kernel32.dll", "GetProcAddress", WIN32_API_GET_PROC_ADDRESS},
     {"kernel32.dll", "FreeLibrary", WIN32_API_FREE_LIBRARY},
+    {"user32.dll", "MoveWindow", WIN32_API_MOVE_WINDOW},
+    {"user32.dll", "SetFocus", WIN32_API_SET_FOCUS},
+    {"user32.dll", "GetFocus", WIN32_API_GET_FOCUS},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -1206,6 +1215,11 @@ static void api_set_filter(trap_frame_t *f) {
 #define WIN32_GUI_MSGQ        16u
 #define WIN32_GUI_PENS        8u
 #define WIN32_GUI_TIMERS      4u
+/* How long a window waits on its inbox before the pump runs again, in
+ * scheduler ticks. Short enough that a message feels immediate, long enough
+ * that an idle window is not spinning. */
+#define WIN32_MSG_POLL_TICKS 5u
+
 #define WIN32_HWND_BASE       0x40000000u
 /* Frame thickness this layer assumes when it converts between client and
  * screen space: Novus-WM draws a one-pixel border and a 32-pixel caption. */
@@ -1216,6 +1230,8 @@ static void api_set_filter(trap_frame_t *f) {
 #define WM_CREATE     0x0001u
 #define WM_DESTROY    0x0002u
 #define WM_SIZE       0x0005u
+#define WM_SETFOCUS   0x0007u
+#define WM_KILLFOCUS  0x0008u
 #define WM_PAINT      0x000Fu
 #define WM_CLOSE      0x0010u
 #define WM_QUIT       0x0012u
@@ -1276,6 +1292,7 @@ typedef struct {
   UINT8       quit_pending;
   UINT32      quit_code;
   UINT32      paint_hwnd;
+  UINT32      focus_hwnd; /* the window the WM is routing keys to */
   UINT32      text_rgb;
   UINT32      bk_ref;   /* SetBkColor, kept as COLORREF */
   UINT8       bk_mode;  /* 1 = TRANSPARENT, 2 = OPAQUE */
@@ -1503,6 +1520,14 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
   }
   hwnd = gui_hwnd_for_win(gu, win);
   if (hwnd == 0u) {
+    /* A key that names a window this process does not own is the one
+     * diagnostic worth printing: it separates "the WM routed the key here
+     * and the layer dropped it" from "the WM routed it somewhere else". */
+    if (m.hdr.type == NWM_EV_KEY) {
+      kputs("[WIN32] key for an unknown window ");
+      kputs_hex(win);
+      kputs("\n");
+    }
     return;
   }
   switch (m.hdr.type) {
@@ -1555,6 +1580,22 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
     }
     break;
   }
+  case NWM_EV_FOCUS: {
+    /* The WM moved the keyboard somewhere - either because a program asked
+     * with SetFocus, or because the user clicked. Keep the layer's idea of
+     * focus in step and hand the program the pair of messages Windows would
+     * send, so a program that draws a caret reacts to a click as well. */
+    UINT32 old = gu->focus_hwnd;
+
+    if (old != 0u && old != hwnd) {
+      gui_push(gu, old, WM_KILLFOCUS, hwnd, 0);
+    }
+    gu->focus_hwnd = hwnd;
+    if (old != hwnd) {
+      gui_push(gu, hwnd, WM_SETFOCUS, old, 0);
+    }
+    break;
+  }
   case NWM_EV_RESIZE: {
     nwm_ev_resize_t r;
 
@@ -1600,7 +1641,22 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
 static void gui_pump(task_t *t, win32_gui_t *gu) {
   ipc_msg_t m;
 
-  while (ipc_try_recv(t->pid, &m) == 0) {
+  /* ipc_try_recv answers the payload length, not zero: a real event carries
+   * 24..96 bytes, so testing for == 0 drained nothing at all and every
+   * compositor event - a click, a key - sat in the inbox forever while the
+   * pump kept saying there was nothing to do. Anything but IPC_EAGAIN (or
+   * a bad port) means a message was taken off the queue. */
+  while (ipc_try_recv(t->pid, &m) >= 0) {
+    /* Anything that is not a reply is an event from the compositor, and
+     * events are rare enough that naming each one in the log is the
+     * cheapest way to see where a route drops a message. */
+    if (m.hdr.type != NWM_RSP_OK && m.hdr.type != NWM_RSP_ERR) {
+      kputs("[WIN32] ipc event type=");
+      kputs_hex(m.hdr.type);
+      kputs(" len=");
+      kputs_hex(m.hdr.len);
+      kputs("\n");
+    }
     gui_translate(t, gu, &m);
   }
 }
@@ -1776,6 +1832,13 @@ static void api_create_window(trap_frame_t *f) {
     y = (UINT64)(UINT32)ry;
   }
   hwnd = WIN32_HWND_BASE | win;
+  kputs("[WIN32] window hwnd=");
+  kputs_hex(hwnd);
+  kputs(" win=");
+  kputs_hex(win);
+  kputs(" pid=");
+  kputs_hex(t->pid);
+  kputs("\n");
   /* One window per slot, and the slot is the window id: the stub indexes
    * the table by that low nibble, so two windows must not share one. */
   for (i = 0; i < WIN32_GUI_MAX_WINDOWS; i++) {
@@ -1892,21 +1955,27 @@ static int gui_pull(trap_frame_t *f, task_t *t, win32_gui_t *gu, int wait) {
       /* Park on the inbox. A yield loop here does not work: this runs
        * inside the syscall, and yielding without ever leaving the syscall
        * starves the WM task that is supposed to produce the event, which
-       * froze the machine the first time this was tried. ipc_recv(block)
-       * parks the task properly and wakes it when a message arrives. */
+       * froze the machine the first time this was tried.
+       *
+       * The wait is bounded on purpose. An event normally wakes this task
+       * through its inbox port, but a wake that is missed would leave the
+       * window deaf for good - and that is exactly what a mis-routed key
+       * looks like from the outside. Parking with a deadline makes a
+       * missed wake cost one poll instead of a dead window. */
       {
         ipc_msg_t in;
-        int       rc = ipc_recv(t->pid, &in, 1);
+        int       rc = ipc_try_recv(t->pid, &in);
 
+        /* Same trap as gui_pump: the successful return is the payload
+         * length, so >= 0 is "message taken", not 0. */
         if (rc >= 0) {
-          gui_translate(t, gu, &in); /* take the wake-up, not just discard */
+          gui_translate(t, gu, &in); /* take the message, do not discard */
           continue;
         }
-        if (rc == IPC_ERETRY) {
-          /* The task is parked and this syscall has to run again when a
-           * message lands. Looping here instead would spin with interrupts
-           * off and stop the whole machine - which is exactly what the
-           * first version did. */
+        if (rc == IPC_EAGAIN) {
+          sched_park(t->pid, WIN32_MSG_POLL_TICKS);
+          /* Replay the syscall after the park: api_get_message rewinds the
+           * instruction pointer and puts SYS_WIN32 back in RAX. */
           return -1;
         }
         f->rax = 0u;
@@ -2515,6 +2584,88 @@ static void api_set_window_text(trap_frame_t *f) {
   f->rax = 1u;
 }
 
+/* MoveWindow(hwnd, x, y, nWidth, nHeight, repaint). Windows sizes here are
+ * the frame, title bar included, exactly what nwm_owner_create expects - so
+ * the client area a program then sees shrinks by the frame, as it does on
+ * Windows. The WM clamps a rectangle back onto the screen, which is why
+ * GetWindowRect reports the placed rectangle rather than what was asked for. */
+static void api_move_window(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+  UINT64       h64 = 0;
+  INT32        cx, cy, cw, ch;
+
+  if (w == NULL || stack_arg(f, t, 5u, &h64) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  cx = (INT32)f->rdx;
+  cy = (INT32)f->r8;
+  cw = (INT32)f->r9;
+  ch = (INT32)h64;
+  if (cw <= 0 || ch <= 0) {
+    f->rax = 0u;
+    return;
+  }
+  if (nwm_owner_move(t->pid, w->win, cx, cy) != NWM_OK ||
+      nwm_owner_resize(t->pid, w->win, cw, ch) != NWM_OK) {
+    f->rax = 0u;
+    return;
+  }
+  w->x = cx;
+  w->y = cy;
+  w->w = cw - 2;
+  w->h = ch - (INT32)NWM_TITLE_H - 1;
+  if (w->w < 1) {
+    w->w = 1;
+  }
+  if (w->h < 1) {
+    w->h = 1;
+  }
+  w->dirty = 1u;
+  f->rax = 1u;
+}
+
+/* SetFocus(hwnd) hands the keyboard to that window: the WM raises it and
+ * routes key events to it, and the program gets WM_KILLFOCUS on the window
+ * that had it before. */
+static void api_set_focus(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
+  UINT32       old;
+
+  if (w == NULL) {
+    f->rax = 0u;
+    return;
+  }
+  old = gu->focus_hwnd;
+  if (nwm_owner_focus(t->pid, w->win) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  gu->focus_hwnd = w->hwnd;
+  if (old != 0u && old != w->hwnd) {
+    gui_push(gu, old, WM_KILLFOCUS, w->hwnd, 0);
+  }
+  gui_push(gu, w->hwnd, WM_SETFOCUS, old, 0);
+  f->rax = w->hwnd;
+}
+
+static void api_get_focus(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_wnd_t *w;
+
+  if (gu == NULL || gu->focus_hwnd == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  w = gui_window(gu, gu->focus_hwnd);
+  f->rax = (w != NULL) ? w->hwnd : 0u;
+}
+
 static void api_get_window_text(trap_frame_t *f) {
   task_t      *t = sched_current();
   win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
@@ -2895,10 +3046,40 @@ static void api_get_text_face(trap_frame_t *f) {
   f->rax = n;
 }
 
-/* DrawTextA(hdc, str, count, RECT*, format). One line per '\n', aligned
- * inside the rectangle the way DT_LEFT/CENTER/RIGHT and DT_VCENTER ask.
- * Word wrapping is not implemented: a caller that passes DT_WORDBREAK with
- * no newline gets the single line it would get without the flag. */
+/* How many bytes of one text run fit into `avail` pixels: the length of the
+ * first wrapped line. A break goes at an ASCII space when one is available
+ * on that line, otherwise between characters - Chinese runs have no spaces,
+ * and a line that stops mid-word is still better than one that runs over the
+ * rectangle. */
+static UINT32 wrap_len(const char *s, UINT32 len, INT32 avail, INT32 extra) {
+  UINT32 i = 0;
+  UINT32 last_space = 0;
+
+  if (len == 0u || avail <= 0) {
+    return len;
+  }
+  while (i < len) {
+    UINT32 next = i + 1u;
+    INT32  w;
+
+    while (next < len && ((UINT8)s[next] & 0xC0u) == 0x80u) {
+      next++; /* step to the next code point */
+    }
+    w = measure_text(s, next, extra);
+    if (w > avail && i != 0u) {
+      return (last_space != 0u) ? last_space : i;
+    }
+    if ((UINT8)s[i] == ' ') {
+      last_space = next;
+    }
+    i = next;
+  }
+  return len;
+}
+
+/* DrawTextA(hdc, str, count, RECT*, format). One line per '\n', wrapped at
+ * the rectangle's width when DT_WORDBREAK is set, aligned the way
+ * DT_LEFT/CENTER/RIGHT and DT_VCENTER ask. */
 static void api_draw_text(trap_frame_t *f) {
   task_t      *t = NULL;
   win32_gui_t *gu = NULL;
@@ -2963,6 +3144,14 @@ static void api_draw_text(trap_frame_t *f) {
       while (n != 0u && (text[start + n - 1u] == '\r')) {
         n--; /* CRLF: the CR is not part of the line */
       }
+      if ((format & 0x00000010u) != 0u && n != 0u) { /* DT_WORDBREAK */
+        UINT32 cut = wrap_len(text + start, n, rect[2] - rect[0], gu->char_extra);
+
+        if (cut != 0u && cut < n) {
+          n = cut;
+          i = start + cut; /* the rest of the run becomes the next line */
+        }
+      }
       width = measure_text(text + start, n, gu->char_extra);
       if ((format & 0x00000001u) != 0u) {          /* DT_CENTER */
         x = rect[0] + (rect[2] - rect[0] - width) / 2;
@@ -2976,8 +3165,13 @@ static void api_draw_text(trap_frame_t *f) {
       }
       y += 20;
       line++;
-      if (i < len) {
+      if (i < len && text[i] == '\n') {
         i++; /* step over the '\n' */
+      }
+      /* A wrapped line usually breaks at a space; do not start the next
+       * line with the space the break left behind. */
+      while (i < len && text[i] == ' ') {
+        i++;
       }
     }
   }
@@ -4165,6 +4359,15 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_FREE_LIBRARY:
     api_free_library(f);
+    return;
+  case WIN32_API_MOVE_WINDOW:
+    api_move_window(f);
+    return;
+  case WIN32_API_SET_FOCUS:
+    api_set_focus(f);
+    return;
+  case WIN32_API_GET_FOCUS:
+    api_get_focus(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;

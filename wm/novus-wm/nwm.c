@@ -1939,6 +1939,34 @@ int nwm_owner_title(UINT64 owner, UINT32 win, const char *title) {
   return nwm_kernel_request(owner, NWM_REQ_TITLE, &t, sizeof(t), 0);
 }
 
+int nwm_owner_move(UINT64 owner, UINT32 win, INT32 x, INT32 y) {
+  nwm_move_t m;
+
+  memset(&m, 0, sizeof(m));
+  m.win = win;
+  m.x = x;
+  m.y = y;
+  return nwm_kernel_request(owner, NWM_REQ_MOVE, &m, sizeof(m), 0);
+}
+
+int nwm_owner_resize(UINT64 owner, UINT32 win, INT32 w, INT32 h) {
+  nwm_resize_t r;
+
+  memset(&r, 0, sizeof(r));
+  r.win = win;
+  r.w = w;
+  r.h = h;
+  return nwm_kernel_request(owner, NWM_REQ_RESIZE, &r, sizeof(r), 0);
+}
+
+int nwm_owner_focus(UINT64 owner, UINT32 win) {
+  nwm_win_t r;
+
+  (void)owner;
+  r.win = win;
+  return nwm_kernel_request(owner, NWM_REQ_FOCUS, &r, sizeof(r), 0);
+}
+
 int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
   nwm_window_t *v = win_get(win);
   nd_rect_t     cr;
@@ -2008,6 +2036,18 @@ int nwm_owner_title(UINT64 owner, UINT32 win, const char *title) {
 }
 int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
   (void)win; (void)w; (void)h;
+  return NWM_EBADWIN;
+}
+int nwm_owner_move(UINT64 owner, UINT32 win, INT32 x, INT32 y) {
+  (void)owner; (void)win; (void)x; (void)y;
+  return NWM_EBADWIN;
+}
+int nwm_owner_resize(UINT64 owner, UINT32 win, INT32 w, INT32 h) {
+  (void)owner; (void)win; (void)w; (void)h;
+  return NWM_EBADWIN;
+}
+int nwm_owner_focus(UINT64 owner, UINT32 win) {
+  (void)owner; (void)win;
   return NWM_EBADWIN;
 }
 int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h) {

@@ -15,11 +15,11 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 * PE32+（x86-64）可执行文件加载，基址 `0x50000000`（无重定位表的镜像按其
   自身的链接基址加载）。
 * DIR64 基址重定位；按名称导入，IAT 填 thunk 地址。
-* 101 条 API（表里 102 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
+* 104 条 API（表里 105 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
   tick、`Sleep`、错误码、命令行、模块基址、注册表读写、堆与 `VirtualAlloc`、
-  `user32` 窗口、消息循环、投递与定时器、坐标换算、光标位置、`gdi32` 绘制与形状、
-  TEB / TLS、屏幕度量、字体度量、文字测量与排版，以及文件读写、目录枚举、
-  `LoadLibrary` / `GetProcAddress`。
+  `user32` 窗口、消息循环、投递与定时器、坐标换算、光标位置、窗口移动、焦点、
+  `gdi32` 绘制与形状、TEB / TLS、屏幕度量、字体度量、文字测量与排版（含
+  `DT_WORDBREAK` 折行），以及文件读写、目录枚举、`LoadLibrary` / `GetProcAddress`。
 * 每进程独立地址空间（`vm_space`）、独立的 Win32 ABI 标记，以及 `%fs` 指向的 TEB。
 * 文件管理器 `/exe` 虚拟目录，选中后运行。
 
@@ -27,7 +27,7 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 
 * 磁盘上任意路径的 `.exe`：镜像来自内核内嵌表（`build/win32_blobs.h`）。
 * 序号导入、延迟导入、从磁盘映射真实 DLL、PE TLS 目录、多线程、SEH。
-* 真实 Windows 注册表语义、`MoveWindow`、`SetFocus`、`DT_WORDBREAK`。
+* 菜单、对话框、控件、`ws2_32`、`crypt32`、`comctl32`、`ole32`、`shell32`。
 
 ---
 
@@ -632,15 +632,58 @@ TextOutA`。
   `WM_PAINT` 经 `FillRect` / `TextOutA` / `MoveToEx` / `LineTo` / `Rectangle` /
   `Ellipse` / `SetPixel` 提交进 Novus-WM——第六到第八块的绘制路径在真机管线上是通的。
 
-两个诚实的缺口：
+这一段最初留下的两个缺口，一个换通道后关闭，另一个是层里的真 bug，已修。
 
-* **指针注入没通到客户机。** QEMU monitor 的 `mouse_move` 在这套
-  `-display none` + PS/2 的组合下不驱动客户机光标（截图上光标始终停在
-  `(0,0)`，`[NWM] stats` 的 `ev` 只在 `sendkey` 时 +1）。窗口因此拿不到焦点，
-  `sendkey` 打出的字符也到不了窗口过程——`[WIN32] key event reached the layer`
-  一次都没出现过。这是注入通道的问题，不是键路由的结论：`kbd_byte` 收到了字节
-  并 push 了 `ND_EV_KEY`，但 `nwm.c` 的键路由按 `g_focus` 分发，焦点窗口为空就
-  无人可发。键入路径要在真机上验，不能拿这套注入下结论。
-* **没有 TTF 时缺字的汉字画成空心框。** 点阵表只有 541 个 UI 字形，截图里
-  “提供”之类的字显示为 `口`。这是字体缺字，不是排版 bug；接 TrueType 面即可。
+* **输入注入：QEMU monitor 通不了，改走 VNC。** `-display none` + PS/2 下
+  `mouse_move` 不驱动客户机光标（截图上光标始终停在 `(0,0)`）。改成
+  `-vnc 127.0.0.1:NN` 后用 vncdotool 注入，点击能让 Win32 窗口置顶并获得焦点，
+  串口出现 `[NWM] key -> win=3 pid=7`。这说明注入通道本身是好的，之前的结论只
+  对 monitor 成立。
+* **按键到不了窗口过程，根因在层的收件箱判断上。** `ipc_try_recv` 成功时返回的
+  是**载荷长度**（24、64 这样），不是 0；`gui_pump` 写的是
+  `while (ipc_try_recv(...) == 0)`，于是它只可能捞到"长度为 0 的消息"——真实事件
+  一条也捞不到。串口里 `[WIN32] ipc event` 一次都没打印，就是这个原因；而
+  `GetMessageA` 的有界等待把这条空队列误读成"该结束了"，一有点击到达就直接
+  `return 0`，窗口的 `while (GetMessageA(...))` 于是退出、进程结束——这也是
+  "点一下窗口就没了"的真凶。改成 `>= 0` 后，点击、按键都进了窗口过程：串口里
+  `ipc event type=0x202`（鼠标）、`0x203`（按键）、`key event reached the layer`
+  连续出现，窗口里把键入的 `abcd` 画了出来（`WM_CHAR` → `TextOutA`）。
+* **没有 TTF 时缺字的汉字画成空心框。** 点阵表原先只收源码里出现过的非 ASCII
+  字符（541 个），Win32 程序运行时自带的中文不在表里。`tools/fontgen/fallback.py`
+  改成按 GB2312 一级字库（`0xB0A1..0xD7F9`，3755 字）加标点符号现算，与源码
+  字符取并集，共 **4445 个字形**（`build/nd_font_fallback.h` 942 KB）。截图里
+  "提供"等字已经正常，不再画 `口`。代价是 `NOVUS.EFI` 大了约 0.9 MB。
+
+## 14. 第十块：窗口端语义与字形
+
+这一块补的是"程序能改自己的窗口、能拿到键盘、能把一段长文排进窄框"，以及把
+上一块暴露的收件箱 bug 一起修掉。
+
+* `MoveWindow(hwnd,x,y,w,h,repaint)`：尺寸按**整窗**传入，客户区在层内记为
+  `w-2 × h-NWM_TITLE_H-1`（同 `client_rect`），改完置 `dirty` 触发重绘。
+  经 `nwm_owner_move` 落到已有 `NWM_REQ_MOVE`。
+* `SetFocus` / `GetFocus`：`SetFocus` 走 `nwm_owner_focus`（WM 侧 raise +
+  `focus_set`），并由层给旧窗口投 `WM_KILLFOCUS`、新窗口投 `WM_SETFOCUS`；
+  `GetFocus` 返回层里记住的 `focus_hwnd`。用户点击窗口时 WM 发 `NWM_EV_FOCUS`，
+  同一条 `gui_translate` 分支把层和程序的焦点视图对齐。
+* `DrawTextA` 的 `DT_WORDBREAK`：新增 `wrap_len()` 按像素宽度找断点，优先在
+  ASCII 空格断，没有空格就按码点断（中文没有空格，必须能断），行尾跳过多余空格。
+  返回行数；不带标志时仍是一条。
+* `kernel/win32.c` 的收件箱判断与有界等待：`ipc_try_recv` 一律按 `>= 0` 认成
+  "收到"，`GetMessageA` 的等待改成 `sched_park(WIN32_MSG_POLL_TICKS)`——漏一次
+  唤醒退化成一次 poll，而不是窗口永久失聪。
+
+验收（QEMU/TCG，串口）：`msgdemo.exe` 全项 `ok`、`FAIL count = 0`：
+
+* `MoveWindow(200,150,400,200)` 后 `GetClientRect` = 398×167，
+  `GetWindowRect` = (200,150,600,350)；
+* `SetFocus` 返回同一 hwnd，`GetFocus` 随后同值；点击前 `GetFocus` 允许是 0 或
+  该窗口——Novus-WM 在窗口打开时就把键盘给它，这是窗口管理器策略，不是
+  Windows 语义，样例按"两者皆合法"断言；
+* `DrawTextA` 无 `DT_WORDBREAK` 返回 1 行，带标志在同一 60×80 矩形内返回 5 行，
+  且行数在 2..8 之间；
+* 目视：`window.exe` 被点击后置顶、获得焦点，键入 `abcd` 以红色画在窗口里。
+
+仍未做（别当成已做）：菜单、对话框与控件、`ws2_32`、`crypt32`、`comctl32`、
+`ole32`、`shell32`、SEH、PE TLS 目录、多线程、D3D。微信 / QQ 那一层还没碰。
 

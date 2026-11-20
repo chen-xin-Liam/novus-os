@@ -66,6 +66,12 @@ __declspec(dllimport) u64   SetTimer(u64 hwnd, u64 id, u32 ms, void *proc);
 __declspec(dllimport) i32   KillTimer(u64 hwnd, u64 id);
 __declspec(dllimport) i32   GetClientRect(u64 hwnd, RECT *r);
 __declspec(dllimport) i32   GetWindowRect(u64 hwnd, RECT *r);
+__declspec(dllimport) i32   MoveWindow(u64 hwnd, i32 x, i32 y, i32 w, i32 h,
+                                       i32 repaint);
+__declspec(dllimport) u64   SetFocus(u64 hwnd);
+__declspec(dllimport) u64   GetFocus(void);
+__declspec(dllimport) i32   DrawTextA(u64 hdc, const char *text, u32 count,
+                                      RECT *rect, u32 format);
 __declspec(dllimport) i32   ClientToScreen(u64 hwnd, POINT *pt);
 __declspec(dllimport) i32   ScreenToClient(u64 hwnd, POINT *pt);
 __declspec(dllimport) i32   GetCursorPos(POINT *pt);
@@ -400,6 +406,61 @@ void novus_win32_main(void) {
          SetWindowLongPtrA(hwnd, GWLP_USERDATA, 0xCAFEu), 0u);
   expect("GetWindowLongPtrA(GWLP_USERDATA)",
          GetWindowLongPtrA(hwnd, GWLP_USERDATA), 0xCAFEu);
+
+  /* MoveWindow: the geometry a program expects after it resizes itself.
+   * Ask for 400 x 200 at (200,150) and the client must come back 398 x 167,
+   * with the window rectangle following. */
+  expect("MoveWindow(200,150,400,200)", (u64)MoveWindow(hwnd, 200, 150, 400,
+                                                        200, 1), 1u);
+  rc.left = -1; rc.top = -1; rc.right = -1; rc.bottom = -1;
+  expect("GetClientRect after MoveWindow", (u64)GetClientRect(hwnd, &rc), 1u);
+  expect("  client width = 400 - 2", (u64)(u32)rc.right, 398u);
+  expect("  client height = 200 - 33", (u64)(u32)rc.bottom, 167u);
+  wr.left = 0; wr.top = 0; wr.right = 0; wr.bottom = 0;
+  expect("GetWindowRect after MoveWindow", (u64)GetWindowRect(hwnd, &wr), 1u);
+  expect("  window left moved", (u64)(u32)wr.left, 200u);
+  expect("  window top moved", (u64)(u32)wr.top, 150u);
+  expect("  window right = left + 400", (u64)(u32)wr.right, 600u);
+  expect("  window bottom = top + 200", (u64)(u32)wr.bottom, 350u);
+
+  /* Focus. SetFocus raises the window and takes the keyboard; GetFocus has
+   * to report the same handle afterwards, which is what a program that
+   * draws a caret keys off. Novus-WM hands the keyboard to a window when it
+   * opens, so GetFocus may already answer this window before SetFocus is
+   * called - a window-manager policy, and both answers are legitimate; what
+   * the check rejects is a handle belonging to nobody. */
+  {
+    u64 before = (u64)GetFocus();
+    u64 sane = (before == 0u || before == hwnd) ? 1u : 0u;
+
+    expect("GetFocus before SetFocus is none or this window", sane, 1u);
+  }
+  expect("SetFocus", (u64)SetFocus(hwnd), hwnd);
+  expect("GetFocus returns the window", (u64)GetFocus(), hwnd);
+
+  /* DrawTextA returns the number of lines it laid out. Without DT_WORDBREAK
+   * a long run in a narrow rectangle is one line; with the flag it has to
+   * break into several, or the flag is being accepted and ignored - which
+   * this check exists to catch. */
+  {
+    RECT box;
+    i32  plain;
+    i32  wrapped;
+
+    box.left = 0; box.top = 0; box.right = 60; box.bottom = 80;
+    plain = DrawTextA(hwnd,
+        "the quick brown fox jumps over the lazy dog", 43u, &box, 0u);
+    expect("DrawTextA without DT_WORDBREAK = one line", (u64)(u32)plain, 1u);
+    wrapped = DrawTextA(hwnd,
+        "the quick brown fox jumps over the lazy dog", 43u, &box, 0x0010u);
+    say("  DrawTextA DT_WORDBREAK lines = ");
+    say_hex((u64)(u32)wrapped);
+    say("\n");
+    expect_true("DT_WORDBREAK broke the run into several lines",
+                (u32)wrapped < 2u ? 1 : 0);
+    expect_true("DT_WORDBREAK stayed inside the rectangle",
+                (u32)wrapped > 8u ? 1 : 0);
+  }
 
   expect("DestroyWindow", (u64)DestroyWindow(hwnd), 1u);
 

@@ -83,5 +83,11 @@ int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h);
  * caller can answer GetWindowRect with the truth rather than with what it
  * asked for. Returns 0 when the window is gone. */
 int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h);
+/* Frame geometry and keyboard ownership, for MoveWindow and SetFocus. The
+ * WM clamps a moved or resized frame back onto the screen and answers with
+ * the rectangle it really used, which nwm_owner_rect reports. */
+int nwm_owner_move(UINT64 owner, UINT32 win, INT32 x, INT32 y);
+int nwm_owner_resize(UINT64 owner, UINT32 win, INT32 w, INT32 h);
+int nwm_owner_focus(UINT64 owner, UINT32 win);
 
 #endif /* NOVUS_NWM_H */
