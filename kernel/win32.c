@@ -1430,6 +1430,8 @@ typedef struct {
   UINT8  kind;     /* WIN32_CHILD_STATIC / _BUTTON / _EDIT */
   UINT8  pressed;  /* button: the pointer is down inside it */
   UINT8  caret;    /* edit: draw the insertion bar */
+  UINT8  pad0;
+  UINT32 ins;      /* edit: insertion point, measured in bytes */
   INT32  x, y, w, h;
   char   text[WIN32_CHILD_TEXT_MAX];
 } win32_child_t;
@@ -1708,6 +1710,8 @@ static int  msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
                          const ipc_msg_t *m);
 static int  gui_menu_click(task_t *t, win32_gui_t *gu, win32_wnd_t *w, INT32 x,
                            INT32 y, int down);
+static win32_child_t *gui_focus_cycle(win32_gui_t *gu, UINT32 parent,
+                                      UINT32 cur, INT32 dir);
 /* Translate one delivered message into a queued WM_* message. */
 static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
   ipc_msg_t m = *msg;
@@ -1799,18 +1803,101 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
 
         if (ec != NULL && ec->kind == WIN32_CHILD_EDIT && ec->parent == hwnd) {
           UINT32 n = 0;
+          UINT8  handled = 1u;
 
           while (n + 1u < WIN32_CHILD_TEXT_MAX && ec->text[n] != '\0') {
             n++;
           }
-          if (k.key < ND_KEY_BASE && (k.key == 8u || k.key == 0x7Fu)) {
-            if (n > 0u) {
-              ec->text[n - 1u] = '\0';
+          /* Keep the insertion point inside the string at all times: the
+           * buffer can be replaced under it by SetWindowTextA. */
+          if (ec->ins > n) {
+            ec->ins = n;
+          }
+          if (k.key == ND_KEY_LEFT) {
+            if (ec->ins > 0u) {
+              ec->ins--;
+            }
+          } else if (k.key == ND_KEY_RIGHT) {
+            if (ec->ins < n) {
+              ec->ins++;
+            }
+          } else if (k.key == ND_KEY_HOME) {
+            ec->ins = 0u;
+          } else if (k.key == ND_KEY_END) {
+            ec->ins = n;
+          } else if (k.key == ND_KEY_DELETE) {
+            if (ec->ins < n) {
+              UINT32 j;
+
+              for (j = ec->ins; j + 1u < WIN32_CHILD_TEXT_MAX; j++) {
+                ec->text[j] = ec->text[j + 1u];
+                if (ec->text[j] == '\0') {
+                  break;
+                }
+              }
+            }
+          } else if (k.key == 8u || k.key == 0x7Fu || k.key == ND_KEY_BACK) {
+            if (ec->ins > 0u) {
+              UINT32 j;
+
+              for (j = ec->ins - 1u; j + 1u < WIN32_CHILD_TEXT_MAX; j++) {
+                ec->text[j] = ec->text[j + 1u];
+                if (ec->text[j] == '\0') {
+                  break;
+                }
+              }
+              ec->ins--;
             }
           } else if (k.key >= 0x20u && k.key < 0x7Fu &&
                      n + 1u < WIN32_CHILD_TEXT_MAX) {
-            ec->text[n] = (char)k.key;
+            UINT32 j;
+
+            /* Insert at the caret, not at the end: the caret moved with the
+             * arrow keys above and typing has to land where it points. */
+            for (j = n; j > ec->ins; j--) {
+              ec->text[j] = ec->text[j - 1u];
+            }
+            ec->text[ec->ins] = (char)k.key;
             ec->text[n + 1u] = '\0';
+            ec->ins++;
+          } else if (k.key == ND_KEY_TAB) {
+            handled = 0u; /* focus moves outside this control */
+          } else {
+            handled = 0u;
+          }
+          {
+            win32_wnd_t *pw = gui_window(gu, hwnd);
+
+            if (pw != NULL) {
+              pw->dirty = 1u;
+            }
+          }
+          if (handled != 0u) {
+            break; /* the control swallowed the key; the parent's proc does not see it */
+          }
+        }
+      }
+      /* Tab moves focus to the next control the way Windows does it: the
+       * key is not text, the parent never sees it as a character, and Shift
+       * walks the tab order backwards. */
+      if (k.key == ND_KEY_TAB) {
+        win32_child_t *old = gui_child(gu, gu->focus_child);
+        win32_child_t *nw = gui_focus_cycle(gu, hwnd, gu->focus_child,
+                                            (k.mods & ND_MOD_SHIFT) ? -1 : 1);
+
+        if (nw != NULL) {
+          UINT32 l = 0u;
+
+          if (old != NULL && old != nw) {
+            old->caret = 0u;
+          }
+          gu->focus_child = nw->hwnd;
+          if (nw->kind == WIN32_CHILD_EDIT) {
+            nw->caret = 1u;
+            while (l + 1u < WIN32_CHILD_TEXT_MAX && nw->text[l] != '\0') {
+              l++;
+            }
+            nw->ins = l;
           }
           {
             win32_wnd_t *pw = gui_window(gu, hwnd);
@@ -1820,6 +1907,7 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
             }
           }
         }
+        break;
       }
       if (k.key >= ND_KEY_BASE) {
         UINT32 vk = vk_for_special(k.key - ND_KEY_BASE);
@@ -1917,8 +2005,32 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
           hit->pressed = 1u;
         }
         if (hit != NULL && hit->kind == WIN32_CHILD_EDIT) {
+          UINT32 n = 0u;
+          UINT32 i = 0u;
+          INT32  rel;
+
+          if (gu->focus_child != hit->hwnd) {
+            win32_child_t *old = gui_child(gu, gu->focus_child);
+
+            if (old != NULL) {
+              old->caret = 0u;
+            }
+          }
           gu->focus_child = hit->hwnd;
           hit->caret = 1u;
+          /* Put the insertion point where the pointer landed: walk the
+           * prefix widths until the click x falls inside the next glyph. */
+          while (n + 1u < WIN32_CHILD_TEXT_MAX && hit->text[n] != '\0') {
+            n++;
+          }
+          rel = mm.x - (hit->x + 5);
+          hit->ins = n;
+          for (i = 0u; i <= n; i++) {
+            if (measure_text(hit->text, i, 0) > rel) {
+              hit->ins = i;
+              break;
+            }
+          }
         } else if (hit == NULL && gu->focus_child != 0u) {
           win32_child_t *old = gui_child(gu, gu->focus_child);
 
@@ -2575,9 +2687,14 @@ static void gui_child_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w,
       gu->ntext++;
     }
     if (c->caret) {
-      /* The insertion bar sits after the text, which is where a real edit
-       * control keeps it while the pointer is at the end. */
-      tw = (len > 0u) ? measure_text(c->text, len, 0) : 0;
+      /* The insertion bar sits at the insertion point, not always after the
+       * text: arrow keys and clicks move it, and typing inserts there. */
+      UINT32 at = c->ins;
+
+      if (at > len) {
+        at = len;
+      }
+      tw = (at > 0u) ? measure_text(c->text, at, 0) : 0;
       (void)nwm_owner_shape(t->pid, w->win, NWM_OP_VLINE,
                             (INT16)(c->x + 5 + tw), (INT16)(c->y + 3), 1,
                             (INT16)(c->h - 6), 0x303030u);
@@ -2598,6 +2715,42 @@ static void gui_children_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
       gui_child_draw(t, gu, w, &gu->kid[i]);
     }
   }
+}
+
+/* Tab order: the focusable controls of one window, in creation order, which
+ * is the order Windows walks them. `cur` is the control that has focus now
+ * (0 when the window itself does), `dir` is +1 forward and -1 backward. */
+static win32_child_t *gui_focus_cycle(win32_gui_t *gu, UINT32 parent,
+                                      UINT32 cur, INT32 dir) {
+  UINT32 slot[WIN32_GUI_MAX_CHILDREN];
+  UINT32 n = 0u;
+  INT32  cur_idx = -1;
+  UINT32 i;
+  INT32  pick;
+
+  for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+    win32_child_t *c = &gu->kid[i];
+
+    if (!c->used || c->parent != parent) {
+      continue;
+    }
+    if (c->kind != WIN32_CHILD_BUTTON && c->kind != WIN32_CHILD_EDIT) {
+      continue;
+    }
+    if (c->hwnd == cur) {
+      cur_idx = (INT32)n;
+    }
+    slot[n++] = i;
+  }
+  if (n == 0u) {
+    return NULL;
+  }
+  if (cur_idx < 0) {
+    pick = (dir > 0) ? 0 : (INT32)n - 1;
+  } else {
+    pick = (INT32)(((UINT32)(cur_idx + dir) + n) % n);
+  }
+  return &gu->kid[slot[pick]];
 }
 
 /* The control under a client-area point, if any. Later controls win, which
@@ -4199,6 +4352,12 @@ static void api_set_window_text(trap_frame_t *f) {
       return;
     }
     copy_text(k->text, sizeof(k->text), ctext);
+    /* An edit keeps its insertion point inside the new string; Windows puts
+     * the caret at the end when the text is replaced wholesale. */
+    k->ins = 0u;
+    while (k->ins + 1u < WIN32_CHILD_TEXT_MAX && k->text[k->ins] != '\0') {
+      k->ins++;
+    }
     {
       win32_wnd_t *pw = gui_window(gu, k->parent);
 

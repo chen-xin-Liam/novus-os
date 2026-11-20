@@ -177,6 +177,10 @@ static const app_t g_win32[] = {
     {"ctrldemo.exe", k_app_ctrldemo_exe, &k_app_ctrldemo_exe_len},
     {"menudemo.exe", k_app_menudemo_exe, &k_app_menudemo_exe_len},
     {"resdemo.exe", k_app_resdemo_exe, &k_app_resdemo_exe_len},
+    /* Typing into an edit: caret movement with the arrow keys, insertion in
+     * the middle, Tab between controls, and a button that prints what the
+     * buffer holds so the serial log can be checked against the keystrokes. */
+    {"editdemo.exe", k_app_editdemo_exe, &k_app_editdemo_exe_len},
 };
 
 UINT32 apps_win32_count(void) {
