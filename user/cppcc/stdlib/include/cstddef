@@ -1,0 +1,11 @@
+#ifndef CPPCC_STDLIB_CSTDDEF
+#define CPPCC_STDLIB_CSTDDEF
+
+/* Freestanding subset. cppcc currently supports typedefs but not class
+ * templates, so std::size_t is intentionally absent until stage 2. */
+typedef unsigned long size_t;
+typedef long ptrdiff_t;
+
+#define NULL 0
+
+#endif

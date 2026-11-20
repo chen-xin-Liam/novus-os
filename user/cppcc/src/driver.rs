@@ -1,8 +1,5 @@
+use crate::api::{self, CompileInput, CompileOptions, LanguageStandard, Target};
 use crate::diagnostic::CompileError;
-use crate::lexer::lex;
-use crate::parser::parse;
-use crate::preprocess::Preprocessor;
-use crate::sema::analyze;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::PathBuf;
@@ -19,6 +16,7 @@ struct Options {
     check_only: bool,
     preprocess_only: bool,
     no_standard_include: bool,
+    language: Option<String>,
     help: bool,
 }
 
@@ -28,57 +26,47 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<i32> {
         print_usage();
         return Ok(0);
     }
-    let input = options.input.as_ref().context("missing input source file")?;
+    let input_path = options.input.as_ref().context("missing input source file")?;
     if !options.check_only && !options.preprocess_only && options.output.is_none() {
         bail!("missing -o output.nuc (or use --check / -E for front-end validation only)");
     }
-
-    let mut system_dirs = options.system_include_dirs;
-    if !options.no_standard_include {
-        system_dirs.insert(
-            0,
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src").join("include"),
-        );
-    }
-    let mut preprocessor = Preprocessor::new(options.include_dirs).with_system_include_dirs(system_dirs);
-    for (name, value) in &options.defines {
-        preprocessor.define(name, value.as_deref());
-    }
-    for name in &options.undefines {
-        preprocessor.undefine(name);
-    }
-    let (preprocessed, mut errors) = preprocessor.preprocess(input)?;
+    let language = match options.language.as_deref() {
+        None | Some("c++11") | Some("c++0x") => LanguageStandard::Cpp11,
+        Some(other) => bail!("unsupported language level '{other}'; cppcc targets C++11"),
+    };
+    let api_options = CompileOptions {
+        language,
+        include_dirs: options.include_dirs.clone(),
+        system_include_dirs: options.system_include_dirs.clone(),
+        defines: options.defines.clone(),
+        undefines: options.undefines.clone(),
+        no_standard_include: options.no_standard_include,
+        preprocess_only: options.preprocess_only,
+        dump_ast: options.dump_ast,
+    };
+    let result = api::compile(&CompileInput::file(input_path), &api_options, Target::Nuc)?;
+    print_errors(&result.diagnostics);
     if options.preprocess_only {
-        print_errors(&errors);
-        print!("{}", preprocessed.text);
-        return Ok(if errors.is_empty() { 0 } else { 1 });
+        if let Some(text) = result.preprocessed {
+            print!("{text}");
+        }
+        return Ok(if result.diagnostics.is_empty() { 0 } else { 1 });
     }
-
-    let lexed = lex(&preprocessed);
-    errors.extend(lexed.errors);
-    let parsed = parse(lexed.tokens);
-    errors.extend(parsed.errors);
-
-    let mut unit = parsed.unit;
-    if errors.is_empty() {
-        let sema = analyze(&mut unit);
-        errors.extend(sema.errors);
+    if let Some(dump) = result.ast_dump {
+        println!("{dump}");
     }
-    print_errors(&errors);
-    if !errors.is_empty() {
+    if !result.diagnostics.is_empty() {
         return Ok(1);
-    }
-    if options.dump_ast {
-        println!("{unit:#?}");
     }
     if options.check_only {
         println!("cppcc: front-end checks passed");
         return Ok(0);
     }
-    let output = options.output.expect("output required unless check-only");
-    let image = crate::nucgen::generate(&unit)?;
-    fs::write(&output, &image).with_context(|| format!("failed to write {}", output.display()))?;
-    println!("cppcc: wrote {} ({} bytes)", output.display(), image.len());
+    let output = options.output.as_ref().expect("output required unless check-only");
+    let artifact = result.artifact.context("compiler produced no artifact")?;
+    fs::write(output, &artifact.bytes)
+        .with_context(|| format!("failed to write {}", output.display()))?;
+    println!("cppcc: wrote {} ({} bytes)", output.display(), artifact.bytes.len());
     Ok(0)
 }
 
@@ -118,9 +106,9 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Options> {
             _ if arg.starts_with("-U") && arg.len() > 2 => {
                 options.undefines.push(arg[2..].to_owned());
             }
-            // Language level is fixed at C++11; accept the compilers' spelling
-            // so existing build scripts keep working.
-            _ if arg.starts_with("-std=") => {}
+            _ if arg.starts_with("-std=") => {
+                options.language = Some(arg[5..].to_owned());
+            }
             // Warning switches are accepted and ignored: diagnostics here are
             // either errors or nothing.
             _ if arg.starts_with("-W") || arg == "-Wall" || arg == "-Wextra" => {}

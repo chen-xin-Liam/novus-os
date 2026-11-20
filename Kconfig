@@ -116,14 +116,22 @@ config NOVUS_INSTALLER
 	  NovusFS system partition to a target disk and builds the Merkle
 	  tree over the result. Requires NOVUS_MERKLE.
 
-# Host-side C++98 -> NUC compiler (M7).
+# Host-side C++11 compiler library and tools (M7).
 config USER_CPPCC
 	bool "Build the cppcc host compiler"
 	default y
 	help
 	  Build the Rust host executable under build/tools and compile the
-	  C++98 Hello sample to out/cppcc/hello.nuc. `make run` stages it as
+	  C++11 Hello sample to out/cppcc/hello.nuc. `make run` stages it as
 	  APPS/DEMO.NUC on the vvfat ESP for the existing boot-stage loader.
+
+config USER_CPPCC_MULTITARGET
+	bool "Build cppcc multi-target tools and C ABI library"
+	depends on USER_CPPCC
+	default y
+	help
+	  Build cppcc_to_win64 (PE32+), cppcc_to_linux (ELF64) and the
+	  cppcc C ABI static library under build/tools.
 
 # User-space language modules live in their own trees and bring their own
 # Kconfig with them, so the option is declared next to the code it builds.

@@ -545,7 +545,22 @@ impl Analyzer {
     }
 
     fn check_range_for(&mut self, var: &mut Variable, range: &mut Expr, body: &mut Stmt, return_type: &Type) {
-        let range_type = self.check_expr(range);
+        /* `check_expr` decays array identifiers to pointers, which loses the
+         * bound a range-for needs. Read the declared variable type directly
+         * for the common `for (T x : array)` form. */
+        let identifier = match &range.kind {
+            ExprKind::Identifier(name) => Some(name.clone()),
+            _ => None,
+        };
+        let range_type = if let Some(name) = identifier {
+            match self.symbols.lookup(&name).map(|symbol| symbol.kind.clone()) {
+                Some(SymbolKind::Variable(ty)) => ty,
+                _ => self.check_expr(range),
+            }
+        } else {
+            self.check_expr(range)
+        };
+        range.ty = Some(range_type.clone());
         let mut element = if range_type.array_len.is_some() && range_type.pointers == 0 {
             let mut element = range_type.clone();
             element.array_len = None;
@@ -832,7 +847,8 @@ impl Analyzer {
                         Type::new(BaseType::Bool)
                     }
                     "++" | "--" => {
-                        if !is_lvalue(operand) || operand_type.is_const || !(operand_type.is_integer() || operand_type.pointers > 0) {
+                        let modifiable = operand_type.pointers > 0 || !operand_type.is_const;
+                        if !is_lvalue(operand) || !modifiable || !(operand_type.is_integer() || operand_type.pointers > 0) {
                             self.errors.push(CompileError::new(expr.location.clone(), "increment/decrement requires a modifiable scalar lvalue"));
                         }
                         operand_type
@@ -847,7 +863,8 @@ impl Analyzer {
             }
             ExprKind::Postfix { op: _, operand } => {
                 let ty = self.check_expr(operand);
-                if !is_lvalue(operand) || ty.is_const || !(ty.is_integer() || ty.pointers > 0) {
+                let modifiable = ty.pointers > 0 || !ty.is_const;
+                if !is_lvalue(operand) || !modifiable || !(ty.is_integer() || ty.pointers > 0) {
                     self.errors.push(CompileError::new(expr.location.clone(), "postfix increment/decrement requires a modifiable scalar lvalue"));
                 }
                 ty
@@ -965,7 +982,8 @@ impl Analyzer {
     fn check_binary(&mut self, op: &str, left_ty: &Type, right_ty: &Type, left: &Expr, right: &Expr, location: &SourceLocation) -> Type {
         let assignment = matches!(op, "=" | "+=" | "-=" | "*=" | "/=" | "%=" | "&=" | "|=" | "^=" | "<<=" | ">>=");
         if assignment {
-            if !is_lvalue(left) || left_ty.is_const || left_ty.array_len.is_some() {
+            let left_modifiable = left_ty.pointers > 0 || !left_ty.is_const;
+            if !is_lvalue(left) || !left_modifiable || left_ty.array_len.is_some() {
                 self.errors.push(CompileError::new(location.clone(), "assignment requires a modifiable lvalue"));
             }
             if op == "=" {
@@ -988,9 +1006,13 @@ impl Analyzer {
             "==" | "!=" | "<" | "<=" | ">" | ">=" => {
                 let pointer_compare =
                     (left_ty.pointers > 0 && is_null_constant(right)) || (right_ty.pointers > 0 && is_null_constant(left));
+                let mut left_unqualified = left_ty.clone();
+                let mut right_unqualified = right_ty.clone();
+                left_unqualified.is_const = false;
+                right_unqualified.is_const = false;
                 if !pointer_compare
                     && !(left_ty.is_integer() && right_ty.is_integer())
-                    && !type_compatible(left_ty, right_ty)
+                    && !type_compatible(&left_unqualified, &right_unqualified)
                 {
                     self.errors.push(CompileError::new(location.clone(), "comparison operands have incompatible types"));
                 }

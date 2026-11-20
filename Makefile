@@ -18,7 +18,8 @@
 #
 # Usage:
 #   make              build out/NOVUS.EFI
-#   make cppcc        build the host-side C++98 -> NUC compiler
+#   make cppcc        build the host-side C++11 -> NUC compiler
+#   make cppcc-tools  build cppcc_to_win64, cppcc_to_linux and the C ABI library
 #   make cppcc-demo   compile the M7 Hello program to out/cppcc/hello.nuc
 #   make run          build, then boot the image in QEMU (MEM=4G by default)
 #   make iso          build the bootable live ISO (out/novus-live.iso);
@@ -46,7 +47,7 @@ OBJCOPY := $(CROSS)objcopy
 ifeq ($(shell command -v $(CC) 2>/dev/null),)
 ifeq ($(strip $(MAKECMDGOALS)),)
 $(error $(CC) not found in PATH. Install the mingw-w64 x86-64 cross toolchain (e.g. package gcc-mingw-w64-x86-64) or set CROSS=<toolchain-prefix>.)
-else ifneq ($(filter-out clean cppcc cppcc-demo,$(MAKECMDGOALS)),)
+else ifneq ($(filter-out clean cppcc cppcc-demo cppcc-cabi cppcc-to-win64 cppcc-to-linux cppcc-tools,$(MAKECMDGOALS)),)
 $(error $(CC) not found in PATH. Install the mingw-w64 x86-64 cross toolchain (e.g. package gcc-mingw-w64-x86-64) or set CROSS=<toolchain-prefix>.)
 endif
 endif

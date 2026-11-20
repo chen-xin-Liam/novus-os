@@ -2,13 +2,13 @@
 
 ## 1. 实现架构
 
-`cppcc` 是 host-native Rust 工具，不链接进内核，也不依赖 LLVM 或外部汇编器。当前流水线为：
+`cppcc` 是 host-native Rust 编译库与工具集，不链接进内核，也不依赖 LLVM 或外部汇编器。流水线为：
 
 ```text
-driver → preprocess → lexer → parser/AST → sema → x86_64 AST codegen → nucgen
+api::compile → preprocess → lex → parse/AST → sema → x86_64 codegen → object::ObjectModule → target::{nuc,win64,linux}
 ```
 
-后端直接遍历经过语义检查的 AST：表达式已标注类型，符号作用域已验证。M7 只有 x86_64 一个后端，因此未增加独立 `ir.rs`，避免维护重复的类型、作用域和控制流状态。`x86_64.rs` 使用手写指令编码，包含栈帧/局部槽分配、算术与比较、分支标签、直接调用和 syscall intrinsic；函数调用遵守 SysV x86_64 参数寄存器与 16 字节栈对齐。
+`api.rs` 提供稳定 Rust 编译接口；`driver.rs` 和两个目标工具只是它的 CLI 壳。`ir.rs` 定义目标无关指令骨架，`object.rs` 是当前后端共享的字节/符号/重定位模型。`x86_64.rs` 使用手写指令编码，并按目标 ABI（SysV NUC、SysV Linux、Win64）生成栈帧、调用序列与运行时入口：Win64 使用 RCX/RDX/R8/R9、shadow space 与 IAT 调用；Linux/NUC 使用 syscall 入口，其中 Linux 的 `write` 为 syscall 1，NUC 保留 2。
 
 `preprocess.rs` 保留源文件行列映射并处理受限预处理；`lexer.rs` 生成带位置 token；`parser.rs` 递归下降构造 AST 并在语法错误后恢复；`sema.rs` 收集函数、全局变量、结构体和作用域符号，报告类型/return/void 错误；`nucgen.rs` 序列化并自校验 NUC 文件。
 
@@ -42,7 +42,7 @@ driver → preprocess → lexer → parser/AST → sema → x86_64 AST codegen �
 
 生成器始终写规范段权限，但当前 `kernel/nuc.c` 映射代码页时也保留写权限、映射其他非 BSS 段时同样可写；实际 loader 尚未落实段 flags 所表达的 W^X/RODATA 保护。Header 按规范写 8 MiB stack_size，loader 当前会 clamp 到 64–256 KiB。
 
-合成 `_start` 以 `rsp` 对齐后调用 `main`，取返回值到 `rdi`，发起 `SYS_EXIT=60`。`novus_write` 设置 `rax=2, rdi=1, rsi=buffer, rdx=len`；`novus_yield` 使用 1。硬件 `syscall` 会覆盖 `rcx`，本实现的 builtin 不把 `rcx` 用作 syscall 参数。
+NUC/Linux 合成 `_start` 以 `rsp` 对齐后调用 `main`，取返回值到 `rdi`，发起 `SYS_EXIT=60`。`novus_write` 设置 `rdi=1, rsi=buffer, rdx=len`；NUC 使用 `rax=2`，Linux 使用 `rax=1`（syscall 2 在 Linux 是 `open`）。`novus_yield` 在 NUC 使用 1；Win64 目标改为 kernel32 导入调用。硬件 `syscall` 会覆盖 `rcx`，本实现的 builtin 不把 `rcx` 用作 syscall 参数。
 
 ## 4. 加载与运行
 

@@ -1,0 +1,12 @@
+[package]
+name = "cppcc-cabi"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cppcc_cabi"
+crate-type = ["staticlib"]
+
+[dependencies]
+anyhow = "1"
+cppcc = { path = "../cppcc" }

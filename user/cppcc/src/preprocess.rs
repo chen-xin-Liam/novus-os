@@ -125,6 +125,28 @@ impl Preprocessor {
         ))
     }
 
+    /// Preprocess an in-memory translation unit. Includes are still resolved
+    /// from the configured include directories; `path` is used for diagnostics.
+    pub fn preprocess_source(
+        mut self,
+        path: &Path,
+        source: &str,
+    ) -> Result<(PreprocessedSource, Vec<CompileError>)> {
+        self.install_predefined();
+        let path = canonical_or_absolute(path)?;
+        self.include_stack.push(path.clone());
+        let result = self.process_source(&path, source);
+        self.include_stack.pop();
+        result?;
+        Ok((
+            PreprocessedSource {
+                text: self.output,
+                locations: self.locations,
+            },
+            self.errors.into_errors(),
+        ))
+    }
+
     fn install_predefined(&mut self) {
         // `__cplusplus` advertises the C++11 language level so that native
         // headers select their modern paths instead of falling back to C89.
