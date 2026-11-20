@@ -20,6 +20,7 @@
 #include "nd_internal.h"
 #include "nd_font_uni.h"
 #include "nd_lang.h"
+#include "gpu2d.h"
 
 #define ND_ALPHA_CHANNEL 0xFF000000u
 
@@ -74,9 +75,10 @@ void nd_span_raw(nd_surface_t *s, INT32 x, INT32 y, INT32 count,
   UINT32  hw = nd_hw_pixel(s, c);
   UINT32 *row = s->px + (UINT32)y * s->stride + (UINT32)x;
 
-  while (count-- > 0) {
-    *row++ = hw;
-  }
+  /* One entry point for every filled pixel in the system: a hardware 2D
+   * engine plugs in here (kernel/gpu2d.c), and until one exists this is the
+   * CPU path with 64-bit pair stores. */
+  gpu2d_fill_span(row, (UINT32)count, hw);
 }
 
 void nd_span_blend_raw(nd_surface_t *s, INT32 x, INT32 y, INT32 count,
@@ -512,7 +514,7 @@ void nd_blit(nd_surface_t *dst, INT32 x, INT32 y, const nd_surface_t *src,
                      (UINT32)clip.x;
 
     if (!swap) {
-      memcpy(drow, srow, (UINT64)clip.w * 4u);
+      gpu2d_copy_row(drow, srow, (UINT32)clip.w);
     } else {
       INT32 i;
       for (i = 0; i < clip.w; i++) {

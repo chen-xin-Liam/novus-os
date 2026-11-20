@@ -34,6 +34,19 @@ static const gpu_name_t g_intel_names[] = {
   {0x9B41u, "Intel UHD Graphics (Comet Lake)"},
 };
 
+/* NVIDIA is not integrated graphics, but a machine with a GeForce still has
+ * to boot: the desktop draws over the firmware framebuffer, which on a
+ * discrete card lives inside its own VRAM aperture. That aperture is far
+ * above 4 GiB on every modern card, so the numbers here are what tells the
+ * rest of the kernel how much of it is even reachable. Names are given only
+ * where the id is known, because a wrong name is worse than a family name. */
+static const gpu_name_t g_nvidia_names[] = {
+  {0x2F04u, "GeForce RTX 5070 (GB205)"},
+  {0x2684u, "GeForce RTX 4090 (AD102)"},
+  {0x2484u, "GeForce RTX 3070 (GA104)"},
+  {0x1F08u, "GeForce RTX 2060 (TU106)"},
+};
+
 static const gpu_name_t g_amd_names[] = {
   {0x15D8u, "AMD Radeon Graphics (Picasso)"},
   {0x15DDu, "AMD Radeon Vega 8 (Raven)"},
@@ -105,12 +118,20 @@ static const char *name_for(UINT16 vendor, UINT16 device) {
     }
     return "AMD Radeon 显示控制器";
   }
+  if (vendor == GPU_VENDOR_NVIDIA) {
+    for (i = 0; i < sizeof(g_nvidia_names) / sizeof(g_nvidia_names[0]); i++) {
+      if (g_nvidia_names[i].id == device) {
+        return g_nvidia_names[i].name;
+      }
+    }
+    return "NVIDIA GeForce 显示控制器";
+  }
   return 0;
 }
 
 void gpu_init(void) {
   pci_dev_t list[PCI_MAX_DEVICES];
-  pci_dev_t d;
+  pci_dev_t d = {0};
   pci_dev_t first;
   int       n;
   int       i;
@@ -124,23 +145,55 @@ void gpu_init(void) {
   }
   /* Class 03h is "display controller". Integrated controllers usually
    * declare subclass 80h ("other"), the firmware VGA device 00h. Walk the
-   * whole bus once and prefer Intel or AMD when the machine has more than
-   * one: a discrete card sitting next to the integrated one must not hide
-   * it. */
-  n = pci_scan(list, PCI_MAX_DEVICES);
-  for (i = 0; i < n; i++) {
-    if (list[i].class_code != 0x03u) {
-      continue;
+   * whole bus once. The controller that actually scans out is the one whose
+   * own BAR window contains the framebuffer the firmware left us: on a
+   * desktop with an AMD APU and a discrete GeForce, that is the GeForce,
+   * and picking the "integrated" one by vendor would describe a chip that
+   * is not drawing a single pixel. Vendor preference is only the fallback
+   * for machines where the scanout sits in plain system RAM. */
+  {
+    const nd_output_t *o = nd_outputs(0);
+    UINT64             fb = (o != 0) ? o[0].fb_phys : 0u;
+
+    g_fb_phys = fb;
+    n = pci_scan(list, PCI_MAX_DEVICES);
+    for (i = 0; i < n; i++) {
+      UINT32 k;
+
+      if (list[i].class_code != 0x03u) {
+        continue;
+      }
+      if (have_first == 0) {
+        first = list[i];
+        have_first = 1;
+      }
+      if (fb != 0u) {
+        for (k = 0; k < 6u; k++) {
+          UINT64 lo = (list[i].bar[k] != 0u) ? list[i].bar[k]
+                                             : list[i].bar64[k];
+          UINT64 sz = list[i].bar_size[k];
+
+          if (lo == 0u || sz == 0u) {
+            continue;
+          }
+          if (fb >= lo && fb < lo + sz) {
+            d = list[i];
+            have = 1;
+            break;
+          }
+        }
+      }
+      if (have != 0) {
+        break;
+      }
+      if (list[i].vendor == GPU_VENDOR_INTEL ||
+          list[i].vendor == GPU_VENDOR_AMD) {
+        d = list[i];
+        have = 2;               /* preferred, but not the scanout owner */
+      }
     }
-    if (have_first == 0) {
-      first = list[i];
-      have_first = 1;
-    }
-    if (list[i].vendor == GPU_VENDOR_INTEL ||
-        list[i].vendor == GPU_VENDOR_AMD) {
-      d = list[i];
+    if (have == 2) {
       have = 1;
-      break;
     }
   }
   if (have == 0) {
@@ -257,7 +310,12 @@ void gpu_init(void) {
       g_fb_phys = outs[0].fb_phys;
       g_fb_bytes = outs[0].fb_size;
       for (k = 0; k < 6u; k++) {
-        UINT64 lo = d.bar[k];
+        /* bar[] only carries windows the kernel's identity map already
+         * covers (< 4 GiB). A discrete card's VRAM aperture is far above
+         * that, so the scanout can only be found through bar64[] - and it
+         * is exactly the case where the compositor is writing across PCIe
+         * into the card, worth saying out loud. */
+        UINT64 lo = (d.bar[k] != 0u) ? d.bar[k] : d.bar64[k];
         UINT64 hi = lo + (UINT64)d.bar_size[k];
 
         if (d.bar_size[k] == 0u || lo == 0u) {
@@ -282,6 +340,11 @@ void gpu_init(void) {
         kputs(" (gpu aperture ");
         kputs_hex(g_scanout_bytes);
         kputs(")\n");
+        if (g_scanout_base >= 0x100000000ULL) {
+          kputs("[GPU] scanout is above the 4 GiB identity map: the "
+                "compositor writes it through the mapped aperture, not by "
+                "physical address\n");
+        }
       } else {
         kputs(" outside every BAR (firmware linear framebuffer)\n");
       }

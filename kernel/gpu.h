@@ -19,10 +19,11 @@
 
 #include "uefi.h"
 
-#define GPU_VENDOR_NONE  0x0000u
-#define GPU_VENDOR_INTEL 0x8086u
-#define GPU_VENDOR_AMD   0x1002u
-#define GPU_VENDOR_OTHER 0xFFFFu
+#define GPU_VENDOR_NONE   0x0000u
+#define GPU_VENDOR_INTEL  0x8086u
+#define GPU_VENDOR_AMD    0x1002u
+#define GPU_VENDOR_NVIDIA 0x10DEu
+#define GPU_VENDOR_OTHER  0xFFFFu
 
 /* Find the display controller, name it, and check that BAR 0 answers.
  * Call once, after the PCI bus is usable and before the desktop is

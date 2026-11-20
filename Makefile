@@ -133,6 +133,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/rtc.c \
        kernel/pci.c \
        kernel/gpu.c \
+       kernel/gpu2d.c \
        kernel/net.c \
        kernel/net_dhcp.c \
        kernel/net_tcp.c \

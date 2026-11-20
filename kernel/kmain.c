@@ -70,6 +70,7 @@
 #include "lang.h"
 #include "sysinfo.h"
 #include "gpu.h"
+#include "gpu2d.h"
 #include "net.h"
 #include "irq.h"
 
@@ -571,6 +572,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * GOP framebuffer; this puts the chip where the settings page and
        * the boot log can show it. */
       gpu_init();
+      /* 2D engine seam: decide who performs spans and blits before the
+       * first window is painted. The software path runs on the CPU over the
+       * firmware framebuffer; a vendor engine plugs in here when it exists. */
+      gpu2d_init();
       sysinfo_init();
       {
         int install_mode = (shared_mem_get() != NULL &&
