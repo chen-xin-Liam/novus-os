@@ -42,11 +42,28 @@ UINT64 virt_to_phys(const void *v);
 
 /* Map `size` bytes of physical memory (any address, including one above
  * ram_top such as a device BAR or a framebuffer) into the kernel virtual
- * space and return a linear pointer, or NULL on failure. Callers pass
- * MM_MAP_UC for device MMIO to mark the range uncacheable. The returned
- * pointer stays valid for the lifetime of the kernel. */
+ * space and return a linear pointer, or NULL on failure.
+ *
+ * MM_MAP_UC marks the range uncacheable: correct for device registers, where
+ * every access must reach the hardware in order.
+ * MM_MAP_WC marks it write-combining: still uncached for reads, but
+ * consecutive writes are merged into full cache-line bursts before they leave
+ * the CPU. That is the right mode for a scanout, and it is the difference
+ * between one PCIe transaction per pixel and one per cache line on a card
+ * whose framebuffer sits above 4 GiB. */
 #define MM_MAP_UC 0x01u
+#define MM_MAP_WC 0x02u
 void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags);
+
+/* Turn on CR4.PAT and make sure IA32_PAT has the standard layout, so that
+ * MM_MAP_WC's PTE bit means write-combining instead of a reserved-bit fault.
+ * Call once, before the first WC mapping (mm_init does it). */
+void mm_enable_pat(void);
+
+/* 1 when CR4.PAT is set and IA32_PAT entry 4 really means write-combining.
+ * 0 on a CPU that does not advertise PAT (mm_map_phys then maps MM_MAP_WC as
+ * uncached). */
+int mm_pat_available(void);
 
 /* Read the same physical byte (kernel .text region) through the identity
  * map and through PHYSMAP_BASE and report PASS/FAIL on the console. */

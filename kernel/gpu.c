@@ -16,6 +16,8 @@ typedef struct {
 } gpu_name_t;
 
 static const gpu_name_t g_intel_names[] = {
+  {0x7D67u, "Intel Graphics (Meteor/Arrow Lake)"},
+  {0x7D55u, "Intel Arc Graphics (Meteor Lake)"},
   {0x3E9Bu, "Intel UHD Graphics 630"},
   {0x3E92u, "Intel UHD Graphics 630"},
   {0x9A49u, "Intel Iris Xe Graphics"},
@@ -26,7 +28,6 @@ static const gpu_name_t g_intel_names[] = {
   {0xA780u, "Intel Iris Xe Graphics (Raptor Lake)"},
   {0xA7A0u, "Intel UHD Graphics 710"},
   {0x7D40u, "Intel Iris Xe Graphics (Meteor Lake)"},
-  {0x7D55u, "Intel Arc Graphics (Meteor Lake)"},
   {0x1912u, "Intel HD Graphics 530"},
   {0x5912u, "Intel HD Graphics 630"},
   {0x3185u, "Intel UHD Graphics 630 (Pentium)"},
@@ -157,6 +158,49 @@ void gpu_init(void) {
 
     g_fb_phys = fb;
     n = pci_scan(list, PCI_MAX_DEVICES);
+    /* Every display controller gets a line, not just the chosen one: a
+     * machine with an integrated Intel chip and a discrete card has to be
+     * able to say which is which from the boot log alone, because that is
+     * the first question anyone asks when the screen comes up wrong. */
+    {
+      UINT32 j;
+
+      for (j = 0; j < (UINT32)n; j++) {
+        if (list[j].class_code != 0x03u) {
+          continue;
+        }
+        kputs("[GPU] controller ");
+        kputs_hex(list[j].vendor);
+        kputs(":");
+        kputs_hex(list[j].device);
+        kputs(" bus=");
+        kputs_hex((UINT64)list[j].bus);
+        kputs(" bar0=");
+        kputs_hex(list[j].bar[0]);
+        kputs(" bar0_sz=");
+        kputs_hex(list[j].bar_size[0]);
+        kputs(" bar2=");
+        kputs_hex((list[j].bar[2] != 0u) ? list[j].bar[2] : list[j].bar64[2]);
+        kputs(" bar2_sz=");
+        kputs_hex(list[j].bar_size[2]);
+        if (fb != 0u) {
+          UINT32 k;
+          int    owns = 0;
+
+          for (k = 0; k < 6u; k++) {
+            UINT64 lo = (list[j].bar[k] != 0u) ? list[j].bar[k]
+                                               : list[j].bar64[k];
+
+            if (lo != 0u && list[j].bar_size[k] != 0u && fb >= lo &&
+                fb < lo + list[j].bar_size[k]) {
+              owns = 1;
+            }
+          }
+          kputs(owns != 0 ? " (scanout)" : "");
+        }
+        kputs("\n");
+      }
+    }
     for (i = 0; i < n; i++) {
       UINT32 k;
 
