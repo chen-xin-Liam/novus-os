@@ -10,9 +10,11 @@
 #ifndef NOVUS_NVUS_PATHS_H
 #define NOVUS_NVUS_PATHS_H
 
+#define NVUS_FONT_DIR       "/Novus/font"   /* user drop folder: .ttf/.otf */
 #define NVUS_FONT_FILE      "/Novus/fonts/font.bin"
 #define NVUS_LANG_FILE      "/Novus/kernel/core/language.cfg"
 #define NVUS_USERS_DB_FILE  "/ProgramData/Security/users.db"
+#define NVUS_ICON_DIR       "/Novus/icons"  /* user drop folder: shell .ico */
 #define NVUS_REGISTRY_FILE  "/Novus/wincompat/system32/registry.cfg"
 
 #define NVUS_FSINFO_FILE    "/.novusfs/fsinfo"

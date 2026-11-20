@@ -245,6 +245,12 @@ void nd_fill_circle(nd_surface_t *s, INT32 cx, INT32 cy, INT32 radius,
                     nd_color_t c);
 void nd_circle(nd_surface_t *s, INT32 cx, INT32 cy, INT32 radius,
                nd_color_t c);
+/* Axis-aligned ellipse: FILL paints the interior, the outline version
+ * walks the same spans and touches only their two ends. */
+void nd_fill_ellipse(nd_surface_t *s, INT32 cx, INT32 cy, INT32 rx, INT32 ry,
+                     nd_color_t c);
+void nd_ellipse(nd_surface_t *s, INT32 cx, INT32 cy, INT32 rx, INT32 ry,
+                nd_color_t c);
 void nd_round_rect(nd_surface_t *s, nd_rect_t r, INT32 radius, nd_color_t c);
 void nd_round_frame(nd_surface_t *s, nd_rect_t r, INT32 radius, INT32 thick,
                     nd_color_t c);

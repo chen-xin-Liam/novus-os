@@ -29,6 +29,11 @@ typedef struct {
   int     lba48;
   UINT64  sectors;
   char    name[8];
+  /* One drive at a time on a channel's command block. Reads and writes are
+   * driven from whatever task issued them, and the idle sweep spins disks
+   * down from the scheduler's context, so the command block needs to be
+   * serialised just like the AHCI port's slot is. */
+  volatile int locked;
   blkdev_t dev;
 } ide_drive_t;
 
@@ -57,6 +62,22 @@ static inline void ide_outw(UINT16 p, UINT16 v) {
 }
 
 /* ---- low-level command flow ------------------------------------------- */
+
+/* Serialise the command block of one drive. Bounded, like the AHCI port
+ * lock: a caller that cannot take it reports -1 rather than waiting behind
+ * a transfer it has no business joining. */
+static int ide_lock(ide_drive_t *d) {
+  int t;
+
+  for (t = 0; t < IDE_TIMEOUT; t++) {
+    if (__sync_lock_test_and_set(&d->locked, 1) == 0) {
+      return 0;
+    }
+  }
+  return -1;
+}
+
+static void ide_unlock(ide_drive_t *d) { __sync_lock_release(&d->locked); }
 
 static int ide_identify(ide_ch_t *c, UINT8 drv, UINT16 *id) {
   int    t;
@@ -166,34 +187,198 @@ static int ide_transfer(ide_drive_t *d, UINT64 sector, UINTN count,
 static int ide_blk_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
   ide_drive_t *d = (ide_drive_t *)ctx;
   UINT8       *u = (UINT8 *)buf;
+  int          rc = 0;
 
+  if (ide_lock(d) != 0) {
+    return -1;
+  }
   while (count != 0) {
     UINTN c = (count > 256) ? 256 : count;
     if (ide_transfer(d, sector, c, u, 0) != 0) {
-      return -1;
+      rc = -1;
+      break;
     }
     sector += c;
     count  -= c;
     u      += c * BLKDEV_SECTOR_SIZE;
   }
-  return 0;
+  ide_unlock(d);
+  return rc;
 }
 
 static int ide_blk_write(void *ctx, UINT64 sector, UINTN count,
                          const void *buf) {
   ide_drive_t *d = (ide_drive_t *)ctx;
   UINT8       *u = (UINT8 *)(UINTN)buf;
+  int          rc = 0;
 
+  if (ide_lock(d) != 0) {
+    return -1;
+  }
   while (count != 0) {
     UINTN c = (count > 256) ? 256 : count;
     if (ide_transfer(d, sector, c, u, 1) != 0) {
-      return -1;
+      rc = -1;
+      break;
     }
     sector += c;
     count  -= c;
     u      += c * BLKDEV_SECTOR_SIZE;
   }
+  ide_unlock(d);
+  return rc;
+}
+
+/* FLUSH CACHE / FLUSH CACHE EXT waits until the drive has copied its internal
+ * write cache to the medium. Neither form carries a sector range or a data
+ * phase, so only the device/head selection and the command byte are written;
+ * LBA48-capable drives take the extended form so the flush stays valid above
+ * the 28-bit limit. */
+static int ide_flush(ide_drive_t *d) {
+  int t;
+
+  for (t = 0; t < IDE_TIMEOUT; t++) {
+    if ((ide_inb(d->cmd + 7) & 0x80u) == 0u) {
+      break;
+    }
+  }
+  if (ide_inb(d->cmd + 7) & 0x80u) {
+    return -1;
+  }
+  ide_outb(d->ctl, 0x02);
+  ide_outb(d->cmd + 6, (UINT8)((d->lba48 ? 0x40u : 0xE0u) | (d->drv << 4)));
+  ide_outb(d->cmd + 7, (UINT8)(d->lba48 ? 0xEAu : 0xE7u));
+  for (t = 0; t < IDE_TIMEOUT; t++) {
+    if ((ide_inb(d->cmd + 7) & 0x80u) == 0u) {
+      break;
+    }
+  }
+  if (ide_inb(d->cmd + 7) & (0x01u | 0x80u)) {
+    return -1;
+  }
   return 0;
+}
+
+static int ide_blk_flush(void *ctx) {
+  ide_drive_t *d = (ide_drive_t *)ctx;
+  int          rc;
+
+  if (ide_lock(d) != 0) {
+    return -1;
+  }
+  rc = ide_flush(d);
+  ide_unlock(d);
+  return rc;
+}
+
+/* STANDBY IMMEDIATE (0xE0) parks the heads and stops the spindle. Like
+ * FLUSH it has neither an LBA nor a data phase, so the device/head
+ * register only carries the drive select - the LBA48 bit is deliberately
+ * not set, because the command ignores it and a 28-bit drive may refuse a
+ * selection it never advertised. A drive already at rest completes it
+ * anyway, so repeating the command is harmless. */
+static int ide_powerdown(ide_drive_t *d) {
+  int t;
+
+  for (t = 0; t < IDE_TIMEOUT; t++) {
+    if ((ide_inb(d->cmd + 7) & 0x80u) == 0u) {
+      break;
+    }
+  }
+  if (ide_inb(d->cmd + 7) & 0x80u) {
+    return -1;
+  }
+  ide_outb(d->ctl, 0x02);
+  ide_outb(d->cmd + 6, (UINT8)(0xE0u | (d->drv << 4)));
+  ide_outb(d->cmd + 7, 0xE0u);
+  for (t = 0; t < IDE_TIMEOUT; t++) {
+    if ((ide_inb(d->cmd + 7) & 0x80u) == 0u) {
+      break;
+    }
+  }
+  if (ide_inb(d->cmd + 7) & (0x01u | 0x80u)) {
+    return -1;
+  }
+  return 0;
+}
+
+/* CHECK POWER MODE (0xE5) answers with one 512-byte sector over PIO; the
+ * first byte is 0xFF (active), 0x80 (idle) or 0x00 (standby). It is
+ * polled with a much shorter bound than a transfer: several controllers
+ * (QEMU's IDE among them) complete the command without ever raising DRQ,
+ * and a query has no business holding the machine for a full timeout
+ * when the honest answer is "unknown". */
+#define IDE_POWER_POLL 20000
+
+static int ide_power_state(ide_drive_t *d, UINT32 *state) {
+  UINT16 buf[256];
+  UINT8  byte;
+  int    t;
+  int    i;
+
+  for (t = 0; t < IDE_POWER_POLL; t++) {
+    if ((ide_inb(d->cmd + 7) & 0x80u) == 0u) {
+      break;
+    }
+  }
+  if (ide_inb(d->cmd + 7) & 0x80u) {
+    return -1;
+  }
+  ide_outb(d->ctl, 0x02);
+  ide_outb(d->cmd + 6, (UINT8)(0xE0u | (d->drv << 4)));
+  ide_outb(d->cmd + 7, 0xE5u);
+  for (t = 0; t < IDE_POWER_POLL; t++) {
+    UINT8 st = ide_inb(d->cmd + 7);
+    if ((st & 0x01u) != 0u) {
+      return -1;                                   /* ERR */
+    }
+    if ((st & 0x80u) == 0u && (st & 0x08u) != 0u) {
+      break;                                       /* BSY clear, DRQ set */
+    }
+  }
+  if (t == IDE_POWER_POLL) {
+    return -1;
+  }
+  for (i = 0; i < 256; i++) {
+    buf[i] = ide_inw(d->cmd + 0);
+  }
+  byte = (UINT8)(buf[0] & 0xFFu);
+  if (byte == 0xFFu) {
+    *state = BLKDEV_POWER_ACTIVE;
+  } else if (byte == 0x80u) {
+    *state = BLKDEV_POWER_IDLE;
+  } else if (byte == 0x00u) {
+    *state = BLKDEV_POWER_STANDBY;
+  } else if (byte == 0x40u) {
+    *state = BLKDEV_POWER_SLEEP;
+  } else {
+    *state = BLKDEV_POWER_UNKNOWN;
+  }
+  return 0;
+}
+
+static int ide_blk_powerdown(void *ctx) {
+  ide_drive_t *d = (ide_drive_t *)ctx;
+  int          rc;
+
+  if (ide_lock(d) != 0) {
+    return -1;
+  }
+  rc = ide_powerdown(d);
+  ide_unlock(d);
+  return rc;
+}
+
+static int ide_blk_power_state(void *ctx, UINT32 *state) {
+  ide_drive_t *d = (ide_drive_t *)ctx;
+  int          rc;
+
+  if (ide_lock(d) != 0) {
+    return -1;
+  }
+  rc = ide_power_state(d, state);
+  ide_unlock(d);
+  return rc;
 }
 
 /* ---- probe ------------------------------------------------------------ */
@@ -263,6 +448,10 @@ int ide_init(void) {
         idv->dev.ctx          = idv;
         idv->dev.read         = ide_blk_read;
         idv->dev.write        = ide_blk_write;
+        idv->dev.flush        = ide_blk_flush;
+        idv->dev.powerdown    = ide_blk_powerdown;
+        idv->dev.power_state  = ide_blk_power_state;
+        idv->dev.power_irq_safe = 1;
         if (blkdev_register(&idv->dev) < 0) {
           continue;
         }

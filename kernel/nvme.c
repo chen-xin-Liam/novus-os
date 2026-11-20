@@ -26,6 +26,8 @@
 #define NVME_ADMIN_IDENTIFY 0x06u
 #define NVME_NVM_WRITE 0x01u
 #define NVME_NVM_READ 0x02u
+#define NVME_NVM_FLUSH 0x00u
+#define NVME_DATA_BYTES 4096u
 #define NVME_CNS_NAMESPACE 0x00u
 #define NVME_CNS_CONTROLLER 0x01u
 #define NVME_CNS_ACTIVE_NS 0x02u
@@ -321,6 +323,7 @@ static int nvme_xfer(nvme_ns_t *ns, UINT64 sector, UINTN count, void *buffer,
 static int nvme_blk_read(void *ctx, UINT64 sector, UINTN count, void *buf);
 static int nvme_blk_write(void *ctx, UINT64 sector, UINTN count,
                          const void *buf);
+static int nvme_blk_flush(void *ctx);
 
 static int nvme_setup_namespaces(nvme_ctrl_t *ctrl) {
   UINT32 nslist[64];
@@ -390,6 +393,7 @@ static int nvme_setup_namespaces(nvme_ctrl_t *ctrl) {
     ns->dev.ctx = ns;
     ns->dev.read = nvme_blk_read;
     ns->dev.write = nvme_blk_write;
+    ns->dev.flush = nvme_blk_flush;
     /* The first namespace keeps the classic "nvmeN"; extras follow the
      * "nvmeNnM" convention. */
     if (registered == 0) {
@@ -424,7 +428,10 @@ static int nvme_setup_namespaces(nvme_ctrl_t *ctrl) {
   return registered;
 }
 
-static int nvme_io_block(nvme_ns_t *ns, UINT64 lba, int write) {
+/* One NVM command moving nlb contiguous logical blocks from lba. The data
+ * rides in the single PRP entry that covers the 4 KiB staging page, so the
+ * caller has to fit nlb * block_size inside it (nvme_xfer does). */
+static int nvme_io_blocks(nvme_ns_t *ns, UINT64 lba, UINT32 nlb, int write) {
   nvme_ctrl_t *ctrl = ns->ctrl;
   nvme_cmd_t command;
   memset(&command, 0, sizeof(command));
@@ -433,7 +440,10 @@ static int nvme_io_block(nvme_ns_t *ns, UINT64 lba, int write) {
   command.prp1 = ctrl->data_phys;
   command.cdw10 = (UINT32)lba;
   command.cdw11 = (UINT32)(lba >> 32);
-  command.cdw12 = 0;
+  /* NLB is zero-based, so a count of 1 encodes as 0. Leaving it at 0 for
+   * every transfer made the controller move one block per command: a 64 KiB
+   * read of 512-byte blocks cost 128 round trips instead of 16. */
+  command.cdw12 = nlb - 1u;
   command.cid = ctrl->next_cid++;
   return nvme_submit(&ctrl->io, &command);
 }
@@ -470,7 +480,9 @@ static int nvme_xfer(nvme_ns_t *ns, UINT64 sector, UINTN count,
     UINTN chunk;
 
     if (within != 0 || count < spb) {
-      if (nvme_io_block(ns, lba, 0) != 0) {
+      /* Partial block: fetch it, patch the touched sectors, write it back.
+       * Correct for a stray sector, but it cannot be batched. */
+      if (nvme_io_blocks(ns, lba, 1u, 0) != 0) {
         __sync_lock_release(&ctrl->locked);
         return -1;
       }
@@ -481,7 +493,7 @@ static int nvme_xfer(nvme_ns_t *ns, UINT64 sector, UINTN count,
       if (write) {
         memcpy(ctrl->data + within * BLKDEV_SECTOR_SIZE, user,
                chunk * BLKDEV_SECTOR_SIZE);
-        if (nvme_io_block(ns, lba, 1) != 0) {
+        if (nvme_io_blocks(ns, lba, 1u, 1) != 0) {
           __sync_lock_release(&ctrl->locked);
           return -1;
         }
@@ -490,20 +502,27 @@ static int nvme_xfer(nvme_ns_t *ns, UINT64 sector, UINTN count,
                chunk * BLKDEV_SECTOR_SIZE);
       }
     } else {
-      if (write) {
-        memcpy(ctrl->data, user, block_bytes);
-        if (nvme_io_block(ns, lba, 1) != 0) {
-          __sync_lock_release(&ctrl->locked);
-          return -1;
-        }
-      } else {
-        if (nvme_io_block(ns, lba, 0) != 0) {
-          __sync_lock_release(&ctrl->locked);
-          return -1;
-        }
-        memcpy(user, ctrl->data, block_bytes);
+      /* Whole blocks: move as many as the staging page holds per command,
+       * so a large read costs one round trip per page rather than per block. */
+      UINT32 max_blocks = NVME_DATA_BYTES / block_bytes;
+      UINT32 blocks = (UINT32)(count / spb);
+      UINTN bytes;
+
+      if (blocks > max_blocks) {
+        blocks = max_blocks;
       }
-      chunk = spb;
+      bytes = (UINTN)blocks * block_bytes;
+      if (write) {
+        memcpy(ctrl->data, user, bytes);
+      }
+      if (nvme_io_blocks(ns, lba, blocks, write) != 0) {
+        __sync_lock_release(&ctrl->locked);
+        return -1;
+      }
+      if (!write) {
+        memcpy(user, ctrl->data, bytes);
+      }
+      chunk = (UINTN)blocks * spb;
     }
     sector += chunk;
     count -= chunk;
@@ -520,6 +539,30 @@ static int nvme_blk_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
 static int nvme_blk_write(void *ctx, UINT64 sector, UINTN count,
                           const void *buf) {
   return nvme_xfer((nvme_ns_t *)ctx, sector, count, (void *)buf, 1);
+}
+
+static int nvme_blk_flush(void *ctx) {
+  nvme_ns_t *ns = (nvme_ns_t *)ctx;
+  nvme_ctrl_t *ctrl;
+  nvme_cmd_t command;
+  int rc;
+
+  if (ns == NULL || ns->ctrl == NULL) {
+    return -1;
+  }
+  ctrl = ns->ctrl;
+  if (nvme_lock(ctrl) != 0) {
+    return -1;
+  }
+  /* Flush (opcode 0x00) carries no data: PRPs stay zero and the namespace
+   * id alone selects what the controller should drain. */
+  memset(&command, 0, sizeof(command));
+  command.opcode = NVME_NVM_FLUSH;
+  command.nsid = ns->nsid;
+  command.cid = ctrl->next_cid++;
+  rc = nvme_submit(&ctrl->io, &command);
+  __sync_lock_release(&ctrl->locked);
+  return rc;
 }
 
 static int nvme_controller_init(const pci_dev_t *pci) {

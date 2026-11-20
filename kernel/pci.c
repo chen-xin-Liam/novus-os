@@ -89,7 +89,12 @@ static int bar_info(UINT8 bus, UINT8 dev, UINT8 func, UINT8 index,
   if (mask_lo == 0u || mask_lo == 0xFFFFFFFFu) {
     return -1;
   }
-  size = ((UINT64)(~(mask_lo & 0xFFFFFFF0u)) & 0xFFFFFFF0u) + 1u;
+  /* Size = the lowest set bit of the mask. Inverting the mask and adding
+   * one gives that bit; masking the inverted value first - which this did
+   * before - throws it away and reports a size that is 1 too small for
+   * anything that is not a power of two in the low nibble: a 16 MiB BAR
+   * came back as 16 MiB - 15 bytes. */
+  size = (UINT64)(~(mask_lo & 0xFFFFFFF0u)) + 1u;
   if (is64 && mask_hi != 0u && mask_hi != 0xFFFFFFFFu) {
     size += ((UINT64)(~mask_hi) + 1u) << 32;
   }

@@ -74,6 +74,9 @@ typedef struct task {
   UINT8    abi;           /* TASK_ABI_*: what the task is allowed to call */
   UINT32   win32_last_error; /* Win32 GetLastError state */
   UINT64   win32_image_base; /* PE image base, for GetModuleHandleA */
+  UINT64   teb_va;   /* Win32 TEB in the task's own space, installed as
+                      * MSR_FS_BASE on every switch. Zero for a NUC task:
+                      * those have no TEB and never touch %fs. */
   struct {
     UINT32 ino;
     UINT32 dir_index;

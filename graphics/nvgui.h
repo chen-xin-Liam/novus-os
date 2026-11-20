@@ -24,6 +24,11 @@
 #include "nd.h"
 #include "nd_input.h"
 
+/* Opaque here: the image icon type lives in graphics/nd_icon.h, which
+ * includes nd.h itself. Keeping the include out of this header means a
+ * client of the widget set never pulls the filesystem in. */
+struct nd_icon_s;
+
 #define NG_POOL_SIZE 192
 #define NG_TITLE_MAX 40
 
@@ -88,7 +93,8 @@ typedef enum {
   NG_ICON_CHEVRON,
   NG_ICON_DISK,
   NG_ICON_DEVICES,
-  NG_ICON_VOLUME
+  NG_ICON_VOLUME,
+  NG_ICON_WIFI
 } ng_icon_kind_t;
 
 typedef struct ng_widget ng_widget_t;
@@ -180,6 +186,9 @@ struct ng_widget {
       UINT8 kind; /* ng_icon_kind_t */
       UINT8 size; /* glyph box in pixels, 0 = 20 */
       UINT8 pad[2];
+      /* A real image icon (decoded .ico fat pointer) takes over drawing
+       * from the built-in vector shape when it is set. */
+      const struct nd_icon_s *img;
     } icon;
     struct {
       nd_color_t color;
@@ -320,6 +329,12 @@ void ng_raise(ng_widget_t *w);
  * in pixels (0 = 20). */
 ng_widget_t *ng_icon(ng_widget_t *w, ng_icon_kind_t kind, UINT32 size,
                      ng_action_fn fn);
+
+/* Give an icon widget a real image (a decoded ICO from graphics/nd_icon.h).
+ * Once set, the image replaces the vector shape; NULL puts the shape back.
+ * The widget keeps the pointer, so the image has to outlive it - icons
+ * fetched with nd_icon_get() are cached by the decoder and are safe. */
+ng_widget_t *ng_icon_image(ng_widget_t *w, const struct nd_icon_s *img);
 
 /* Re-read the design tokens into the widget theme and damage the whole
  * canvas. Called by the shell when the light/dark mode changes; windows

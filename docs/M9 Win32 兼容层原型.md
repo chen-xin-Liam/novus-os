@@ -12,18 +12,25 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 
 已实现：
 
-* PE32+（x86-64）可执行文件加载，固定基址 `0x50000000`。
+* PE32+（x86-64）可执行文件加载，基址 `0x50000000`（无重定位表的镜像按其
+  自身的链接基址加载）。
 * DIR64 基址重定位；按名称导入，IAT 填 thunk 地址。
-* 15 个 API：控制台输出、tick、`Sleep`、错误码、命令行、模块基址、
-  注册表读写。
-* 每进程独立地址空间（`vm_space`）与独立的 Win32 ABI 标记。
+* 125 条 API（表里 126 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
+  tick、`Sleep`、错误码、命令行、模块基址、注册表读写、堆与 `VirtualAlloc`、
+  `user32` 窗口、消息循环、投递与定时器、坐标换算、光标位置、窗口移动、焦点、
+  `gdi32` 绘制与形状、TEB / TLS、屏幕度量、字体度量、文字测量与排版（含
+  `DT_WORDBREAK` 折行），文件读写、目录枚举、`LoadLibrary` / `GetProcAddress`，
+  控件（`STATIC` / `BUTTON` / `EDIT`、`WM_COMMAND`、`GetDlgItem`）、`MessageBoxA`，
+  以及 `ws2_32` 的握手、地址转换与错误码（传输调用如实返回 `WSAENETDOWN`）。
+* 每进程独立地址空间（`vm_space`）、独立的 Win32 ABI 标记，以及 `%fs` 指向的 TEB。
 * 文件管理器 `/exe` 虚拟目录，选中后运行。
 
 未实现：
 
-* GUI（`user32`/`gdi32`）、文件 API、堆管理、线程、异常、TLS。
 * 磁盘上任意路径的 `.exe`：镜像来自内核内嵌表（`build/win32_blobs.h`）。
-* 序号导入、延迟导入、DLL、真实 Windows 注册表语义。
+* 序号导入、延迟导入、从磁盘映射真实 DLL、PE TLS 目录、多线程、SEH。
+* 菜单、模态对话框（`DialogBox` 与模板）、`ws2_32` 的传输部分（本块只起了握手与地址转换）、
+  `crypt32`、`comctl32`、`ole32`、`shell32`。
 
 ---
 
@@ -240,3 +247,508 @@ scripts/run.sh
 
 * `CONFIG_NOVUS_WIN32=n` 时仍可构建：`apps.c` 的 Win32 分支整体编译掉，
   sysinfo 的 `/exe` 目录为空。
+
+## 第二批 API：程序启动阶段真正会调的十几个
+
+第一批只有 15 个入口，够证明"PE 能加载、导入表能填、系统调用能回到内核"，
+但任何一个真实程序在画第一个像素之前都要先问三件事：**我能分多少内存、我在哪个路径
+下运行、现在几点**。第二批补的正是这些，合计 30 个入口：
+
+| 组 | API | 实现口径 |
+| --- | --- | --- |
+| 模块 | `GetModuleFileNameA` | 返回加载时的镜像名（不含挂载点，层里还没有路径概念） |
+| 内存 | `VirtualAlloc` / `VirtualFree` | 进程独占 `0x20000000–0x30000000` 的 256 MiB 窗口，逐页映射新物理页；地址参数被忽略 |
+| 堆 | `GetProcessHeap` / `HeapAlloc` / `HeapFree` | 和 VirtualAlloc 同一个窗口；簿记表放在内核（64 项），不放用户内存 |
+| 时钟 | `GetSystemTime` / `GetLocalTime` / `QueryPerformanceCounter` / `QueryPerformanceFrequency` | 日期来自 RTC，计数来自 LAPIC 10 ms 节拍，频率固定 10 MHz |
+| 身份 | `GetCurrentProcessId` / `GetCurrentThreadId` / `IsDebuggerPresent` | 进程 id 即任务 pid（本层没有多线程）；调试器恒为否 |
+| 机器 | `GetSystemInfo` | 48 字节 SYSTEMINFO，页 4 KiB、粒度 64 KiB、CPU 数为当前任务数 |
+| 兜底 | `SetUnhandledExceptionFilter` | 接受并返回旧过滤器，但异常仍然终止进程（不假装有 SEH） |
+
+三条设计取舍，写在这里免得下次又踩：
+
+1. **分配器簿记不放用户内存。** Windows 的堆会在每个块前留头，本层内核不能直接解引用
+   用户地址（要过 `user_copy`），把 64 项 `{owner, va, size}` 表放内核更省事，也更安全。
+2. **释放不还页。** `VirtualFree`/`HeapFree` 只清表项，页继续映射。层里还没有 unmap 路径，
+   而"指针可能还活着"时回收页比泄漏更糟；地址空间随进程退出一起销毁。
+3. **RDI 保存约定不变。** 新 API 都走同一个 thunk（RDI 暂存在 shadow space 里），
+   第 5 个及以后的参数从 `rsp + 0x28 + (n-5)*8` 读（`n` 是真实参数序号，第 5 个是第一
+   个真正落到栈上的参数；`0x28 = 返回地址 8 字节 + 四个寄存器参数槽 0x20`）。
+
+验收：样例程序 `hello.exe` 在退出前会打印这一段，全部来自第二批 API：
+
+```
+[WIN32] image: hello.exe
+[WIN32] virtual: block ok, pagesum=...
+[WIN32] heap: alloc/free ok
+[WIN32] date: 2026
+[WIN32]   month 11  day 19  hour 20  minute 5x
+[WIN32] qpf: 10000000
+[WIN32] qpc: ...
+[WIN32] page: 4096
+[WIN32] cpus: ...
+[WIN32] pid: ...
+```
+
+## 第三批：user32 / gdi32，窗口真的开出来
+
+前两批让程序能跑起来并自己说话；这一批让它有窗口。范围是"能开一个窗口、能画、能收
+消息"的最小闭环，一共 18 个 API：
+
+| 分类 | API | 做法 |
+| --- | --- | --- |
+| 窗口 | `RegisterClassExA` / `CreateWindowExA` / `DestroyWindow` / `ShowWindow` | 窗口就是 Novus-WM 的窗口，owner 记为进程 pid；z-order、焦点、拖拽、关闭按钮全部复用 |
+| 消息 | `GetMessageA` / `PeekMessageA` / `DispatchMessageA` / `TranslateMessage` / `DefWindowProcA` | 每个进程一条 16 条的环形队列，货从 WM 事件翻译而来 |
+| 客户区 | `GetClientRect` | 客户区 = `(w-2) x (h-33)`，边框和标题栏由 WM 画 |
+| 绘制 | `BeginPaint` / `EndPaint` / `GetDC` / `ReleaseDC` / `FillRect` / `TextOutA` / `SetTextColor` / `CreateSolidBrush` | 不是像素缓冲，是**显示列表**：每次调用往 WM 追加一条图元，`EndPaint` 时整体提交 |
+
+### 为什么要有"内核直调"通道
+
+Win32 进程在 ring3 只有 `SYS_WIN32` 一个系统调用入口，它不可能去说 WM 的 IPC 协议
+（那是 Rust 侧应用的私有格式）。所以 `nwm.c` 里加了一条内核侧入口：
+
+```c
+static int g_kernel_call;      /* 置位时 ack() 不发 reply，只记状态 */
+static INT32 g_kernel_status;
+static UINT32 g_kernel_win;
+
+int nwm_kernel_request(owner, type, payload, len, out_win);   /* 造一个 sender=owner 的假报文 */
+int nwm_owner_create(...); nwm_owner_destroy(...); nwm_owner_clear(...);
+int nwm_owner_shape(...);  nwm_owner_text(...);   nwm_owner_flush(...);
+```
+
+内核侧调用是同步的：`handle_request()` 走完，`ack()` 看到 `g_kernel_call` 就只把
+状态码填进 `g_kernel_status` 然后返回。没有新线程、没有额外队列，也没有把 WM 的
+协议暴露给用户态。
+
+### DispatchMessageA 必须回到程序自己的 ring
+
+`WndProc` 是程序里的函数指针，只能由程序自己的 ring3 代码调用。`DispatchMessageA`
+因此不是 thunk，而是一页手写机器码（43 字节）：
+
+```
+mov rax,[rcx]        ; MSG.hwnd
+and eax,0xF
+mov r11,[0x60003F00+rax*8]   ; 表项：该窗口的 WndProc
+test r11,r11 / jz .none
+mov r8,[rcx+0x10]    ; wParam / lParam 按 Win64 顺序摆好
+mov r9,[rcx+0x18]
+mov edx,[rcx+8]      ; message
+mov rax,rcx
+mov rcx,[rax]        ; hwnd 回填 rcx
+sub rsp,8 / call r11 / add rsp,8 / ret
+.none: xor eax,eax / ret
+```
+
+HWND 编码是 `0x40000000 | winid`，表索引 `hwnd & 0xF`（16 槽，对应 10 个窗口足够）。
+`pe.c` 的 IAT 填充从"一律写 thunk"改成"问 `win32_api_entry(id)`"，只有返回值和
+常规 thunk 地址完全相等时才写 thunk，否则直接写 stub 页地址——这样"这个 API 需要
+用户态代码"这件事由 `win32.c` 一处决定。
+
+### 等待不能再忙等
+
+`GetMessageA` 空队列时的第一版是 `sched_yield()` 循环，结果整机冻结：
+syscall 进入时中断是关的，WM 任务永远上不了 CPU。改成 `ipc_recv(pid, &in, 1)` 真
+阻塞，并在 `IPC_ERETRY` 时按 `sys_ipc_recv` 同一套机制处理：
+
+```c
+sched_park(pid, 500);
+f->rax = SYS_WIN32;
+f->rip -= WIN32_SYSCALL_LEN;   /* 回到 syscall，唤醒后原地重放 */
+```
+
+唤醒后 `gui_pull` 在 wait 分支返回 -1，`api_get_message` 负责把 rip 卷回去，重放时
+队列里已经有消息了。
+
+### 这一批真正修掉的 bug（按发现顺序）
+
+1. **无 `.reloc` 的镜像怎么处理。** 样例程序一开始没有任何绝对地址，链接器就不生成
+   重定位表，加载器（有意地）拒绝搬移。当时让样例真的持有绝对地址
+   （`static const char *const k_body[]`）来产生 3 条 DIR64。后续补上的
+   `tlsdemo.c` 又撞上同一件事，于是加载器这一侧也按 Windows 的规则补全了：
+   **没有重定位表的镜像只在它自己被链接的基址上加载**，前提是该基址页对齐、
+   整段镜像落在 `0x42000000`（TEB）以下；否则报
+   `no relocations and no room at its preferred base`。两个样例因此各走一条路径：
+   `hello.exe`/`window.exe` 在 `0x50000000` 走重定位，`tlsdemo.exe` 回到 `0x400000`
+   原地加载。
+2. **`FillRect` 的 DLL 名对不上。** Windows 里它是 USER32 导出，多数编译器按 GDI32
+   导入。`win32_api_lookup()` 改成先精确匹配 DLL+函数，再按函数名兜底——DLL 只是
+   记账，不是契约。
+3. **stub 页只给了 `USER|EXEC`。** `user_copy(to_user=1)` 要求写权限，表项写不进
+   去，`WndProc` 永远不被调用（`rc = 0xFFFF...`）。补 `VM_PROT_WRITE` 后
+   `DefWindowProc reached` 立刻出现。
+4. **栈参数偏移整体错一格。** 旧公式 `0x28 + (n-4)*8` 对第 5 个参数读到 `rsp+0x30`。
+   实机栈 dump 是决定性证据：`rsp+0x28` 处正好是 `0x1B`/`0x2D`/`0x27`，和各行文本
+   长度吻合。改成 `0x28 + (n-5)*8`（`n >= 5`）后，同一处调用点
+   `TextOutA(hdc, x, y, str, len)` 立刻拿到 `len`。顺带把三个 `Reg*` 调用点从"为
+   旧公式编的号"改回真实参数号。
+   影响面不止文字：`CreateWindowExA` 的 x/y/w/h 也整体错位，窗口被摆到屏外。
+
+### 验收
+
+样例 `user/win32compat/samples/window.c`（无 CRT，入口 `novus_win32_main`）在 QEMU
+实机里跑出的串口：
+
+```
+[NWM] create win=3 from pid=7
+[WIN32] paint: submitted shapes=2 texts=8 flush->0
+[NWM] first frame win=3 from pid=7
+```
+
+`shapes=2` 是白底 + 左侧 4px 红条，`texts=8` 是 `WndProc` 里八次 `TextOutA`——
+文字第一次真的上了屏。这意味着链路已经闭合：
+
+```
+CreateWindowExA → WM 窗口 → GetMessageA(park) → DispatchMessageA(stub)
+→ 程序自己的 WndProc → BeginPaint → FillRect/TextOutA → EndPaint → 显示列表提交
+```
+
+### 还没做的（别当成已做）
+
+- 只有 scale=1 的单一字号，`GetTextMetricsA` 报的就是这一种的度量；CJK 字形的覆盖
+  按内置子集来。
+- `WM_KEYUP` 不投递（WM 只给按下），修饰键（Shift/Ctrl/Alt）不带进 `WM_CHAR`。
+- `WM_CHAR` 由本层排进队列，`TranslateMessage` 仍是空实现。
+- 没有 `SetWindowPos` / `SetWindowLong` / 菜单 / 对话框 / 控件（`comctl32` 整块缺）。
+- 合成器只在创建、`EndPaint`、`WM_EV_RESIZE`、`InvalidateRect` 时请求重绘。
+- 没有 `ws2_32` / `crypt32` / `ole32` / `shell32` / SEH / PE TLS 目录 / 多线程；
+  微信、QQ 这类大型应用离"能起来"还有相当距离，本层只到"最小窗口程序能跑"。
+
+---
+
+## 7. 第四块：TEB 与 TLS
+
+Windows 程序在第一条指令前就已经有线程信息块，`%fs` 直接指向它。这一块把这件事补齐，
+结构按 x64 ABI 的真实偏移填，而不是按本层自造的布局：
+
+| 偏移 | 字段 | 值 |
+| --- | --- | --- |
+| `0x08` / `0x10` | `StackBase` / `StackLimit` | `0xA0000000` / 减去 64 KiB |
+| `0x30` | `Self` | `0x42000000`（指向自己） |
+| `0x40` / `0x48` | `ClientId.ProcessId` / `UniqueThread` | 指针宽，取自 `task_t` |
+| `0x1480` | `TlsSlots[64]` | 编译器读线程局部变量走的就是这里 |
+
+TEB 占 `0x42000000` 起的**两页**（`0x1480` 在第二页），由 `pe_teb()` 在 `pe_load()`
+末尾、进程号已知之后映射并填写。填不进去只打一行
+`TEB not mapped, TlsAlloc will fail`，程序照样启动。
+
+### 切换任务时必须跟着换 %fs
+
+`%fs` 是每核寄存器（`IA32_FS_BASE`，MSR `0xC0000100`），所以调度器三处都要写：
+
+```c
+sched_start()          msr_write(MSR_FS_BASE, first->teb_va);
+sched_switch_frame()   msr_write(MSR_FS_BASE, next->teb_va);
+sched_enter_kidle()    msr_write(MSR_FS_BASE, 0u);   /* 内核上下文不留用户基址 */
+```
+
+最后一处是安全边界而不只是整洁：内核 idle 用 ring 0 跑，留着上一个进程的 `%fs`
+就能让内核意外解引用一个已经被切出去的地址空间。
+
+### 4 个 TLS API
+
+`TlsAlloc` / `TlsFree` / `TlsGetValue` / `TlsSetValue` 直接读写 TEB 的那 64 个槽，
+读写走 `user_copy()`，因为这页属于用户空间：
+
+* 槽 0 保留（镜像自己的 TLS 目录还没有支持），`TlsAlloc` 从 1 开始发索引；
+* 发不出去就返回 `TLS_OUT_OF_INDEXES`（`0xFFFFFFFF`），这是程序要自己处理的结果；
+* `TlsFree` 会把槽清零，否则同一个索引再发出去时，读到的会是上一个持有者的指针；
+* 读一个从未分配的索引返回 0，和 Windows 一致。
+
+`TlsAlloc` 的位图是**进程级**的：本层一个 Win32 进程，多线程调度还没做，不说成线程级。
+
+### 验收程序
+
+`user/win32compat/samples/tlsdemo.c`（控制台，无 CRT，入口 `novus_win32_main`）
+开机自检一次，逐项打印并给出 PASS / FAIL：
+
+```
+[TLS] TEB checks on %fs
+  %fs:0x30 self      = 0x42000000
+  %fs:0x60 PEB (clear) = 0x0
+  ClientId.ProcessId vs API   ok
+  ClientId.ThreadId vs API    ok
+  StackBase = 0xa0000000  ok
+  StackLimit = 0x9fff0000  ok
+[TLS] TlsAlloc / TlsSetValue / TlsGetValue
+  first index = 1 / second index = 2
+  %fs TLS slot 1 = 0xc0ffee  ok
+  %fs TLS slot 2 = 0xbeef    ok
+[TLS] TlsFree
+  free index reads 0 / %fs slot cleared / TlsFree(0) refused  ok
+[SM] GetSystemMetrics  screen = 1024 x 768
+[TLS] PASS
+```
+
+关键一项是 `%fs TLS slot`：它由程序自己用 `movq %fs:(reg)` 读出来，而不是问内核，
+所以它同时证明了三件事——TEB 页真的映射了、`%fs` 真的指向它、`TlsSetValue` 写进去的
+值和编译器会读到的是同一个位置。
+
+## 8. 第五块：键盘字符、字体度量、重绘
+
+三件事凑成"程序能对输入作出反应"：
+
+* **`WM_CHAR`。** WM 交下来的 `key` 对文本键是 Unicode 码点，对控制键是
+  `ND_KEY_BASE` 以上的 `ND_KEY_*`。`vk_for_char()` / `vk_for_special()` 把它翻成
+  `WM_KEYDOWN` 的 VK，字符本身再单独排一条 `WM_CHAR`。字符是**本层**排进队列的，
+  而不是像 Windows 那样由 `TranslateMessage` 生成——本层没有保存"上一个 keydown"
+  的状态，排在这里可以让没调 `TranslateMessage` 的程序也能收到字符。
+* **`GetTextMetricsA`。** 按 `TEXTMETRICA` 的 x64 布局整块 56 字节填出：11 个 LONG
+  + 9 个 BYTE。字号是这台合成器唯一有的那一种——16 像素字身、13 像素 ascent、
+  8 像素半宽格、CJK 16 像素格、`tmPitchAndFamily = 0x30`（FF_MODERN 定宽）、
+  `tmCharSet = 134`（GB2312）。程序据此居中、换行都对得上。
+* **`InvalidateRect` 合并重绘。** 只置窗口的 `dirty` 标志，`gui_pull` 在队列空了以后
+  统一排一条 `WM_PAINT`：Windows 也合并重复失效，否则每敲一个键就排一条 PAINT，
+  队列会被自己填满。矩形参数被忽略——显示列表本来就是整块重画。
+* **`GetStockObject`。** 与 `CreateSolidBrush` 同一套"高字节置 1 的颜色"编码，
+  所以两种 handle 可以混用；`HANDLE 0` 是空心刷，`FillRect` 收到它就什么都不画。
+
+样例 `window.c` 因此能一边显示 `tm 16/13/8` 的实测值，一边把键入的字符打在窗口里，
+退格删字、回车清空——这条链路走的是 `WM_CHAR → InvalidateRect → WM_PAINT →
+TextOutA`。
+
+## 9. 第六块：画笔与形状
+
+`FillRect` 只能画盒子；一条墨线、一个空心框和一个椭圆，才让"盒子"变成"画"。所以画笔
+和画刷并列，每个形状都以显示列表里的一条记录发出：
+
+* **`nd_ellipse` / `nd_fill_ellipse`。** 合成器原来只会画圆（`nd_circle`），椭圆按
+  `x = rx*sqrt(1-(y/ry)^2)` 求出每行的半宽，用整数开方 `isqrt_i32()` 算，不查表；
+  半径 3 像素的椭圆也是闭合的。
+* **WM 的三个新 op。** `NWM_OP_LINE`（(x,y)→(x+w,y+h)）、`NWM_OP_ELLIPSE`（圆心 +
+  两个半径）、`NWM_OP_ELLIPSE_FILL`。WM 对不认识的 op 仍然忽略，前向兼容不变。
+* **`Rectangle` / `Ellipse` 是"刷 + 笔"两条记录。** Windows 画矩形会先填再用笔画边，
+  本层照做：先发 `FILL`/`ELLIPSE_FILL`，再发 `FRAME`/`ELLIPSE`，颜色分别取当前
+  画刷和当前画笔。
+* **画笔是真的对象。** `CreatePen` 返回 `0xFD000000 | (槽+1)`，`SelectObject` 按句柄
+  高字节区分画笔/画刷/空心刷（0），`DeleteObject` 只真的释放画笔槽——别的对象是一个
+  颜色，删不删都不占资源。
+* **`SetBkMode` / `SetBkColor` / `SetPixel` / `PatBlt`。** 背景模式默认是 TRANSPARENT
+  （和 Windows 一致），`PatBlt` 只接受 `PATCOPY`、`WHITENESS`、`BLACKNESS` 三种光栅
+  操作，其它返 0 并置 `ERROR_INVALID_PARAMETER`——猜一个近似值等于画错。
+* **`PostQuitMessage` 真的结束循环。** 退出码存进进程状态，`GetMessageA` 在队列空时
+  把 `WM_QUIT` 连同 `wParam` 写进 `MSG` 再返回 0，所以"看返回值"和"看 msg.message"
+  两种循环都能退出。
+* **`SetWindowTextA` / `GetWindowTextA`。** 标题写在 WM 的窗口标题栏里（`nwm_owner_title`），
+  本地同时留一份，读取不再绕一趟 IPC。
+
+样例 `window.c` 在窗口底部多画一块面板：`PatBlt` 色带、`MoveToEx` + 两段 `LineTo` 的
+折线、一个矩形、一个椭圆、16 个 `SetPixel` 点，画笔成对创建/选中/删除。
+
+## 10. 第七块：消息循环的其余部分
+
+前六块让程序"能开窗、能画、能收字符"，这一块让它"像一个 Windows 程序那样跑循环"。
+其中一条是**修掉一个真实的兼容错误**：
+
+* **`GetMessageA` 的参数顺序。** Windows 是 `GetMessageA(hwnd, lpMsg, min, max)`，
+  之前的层把第一个参数当成 `MSG*`，样例也跟着写成 `GetMessageA(&msg, 0, 0, 0)`——
+  在自家样例里自洽，但任何真实 Windows 程序编译出来的调用都会把窗口句柄当地址写坏。
+  现在层按 Windows 顺序取参，`hwnd` 非 0 时还按它过滤消息；样例同步改回标准写法。
+* **`PostMessageA`。** 消息进本进程队列，调用在消息被处理之前就返回，和 Windows 一样。
+* **`SendMessageA`。** 同步调用要求窗口过程在调用者的栈帧里运行，而本层的窗口过程由
+  程序**自己的**循环派发（是用户态回调，内核无法代调）。所以 `SendMessageA` 以异步方式
+  投递并返回 0，这是**写在文档里的偏差**，而不是悄悄返回一个假结果：`msgdemo.exe`
+  专门断言"返回 0 且消息随后到达"。
+* **`SetTimer` / `KillTimer` / `WM_TIMER`。** 4 个槽，周期下限 10 ms（一个 tick）。
+  队列空时由 tick 计数补一条 `WM_TIMER`，队列满则顺延而不是丢——和 Windows 的合并
+  语义一致。`TIMERPROC` 需要从 tick 路径回调用户态，本层暂时做不到，所以带回调的
+  `SetTimer` 返回 0 并置 `ERROR_INVALID_PARAMETER`，而不是给一个永远不响的定时器。
+* **`WM_KEYUP`。** 输入源只报按下，本层在按下/字符之后立刻补一条 `WM_KEYUP`。
+  依赖"按下-抬起成对"的热键程序因此能工作，代价是抬起比真实键盘早一个消息。
+* **坐标与指针。** `GetWindowRect` 报的是窗口**被放置**的矩形（`nwm_owner_rect`），
+  不是调用者请求的那一个：被夹回屏幕的窗口位置会变，报请求值会让 `ClientToScreen`
+  和屏幕上的像素对不上。客户区原点在 `(x+1, y+32)`——左边 1 像素边框、上面 32 像素
+  标题，`ClientToScreen` / `ScreenToClient` 互为逆运算。`GetCursorPos` 读的是合成器
+  那块软件指针的真实位置，不是猜的。
+* **`GetWindowLongPtrA` / `SetWindowLongPtrA`。** 只实现 `GWLP_USERDATA`（-21），
+  这是程序唯一按约定存放自己数据的地方；别的索引返回 0，不假装有值。
+
+## 11. 第八块：文字排版
+
+* **`GetTextExtentPoint32A`。** 量的是合成器真正画字时用的那张步进表
+  （`nd_text_width_n`）：载入 TrueType 面时按字形步进，没有载入时按内建点阵
+  （半角 6 / 全角 16）。先前按 `nd_ttf_advance` 累加，没有字体时量出 0 宽度，
+  量出来和画出来不一致——这是 `msgdemo.exe` 抓出来的，样例现在断言
+  "M × 4 = 4 格"、"一个字 = 2 格"的**关系**而不是某个常数。
+* **`SetTextAlign` / `GetTextAlign`。** `TA_CENTER` / `TA_RIGHT` 会把原点从字符串左边缘
+  移到中心或右边缘，`TextOutA` 因此不用先量再画。
+* **`DrawTextA`。** 按 `\n` 分行，`DT_CENTER` / `DT_RIGHT` / `DT_VCENTER` 生效；
+  **词间换行（`DT_WORDBREAK`）没有实现**——传了这个标志但没有换行符时，得到的是单行，
+  文档写明而不是装作支持。
+* **`GetTextFaceA`。** 载入了 TrueType 面就返回它的家族名（`nd_ttf_family()`）；
+  没有载入时返回 `Novus Bitmap`——那是此刻真正在画字的那套点阵，而不是一个
+  并不存在的字体名。
+* **`SetTextCharacterExtra`。** 字间距参与测量与绘制，两边用同一个函数，所以量出来和
+  画出来永远一致。
+
+## 12. 第九块：文件与库
+
+十三支 API：`CreateFileA`、`ReadFile`、`CloseHandle`、`GetFileSize`、
+`GetFileAttributesA`、`DeleteFileA`、`CreateDirectoryA`、`FindFirstFileA`、
+`FindNextFileA`、`FindClose`、`LoadLibraryA`、`GetProcAddress`、`FreeLibrary`。
+
+* **句柄怎么编。** 文件句柄是 `0x22000000 | 任务 fd 槽`，枚举句柄是
+  `0x23000000 | 槽`，库句柄是 `0x5E000000 | 序号`。三套位段写在同一个
+  `trap_frame_t` 返回值里，`WriteFile` 因此可以按高位分辨"这是文件还是控制台"，
+  程序也不会把枚举句柄和文件句柄搞混——`fileio.exe` 专门断言这三个前缀。
+* **路径。** 相对路径补成 `/name`，绝对路径原样；解析交给 `vfs_resolve_path` /
+  `vfs_resolve_parent`，删除与建目录都用"父目录 + 叶子名"的后端签名，和文件系统
+  适配层一致。
+* **`CreateFileA` 的 creation 语义。** `CREATE_NEW` 撞上已存在的名字**返回失败**
+  （`ERROR_FILE_EXISTS`），不是打开旧文件；`CREATE_ALWAYS` / `OPEN_ALWAYS` 在
+  父目录里新建；`TRUNCATE_EXISTING` 保留文件、清空字节；`OPEN_EXISTING` 缺文件
+  返回 `ERROR_FILE_NOT_FOUND`。第一条是 `fileio.exe` 抓出来的真错误，已修。
+* **枚举要先落盘。** 后端把目录块放在写回缓存里，同进程刚建的文件在"块级"
+  枚举里还看不见，所以 `FindFirstFileA` / `FindNextFileA` 每次枚举前先
+  `fs->sync()`。这是本层的责任——Windows 程序从不自己 flush 就能 `FindNext`。
+  通配 `*` / `?` 由本层匹配；枚举自然结束返回 0（Windows 置
+  `ERROR_NO_MORE_FILES`），`readdir` 真的报错时才打日志。
+* **`LoadLibraryA` 只认四个内建库。** `kernel32.dll` / `user32.dll` / `gdi32.dll` /
+  `advapi32.dll` 的入口本来就编在镜像里，给句柄是真话；别的名字返回 0 并置
+  `ERROR_MOD_NOT_FOUND`，而不是给一个稍后 `GetProcAddress` 会失败的假句柄。
+  **从磁盘映射真实 DLL 没有实现**，文档写明。
+* **`GetProcAddress` 复用导入那条路。** 它按 `win32_api_lookup` 查名字、再用
+  `win32_api_entry` 拿到同一枚 thunk 地址，所以"导入表拿到的函数"和"运行时
+  查到的函数"是同一个入口，不会出现两套实现。
+* **`CloseHandle`。** 文件槽、枚举槽都清零；控制台与标准句柄 0/1/2 是
+  "关不掉也不算错"，返回 1 而不是报错。
+
+验证：`fileio.exe` 在 QEMU/TCG 上全项 PASS（建目录、`CREATE_ALWAYS` 写 13 字节、
+`GetFileSize`=13、关句柄后再关失败、`OPEN_EXISTING` 读回同样 13 字节并逐字节比对、
+`CREATE_NEW` 被拒、属性 0x80/0x10/失败 0xFFFFFFFF、`/fio/*` 枚举到 `note.txt`、
+删除后再查为 INVALID、`gdi32.dll` 拿到句柄且 `TextOutA` 落在 thunk 页、
+`ws2_32.dll` 与不存在的名字都被拒）。
+
+## 13. 实机验证记录
+
+在 QEMU/TCG（`-accel tcg -smp 2 -m 3072 -vga std`，串口转存）上跑了两轮：
+
+* **样例盘。** `tlsdemo.exe` / `msgdemo.exe` / `fileio.exe` 依次启动，串口
+  `[TLS] PASS`、`[MSG] PASS`、`[FIO] PASS` 三条全绿，无失败项。`msgdemo`
+  抓出两处真缺陷（枚举竞态、`CREATE_NEW` 语义）和一处样例自身写穿栈的问题，
+  都已修完复测。
+* **目视盘。** 桌面只启 `window.exe`，让它的窗口不被设置页挡住。串口
+  `[WIN32] paint: begin hwnd=0x40000003` →
+  `paint: submitted shapes=0x19 texts=0xA flush->0`，屏幕上是：标题栏
+  `Win32 窗口 · Novus 0` 带最小化/最大化/关闭三个按钮、左侧 4 像素红色标记条、
+  五行文字（含中文）、一条蓝色折线、一个 120×40 蓝框矩形、一个点线椭圆、
+  底部 16 个 `SetPixel` 点组成的点线。二十五条形状、十条文字全部由窗口过程的
+  `WM_PAINT` 经 `FillRect` / `TextOutA` / `MoveToEx` / `LineTo` / `Rectangle` /
+  `Ellipse` / `SetPixel` 提交进 Novus-WM——第六到第八块的绘制路径在真机管线上是通的。
+
+这一段最初留下的两个缺口，一个换通道后关闭，另一个是层里的真 bug，已修。
+
+* **输入注入：QEMU monitor 通不了，改走 VNC。** `-display none` + PS/2 下
+  `mouse_move` 不驱动客户机光标（截图上光标始终停在 `(0,0)`）。改成
+  `-vnc 127.0.0.1:NN` 后用 vncdotool 注入，点击能让 Win32 窗口置顶并获得焦点，
+  串口出现 `[NWM] key -> win=3 pid=7`。这说明注入通道本身是好的，之前的结论只
+  对 monitor 成立。
+* **按键到不了窗口过程，根因在层的收件箱判断上。** `ipc_try_recv` 成功时返回的
+  是**载荷长度**（24、64 这样），不是 0；`gui_pump` 写的是
+  `while (ipc_try_recv(...) == 0)`，于是它只可能捞到"长度为 0 的消息"——真实事件
+  一条也捞不到。串口里 `[WIN32] ipc event` 一次都没打印，就是这个原因；而
+  `GetMessageA` 的有界等待把这条空队列误读成"该结束了"，一有点击到达就直接
+  `return 0`，窗口的 `while (GetMessageA(...))` 于是退出、进程结束——这也是
+  "点一下窗口就没了"的真凶。改成 `>= 0` 后，点击、按键都进了窗口过程：串口里
+  `ipc event type=0x202`（鼠标）、`0x203`（按键）、`key event reached the layer`
+  连续出现，窗口里把键入的 `abcd` 画了出来（`WM_CHAR` → `TextOutA`）。
+* **没有 TTF 时缺字的汉字画成空心框。** 点阵表原先只收源码里出现过的非 ASCII
+  字符（541 个），Win32 程序运行时自带的中文不在表里。`tools/fontgen/fallback.py`
+  改成按 GB2312 一级字库（`0xB0A1..0xD7F9`，3755 字）加标点符号现算，与源码
+  字符取并集，共 **4445 个字形**（`build/nd_font_fallback.h` 942 KB）。截图里
+  "提供"等字已经正常，不再画 `口`。代价是 `NOVUS.EFI` 大了约 0.9 MB。
+
+## 14. 第十块：窗口端语义与字形
+
+这一块补的是"程序能改自己的窗口、能拿到键盘、能把一段长文排进窄框"，以及把
+上一块暴露的收件箱 bug 一起修掉。
+
+* `MoveWindow(hwnd,x,y,w,h,repaint)`：尺寸按**整窗**传入，客户区在层内记为
+  `w-2 × h-NWM_TITLE_H-1`（同 `client_rect`），改完置 `dirty` 触发重绘。
+  经 `nwm_owner_move` 落到已有 `NWM_REQ_MOVE`。
+* `SetFocus` / `GetFocus`：`SetFocus` 走 `nwm_owner_focus`（WM 侧 raise +
+  `focus_set`），并由层给旧窗口投 `WM_KILLFOCUS`、新窗口投 `WM_SETFOCUS`；
+  `GetFocus` 返回层里记住的 `focus_hwnd`。用户点击窗口时 WM 发 `NWM_EV_FOCUS`，
+  同一条 `gui_translate` 分支把层和程序的焦点视图对齐。
+* `DrawTextA` 的 `DT_WORDBREAK`：新增 `wrap_len()` 按像素宽度找断点，优先在
+  ASCII 空格断，没有空格就按码点断（中文没有空格，必须能断），行尾跳过多余空格。
+  返回行数；不带标志时仍是一条。
+* `kernel/win32.c` 的收件箱判断与有界等待：`ipc_try_recv` 一律按 `>= 0` 认成
+  "收到"，`GetMessageA` 的等待改成 `sched_park(WIN32_MSG_POLL_TICKS)`——漏一次
+  唤醒退化成一次 poll，而不是窗口永久失聪。
+
+验收（QEMU/TCG，串口）：`msgdemo.exe` 全项 `ok`、`FAIL count = 0`：
+
+* `MoveWindow(200,150,400,200)` 后 `GetClientRect` = 398×167，
+  `GetWindowRect` = (200,150,600,350)；
+* `SetFocus` 返回同一 hwnd，`GetFocus` 随后同值；点击前 `GetFocus` 允许是 0 或
+  该窗口——Novus-WM 在窗口打开时就把键盘给它，这是窗口管理器策略，不是
+  Windows 语义，样例按"两者皆合法"断言；
+* `DrawTextA` 无 `DT_WORDBREAK` 返回 1 行，带标志在同一 60×80 矩形内返回 5 行，
+  且行数在 2..8 之间；
+* 目视：`window.exe` 被点击后置顶、获得焦点，键入 `abcd` 以红色画在窗口里。
+
+仍未做（别当成已做）：菜单、模态对话框、`ws2_32` 的传输部分、`crypt32`、
+`comctl32`、`ole32`、`shell32`、SEH、PE TLS 目录、多线程、D3D。微信 / QQ
+那一层还没碰。
+
+## 15. 第十一块：`ws2_32` 起头
+
+内核其实已经有 TCP 引擎（`net_tcp.c`）、解析器（`net_dns.c`）与 DHCP，但那套
+引擎是**一条连接**，不是描述符表；`ws2_32` 还没有描述符层可以落到它上面。所以
+这块只做**不需要连接**的那部分，剩下的如实失败，下一块才把描述符接到
+`net_tcp_*` 上：
+
+* `WSAStartup` / `WSACleanup`：握手成功，`wVersion` 与 `wHighVersion` = 0x0202，
+  `szDescription` = "Novus ws2_32"，`szSystemStatus` = "socket layer not wired"，
+  `iMaxSockets` 与 `iMaxUdpDg` 都是 0——没有描述符层，就不给一个看起来能用的数字。
+* `WSAGetLastError` / `WSASetLastError`：沿用每个任务已有的错误槽，读写一致。
+* `inet_addr` / `inet_ntoa`：真转换。`inet_addr` 逐段解析、越界与段数不足都回
+  `INADDR_NONE`（0xFFFFFFFF）；`inet_ntoa` 按网络字节序展开，文本写进 TEB 第二页
+  尾部 `+0x1700` 的 16 字节缓冲并返回该地址（Windows 用它自己的线程缓冲，这里用
+  线程块尾部，语义上是同一个东西）。
+* `socket` / `connect` / `send` / `recv` / `bind` / `listen` / `accept` / `select` /
+  `ioctlsocket`：返回失败值（`INVALID_SOCKET` 或 `SOCKET_ERROR`）并把
+  `WSAGetLastError` 置为 `WSAENETDOWN`（10050）。
+* `closesocket`：没有句柄被发放过，任何值都是 `WSAENOTSOCK`（10038）。
+* `gethostbyname`：回 0，错误 `WSAHOST_NOT_FOUND`（11001）；`getaddrinfo` 回
+  `EAI_FAIL`（-4，按 x64 符号扩展返回），`freeaddrinfo` 是空操作。
+* `LoadLibraryA("ws2_32.dll")` 现在给得出句柄，`GetProcAddress` 能解析出同名
+  thunk——动态加载和导入表走同一条路。
+
+验证：`wsdemo.exe` 在 QEMU/TCG 上 `[WS] PASS`，`FAIL count = 0x0`，29 项 `ok`：
+握手与 `WSADATA` 各字段、`inet_addr` 三个拒绝用例、`inet_ntoa` 三组往返字符串、
+`socket`/`connect`/`gethostbyname`/`closesocket` 的失败值与错误码、`WSASetLastError(0)`
+回读，以及经 `GetProcAddress` 取到的 `inet_ntoa` 指针调用结果。
+
+
+## 16. 第十二块：控件
+
+Windows 的对话框本质是"带子窗口的窗口"，所以这块先把子窗口做出来，而不是先
+做 `DialogBox` 的模板解析：没有控件，对话框只是一个空框。
+
+* `CreateWindowExA` 的类名为 `STATIC` / `BUTTON` / `EDIT`（大小写不敏感）且第 9
+  个参数（父窗）非零时，不建顶层窗口，而是在父窗里建一个子控件，句柄从
+  `0x41000000` 起按槽位编号。控件不经过 Novus-WM：它不是窗口管理器的对象，
+  只占父窗客户区里的一个矩形，与 Windows 的 child window 一致。
+* 每个控件有自己的文本缓冲（96 字节），`SetWindowTextA` / `GetWindowTextA` 对
+  控件同样有效——这也是 `WM_INITDIALOG` 里填初值的做法。
+* 绘制由父窗这一帧统一发出：`EndPaint` 之后、`nwm_owner_flush` 之前把控件矩形
+  逐个画进去。`STATIC` 不画底（透出父窗背景），`BUTTON` 圆角填充加描边、文字
+  居中，`EDIT` 白底加 1 像素边框、有插入符时画一根竖线。
+* 命中测试跳过 `STATIC`（它不接收鼠标），从最上层往下找。按下 `BUTTON` 记下
+  按压态，同一个控件上松开才发 `WM_COMMAND`：`wParam` 高 16 位是控件 id
+  （约定为 `(hwnd & 0xFF) + 1`），低 16 位是通知码 `BN_CLICKED`（0），`lParam`
+  是控件句柄。按下 `EDIT` 则把焦点交给它并画插入符。
+* 键盘：焦点在 `EDIT` 上时，字符与退格直接改它的缓冲。**这里是明说的差异**：
+  Windows 会把按键先给控件再以 `WM_CHAR` 形式投给控件的过程，这里只有父窗一个
+  过程，键消息仍投父窗，父窗看不到子控件的键盘。真正的 `SetFocus` 到子控件、
+  控件自绘的 `WM_PAINT`，要等子窗口有自己的过程时才能对齐。
+* `GetDlgItem(parent, id)`：按 id 反查子控件句柄，校验父窗归属。
+
+验证：`ctrldemo.exe` 建 520×300 窗口加三个控件，控制台断言
+`RegisterClassExA`、三个句柄非零且互异、`GetDlgItem(hwnd, 2)` 等于按钮句柄、
+控件上的文本往返；画面上点按钮后标签变成 `btn #1`，在编辑框里键入字符可见。
+
+仍未做：菜单（`CreateMenu` / `AppendMenu` / 菜单栏由谁画还没定，见下）、
+`DialogBox` 与 `DLGTEMPLATE`、`SendMessage` 的同步语义、子控件自己的窗口过程、
+`comctl32` 的通用控件。

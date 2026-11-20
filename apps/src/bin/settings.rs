@@ -171,6 +171,12 @@ fn page_system(w: &mut wm::Win, s: &State) {
      * preferred timing comes from the display's EDID; the link type says
      * whether it hangs off DP/eDP/HDMI or VGA. */
     card(w, CONTENT_X, 242, CONTENT_W, 136, "显示输出");
+    /* The controller behind the outputs, on the title line: kernel/gpu.c
+     * put its name in the display reply. */
+    let gpu = s.displays.gpu_name();
+    if !gpu.is_empty() {
+        w.text(CONTENT_X + 84, 254, ui::dim(), gpu);
+    }
     if s.displays.count == 0 {
         w.text(CONTENT_X + 14, 286, ui::dim(), "没有可用的图形输出");
     } else {
@@ -436,14 +442,18 @@ fn draw(w: &mut wm::Win, s: &State) {
     w.fill(0, 0, CW, CH, ui::bg());
     nav(w, s);
 
-    w.text_big(CONTENT_X, 24, ui::text(), PAGE_NAMES[match s.page {
+    /* The page title now sits on the same line as the nav heading and the
+     * subtitle gets 10 px of air above the first card: at 24/60 the 32 px
+     * title and the 16 px subtitle left only 4 px before the card edge,
+     * which read as the text touching the card. */
+    w.text_big(CONTENT_X, 18, ui::text(), PAGE_NAMES[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
         Page::Update => 3,
         Page::About => 4,
     }]);
-    w.text(CONTENT_X, 60, ui::dim(), PAGE_SUB[match s.page {
+    w.text(CONTENT_X, 54, ui::dim(), PAGE_SUB[match s.page {
         Page::System => 0,
         Page::Look => 1,
         Page::Apps => 2,
@@ -538,6 +548,7 @@ pub extern "C" fn _start() -> ! {
                 pref_height: 0,
                 flags: 0,
             }; 4],
+            gpu: [0; 24],
         },
         st: sinfo::Stats {
             uptime: 0,

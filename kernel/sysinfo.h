@@ -159,6 +159,12 @@ typedef struct {
 typedef struct {
   UINT32                  count;
   sysinfo_display_out_t   out[SYSINFO_DISPLAY_MAX];
+  /* The display controller behind those outputs, one short line:
+   * "Intel UHD Graphics 630". Empty when there is none. The field sits
+   * after count+out, so a client that only reads the old prefix keeps
+   * working. It has to keep the whole reply inside IPC_PAYLOAD_MAX (128
+   * bytes): 4 + 4 * 20 + 24 = 108. */
+  char                    gpu[24];
 } sysinfo_display_rsp_t;
 
 /* Kill: the pid to end. Reply is an INT32 status through RSP_OK. */

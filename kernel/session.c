@@ -40,6 +40,12 @@ static void desktop_start(void) {
       kputs("[SESSION] desktop app launch failed\n");
     }
   }
+#if CONFIG_NOVUS_WIN32
+  /* TEMP (verification): open the control demo so its window is on screen
+   * for the click test. */
+  (void)apps_win32_launch(6u);
+  (void)apps_win32_launch(7u);
+#endif
   if (shm->app_img_base != 0 && shm->app_img_size != 0 &&
       nuc_load((const void *)(UINTN)shm->app_img_base, shm->app_img_size, "demo") != 0) {
     kputs("[SESSION] staged app refused\n");
@@ -50,7 +56,8 @@ static int desktop_app(const char *name) {
   return text_equal(name, "fileman") || text_equal(name, "taskman") ||
       text_equal(name, "settings") || text_equal(name, "netman") ||
       text_equal(name, "devmgmt") || text_equal(name, "demo") ||
-      text_equal(name, "hello.exe");
+      text_equal(name, "hello.exe") || text_equal(name, "tlsdemo.exe") ||
+      text_equal(name, "msgdemo.exe") || text_equal(name, "fileio.exe");
 }
 
 static void desktop_stop(void) {

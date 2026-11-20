@@ -173,7 +173,15 @@ int novusfs_super_flush(novusfs_fs_t *fs) {
   if (novusfs_write_block(fs, NOVUSFS_SB_PRIMARY, fs->blkbuf) != 0) {
     return -1;
   }
-  return novusfs_write_block(fs, NOVUSFS_SB_BACKUP, fs->blkbuf);
+  if (novusfs_write_block(fs, NOVUSFS_SB_BACKUP, fs->blkbuf) != 0) {
+    return -1;
+  }
+  /* Both copies carry the mount pointer, and the device only acknowledges
+   * them into its write cache. A power loss before the cache reaches the
+   * medium leaves the previous version (or a torn pair) behind even though
+   * the redo it describes is already durable, so the pair is not usable as
+   * a commit point until this flush returns. */
+  return blkdev_flush(fs->dev);
 }
 
 int novusfs_super_read(novusfs_fs_t *fs, blkdev_t *dev) {

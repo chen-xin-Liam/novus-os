@@ -90,7 +90,14 @@ static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
   if (size == 0u) {
     size = 1u;
   }
-  base = mm_map_phys(phys, size, MM_MAP_UC);
+  /* Write-combining, not uncacheable. The scanout is written far more than
+   * it is read, and on a discrete card every pixel store is a PCIe
+   * transaction into the VRAM aperture: UC means one transaction per
+   * 32-bit word, WC lets the CPU merge a cache line's worth before it
+   * leaves, which is the difference between a usable and an unusable
+   * desktop over PCIe. Reads (the cursor save/restore path) are still
+   * uncached, so they stay correct, just slow. */
+  base = mm_map_phys(phys, size, MM_MAP_WC);
   if (base == 0) {
     return 0;
   }

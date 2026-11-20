@@ -156,6 +156,26 @@ int apps_launch_name(const char *name) {
  * NUC index, which the sysinfo /apps page and every spawn client rely on. */
 static const app_t g_win32[] = {
     {"hello.exe", k_app_hello_exe, &k_app_hello_exe_len},
+    {"window.exe", k_app_window_exe, &k_app_window_exe_len},
+    /* Console self-test for the loader's TEB and the TLS calls: it prints
+     * one line per check and exits, so it is the fastest way to tell
+     * whether a loader or scheduler change broke the thread block. */
+    {"tlsdemo.exe", k_app_tlsdemo_exe, &k_app_tlsdemo_exe_len},
+    /* Console self-test for the message loop: posted messages, timers,
+     * coordinate conversion and text measurement, one check per line. */
+    {"msgdemo.exe", k_app_msgdemo_exe, &k_app_msgdemo_exe_len},
+    /* Console self-test for the file calls and the library calls: it writes
+     * a file, reads it back, enumerates the directory, deletes it, and asks
+     * for the three built-in DLLs. */
+    {"fileio.exe", k_app_fileio_exe, &k_app_fileio_exe_len},
+    /* Console self-test for the socket surface: the ws2_32 handshake, the
+     * address conversions, and the honest failure a transport call gets
+     * while the kernel has no network stack. */
+    {"wsdemo.exe", k_app_wsdemo_exe, &k_app_wsdemo_exe_len},
+    /* Dialog controls: a window with STATIC, BUTTON and EDIT children, the
+     * click path into WM_COMMAND and typing into an edit. */
+    {"ctrldemo.exe", k_app_ctrldemo_exe, &k_app_ctrldemo_exe_len},
+    {"menudemo.exe", k_app_menudemo_exe, &k_app_menudemo_exe_len},
 };
 
 UINT32 apps_win32_count(void) {

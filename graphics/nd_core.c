@@ -20,6 +20,7 @@
 #include "nd_internal.h"
 #include "nd_font_uni.h"
 #include "nd_lang.h"
+#include "gpu2d.h"
 
 #define ND_ALPHA_CHANNEL 0xFF000000u
 
@@ -74,9 +75,10 @@ void nd_span_raw(nd_surface_t *s, INT32 x, INT32 y, INT32 count,
   UINT32  hw = nd_hw_pixel(s, c);
   UINT32 *row = s->px + (UINT32)y * s->stride + (UINT32)x;
 
-  while (count-- > 0) {
-    *row++ = hw;
-  }
+  /* One entry point for every filled pixel in the system: a hardware 2D
+   * engine plugs in here (kernel/gpu2d.c), and until one exists this is the
+   * CPU path with 64-bit pair stores. */
+  gpu2d_fill_span(row, (UINT32)count, hw);
 }
 
 void nd_span_blend_raw(nd_surface_t *s, INT32 x, INT32 y, INT32 count,
@@ -303,6 +305,61 @@ void nd_circle(nd_surface_t *s, INT32 cx, INT32 cy, INT32 radius,
   }
 }
 
+/* Half-width of an ellipse row. The span is sampled from the equation
+ * itself - x = rx * sqrt(1 - (y/ry)^2) - with the square root taken on an
+ * integer ratio, so a 3-pixel-radius ellipse still closes instead of
+ * stepping in whole-pixel jumps the way a table would. */
+static INT32 ellipse_half(INT32 rx, INT32 ry, INT32 dy) {
+  INT64 ry2 = (INT64)ry * (INT64)ry;
+  INT64 rem = ry2 - (INT64)dy * (INT64)dy;
+  INT64 num;
+
+  if (rem <= 0) {
+    return 0;
+  }
+  num = (INT64)rx * (INT64)rx * rem / ry2;
+  return isqrt_i32((INT32)num);
+}
+
+void nd_fill_ellipse(nd_surface_t *s, INT32 cx, INT32 cy, INT32 rx, INT32 ry,
+                     nd_color_t c) {
+  INT32 dy;
+
+  if (rx < 0 || ry < 0) {
+    return;
+  }
+  if (ry == 0) {
+    nd_hline(s, cx - rx, cx + rx, cy, c);
+    return;
+  }
+  for (dy = -ry; dy <= ry; dy++) {
+    INT32 half = ellipse_half(rx, ry, dy);
+
+    nd_fill_rect(s, nd_rect(cx - half, cy + dy, half * 2 + 1, 1), c);
+  }
+}
+
+void nd_ellipse(nd_surface_t *s, INT32 cx, INT32 cy, INT32 rx, INT32 ry,
+                nd_color_t c) {
+  INT32 dy;
+
+  if (rx < 0 || ry < 0) {
+    return;
+  }
+  if (ry == 0) {
+    nd_hline(s, cx - rx, cx + rx, cy, c);
+    return;
+  }
+  for (dy = -ry; dy <= ry; dy++) {
+    INT32 half = ellipse_half(rx, ry, dy);
+
+    nd_pixel(s, cx - half, cy + dy, c);
+    if (half != 0) {
+      nd_pixel(s, cx + half, cy + dy, c);
+    }
+  }
+}
+
 /* Left-edge inset of row `y` inside a rounded rectangle, in 1/16 px.
  *
  * The row is sampled at its vertical centre, so the edge moves by a
@@ -512,7 +569,7 @@ void nd_blit(nd_surface_t *dst, INT32 x, INT32 y, const nd_surface_t *src,
                      (UINT32)clip.x;
 
     if (!swap) {
-      memcpy(drow, srow, (UINT64)clip.w * 4u);
+      gpu2d_copy_row(drow, srow, (UINT32)clip.w);
     } else {
       INT32 i;
       for (i = 0; i < clip.w; i++) {
@@ -629,6 +686,52 @@ static void draw_uni_bits(nd_surface_t *s, INT32 x, INT32 y,
   }
 }
 
+/* Draw one Unicode glyph from the 4-bit coverage map: the antialiased
+ * sibling of draw_uni_bits. Each covered cell is blended at its coverage
+ * level, so thin strokes and diagonal edges keep a soft edge instead of
+ * snapping to a black-and-white staircase. */
+/* `gray` holds px rows of px nibbles, already rasterised for the size the
+ * text is drawn at; `blk` is how many screen pixels each coverage cell
+ * covers (1 whenever the raster was produced at the final size). */
+static void draw_uni_gray(nd_surface_t *s, INT32 x, INT32 y,
+                          const UINT8 *gray, UINT32 px, UINT32 blk,
+                          nd_color_t c) {
+  UINT32 gy;
+  UINT32 stride;
+
+  if (px == 0u) {
+    return;
+  }
+  if (blk == 0u) {
+    blk = 1u;
+  }
+  stride = px / 2u;
+  for (gy = 0; gy < px; gy++) {
+    const UINT8 *row = &gray[gy * stride];
+    UINT32       gx;
+
+    for (gx = 0; gx < px; gx++) {
+      UINT8 b = row[gx >> 1u];
+      UINT8 nib = (gx & 1u) != 0u ? (UINT8)(b & 0x0Fu) : (UINT8)(b >> 4);
+      UINT8 a = (UINT8)(nib * 17u); /* 15 -> 255 */
+
+      if (a == 0u) {
+        continue;
+      }
+      if (blk == 1u) {
+        if (nd_visible(s, x + (INT32)gx, y + (INT32)gy)) {
+          nd_span_blend_raw(s, x + (INT32)gx, y + (INT32)gy, 1, c, a);
+        }
+      } else {
+        nd_blend_rect(s, nd_rect(x + (INT32)gx * (INT32)blk,
+                                 y + (INT32)gy * (INT32)blk, (INT32)blk,
+                                 (INT32)blk),
+                      c, a);
+      }
+    }
+  }
+}
+
 void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
                    UINT32 max_px, nd_color_t c, UINT32 scale) {
   const char *p;
@@ -659,6 +762,30 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
     if (cp < 0x20u) {
       continue; /* control codes carry no shape and no advance */
     }
+    /* Combining marks advance by zero and stack on the previous glyph,
+     * which is how Unifont's 8x16/16x16 combining cells are designed. */
+    if (adv == 0u && prev_adv != 0u) {
+      gx = cx - (INT32)prev_adv;
+    }
+    /* Any glyph the loaded face covers is painted from its 4-bit coverage
+     * map, ASCII included. The 5x7 cell below is only a fallback now: it
+     * made digits and letters roughly half the height of the hanzi beside
+     * them and left every edge a black-and-white staircase. */
+    {
+      UINT32       gpx = ND_CJK_W;
+      UINT32       gblk = 1u;
+      const UINT8 *gray = nd_glyph_gray(cp, scale, &gpx, &gblk);
+
+      if (gray != 0) {
+        draw_uni_gray(s, gx, y + (INT32)(cell - ND_CJK_H * scale), gray, gpx,
+                      gblk, c);
+        if (adv != 0u) {
+          prev_adv = adv;
+        }
+        cx += (INT32)adv;
+        continue;
+      }
+    }
     if (cp < 0x80u) {
       draw_ascii(s, gx, y + (INT32)(cell - ND_GLYPH_H * scale), (UINT8)cp, c,
                  scale);
@@ -666,11 +793,6 @@ void nd_text_limit(nd_surface_t *s, INT32 x, INT32 y, const char *text,
       UINT32       wide = 8u;
       const UINT8 *rows;
 
-      /* Combining marks advance by zero and stack on the previous glyph,
-       * which is how Unifont's 8x16/16x16 combining cells are designed. */
-      if (adv == 0u && prev_adv != 0u) {
-        gx = cx - (INT32)prev_adv;
-      }
       rows = nd_glyph_find(cp, &wide);
       if (rows == 0) {
         UINT32 w = (adv != 0u) ? adv : wide * scale;

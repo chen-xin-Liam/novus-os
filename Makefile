@@ -107,6 +107,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/gpt.c \
        kernel/nksym.c \
        graphics/nd_font.c \
+       graphics/nd_ttf.c \
        graphics/nd_font_uni.c \
        graphics/nd_ime_dict.c \
        graphics/nd_ime.c \
@@ -116,6 +117,7 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_input.c \
        graphics/nd_jpeg.c \
        graphics/nd_wallpaper.c \
+       graphics/nd_icon.c \
        graphics/nvgui.c \
        graphics/nd_theme.c \
        graphics/nd_lang.c \
@@ -130,6 +132,8 @@ SRC := arch/x86_64/boot/main.c \
        kernel/devtab.c \
        kernel/rtc.c \
        kernel/pci.c \
+       kernel/gpu.c \
+       kernel/gpu2d.c \
        kernel/net.c \
        kernel/net_dhcp.c \
        kernel/net_tcp.c \
@@ -338,13 +342,18 @@ banner:
 # after the 'all' target on purpose: make takes the first target it sees as
 # the default.
 WP_DIR    := assets/backgrounds-screen
-WP_IMGS := $(WP_DIR)/pexels-snapsbyclark-12981877.jpg \
+WP_IMGS := $(WP_DIR)/novus-paper-polar.jpg \
+           $(WP_DIR)/novus-paper-ring.jpg \
+           $(WP_DIR)/novus-paper-strata.jpg \
+           $(WP_DIR)/novus-paper-lattice.jpg \
+           $(WP_DIR)/novus-paper-daylight.jpg \
            $(WP_DIR)/pexels-codioful-6985184.jpg \
            $(WP_DIR)/pexels-ian-panelo-40321675.jpg \
            $(WP_DIR)/mrbinz-vietnam-10445204_1920.jpg \
            $(WP_DIR)/pexels-thales13-40360883.jpg \
            $(WP_DIR)/pexels-tu-n-vu-2153773491-40278712.jpg \
-           $(WP_DIR)/treptoweralex-usa-9889580.jpg
+           $(WP_DIR)/treptoweralex-usa-9889580.jpg \
+           $(WP_DIR)/pexels-snapsbyclark-12981877.jpg
 
 FONT_UI_SOURCES := $(wildcard graphics/*.c kernel/*.c wm/novus-wm/*.c) \
                    $(shell find apps/src -name '*.rs' -type f)
@@ -352,6 +361,47 @@ build/nd_font_fallback.h: tools/fontgen/fallback.py graphics/nd_font_data.bin $(
 	python3 tools/fontgen/fallback.py $@
 
 build/graphics_nd_font.o: build/nd_font_fallback.h
+
+# ---------------------------------------------------------------------------
+# Shell icons (assets/icons)
+# ---------------------------------------------------------------------------
+# The SVG sources are rendered to ICO by tools/icons/mkico.py on the host and
+# committed; the Makefile only needs to turn those ICO files into C blobs so
+# the decoder in graphics/nd_icon.c has a built-in set on a medium with no
+# system partition. A matching file in /Novus/icons/<name>.ico still wins at
+# runtime - see graphics/nd_icon.h.
+ICON_DIR  := assets/icons
+ICON_IMGS := $(wildcard $(ICON_DIR)/*.ico)
+ICON_BLOB_H := build/icons_blobs.h
+
+$(ICON_BLOB_H): $(ICON_IMGS) | build
+	@{ \
+	  echo '/* generated from assets/icons by the Makefile - do not edit */'; \
+	  echo '#ifndef NOVUS_ICONS_BLOBS_H'; \
+	  echo '#define NOVUS_ICONS_BLOBS_H'; \
+	  for f in $(ICON_IMGS); do \
+	    n=`basename $$f .ico`; \
+	    c=`echo $$n | tr '-' '_'`; \
+	    echo '/* '"$$n"'.ico */'; \
+	    xxd -i -n k_ico_$$c $$f; \
+	  done; \
+	  echo 'typedef struct {'; \
+	  echo '  const char        *name;'; \
+	  echo '  const unsigned char *data;'; \
+	  echo '  unsigned int       len;'; \
+	  echo '} nd_icon_blob_row_t;'; \
+	  echo 'static const nd_icon_blob_row_t g_icon_blob_rows[] = {'; \
+	  for f in $(ICON_IMGS); do \
+	    n=`basename $$f .ico`; \
+	    c=`echo $$n | tr '-' '_'`; \
+	    echo '  {"'"$$n"'", k_ico_'"$$c"', (unsigned int)sizeof(k_ico_'"$$c"')},'; \
+	  done; \
+	  echo '};'; \
+	  echo '#define ND_ICON_BLOB_COUNT (sizeof(g_icon_blob_rows) / sizeof(g_icon_blob_rows[0]))'; \
+	  echo '#endif'; \
+	} > $@
+
+build/graphics_nd_icon.o: $(ICON_BLOB_H)
 
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
@@ -416,11 +466,14 @@ $(APPS_BLOB_H): $(APPS_BINS) | build
 # the kernel's PE loader has a genuine import table and relocation table to
 # process. It is linked at 0x400000 while the kernel maps it at 0x50000000,
 # which forces the base relocation path that M9 exists to exercise.
-WIN32_SRC    := user/win32compat/samples/hello.c
-WIN32_BIN    := out/win32/hello.exe
+WIN32_BINS   := out/win32/hello.exe out/win32/window.exe out/win32/tlsdemo.exe out/win32/msgdemo.exe out/win32/fileio.exe out/win32/wsdemo.exe out/win32/ctrldemo.exe out/win32/menudemo.exe
 WIN32_BLOB_H := build/win32_blobs.h
 
-$(WIN32_BIN): $(WIN32_SRC) | out
+# hello.exe proves the console and memory calls; window.exe proves the
+# user32 path (class, window, message loop, paint). Both are linked at
+# 0x400000 while the kernel maps them at 0x50000000, which forces the
+# base relocation path M9 exists to exercise.
+out/win32/%.exe: user/win32compat/samples/%.c | out
 	@mkdir -p $(@D)
 	$(CC) -O2 -ffreestanding -fno-stack-protector \
 	    -fno-asynchronous-unwind-tables -mno-stack-arg-probe \
@@ -428,13 +481,20 @@ $(WIN32_BIN): $(WIN32_SRC) | out
 	    -Wl,--subsystem,console -Wl,--image-base,0x400000 \
 	    -Wl,--dynamicbase -Wl,--enable-reloc-section \
 	    -Wl,--disable-auto-import -Wl,-e,novus_win32_main \
-	    -o $@ $< -lkernel32 -ladvapi32
+	    -o $@ $< -lkernel32 -ladvapi32 -luser32 -lgdi32 -lws2_32
 
-$(WIN32_BLOB_H): $(WIN32_BIN) | build
+$(WIN32_BLOB_H): $(WIN32_BINS) | build
 	@{ echo '/* Generated by the build: M9 Win32 sample images. */'; \
 	   echo '#ifndef NOVUS_WIN32_BLOBS_H'; \
 	   echo '#define NOVUS_WIN32_BLOBS_H'; \
-	   xxd -i -n k_app_hello_exe $(WIN32_BIN); \
+	   xxd -i -n k_app_hello_exe out/win32/hello.exe; \
+	   xxd -i -n k_app_window_exe out/win32/window.exe; \
+	   xxd -i -n k_app_tlsdemo_exe out/win32/tlsdemo.exe; \
+	   xxd -i -n k_app_msgdemo_exe out/win32/msgdemo.exe; \
+	   xxd -i -n k_app_fileio_exe out/win32/fileio.exe; \
+	   xxd -i -n k_app_wsdemo_exe out/win32/wsdemo.exe; \
+	   xxd -i -n k_app_ctrldemo_exe out/win32/ctrldemo.exe; \
+	   xxd -i -n k_app_menudemo_exe out/win32/menudemo.exe; \
 	   echo '#endif'; } > $@
 
 # apps.c includes the generated headers; nothing else does.

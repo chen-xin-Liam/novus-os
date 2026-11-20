@@ -29,12 +29,14 @@
 #include "kernel.h"
 #include "mm.h"
 #include "pmm.h"
+#include "msr.h"
 
 /* PTE flag bits (x86_64 SDM Vol.3, chapter 4). */
 #define MM_PTE_PRESENT     0x0000000000000001ULL
 #define MM_PTE_WRITE       0x0000000000000002ULL
 #define MM_PTE_HUGE        0x0000000000000080ULL /* PS: leaf at PDE level */
 #define MM_PTE_PCD         0x0000000000000010ULL /* cache disable (device) */
+#define MM_PTE_PAT         0x0000000000001000ULL /* selects IA32_PAT entry 4 */
 
 /* Address fields. Table pointers carry bits [51:12], 2 MiB leaf entries
  * carry bits [51:21] (bits 20:12 must be zero there or #PF fires). */
@@ -135,6 +137,11 @@ void mm_init(UINT64 ram_top_bytes) {
   UINT64 pml4_phys, pdpt_phys;
   mm_table_t *pml4, *pdpt;
   UINT32 i;
+
+  /* Before any table is built: the PTE PAT bit is only legal once CR4.PAT
+   * is set, and it only means "write-combining" when IA32_PAT entry 4 says
+   * so. */
+  mm_enable_pat();
 
   pml4 = mm_table_new(&pml4_phys);
   if (pml4 == 0) {
@@ -321,14 +328,195 @@ static mm_table_t *mm_dev_pd(UINT64 va) {
   return pd;
 }
 
+/* The standard PAT layout: entries 0 WB, 1 WT, 2 UC-, 3 UC, 4 WC, 5 WT,
+ * 6 UC-, 7 UC. Firmware is supposed to program it at reset, but a
+ * bootloader that never touched IA32_PAT leaves it as the reset value on
+ * most parts and as something else on a few; writing it explicitly is the
+ * only way a WC mapping can be trusted. */
+#define IA32_PAT_MSR      0x00000277u
+#define IA32_PAT_DEFAULT  0x0007040600070406ULL
+#define CR4_PAT           0x0000000000100000ULL
+
+/* 0 until CPUID says this CPU has PAT and CR4/IA32_PAT have taken the write.
+ * The PTE PAT bit is a reserved bit on a CPU without PAT, so "no PAT" has to
+ * mean "never set that bit", not "set it and hope": a write-combining request
+ * degrades to uncached instead of faulting. */
+static int g_pat_ok;
+
+static int mm_cpu_has_pat(void) {
+  UINT32 a, b, c, d;
+  UINT32 leaf = 1u;
+
+  __asm__ volatile("cpuid"
+                   : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                   : "a"(leaf)
+                   : "memory");
+  /* SDM CPUID.01H:EDX[16] = PAT (page attribute table). */
+  return ((d & (1u << 16)) != 0u) ? 1 : 0;
+}
+
+int mm_pat_available(void) { return g_pat_ok; }
+
+void mm_enable_pat(void) {
+  UINT64 cr4;
+
+  g_pat_ok = 0;
+  if (mm_cpu_has_pat() == 0) {
+    kputs("[MM] PAT not advertised by CPUID: write-combining needs an MTRR\n");
+    return;
+  }
+  __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
+  if ((cr4 & CR4_PAT) == 0u) {
+    /* The write is deliberately not attempted. It is legal on every real
+     * CPU with PAT, but this kernel runs it before idt_init(), so a refused
+     * write has no #GP handler to recover in: the machine would simply stop.
+     * Firmware that never set CR4.PAT costs us the PTE route only, and
+     * mm_mtrr_wc_cover() below gets write-combining from an MTRR instead. */
+    kputs("[MM] firmware left CR4.PAT clear: page-attribute write-combining off, "
+          "using an MTRR WC range instead\n");
+    return;
+  }
+  if (msr_read(IA32_PAT_MSR) != IA32_PAT_DEFAULT) {
+    msr_write(IA32_PAT_MSR, IA32_PAT_DEFAULT);
+  }
+  g_pat_ok = 1;
+  kputs("[MM] PAT enabled: CR4.PAT set, IA32_PAT has the standard layout, "
+        "write-combining maps are real\n");
+}/* ---- write-combining without PAT: an MTRR WC range -----------------------
+ *
+ * Memory type is the intersection of the MTRR type and the page attributes.
+ * A cacheable (WB) page inside an MTRR range marked WC therefore behaves as
+ * write-combining, which is exactly what PAT would have bought us - and it
+ * works on a machine whose firmware never set CR4.PAT. The variable MTRRs
+ * are few (8 on most parts) and firmware owns some of them, so the rule here
+ * is: reuse hardware state if it already says WC, program one free slot if
+ * there is one, and give up quietly rather than fight an existing range. */
+#define MM_MSR_MTRRCAP        0x000000FEu
+#define MM_MSR_MTRR_DEF_TYPE  0x000002FFu
+#define MM_MSR_MTRR_PHYSBASE  0x00000200u /* + 2 * n */
+#define MM_MSR_MTRR_PHYSMASK  0x00000201u /* + 2 * n */
+#define MM_MTRR_TYPE_WC       1u
+#define MM_MTRR_TYPE_WB       6u
+#define MM_MTRR_PHYSBASE_TYPE 0xFFULL
+#define MM_MTRR_PHYSMASK_VALID (1ULL << 11)
+#define MM_MTRR_DEF_ENABLE    (1ULL << 11)
+#define MM_MTRR_CAP_WC        (1ULL << 10)
+#define MM_MTRR_MASK_ADDR     0x000FFFFFFFFFF000ULL
+
+/* Size encoded in a PHYSMASK: the address bits set to zero are the ones the
+ * range covers, so size = ~mask + 2^12. */
+static UINT64 mm_mtrr_range_size(UINT64 mask) {
+  UINT64 inv = (~mask) & MM_MTRR_MASK_ADDR;
+
+  return ((inv + 0x1000ULL) == 0u) ? 0u : inv + 0x1000ULL;
+}
+
+/* 1 when [lo, hi) is covered by an MTRR range of type WC, 0 when it is not
+ * (including "some other range overlaps", where the answer is someone
+ * else's business). */
+static int mm_mtrr_wc_cover(UINT64 lo, UINT64 hi) {
+  UINT64 cap = msr_read(MM_MSR_MTRRCAP);
+  UINT32 vcnt = (UINT32)(cap & 0xFFu);
+  UINT64 size = 0x1000ULL;
+  UINT64 base, span;
+  UINT32 i;
+  int    slot = -1;
+
+  if ((cap & MM_MTRR_CAP_WC) == 0u || vcnt == 0u || hi <= lo) {
+    kputs("[MM] no variable MTRR with WC support (MTRRCAP=0x");
+    kputs_hex(cap);
+    kputs("): framebuffer mapped uncached\n");
+    return 0;
+  }
+  span = hi - lo;
+  while (size < span) {
+    size <<= 1;
+  }
+  base = lo & ~(size - 1ULL);
+
+  for (i = 0; i < vcnt; i++) {
+    UINT64 m = msr_read(MM_MSR_MTRR_PHYSMASK + 2ULL * i);
+
+    if ((m & MM_MTRR_PHYSMASK_VALID) == 0u) {
+      if (slot < 0) {
+        slot = (int)i;
+      }
+      continue;
+    }
+    {
+      UINT64 b = msr_read(MM_MSR_MTRR_PHYSBASE + 2ULL * i);
+      UINT64 rbase = b & MM_MTRR_MASK_ADDR;
+      UINT64 rsize = mm_mtrr_range_size(m);
+      UINT64 rhi = rbase + rsize;
+
+      if (rsize == 0u) {
+        continue;
+      }
+      if (rbase <= base && hi <= rhi) {
+        /* Our whole range already sits inside this one. */
+        if ((b & MM_MTRR_PHYSBASE_TYPE) == MM_MTRR_TYPE_WC) {
+          kputs("[MM] framebuffer already inside a WC MTRR range, "
+                "write-combining is on\n");
+          return 1;
+        }
+        return 0;
+      }
+      if (rbase < hi && base < rhi) {
+        /* Partial overlap: the intersection would resolve to the more
+         * restrictive type, so a WC range here would silently do nothing. */
+        return 0;
+      }
+    }
+  }
+  if (slot < 0) {
+    kputs("[MM] no free MTRR slot for the framebuffer: mapped uncached\n");
+    return 0;
+  }
+  {
+    UINT64 def = msr_read(MM_MSR_MTRR_DEF_TYPE);
+
+    msr_write(MM_MSR_MTRR_PHYSBASE + 2ULL * (UINT64)slot,
+              (base & MM_MTRR_MASK_ADDR) | MM_MTRR_TYPE_WC);
+    msr_write(MM_MSR_MTRR_PHYSMASK + 2ULL * (UINT64)slot,
+              ((~(size - 1ULL)) & MM_MTRR_MASK_ADDR) | MM_MTRR_PHYSMASK_VALID);
+    if ((def & MM_MTRR_DEF_ENABLE) == 0u) {
+      msr_write(MM_MSR_MTRR_DEF_TYPE, def | MM_MTRR_DEF_ENABLE);
+    }
+  }
+  kputs("[MM] WC MTRR programmed: 0x");
+  kputs_hex(base);
+  kputs(" for 0x");
+  kputs_hex(size);
+  kputs(" bytes\n");
+  return 1;
+}
+
 void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags) {
   UINT64 base = g_devmap_next;
   UINT64 cur = base;
   UINT32 n = (UINT32)(((size + 0x1FFFFFu) >> 21) & 0xFFFFFFFFu);
   UINT32 i;
+  UINT32 cache_bits = 0u;
 
   if (n == 0u) {
     return 0;
+  }
+  /* Decide the cache policy once, before the loop: every page of this
+   * mapping gets the same answer. */
+  if ((flags & MM_MAP_UC) != 0u) {
+    cache_bits = MM_PTE_PCD;
+  } else if ((flags & MM_MAP_WC) != 0u) {
+    if (g_pat_ok != 0) {
+      cache_bits = MM_PTE_PAT;
+    } else if (mm_mtrr_wc_cover(phys & ~0x1FFFFFULL,
+                               ((phys & ~0x1FFFFFULL) +
+                                ((UINT64)n << 21))) != 0) {
+      /* Cacheable page inside a WC MTRR range: the effective type is WC,
+       * so no PTE bits at all. */
+      cache_bits = 0u;
+    } else {
+      cache_bits = MM_PTE_PCD;
+    }
   }
   for (i = 0; i < n; i++) {
     UINT64 p = (phys & ~0x1FFFFFu) + ((UINT64)i << 21);
@@ -341,10 +529,7 @@ void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags) {
     }
     pdi = (UINT32)((v >> 21) & 0x1FFu);
     pd->e[pdi] = MM_PTE_PRESENT | MM_PTE_WRITE | MM_PTE_HUGE |
-                 (p & MM_PTE_ADDR2M_MASK);
-    if ((flags & MM_MAP_UC) != 0u) {
-      pd->e[pdi] |= MM_PTE_PCD;
-    }
+                 (p & MM_PTE_ADDR2M_MASK) | cache_bits;
   }
   g_devmap_next = cur + ((UINT64)n << 21);
   return (void *)base;

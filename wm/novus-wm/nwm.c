@@ -36,10 +36,18 @@
 #define NWM_CORNER   10
 #define NWM_MIN_W    120
 #define NWM_MIN_H    48
+/* Bottom strip the shell's floating taskbar pill occupies: 56 px of pill
+ * plus its 10 px gap to the screen edge. */
+#define NWM_BAR_H    66
 /* Windows 11 caption buttons: 46x32 hit areas, flush with the top-right
  * corner, no gaps - the hover highlight is the only affordance. */
 #define NWM_BTN      46
 #define NWM_BTN_GAP  0
+/* Frames the open animation runs for. The compositor ticks once per timer
+ * tick, so this is roughly an eighth of a second at 60 Hz - short enough
+ * that a window never feels unresponsive, long enough that the ease is
+ * visible. */
+#define NWM_REVEAL_FRAMES 8u
 
 typedef struct {
   UINT8     used;
@@ -49,6 +57,9 @@ typedef struct {
   nd_rect_t rect;  /* frame rect, title bar included */
   UINT8     state; /* 0 normal, 1 minimized, 2 maximized */
   UINT8     alpha; /* content effect: 255 opaque .. 0 invisible */
+  /* Open animation: frames still to play. The shell fades a new window in
+   * along an ease-out curve instead of having it appear at full strength. */
+  UINT8     reveal;
   /* v1.3: NWM_F_CREATE_MODAL. A modal window is the only one that sees the
    * pointer and the keyboard while it is up (see modal_index()). */
   UINT8     modal;
@@ -230,6 +241,12 @@ static void deliver(UINT64 owner, UINT16 type, const void *payload, UINT32 len) 
   }
 }
 
+/* Kernel-call mode: a Win32 process cannot send IPC, so the kernel drives
+ * these handlers directly and reads the answer from the two words below. */
+static int   g_kernel_call;
+static INT32 g_kernel_status;
+static UINT32 g_kernel_win;
+
 static void reply(UINT64 to, UINT32 win, INT32 status) {
   nwm_rsp_t rsp;
 
@@ -247,6 +264,15 @@ static void reply(UINT64 to, UINT32 win, INT32 status) {
  * get dropped. CREATE must answer (the window id is the result), and an
  * error is always reported so a buggy client can see it. */
 static void ack(const ipc_msg_t *m, UINT32 win, INT32 status) {
+  /* A kernel caller has no inbox to reply to: the answer is handed back
+   * through these two words instead of a message. Everything else about
+   * the handler is unchanged, which is the point - the ownership checks
+   * and the window table are the same ones an IPC client goes through. */
+  if (g_kernel_call) {
+    g_kernel_status = status;
+    g_kernel_win = win;
+    return;
+  }
   if (status != NWM_OK || m->hdr.type == NWM_REQ_CREATE ||
       (m->hdr.flags & IPC_F_SYNC) != 0u) {
     reply(m->hdr.sender, win, status);
@@ -286,7 +312,16 @@ static void clamp_rect(nd_rect_t *r) {
   nd_surface_t *s = screen();
   INT32         sw = (s != 0) ? s->w : 1024;
   INT32         sh = (s != 0) ? s->h : 768;
+  /* The shell floats its taskbar pill over the bottom of the screen (56 px
+   * tall, 10 px above the edge). A window that reached the raw screen edge
+   * lost its last line behind the pill - the file manager's status hint and
+   * the settings window's footer both did. Keep NWM_BAR_H free so a window
+   * always ends above the bar. */
+  INT32 work_h = sh - NWM_BAR_H;
 
+  if (work_h < NWM_MIN_H) {
+    work_h = NWM_MIN_H;
+  }
   if (r->w < NWM_MIN_W) {
     r->w = NWM_MIN_W;
   }
@@ -296,8 +331,8 @@ static void clamp_rect(nd_rect_t *r) {
   if (r->w > sw) {
     r->w = sw;
   }
-  if (r->h > sh) {
-    r->h = sh;
+  if (r->h > work_h) {
+    r->h = work_h;
   }
   if (r->x < 0) {
     r->x = 0;
@@ -308,8 +343,8 @@ static void clamp_rect(nd_rect_t *r) {
   if (r->x + r->w > sw) {
     r->x = sw - r->w;
   }
-  if (r->y + r->h > sh) {
-    r->y = sh - r->h;
+  if (r->y + r->h > work_h) {
+    r->y = work_h - r->h;
   }
 }
 
@@ -361,6 +396,15 @@ static void paint_shape(nd_rect_t client, UINT8 op, INT32 x, INT32 y, INT32 w,
   case NWM_OP_ROUND_FRAME:
     nd_round_frame(s, r, (radius > 0) ? radius : 1,
                    (thickness > 0) ? thickness : 1, color);
+    break;
+  case NWM_OP_LINE:
+    nd_line(s, r.x, r.y, r.x + r.w, r.y + r.h, color);
+    break;
+  case NWM_OP_ELLIPSE:
+    nd_ellipse(s, r.x, r.y, w, h, color);
+    break;
+  case NWM_OP_ELLIPSE_FILL:
+    nd_fill_ellipse(s, r.x, r.y, w, h, color);
     break;
   default:
     break; /* forward compatible: unknown ops are ignored */
@@ -446,6 +490,7 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_rect_t         vis;
   nd_rect_t         client;
   nd_color_t        title_bg;
+  UINT8             eff;
   UINT32            i;
 
   if (w->state == 1u) {
@@ -459,6 +504,21 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   }
   t = &ng_ctx_get()->theme;
   nd_surface_set_clip(s, vis);
+
+  /* Combined opacity: the client's own effect (255 by default) and the
+   * open animation. The curve is ease-out cubic: fast first paint, then a
+   * decelerating finish, so the window settles instead of blinking on. */
+  eff = w->alpha;
+  if (w->reveal != 0u) {
+    UINT32 t01 = NWM_REVEAL_FRAMES - w->reveal; /* 0 .. FRAMES-1 */
+    UINT32 x   = (t01 * 1000u) / NWM_REVEAL_FRAMES;
+    UINT32 e   = 1000u - ((1000u - x) * (1000u - x) * (1000u - x)) / 1000000u;
+    UINT32 a   = 90u + (165u * e) / 1000u;
+
+    if (a < (UINT32)eff) {
+      eff = (UINT8)a;
+    }
+  }
 
   save_corners(s, w->rect);
   nd_round_rect(s, w->rect, 10, t->win_bg);
@@ -475,8 +535,8 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_hline(s, w->rect.x + 1, w->rect.x + w->rect.w - 2,
            w->rect.y + NWM_TITLE_H - 1, t->win_border);
   nd_text(s, w->rect.x + 12,
-          w->rect.y + (NWM_TITLE_H - (INT32)nd_text_height(w->title, 2)) / 2,
-          w->title, t->text, 2);
+          w->rect.y + (NWM_TITLE_H - (INT32)nd_text_height(w->title, 1)) / 2,
+          w->title, t->text, 1);
 
   /* Caption buttons, drawn by the same helper the shell windows use. A
    * sheet cannot be minimized or maximized, so it only gets a close box. */
@@ -507,9 +567,9 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
               (tx->scale != 0u) ? tx->scale : 1u);
     }
   }
-  if (w->alpha < 255u) {
+  if (eff < 255u) {
     /* Fade effect: the content is dimmed towards the background. */
-    nd_blend_rect(s, client, ND_RGB(0, 0, 0), (UINT8)(255u - w->alpha));
+    nd_blend_rect(s, client, ND_RGB(0, 0, 0), (UINT8)(255u - eff));
   }
   /* Content painted square over the bottom arcs; give the corners back and
    * draw the hairline last so nothing can cut through it. */
@@ -593,6 +653,9 @@ static void req_create(const ipc_msg_t *m) {
   }
   w->owner = m->hdr.sender;
   w->alpha = 255u;
+  /* A new window opens with a short ease-out fade rather than appearing
+   * fully opaque in one frame. */
+  w->reveal = NWM_REVEAL_FRAMES;
   w->modal = (c.flags & NWM_F_CREATE_MODAL) != 0u ? 1u : 0u;
   w->rect = nd_rect(c.x, c.y, c.w, c.h);
   clamp_rect(&w->rect);
@@ -1100,6 +1163,13 @@ static void deliver_key(nwm_window_t *w, const nd_event_t *ev) {
   m.win = w->id;
   m.key = ev->key;
   m.mods = ev->mods;
+  /* Typing is rare, and knowing which window (and therefore which pid) the
+   * key went to is what a keyboard bug report needs. */
+  kputs("[NWM] key -> win=");
+  kputs_hex(w->id);
+  kputs(" pid=");
+  kputs_hex(w->owner);
+  kputs("\n");
   deliver(w->owner, NWM_EV_KEY, &m, sizeof(m));
 }
 
@@ -1434,6 +1504,20 @@ void nwm_tick(void) {
   }
   pump();
   sweep_owners();
+  /* Advance any open animation one frame and repaint just that window. */
+  {
+    UINT32 i;
+
+    for (i = 0; i < NWM_MAX_WINDOWS; i++) {
+      nwm_window_t *w = &g_wins[i];
+
+      if (w->used == 0u || w->reveal == 0u) {
+        continue;
+      }
+      w->reveal--;
+      damage(w->rect);
+    }
+  }
   /* The shell owns the taskbar clock; the WM owns the tick. */
   nd_demo_idle();
 
@@ -1732,11 +1816,243 @@ int nwm_selftest(void) {
   return pass;
 }
 
+/* ---- kernel-callable API ---------------------------------------------- */
+
+/* One request, driven exactly like a client's: the same handlers, the same
+ * ownership rules, the same window table. The only difference is that the
+ * answer comes back through g_kernel_status instead of an inbox message. */
+static int nwm_kernel_request(UINT64 owner, UINT16 type, const void *payload,
+                              UINT32 len, UINT32 *out_win) {
+  ipc_msg_t m;
+
+  if (!g_ready || owner == 0u) {
+    return NWM_EBADWIN;
+  }
+  if ((len != 0u && payload == 0) || len > IPC_PAYLOAD_MAX) {
+    return NWM_EBADPAY;
+  }
+  memset(&m, 0, sizeof(m));
+  m.hdr.magic = IPC_MAGIC;
+  m.hdr.type = type;
+  m.hdr.sender = owner;
+  m.hdr.target = g_port;
+  m.hdr.len = len;
+  if (len != 0u) {
+    memcpy(m.payload, payload, len);
+  }
+  g_kernel_call = 1;
+  g_kernel_status = NWM_OK;
+  g_kernel_win = 0;
+  handle_request(&m);
+  g_kernel_call = 0;
+  if (out_win != 0) {
+    *out_win = g_kernel_win;
+  }
+  return g_kernel_status;
+}
+
+int nwm_owner_create(UINT64 owner, const char *title, INT32 x, INT32 y,
+                     INT32 w, INT32 h, UINT32 *win) {
+  nwm_create_t c;
+  UINT32       i;
+
+  memset(&c, 0, sizeof(c));
+  c.x = x;
+  c.y = y;
+  c.w = w;
+  c.h = h;
+  if (title != 0) {
+    for (i = 0; i + 1u < NWM_TITLE_MAX && title[i] != '\0'; i++) {
+      c.title[i] = title[i];
+    }
+  }
+  return nwm_kernel_request(owner, NWM_REQ_CREATE, &c, sizeof(c), win);
+}
+
+int nwm_owner_destroy(UINT64 owner, UINT32 win) {
+  return nwm_kernel_request(owner, NWM_REQ_DESTROY, &win, 4u, 0);
+}
+
+int nwm_owner_clear(UINT64 owner, UINT32 win) {
+  nwm_win_t r;
+
+  r.win = win;
+  return nwm_kernel_request(owner, NWM_REQ_CLEAR, &r, sizeof(r), 0);
+}
+
+int nwm_owner_shape(UINT64 owner, UINT32 win, UINT8 op, INT16 x, INT16 y,
+                    INT16 w, INT16 h, UINT32 color) {
+  nwm_shape_t s;
+
+  memset(&s, 0, sizeof(s));
+  s.win = win;
+  s.op = op;
+  s.x = x;
+  s.y = y;
+  s.w = w;
+  s.h = h;
+  s.color = color;
+  return nwm_kernel_request(owner, NWM_REQ_SHAPE, &s, sizeof(s), 0);
+}
+
+int nwm_owner_text(UINT64 owner, UINT32 win, INT16 x, INT16 y, UINT8 scale,
+                   const char *text, UINT32 len, UINT32 color) {
+  nwm_text_t t;
+  UINT32     i;
+
+  memset(&t, 0, sizeof(t));
+  t.win = win;
+  t.x = x;
+  t.y = y;
+  t.scale = scale;
+  t.color = color;
+  if (text != 0) {
+    if (len >= NWM_TEXT_MAX) {
+      len = NWM_TEXT_MAX - 1u;
+    }
+    for (i = 0; i < len && text[i] != '\0'; i++) {
+      t.text[i] = text[i];
+    }
+    t.len = (UINT8)i;
+  }
+  return nwm_kernel_request(owner, NWM_REQ_TEXT, &t, sizeof(t), 0);
+}
+
+int nwm_owner_flush(UINT64 owner, UINT32 win) {
+  nwm_win_t r;
+
+  r.win = win;
+  return nwm_kernel_request(owner, NWM_REQ_INVALIDATE, &r, sizeof(r), 0);
+}
+
+int nwm_owner_title(UINT64 owner, UINT32 win, const char *title) {
+  nwm_title_t t;
+  UINT32      i;
+
+  memset(&t, 0, sizeof(t));
+  t.win = win;
+  if (title != 0) {
+    for (i = 0; i + 1u < NWM_TITLE_MAX && title[i] != '\0'; i++) {
+      t.title[i] = title[i];
+    }
+  }
+  return nwm_kernel_request(owner, NWM_REQ_TITLE, &t, sizeof(t), 0);
+}
+
+int nwm_owner_move(UINT64 owner, UINT32 win, INT32 x, INT32 y) {
+  nwm_move_t m;
+
+  memset(&m, 0, sizeof(m));
+  m.win = win;
+  m.x = x;
+  m.y = y;
+  return nwm_kernel_request(owner, NWM_REQ_MOVE, &m, sizeof(m), 0);
+}
+
+int nwm_owner_resize(UINT64 owner, UINT32 win, INT32 w, INT32 h) {
+  nwm_resize_t r;
+
+  memset(&r, 0, sizeof(r));
+  r.win = win;
+  r.w = w;
+  r.h = h;
+  return nwm_kernel_request(owner, NWM_REQ_RESIZE, &r, sizeof(r), 0);
+}
+
+int nwm_owner_focus(UINT64 owner, UINT32 win) {
+  nwm_win_t r;
+
+  (void)owner;
+  r.win = win;
+  return nwm_kernel_request(owner, NWM_REQ_FOCUS, &r, sizeof(r), 0);
+}
+
+int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
+  nwm_window_t *v = win_get(win);
+  nd_rect_t     cr;
+
+  if (v == 0) {
+    return NWM_EBADWIN;
+  }
+  cr = client_rect(v);
+  if (w != 0) {
+    *w = cr.w;
+  }
+  if (h != 0) {
+    *h = cr.h;
+  }
+  return NWM_OK;
+}
+
+int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
+  nwm_window_t *v = win_get(win);
+
+  if (v == 0) {
+    return NWM_EBADWIN;
+  }
+  if (x != 0) {
+    *x = v->rect.x;
+  }
+  if (y != 0) {
+    *y = v->rect.y;
+  }
+  if (w != 0) {
+    *w = v->rect.w;
+  }
+  if (h != 0) {
+    *h = v->rect.h;
+  }
+  return NWM_OK;
+}
+
 #else /* !CONFIG_NOVUS_WM */
 
 void nwm_init(void) {}
 void nwm_tick(void) {}
 int nwm_selftest(void) { return 1; }
 int nwm_activate_owner(UINT64 owner) { (void)owner; return 0; }
+int nwm_owner_create(UINT64 owner, const char *title, INT32 x, INT32 y,
+                     INT32 w, INT32 h, UINT32 *win) {
+  (void)owner; (void)title; (void)x; (void)y; (void)w; (void)h; (void)win;
+  return NWM_EBADWIN;
+}
+int nwm_owner_destroy(UINT64 owner, UINT32 win) { (void)owner; (void)win; return NWM_EBADWIN; }
+int nwm_owner_clear(UINT64 owner, UINT32 win) { (void)owner; (void)win; return NWM_EBADWIN; }
+int nwm_owner_shape(UINT64 owner, UINT32 win, UINT8 op, INT16 x, INT16 y,
+                    INT16 w, INT16 h, UINT32 color) {
+  (void)owner; (void)win; (void)op; (void)x; (void)y; (void)w; (void)h; (void)color;
+  return NWM_EBADWIN;
+}
+int nwm_owner_text(UINT64 owner, UINT32 win, INT16 x, INT16 y, UINT8 scale,
+                   const char *text, UINT32 len, UINT32 color) {
+  (void)owner; (void)win; (void)x; (void)y; (void)scale; (void)text; (void)len;
+  (void)color;
+  return NWM_EBADWIN;
+}
+int nwm_owner_flush(UINT64 owner, UINT32 win) { (void)owner; (void)win; return NWM_EBADWIN; }
+int nwm_owner_title(UINT64 owner, UINT32 win, const char *title) {
+  (void)owner; (void)win; (void)title;
+  return NWM_EBADWIN;
+}
+int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
+  (void)win; (void)w; (void)h;
+  return NWM_EBADWIN;
+}
+int nwm_owner_move(UINT64 owner, UINT32 win, INT32 x, INT32 y) {
+  (void)owner; (void)win; (void)x; (void)y;
+  return NWM_EBADWIN;
+}
+int nwm_owner_resize(UINT64 owner, UINT32 win, INT32 w, INT32 h) {
+  (void)owner; (void)win; (void)w; (void)h;
+  return NWM_EBADWIN;
+}
+int nwm_owner_focus(UINT64 owner, UINT32 win) {
+  (void)owner; (void)win;
+  return NWM_EBADWIN;
+}
+int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
+  (void)win; (void)x; (void)y; (void)w; (void)h;
+  return NWM_EBADWIN;
+}
 
 #endif /* CONFIG_NOVUS_WM */

@@ -45,6 +45,23 @@ pub struct DisplayOut {
 pub struct Display {
     pub count: u32,
     pub out: [DisplayOut; 4],
+    /// The display controller behind them, as the kernel's GPU probe
+    /// named it ("Intel UHD Graphics 630").
+    pub gpu: [u8; 24],
+}
+
+impl Display {
+    /// The controller's name, or "" when the kernel found none. The
+    /// field is ASCII, so a byte slice is enough - no decoding and no
+    /// allocation on a no_std client.
+    pub fn gpu_name(&self) -> &str {
+        let mut n = 0usize;
+
+        while n < self.gpu.len() && self.gpu[n] != 0 {
+            n += 1;
+        }
+        core::str::from_utf8(&self.gpu[..n]).unwrap_or("")
+    }
 }
 
 impl DisplayOut {

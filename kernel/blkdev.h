@@ -75,6 +75,38 @@
 typedef int (*blk_read_fn)(void *ctx, UINT64 sector, UINTN count, void *buf);
 typedef int (*blk_write_fn)(void *ctx, UINT64 sector, UINTN count,
                             const void *buf);
+/* Push the device's volatile write cache to the medium. Optional: a backend
+ * that leaves it NULL has nothing to make durable (memory images) or never
+ * learned the command. */
+typedef int (*blk_flush_fn)(void *ctx);
+
+/* Power states a disk can be reported in. Every backend that can answer
+ * agrees on these four: spinning and ready, spun up but idle (heads
+ * unloaded on some drives), stopped, and parked deep enough that only a
+ * reset brings it back. The block layer only cares whether the medium is
+ * at rest, so this is the whole vocabulary it needs. */
+#define BLKDEV_POWER_UNKNOWN 0xFFFFFFFFu
+#define BLKDEV_POWER_ACTIVE  0u
+#define BLKDEV_POWER_IDLE    1u
+#define BLKDEV_POWER_STANDBY 2u
+#define BLKDEV_POWER_SLEEP   3u
+
+/* Spin the medium down: unload the heads and stop the platter.
+ *
+ * Nothing is invalidated by this. ATA and SCSI both restart the drive on
+ * the next media access, so a caller never has to wake the device before
+ * a transfer - it only has to make sure none is in flight, which the
+ * backend's own lock already covers. Optional: a backend with no moving
+ * parts (memory images, flash) leaves this NULL, and blkdev_powerdown()
+ * reports success for it.
+ *
+ * Returns 0 when the device is stopped (or had nothing to stop), -1 when
+ * the backend or the device refused the command. */
+typedef int (*blk_power_fn)(void *ctx);
+
+/* Report the current state as one of BLKDEV_POWER_*. NULL when the
+ * backend cannot read it; blkdev_power_state() then answers UNKNOWN. */
+typedef int (*blk_power_state_fn)(void *ctx, UINT32 *state);
 
 typedef struct blkdev {
   const char  *name;         /* short static name, e.g. "ramdisk" */
@@ -88,6 +120,24 @@ typedef struct blkdev {
   void        *ctx;          /* backend-private data */
   blk_read_fn  read;
   blk_write_fn write;
+  /* NULL when the backend has no cache it can flush; see blkdev_flush(). */
+  blk_flush_fn flush;
+  /* NULL when the device has nothing to spin down or never learned how. */
+  blk_power_fn powerdown;
+  /* NULL when the backend cannot read its power state. */
+  blk_power_state_fn power_state;
+  /* Set by a backend whose spin-down may run from the timer interrupt:
+   * one that only ever touches a register and polls, like AHCI and IDE.
+   * USB mass storage keeps a multi-step Bulk-Only state machine and must
+   * never be entered from an IRQ, so it leaves this clear and is swept
+   * from task context instead. */
+  int power_irq_safe;
+  /* Bookkeeping owned by the block layer, not by the backend: the tick of
+   * the last transfer this device saw and the last state observed. Both
+   * are maintained by blkdev_read/write/flush and consulted by
+   * blkdev_idle_sweep(), so a backend never has to initialise them. */
+  UINT64 last_active_tick;
+  UINT32 power; /* BLKDEV_POWER_* */
 } blkdev_t;
 
 /* Hardware block size in bytes, how many 512-byte sectors that is, and
@@ -152,6 +202,93 @@ void blkdev_detach_boot_only(void);
 int blkdev_read(blkdev_t *dev, UINT64 sector, UINTN count, void *buf);
 int blkdev_write(blkdev_t *dev, UINT64 sector, UINTN count,
                  const void *buf);
+
+/* Make every write already acknowledged by this device durable.
+ *
+ * A disk reports a write complete once the bytes reach its write cache, not
+ * the medium, so a filesystem commit (WAL marker, superblock pointer) is
+ * durable only after a flush. Without one, a power loss right after
+ * novusfs commits can leave a recovery pass replaying a transaction whose
+ * records the device never stored - or with an older superblock pointer
+ * that no longer matches the redo it just performed.
+ *
+ * Returns 0 when the cache was flushed, when the device has none (memory
+ * images), when the backend never learned the command, or when the device
+ * is read-only; -1 on a failed command. Inline for the same reason the
+ * geometry helpers above are: kernel/gpt.c and the host mkdisk/mkfsnovus
+ * tools include this header without the block layer behind it. */
+static inline int blkdev_flush(blkdev_t *dev) {
+  if (dev == NULL) {
+    return -1;
+  }
+  if ((dev->flags & BLKDEV_FLAG_READONLY) != 0) {
+    return 0;
+  }
+  if (dev->flush == NULL) {
+    return 0;
+  }
+  return dev->flush(dev->ctx);
+}
+
+/* Spin this device down, if it can be. Calling it on a device that is
+ * already stopped is harmless - the ATA command is a no-op there and
+ * costs one round trip. Read-only media and backends without moving parts
+ * report success without touching hardware.
+ *
+ * Inline for the same reason blkdev_flush() is: kernel/gpt.c and the host
+ * mkdisk/mkfsnovus tools include this header with no block layer behind
+ * it. */
+static inline int blkdev_powerdown(blkdev_t *dev) {
+  if (dev == NULL) {
+    return -1;
+  }
+  if ((dev->flags & BLKDEV_FLAG_READONLY) != 0) {
+    return 0;
+  }
+  if (dev->powerdown == NULL) {
+    return 0;
+  }
+  return dev->powerdown(dev->ctx);
+}
+
+/* Ask the backend what state the medium is in. `*state` is set to
+ * BLKDEV_POWER_UNKNOWN whenever the answer cannot be had, so callers can
+ * print or decide on it without a second NULL check. */
+static inline int blkdev_power_state(blkdev_t *dev, UINT32 *state) {
+  if (state == NULL) {
+    return -1;
+  }
+  *state = BLKDEV_POWER_UNKNOWN;
+  if (dev == NULL || dev->power_state == NULL) {
+    return -1;
+  }
+  return dev->power_state(dev->ctx, state);
+}
+
+/* --- automatic spin-down ------------------------------------------------ */
+
+/* Stop every device that has not seen a transfer for the configured idle
+ * timeout. Cheap when nothing qualifies - it walks the device table and
+ * compares two integers.
+ *
+ * `irq_context` is 1 when the caller runs from an interrupt handler (the
+ * timer tick, which is where this system actually gets its chance to look
+ * at idle disks: a desktop shell always leaves a runnable task behind, so
+ * the kernel idle loop below is unreachable). In that mode only backends
+ * that set power_irq_safe are touched - a USB Bulk-Only transfer is a
+ * multi-step state machine and must not be entered from an IRQ. */
+void blkdev_idle_sweep(int irq_context);
+
+/* Idle timeout in seconds before a device is spun down; 0 disables
+ * automatic spin-down entirely. The default is BLKDEV_IDLE_SECONDS. */
+void   blkdev_set_idle_timeout(UINT32 seconds);
+UINT32 blkdev_idle_timeout(void);
+#define BLKDEV_IDLE_SECONDS_DEFAULT 120u
+
+/* Flush and then stop every device that supports it, regardless of the
+ * idle timer. For a shutdown or suspend path, where the whole machine is
+ * about to stop drawing power. Returns the number of devices stopped. */
+UINTN blkdev_standby_all(void);
 
 /* Register a bounded view of a parent device. Offsets and lengths use
  * the same 512-byte sectors as blkdev_read(); the range must fit the

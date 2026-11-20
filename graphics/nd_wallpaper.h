@@ -11,7 +11,7 @@
 /* Number of photo wallpapers; keep in sync with graphics/wpkg.h's
  * WPKG_MAX_IMAGES ceiling, the Makefile's WP_IMGS list and the theme's
  * paper colours. */
-#define ND_WALLPAPER_COUNT 7
+#define ND_WALLPAPER_COUNT 12
 
 /* Built-in photo wallpapers, packed into WPAPERS.PKG from
  * assets/backgrounds-screen by tools/wpkg and staged by the boot stage

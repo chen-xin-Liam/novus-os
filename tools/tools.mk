@@ -140,20 +140,29 @@ $(NOVUPKG): tools/novupkg/src/main.rs tools/novupkg/src/crypto/mod.rs \
 	    $(CARGO) build --quiet
 	cp $(CURDIR)/build/rust-host/debug/novupkg $@
 
+# blkdev.h belongs to these interfaces: blkdev_t is built field by field and
+# later read by code in another object, so a layout change (an added hook,
+# say) has to rebuild every host object that describes the struct. Without
+# this, an incremental build leaves one side compiled against the old layout
+# and the new field reads whatever sits past the end of the old struct.
+HOST_BLKDEPS := kernel/blkdev.h kernel/kernel.h fs/novusfs/novusfs.h
+
 # One rule per kernel filesystem source, flattened like the kernel's own
 # object naming, so the host build and the kernel build never share an
 # object file.
 define HOST_FS_rule
-$(TOOLS_OUT)/$(subst /,_,$(basename $(1))).o: $(1) | $(TOOLS_OUT)
+$(TOOLS_OUT)/$(subst /,_,$(basename $(1))).o: $(1) $$(HOST_BLKDEPS) | $(TOOLS_OUT)
 	$$(HOSTCC) $$(HOSTCFLAGS) $$(HOST_INC) $$(HOST_REMAP) -c $$< -o $$@
 endef
 $(foreach src,$(NOVUSFS_HOST_SRCS),$(eval $(call HOST_FS_rule,$(src))))
 
 $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o: tools/mkfsnovus/mkfsnovus.c \
+                                          $(HOST_BLKDEPS) \
                                           | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
-$(TOOLS_OUT)/tools_mkdisk_mkdisk.o: tools/mkdisk/mkdisk.c | $(TOOLS_OUT)
+$(TOOLS_OUT)/tools_mkdisk_mkdisk.o: tools/mkdisk/mkdisk.c $(HOST_BLKDEPS) \
+                                    | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
 # PE/COFF keeps the core rlib's .xdata unwind metadata, and --gc-sections
@@ -176,13 +185,12 @@ $(TOOLS_OUT)/kernel_gpt.o: kernel/gpt.c kernel/gpt.h kernel/blkdev.h \
                            | $(TOOLS_OUT)
 	$(HOSTCC) $(HOSTCFLAGS) $(HOST_INC) $(HOST_REMAP) -c $< -o $@
 
-# --gc-sections: the precompiled core rlib carries a DWARF reference to
-# Rust's unwind personality even under panic=abort, and nothing defines
-# it in a C-hosted binary. Novus never unwinds, so discarding the unused
-# debug section is correct - and cheaper than pinning a mangled symbol
-# name that changes with the compiler.
+# --gc-sections drops the rlib's unreferenced ELF debug sections on a Linux
+# host. PE keeps .xdata as a live exception-directory entry instead, so a
+# Windows link still resolves rust_eh_personality from the empty stub above;
+# on ELF hosts the prerequisite is empty.
 $(MKFSNOVUS): $(TOOLS_OUT)/tools_mkfsnovus_mkfsnovus.o $(NOVUSFS_HOST_OBJS) \
-              $(RUST_HOST_LIB)
+              $(RUST_UNWIND_STUB) $(RUST_HOST_LIB)
 	$(HOSTCC) -Wl,--gc-sections -o $@ $^
 
 # mkdisk writes the same GPT the boot-stage installer writes: kernel/gpt.c
@@ -322,14 +330,21 @@ endif # MOCHI_PRESENT
 
 novus-img: $(NOVUS_IMG)
 
+# Outline faces committed under assets/fonts are seeded into the user's
+# drop folder /Novus/font, where the kernel picks the first one that parses.
+# An empty or absent directory simply leaves the folder empty: dropping a
+# .ttf onto a running system works the same way, it is read on next boot.
+FONT_SRC := $(wildcard assets/fonts/*.ttf assets/fonts/*.otf assets/fonts/*.ttc)
+FONT_PUT := $(foreach f,$(FONT_SRC),--put $(f) /Novus/font/$(notdir $(f)))
+
 # The system partition: formatted and Merkle-built by the kernel's own
 # filesystem code, so its root hash is already in the superblock.
 # The Unicode font (graphics/nd_font_data.bin, ~3.5 MiB) is seeded into the
 # system partition instead of being linked into NOVUS.EFI: the volume is a
 # fixed 8 MiB, so the EFI shrinks while the FAT images do not grow. The
 # kernel reads /font.bin during the boot-stage mount window and caches it.
-$(NOVUS_IMG): $(MKFSNOVUS) graphics/nd_font_data.bin | out
-	$(MKFSNOVUS) $@ $(SYS_SIZE_MB) --put graphics/nd_font_data.bin /Novus/fonts/font.bin
+$(NOVUS_IMG): $(MKFSNOVUS) graphics/nd_font_data.bin $(FONT_SRC) | out
+	$(MKFSNOVUS) $@ $(SYS_SIZE_MB) --put graphics/nd_font_data.bin /Novus/fonts/font.bin $(FONT_PUT)
 
 esp: $(ESP_IMG)
 

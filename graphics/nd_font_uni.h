@@ -3,7 +3,6 @@
  *
  * Data lives in nd_font_uni.c (index) and nd_font_data.bin (glyphs).
  */
-
 #ifndef NOVUS_ND_FONT_UNI_H
 #define NOVUS_ND_FONT_UNI_H
 
@@ -35,8 +34,22 @@ struct novusfs_fs;
 void nd_font_set_data(const UINT8 *data);
 int  nd_font_load_from(struct novusfs_fs *fs);
 
+/* Load a TrueType/OpenType outline face from /Novus/font (the user's drop
+ * folder) or /Novus/fonts, whichever holds a .ttf/.otf/.ttc first. Returns
+ * 0 when a face is active, -1 when nothing usable was found (the shipped
+ * bitmap table stays in charge). */
+int  nd_font_load_ttf(struct novusfs_fs *fs);
+
 /* 32 glyph bytes (16 rows, big-endian) or NULL. *wide is 16 or 8. */
 const UINT8 *nd_glyph_find(UINT32 cp, UINT32 *wide);
+
+/* Antialiased coverage map for the same codepoint (16 rows x 16 nibbles,
+ * 128 bytes, high nibble is the even column) when the outline face covers
+ * it, else NULL. */
+/* Antialiased coverage map for `cp`, rasterised at a cell that suits the
+ * text scale; `*px` receives the cell size and `*blk` the pixels-per-cell
+ * magnification. Returns 0 when no face covers the codepoint. */
+const UINT8 *nd_glyph_gray(UINT32 cp, UINT32 scale, UINT32 *px, UINT32 *blk);
 
 /* Advance in pixels at 1x: 0 for combining marks, 6 for printable ASCII,
  * 8 or 16 for everything else. */

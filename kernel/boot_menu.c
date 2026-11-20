@@ -68,14 +68,17 @@ static const char *g_sub[BOOT_MENU_OPTION_COUNT] = {
 static void boot_menu_paint(nd_surface_t *s, UINT32 sel, UINT32 sec_left) {
   INT32 cx = s->w / 2;
   INT32 card_w = (s->w < 480) ? (s->w - 48) : 432;
-  INT32 card_h = 232;
+  /* 16 pixel text at scale 1 needs more room than the 7 pixel bitmap cell
+   * the layout used to assume: an entry carries a 16 pixel name above a
+   * 16 pixel description, and the footer two lines below it. */
+  INT32 card_h = 236;
   INT32 card_x = cx - card_w / 2;
   INT32 card_y = (s->h - card_h) / 2;
   INT32 i;
-  INT32  entry_h = 44;
+  INT32  entry_h = 52;
   INT32  entry_y = card_y + 70;
   INT32  label_y = card_y + 14;
-  INT32  foot_y = card_y + card_h - 30;
+  INT32  foot_y = card_y + card_h - 50;
 
   if (card_y < 8) {
     card_y = 8;
@@ -105,7 +108,7 @@ static void boot_menu_paint(nd_surface_t *s, UINT32 sel, UINT32 sec_left) {
     }
     {
       const char *name = g_options[i];
-      nd_text(s, ex + 14, y + 7, name,
+      nd_text(s, ex + 14, y + 4, name,
               ((UINT32)i == sel) ? MENU_ACCENT : MENU_TEXT, 1);
     }
     {
@@ -114,7 +117,7 @@ static void boot_menu_paint(nd_surface_t *s, UINT32 sel, UINT32 sec_left) {
       if (sw > ew - 28) {
         sw = ew - 28;
       }
-      nd_text_limit(s, ex + 14, y + 25, sub, (UINT32)sw, MENU_DIM, 1);
+      nd_text_limit(s, ex + 14, y + 22, sub, (UINT32)sw, MENU_DIM, 1);
     }
   }
 
@@ -167,8 +170,12 @@ void boot_menu_select(void) {
    * daemon) behind g_sched_started, which is still 0 while the menu is up; a
    * timer tick during the menu only advances the tick counter. A device IRQ
    * merely appends bytes to a ring and trap_dispatch returns the same kernel
-   * frame, so no task state is touched and no context switch can happen
-   * (no tasks exist yet). */
+   * frame. Tasks do already exist at this point (the idle, spin and NX probe
+   * tasks were created just above), so the guarantee rests on two guards in
+   * sched.c: sched_tick() only asks for a reschedule once g_sched_started is
+   * set, and sched_switch_frame() returns the incoming frame untouched until
+   * then. Without them the first tick after cpu_sti() enters the idle task
+   * and this menu never returns. */
   nd_surface_t *s = nd_screen();
   UINT32 sel = 0u;
   UINT32 chosen = 0u;

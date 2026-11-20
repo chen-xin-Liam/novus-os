@@ -34,6 +34,12 @@
 #define MSR_GS_BASE        0xC0000101u
 #define MSR_KERNEL_GS_BASE 0xC0000102u
 
+/* FS base (0xC0000100): user-space thread information. Win32 keeps its TEB
+ * there, and a program that reads %fs:0x58 without a TEB in place finds a
+ * null page instead of its TLS slots - which is exactly the crash the loader
+ * used to avoid by refusing images with a TLS directory. */
+#define MSR_FS_BASE        0xC0000100u
+
 static inline UINT64 msr_read(UINT32 msr) {
   UINT32 lo, hi;
   __asm__ volatile("rdmsr" : "=a"(lo), "=d"(hi) : "c"(msr));

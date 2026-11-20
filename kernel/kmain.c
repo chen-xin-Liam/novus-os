@@ -61,6 +61,7 @@
 #include "nd_input.h"
 #include "con.h"
 #include "nd_font_uni.h"
+#include "nd_icon.h"
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
 #include "ipc.h"
 #include "nwm.h"
@@ -68,6 +69,8 @@
 #include "install.h"
 #include "lang.h"
 #include "sysinfo.h"
+#include "gpu.h"
+#include "gpu2d.h"
 #include "net.h"
 #include "irq.h"
 
@@ -256,6 +259,16 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * machine's default disk) is gone from the firmware block-device list
    * after ExitBootServices, so drive it natively. */
   (void)ide_init();
+  /* Storage power: arm the idle timer explicitly instead of trusting the
+   * static initialiser in blkdev.c - the kernel's .data is laid out behind
+   * the boot-stage handoff block, so a default that lives there is not
+   * something to gamble a feature on. From here on a disk that sees no
+   * transfer for the timeout is spun down, and every drive is flushed and
+   * stopped on shutdown and reboot (kernel/power.c). */
+  blkdev_set_idle_timeout(BLKDEV_IDLE_SECONDS_DEFAULT);
+  kputs("[BLK] idle spin-down after ");
+  kputs_hex(BLKDEV_IDLE_SECONDS_DEFAULT);
+  kputs("s\n");
   /* Device manager: scan PCI once and cache it. This is the last moment
    * where a BAR probe (it writes 0xFFFFFFFF over every window) cannot
    * disturb a transfer: every storage driver has probed and the network
@@ -288,8 +301,16 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   }
   storage_mount_ahci_novusfs();
   /* M5: pull the Unicode font out of the mounted system partition (an
-   * installed GPT partition, if present) so the desktop has CJK glyphs. */
+   * installed GPT partition, if present) so the desktop has CJK glyphs.
+   * Then look for an outline face in /Novus/font: when one is present it
+   * takes over drawing, and the bitmap table stays as the fallback for
+   * codepoints that face does not cover. */
   nd_font_load_from(novusfs_root());
+  (void)nd_font_load_ttf(novusfs_root());
+  /* Shell icons: the built-in ICO set is in the loader already; telling
+   * the decoder where the system partition is lets a user icon dropped
+   * into /Novus/icons override one of them. */
+  nd_icon_init(novusfs_root());
   if (vfs_selftest() != 0) {
     kputs("[WARN] VFS selftest failed, continuing degraded\n");
   }
@@ -361,6 +382,8 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
            * file manager can browse the standard tree. Persistence stays
            * off, so session_init() still starts a login-free live desktop. */
           nd_font_load_from(&livefs);
+          (void)nd_font_load_ttf(&livefs);
+          nd_icon_init(&livefs);
           novusfs_set_root(&livefs);
         }
       }
@@ -544,6 +567,15 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * apps are Rust programs embedded in this image (kernel/apps.c); the
        * launcher buttons on the shell's taskbar start the same three later,
        * which is why apps_launch() refuses a second copy. */
+      /* GPU bring-up, step 1: find the display controller and prove its
+       * register window is reachable. The desktop keeps drawing on the
+       * GOP framebuffer; this puts the chip where the settings page and
+       * the boot log can show it. */
+      gpu_init();
+      /* 2D engine seam: decide who performs spans and blits before the
+       * first window is painted. The software path runs on the CPU over the
+       * firmware framebuffer; a vendor engine plugs in here when it exists. */
+      gpu2d_init();
       sysinfo_init();
       {
         int install_mode = (shared_mem_get() != NULL &&

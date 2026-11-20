@@ -737,6 +737,42 @@ static int usb_write(void *ctx, UINT64 sector, UINTN count, const void *buf) {
   return 0;
 }
 
+/* SYNCHRONIZE CACHE(10) is the SCSI form of a cache flush. A target may
+ * report it unsupported (sense ILLEGAL REQUEST), which bot_command surfaces
+ * as a failed command; a device with no write cache has nothing to lose, so
+ * the failure is returned and the caller decides whether that matters. */
+static int usb_flush(void *ctx) {
+  usb_disk_t *d = (usb_disk_t *)ctx;
+  usb_t *u = d->u;
+  UINT8 cb[16];
+
+  if (u == NULL || u->slot == 0u) {
+    return -1;
+  }
+  memset(cb, 0, sizeof(cb));
+  cb[0] = 0x35; /* SYNCHRONIZE CACHE(10); zero LBA range = whole medium */
+  u->lun = d->lun;
+  return bot_command(u, cb, 10, 0, 0, NULL);
+}
+
+static int usb_powerdown(void *ctx) {
+  usb_disk_t *d = (usb_disk_t *)ctx;
+  usb_t *u = d->u;
+  UINT8 cb[16];
+
+  if (u == NULL || u->slot == 0u) {
+    return -1;
+  }
+  /* START STOP UNIT (0x1B) with START=0 and LOEJ=0: a rotating device
+   * parks its heads and spins down, a flash device acknowledges and does
+   * nothing. Immediate=0 makes the target report completion rather than
+   * accepting it silently. */
+  memset(cb, 0, sizeof(cb));
+  cb[0] = 0x1b;
+  u->lun = d->lun;
+  return bot_command(u, cb, 10, 0, 0, NULL);
+}
+
 static int read_capacity(usb_t *u) {
   UINT8 cb[16];
   UINT64 last;
@@ -1384,6 +1420,8 @@ int usb_init(void) {
             d->dev.ctx = d;
             d->dev.read = usb_read;
             d->dev.write = usb_write;
+            d->dev.flush = usb_flush;
+            d->dev.powerdown = usb_powerdown;
             if (blkdev_register(&d->dev) == 0) {
               g_usb_disks++;
               kputs("[USB] disk ");
