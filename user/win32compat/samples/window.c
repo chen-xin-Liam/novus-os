@@ -80,7 +80,7 @@ __declspec(dllimport) u64   CreateWindowExA(u32 ex_style, const char *cls,
                                             void *param);
 __declspec(dllimport) int   DestroyWindow(u64 hwnd);
 __declspec(dllimport) int   ShowWindow(u64 hwnd, i32 cmd);
-__declspec(dllimport) int   GetMessageA(MSG *msg, u64 hwnd, u32 lo, u32 hi);
+__declspec(dllimport) int   GetMessageA(u64 hwnd, MSG *msg, u32 lo, u32 hi);
 __declspec(dllimport) int   TranslateMessage(const MSG *msg);
 __declspec(dllimport) i64   DispatchMessageA(const MSG *msg);
 __declspec(dllimport) i64   DefWindowProcA(u64 hwnd, u32 msg, u64 wp, i64 lp);
@@ -93,6 +93,20 @@ __declspec(dllimport) u64   SetTextColor(u64 hdc, u32 colorref);
 __declspec(dllimport) int   TextOutA(u64 hdc, i32 x, i32 y, const char *s,
                                      i32 count);
 __declspec(dllimport) void  ExitProcess(u32 code);
+
+/* Third block... no, sixth: the pen and the shapes it draws. */
+__declspec(dllimport) i32   SetBkMode(u64 hdc, i32 mode);
+__declspec(dllimport) u32   SetBkColor(u64 hdc, u32 colorref);
+__declspec(dllimport) i32   MoveToEx(u64 hdc, i32 x, i32 y, void *prev);
+__declspec(dllimport) i32   LineTo(u64 hdc, i32 x, i32 y);
+__declspec(dllimport) i32   Rectangle(u64 hdc, i32 l, i32 t, i32 r, i32 b);
+__declspec(dllimport) i32   Ellipse(u64 hdc, i32 l, i32 t, i32 r, i32 b);
+__declspec(dllimport) u32   SetPixel(u64 hdc, i32 x, i32 y, u32 colorref);
+__declspec(dllimport) i32   PatBlt(u64 hdc, i32 x, i32 y, i32 w, i32 h, u32 rop);
+__declspec(dllimport) u64   CreatePen(i32 style, i32 width, u32 colorref);
+__declspec(dllimport) u64   SelectObject(u64 hdc, u64 obj);
+__declspec(dllimport) i32   DeleteObject(u64 obj);
+__declspec(dllimport) void  PostQuitMessage(i32 code);
 
 /* ---- tiny string helpers (no CRT) -------------------------------------- */
 
@@ -130,9 +144,11 @@ static void console(const char *s) {
 #define RGB_INK   0x00141414u
 #define RGB_MUTED 0x00707070u
 #define RGB_LINE  0x00D8D8D8u
+#define RGB_ACCENT 0x00A05000u
 
 static u64 g_hwnd;
 static char g_status[64];
+static char g_typed[48];
 
 /* An array of string literals is a table of absolute addresses, and that is
  * what keeps the image relocatable: the linker only emits a .reloc section
@@ -152,11 +168,53 @@ static const char *const k_info[] = {
   "Message WM_PAINT -> BeginPaint -> EndPaint",
 };
 
+/* TEXTMETRICA as x64 lays it out: eleven LONGs then nine BYTEs, 56 bytes. */
+typedef struct {
+  i32 tmHeight, tmAscent, tmDescent, tmInternalLeading, tmExternalLeading;
+  i32 tmAveCharWidth, tmMaxCharWidth, tmWeight, tmOverhang;
+  i32 tmDigitizedAspectX, tmDigitizedAspectY;
+  i8  tmFirstChar, tmLastChar, tmDefaultChar, tmBreakChar;
+  i8  tmItalic, tmUnderlined, tmStruckOut, tmPitchAndFamily, tmCharSet;
+  i8  pad[3];
+} TEXTMETRIC;
+
+__declspec(dllimport) int InvalidateRect(u64 hwnd, const RECT *rect, i32 erase);
+__declspec(dllimport) u64 GetStockObject(i32 index);
+__declspec(dllimport) int GetTextMetricsA(u64 hdc, TEXTMETRIC *tm);
+
+#define WM_KEYDOWN 0x0100u
+#define WM_CHAR    0x0102u
+#define VK_BACK    0x08u
+#define VK_RETURN  0x0Du
+
+#define STOCK_WHITE_BRUSH 0
+
 static i64 WndProc(u64 hwnd, u32 msg, u64 wp, i64 lp) {
-  (void)wp;
   (void)lp;
 
   switch (msg) {
+  case WM_CHAR: {
+    /* Type into the window and this line grows. WM_CHAR carries the
+     * character itself, which is what this layer hands over for any key
+     * that produces text. */
+    u32 n = str_len(g_typed);
+
+    if ((i32)wp == (i32)VK_BACK) {
+      if (n > 0u) {
+        g_typed[n - 1u] = 0;
+      }
+    } else if ((i32)wp == (i32)VK_RETURN) {
+      g_typed[0] = 0;
+    } else if (n + 1u < (u32)sizeof(g_typed) && (i32)wp >= 0x20 &&
+               (i32)wp < 0x100) {
+      /* The window holds 8-bit text; a codepoint above 0xFF is dropped
+       * rather than stored truncated. */
+      g_typed[n] = (char)wp;
+      g_typed[n + 1u] = 0;
+    }
+    InvalidateRect(hwnd, 0, 0);
+    return 0;
+  }
   case WM_PAINT: {
     PAINTSTRUCT ps;
     u64         hdc;
@@ -201,9 +259,60 @@ static i64 WndProc(u64 hwnd, u32 msg, u64 wp, i64 lp) {
     if (g_status[0] != 0) {
       TextOutA(hdc, 24, 164, g_status, (i32)str_len(g_status));
     }
+    /* The metrics the program measured, then whatever has been typed. */
+    {
+      TEXTMETRIC tm;
+      char       line[40];
+      u32        k = 0;
+
+      if (GetTextMetricsA(hdc, &tm)) {
+        line[k++] = 't';
+        line[k++] = 'm';
+        line[k++] = ' ';
+        line[k++] = (char)('0' + (tm.tmHeight / 10));
+        line[k++] = (char)('0' + (tm.tmHeight % 10));
+        line[k++] = '/';
+        line[k++] = (char)('0' + (tm.tmAscent / 10));
+        line[k++] = (char)('0' + (tm.tmAscent % 10));
+        line[k++] = '/';
+        line[k++] = (char)('0' + (tm.tmAveCharWidth / 10));
+        line[k++] = (char)('0' + (tm.tmAveCharWidth % 10));
+        line[k] = 0;
+        SetTextColor(hdc, RGB_LINE);
+        TextOutA(hdc, 24, 188, line, (i32)k);
+      }
+    }
+    if (g_typed[0] != 0) {
+      SetTextColor(hdc, RGB_RED);
+      TextOutA(hdc, 24, 212, g_typed, (i32)str_len(g_typed));
+    } else {
+      SetTextColor(hdc, RGB_LINE);
+      TextOutA(hdc, 24, 212, "(type here)", 14);
+    }
 
     SetTextColor(hdc, RGB_LINE);
     TextOutA(hdc, 24, (i32)h - 32, "Close the window to end the process.", 36);
+
+    /* The sixth block on one panel: a pen, a zigzag made of LineTo, an
+     * outlined Rectangle, an Ellipse and a row of SetPixel dots. PatBlt lays
+     * the selected brush down as a band first. */
+    {
+      u64 pen = CreatePen(0, 1, RGB_ACCENT);
+      u64 old = SelectObject(hdc, pen);
+      i32 k;
+
+      PatBlt(hdc, 268, 8, 170, 10, 0x00F00021u);
+      MoveToEx(hdc, 268, 28, 0);
+      LineTo(hdc, 438, 84);
+      LineTo(hdc, 268, 140);
+      Rectangle(hdc, 268, 152, 438, 196);
+      Ellipse(hdc, 300, 200, 380, 240);
+      for (k = 0; k < 16; k++) {
+        SetPixel(hdc, 276 + k * 3, 250 - (k & 3), RGB_RED);
+      }
+      SelectObject(hdc, old);
+      DeleteObject(pen);
+    }
 
     EndPaint(hwnd, &ps);
     return 0;
@@ -214,6 +323,8 @@ static i64 WndProc(u64 hwnd, u32 msg, u64 wp, i64 lp) {
     DestroyWindow(hwnd);
     return 0;
   case WM_DESTROY:
+    /* The loop ends when GetMessage answers WM_QUIT. */
+    PostQuitMessage(0);
     return 0;
   default:
     break;
@@ -258,7 +369,7 @@ void novus_win32_main(void) {
   g_status[9] = 0;
 
   mem_zero(&msg, (u32)sizeof(msg));
-  while (GetMessageA(&msg, 0, 0, 0)) {
+  while (GetMessageA(0, &msg, 0, 0)) {
     TranslateMessage(&msg);
     DispatchMessageA(&msg);
   }

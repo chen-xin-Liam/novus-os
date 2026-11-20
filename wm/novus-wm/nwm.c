@@ -397,6 +397,15 @@ static void paint_shape(nd_rect_t client, UINT8 op, INT32 x, INT32 y, INT32 w,
     nd_round_frame(s, r, (radius > 0) ? radius : 1,
                    (thickness > 0) ? thickness : 1, color);
     break;
+  case NWM_OP_LINE:
+    nd_line(s, r.x, r.y, r.x + r.w, r.y + r.h, color);
+    break;
+  case NWM_OP_ELLIPSE:
+    nd_ellipse(s, r.x, r.y, w, h, color);
+    break;
+  case NWM_OP_ELLIPSE_FILL:
+    nd_fill_ellipse(s, r.x, r.y, w, h, color);
+    break;
   default:
     break; /* forward compatible: unknown ops are ignored */
   }
@@ -1154,6 +1163,13 @@ static void deliver_key(nwm_window_t *w, const nd_event_t *ev) {
   m.win = w->id;
   m.key = ev->key;
   m.mods = ev->mods;
+  /* Typing is rare, and knowing which window (and therefore which pid) the
+   * key went to is what a keyboard bug report needs. */
+  kputs("[NWM] key -> win=");
+  kputs_hex(w->id);
+  kputs(" pid=");
+  kputs_hex(w->owner);
+  kputs("\n");
   deliver(w->owner, NWM_EV_KEY, &m, sizeof(m));
 }
 
@@ -1940,6 +1956,27 @@ int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
   return NWM_OK;
 }
 
+int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
+  nwm_window_t *v = win_get(win);
+
+  if (v == 0) {
+    return NWM_EBADWIN;
+  }
+  if (x != 0) {
+    *x = v->rect.x;
+  }
+  if (y != 0) {
+    *y = v->rect.y;
+  }
+  if (w != 0) {
+    *w = v->rect.w;
+  }
+  if (h != 0) {
+    *h = v->rect.h;
+  }
+  return NWM_OK;
+}
+
 #else /* !CONFIG_NOVUS_WM */
 
 void nwm_init(void) {}
@@ -1971,6 +2008,10 @@ int nwm_owner_title(UINT64 owner, UINT32 win, const char *title) {
 }
 int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h) {
   (void)win; (void)w; (void)h;
+  return NWM_EBADWIN;
+}
+int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
+  (void)win; (void)x; (void)y; (void)w; (void)h;
   return NWM_EBADWIN;
 }
 

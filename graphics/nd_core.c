@@ -305,6 +305,61 @@ void nd_circle(nd_surface_t *s, INT32 cx, INT32 cy, INT32 radius,
   }
 }
 
+/* Half-width of an ellipse row. The span is sampled from the equation
+ * itself - x = rx * sqrt(1 - (y/ry)^2) - with the square root taken on an
+ * integer ratio, so a 3-pixel-radius ellipse still closes instead of
+ * stepping in whole-pixel jumps the way a table would. */
+static INT32 ellipse_half(INT32 rx, INT32 ry, INT32 dy) {
+  INT64 ry2 = (INT64)ry * (INT64)ry;
+  INT64 rem = ry2 - (INT64)dy * (INT64)dy;
+  INT64 num;
+
+  if (rem <= 0) {
+    return 0;
+  }
+  num = (INT64)rx * (INT64)rx * rem / ry2;
+  return isqrt_i32((INT32)num);
+}
+
+void nd_fill_ellipse(nd_surface_t *s, INT32 cx, INT32 cy, INT32 rx, INT32 ry,
+                     nd_color_t c) {
+  INT32 dy;
+
+  if (rx < 0 || ry < 0) {
+    return;
+  }
+  if (ry == 0) {
+    nd_hline(s, cx - rx, cx + rx, cy, c);
+    return;
+  }
+  for (dy = -ry; dy <= ry; dy++) {
+    INT32 half = ellipse_half(rx, ry, dy);
+
+    nd_fill_rect(s, nd_rect(cx - half, cy + dy, half * 2 + 1, 1), c);
+  }
+}
+
+void nd_ellipse(nd_surface_t *s, INT32 cx, INT32 cy, INT32 rx, INT32 ry,
+                nd_color_t c) {
+  INT32 dy;
+
+  if (rx < 0 || ry < 0) {
+    return;
+  }
+  if (ry == 0) {
+    nd_hline(s, cx - rx, cx + rx, cy, c);
+    return;
+  }
+  for (dy = -ry; dy <= ry; dy++) {
+    INT32 half = ellipse_half(rx, ry, dy);
+
+    nd_pixel(s, cx - half, cy + dy, c);
+    if (half != 0) {
+      nd_pixel(s, cx + half, cy + dy, c);
+    }
+  }
+}
+
 /* Left-edge inset of row `y` inside a rounded rectangle, in 1/16 px.
  *
  * The row is sampled at its vertical centre, so the edge moves by a

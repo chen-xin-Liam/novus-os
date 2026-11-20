@@ -78,5 +78,10 @@ int nwm_owner_title(UINT64 owner, UINT32 win, const char *title);
 /* Client-area size of a window, which is what a Win32 program sizes its
  * painting and its GetClientRect from. Returns 0 when the window is gone. */
 int nwm_owner_client(UINT32 win, INT32 *w, INT32 *h);
+/* The placed rectangle, frame included. A request that was clamped to stay
+ * on screen comes back at the position the compositor really used, so the
+ * caller can answer GetWindowRect with the truth rather than with what it
+ * asked for. Returns 0 when the window is gone. */
+int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h);
 
 #endif /* NOVUS_NWM_H */

@@ -466,7 +466,7 @@ $(APPS_BLOB_H): $(APPS_BINS) | build
 # the kernel's PE loader has a genuine import table and relocation table to
 # process. It is linked at 0x400000 while the kernel maps it at 0x50000000,
 # which forces the base relocation path that M9 exists to exercise.
-WIN32_BINS   := out/win32/hello.exe out/win32/window.exe
+WIN32_BINS   := out/win32/hello.exe out/win32/window.exe out/win32/tlsdemo.exe out/win32/msgdemo.exe out/win32/fileio.exe
 WIN32_BLOB_H := build/win32_blobs.h
 
 # hello.exe proves the console and memory calls; window.exe proves the
@@ -489,6 +489,9 @@ $(WIN32_BLOB_H): $(WIN32_BINS) | build
 	   echo '#define NOVUS_WIN32_BLOBS_H'; \
 	   xxd -i -n k_app_hello_exe out/win32/hello.exe; \
 	   xxd -i -n k_app_window_exe out/win32/window.exe; \
+	   xxd -i -n k_app_tlsdemo_exe out/win32/tlsdemo.exe; \
+	   xxd -i -n k_app_msgdemo_exe out/win32/msgdemo.exe; \
+	   xxd -i -n k_app_fileio_exe out/win32/fileio.exe; \
 	   echo '#endif'; } > $@
 
 # apps.c includes the generated headers; nothing else does.

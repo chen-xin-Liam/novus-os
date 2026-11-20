@@ -29,12 +29,14 @@
  * NUC image area (0x400000) and of each other:
  *
  *   0x50000000  PE image (relocated from its preferred base)
+ *   0x42000000  TEB: one page, installed as MSR_FS_BASE on every switch
  *   0x60000000  one page of API thunks
  *   0x70000000  command line / image name
  *   0x90000000  return trampoline: ExitProcess(RAX)
  *   0xA0000000  user stack top (64 KiB below it)
  */
 #define WIN32_IMAGE_BASE  0x0000000050000000ULL
+#define WIN32_TEB_VA      0x0000000042000000ULL
 #define WIN32_THUNK_VA    0x0000000060000000ULL
 #define WIN32_ARGV_VA     0x0000000070000000ULL
 #define WIN32_TRAMPOLINE  0x0000000090000000ULL
@@ -46,10 +48,30 @@
 #define WIN32_SLEEP_PORT  0xFFFFFFFFFFFFFFFFULL
 
 /* Thunk stride, see win32_thunk_bytes(). */
-#define WIN32_THUNK_LEN 32u
+#define WIN32_THUNK_LEN 48u
 
-/* ExitProcess .. RegCloseKey. The id is the thunk's R10 value. */
-#define WIN32_API_COUNT 49u
+/* ExitProcess .. GetTextMetricsA, indexed by id. One row (GetLocalTime)
+ * shares GetSystemTime's id, so the table has one more row than ids; this
+ * bounds both. */
+#define WIN32_API_COUNT 101u
+
+/* TEB field offsets, as the x64 ABI defines them: the self pointer at 0x30,
+ * ClientId at 0x40 with both ids pointer-wide, StackBase/StackLimit at
+ * 0x08/0x10, and the 64 inline TLS slots at 0x1480 - the offset a compiler
+ * emitted for a thread-local variable reads through %fs. Slots 0 and 1 are
+ * the image's TLS directory plus one reserved slot; TlsAlloc hands out the
+ * rest. The slots live in a second page, so the TEB spans two. */
+#define WIN32_TEB_SELF_OFF   0x030u
+#define WIN32_TEB_PID_OFF    0x040u
+#define WIN32_TEB_TID_OFF    0x048u
+#define WIN32_TEB_TLS_OFF    0x1480u
+#define WIN32_TEB_TLS_SLOTS  64u
+/* One scratch slot the thunks use to hand the caller's RDI across the
+ * syscall and take it back, so that RDI (callee-saved in the x64 ABI) comes
+ * home untouched without any write above the stack pointer. It sits past the
+ * TLS block, still inside the TEB's second page. */
+#define WIN32_TEB_SCRATCH_OFF 0x1680u
+#define WIN32_TEB_PAGES      2u
 
 /* A page of hand-assembled x86-64 that certain imports are pointed at
  * instead of a thunk. DispatchMessageA is the first: it must call the

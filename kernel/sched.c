@@ -307,6 +307,10 @@ static UINT64 sched_enter_kidle(void) {
   }
   g_current = NULL;
   vm_switch_cr3(mm_kernel_cr3());
+  /* The kernel idle context is ring 0 and has no TEB; leaving a user's
+   * %fs base installed here would let kernel code dereference a pointer
+   * into that task's address space after it has been switched out. */
+  msr_write(MSR_FS_BASE, 0u);
   return sched_kidle_frame();
 }
 
@@ -511,6 +515,10 @@ UINT64 sched_switch_frame(UINT64 current_frame) {
   tss_set_rsp0(next->kstack_top);
   sys_kernel_rsp = next->kstack_top;
   vm_switch_cr3(next->cr3);
+  /* %fs is a per-core register, so it has to follow the task: a Win32
+   * process reads its TEB and its TLS slots through it, and the next task
+   * would otherwise inherit the previous one's. */
+  msr_write(MSR_FS_BASE, next->teb_va);
   return next->rsp;
 }
 
@@ -910,6 +918,7 @@ void sched_start(void) {
   tss_set_rsp0(first->kstack_top);
   sys_kernel_rsp = first->kstack_top;
   vm_switch_cr3(first->cr3);
+  msr_write(MSR_FS_BASE, first->teb_va);
 
   kputs("[SCHED] entering ring 3: ");
   kputs(first->name);

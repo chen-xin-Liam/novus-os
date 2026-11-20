@@ -50,7 +50,8 @@ static int desktop_app(const char *name) {
   return text_equal(name, "fileman") || text_equal(name, "taskman") ||
       text_equal(name, "settings") || text_equal(name, "netman") ||
       text_equal(name, "devmgmt") || text_equal(name, "demo") ||
-      text_equal(name, "hello.exe");
+      text_equal(name, "hello.exe") || text_equal(name, "tlsdemo.exe") ||
+      text_equal(name, "msgdemo.exe") || text_equal(name, "fileio.exe");
 }
 
 static void desktop_stop(void) {
