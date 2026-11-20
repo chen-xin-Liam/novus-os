@@ -176,6 +176,7 @@ static const app_t g_win32[] = {
      * click path into WM_COMMAND and typing into an edit. */
     {"ctrldemo.exe", k_app_ctrldemo_exe, &k_app_ctrldemo_exe_len},
     {"menudemo.exe", k_app_menudemo_exe, &k_app_menudemo_exe_len},
+    {"resdemo.exe", k_app_resdemo_exe, &k_app_resdemo_exe_len},
 };
 
 UINT32 apps_win32_count(void) {

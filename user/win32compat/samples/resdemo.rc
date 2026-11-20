@@ -1,0 +1,12 @@
+/* Resources for resdemo.exe: one RCDATA payload and a string table with two
+ * entries, so FindResourceA and LoadStringA have something to find. */
+1 RCDATA
+BEGIN
+  "novus-rcd-payload"
+END
+
+STRINGTABLE
+BEGIN
+  101 "console says hello"
+  202 "second line from the table"
+END

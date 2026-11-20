@@ -261,6 +261,13 @@ enum {
   WIN32_API_GET_MENU,
   WIN32_API_DESTROY_MENU,
   WIN32_API_DRAW_MENU_BAR,
+  /* Fifteenth block: resources. The image is mapped, so the tree in .rsrc
+   * can be walked from here. */
+  WIN32_API_FIND_RESOURCE,
+  WIN32_API_LOAD_RESOURCE,
+  WIN32_API_LOCK_RESOURCE,
+  WIN32_API_SIZE_OF_RESOURCE,
+  WIN32_API_LOAD_STRING,
 };
 
 typedef struct {
@@ -412,6 +419,11 @@ static const win32_api_t g_api[] = {
     {"user32.dll", "GetMenu", WIN32_API_GET_MENU},
     {"user32.dll", "DestroyMenu", WIN32_API_DESTROY_MENU},
     {"user32.dll", "DrawMenuBar", WIN32_API_DRAW_MENU_BAR},
+    {"kernel32.dll", "FindResourceA", WIN32_API_FIND_RESOURCE},
+    {"kernel32.dll", "LoadResource", WIN32_API_LOAD_RESOURCE},
+    {"kernel32.dll", "LockResource", WIN32_API_LOCK_RESOURCE},
+    {"kernel32.dll", "SizeofResource", WIN32_API_SIZE_OF_RESOURCE},
+    {"kernel32.dll", "LoadStringA", WIN32_API_LOAD_STRING},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -1362,6 +1374,14 @@ static void api_set_filter(trap_frame_t *f) {
 #define MF_DISABLED  0x00000002u
 #define MF_GRAYED    0x00000001u
 
+/* Resources. The loader does not parse the .rsrc section, but the image is
+ * mapped at a known base, so the Win32 side can walk the resource directory
+ * itself - the same tree Windows exposes through FindResource. */
+#define WIN32_RES_HANDLE_BASE 0x25000000u
+#define WIN32_RES_MAX         8u
+#define RT_STRING             6u
+#define RT_RCDATA             10u
+
 #define WIN32_ERROR_INVALID_HANDLE 6u
 #define WIN32_ERROR_INVALID_PARAM  87u
 
@@ -1430,6 +1450,15 @@ typedef struct {
   win32_mitem_t item[WIN32_GUI_MAX_MENU_ITEMS];
 } win32_menu_t;
 
+/* One resolved resource: the address the program may read and its size. A
+ * Windows HRSRC is opaque, so the handle is an index into this table. */
+typedef struct {
+  UINT8  used;
+  UINT32 h;
+  UINT64 va;
+  UINT32 size;
+} win32_res_t;
+
 typedef struct {
   UINT8       used;
   UINT64      pid;
@@ -1439,6 +1468,7 @@ typedef struct {
   win32_wnd_t wnd[WIN32_GUI_MAX_WINDOWS];
   win32_child_t kid[WIN32_GUI_MAX_CHILDREN];
   win32_menu_t  menu[WIN32_GUI_MAX_MENUS];
+  win32_res_t   res[WIN32_RES_MAX];
   UINT32      focus_child; /* the control that owns typing, 0 = the window */
   win32_msg_t q[WIN32_GUI_MSGQ];
   UINT32      qh, qn;
@@ -1701,12 +1731,34 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
       kputs("[WIN32] key for an unknown window ");
       kputs_hex(win);
       kputs("\n");
+    } else if (m.hdr.type == NWM_EV_MOUSE) {
+      kputs("[WIN32] mouse for an unknown window ");
+      kputs_hex(win);
+      kputs("\n");
     }
     return;
   }
   /* The message box is the layer's own window, so it takes its events here:
    * a click on one of its buttons settles the result and there is no
    * procedure to call. */
+  if (m.hdr.type == NWM_EV_MOUSE) {
+    nwm_ev_mouse_t mm;
+
+    if (m.hdr.len >= sizeof(mm)) {
+      memcpy(&mm, m.payload, sizeof(mm));
+      kputs("[WIN32] mouse win=");
+      kputs_hex(win);
+      kputs(" hwnd=");
+      kputs_hex(hwnd);
+      kputs(" type=");
+      kputs_hex(mm.type);
+      kputs(" at ");
+      kputs_hex((UINT64)(UINT32)mm.x);
+      kputs(",");
+      kputs_hex((UINT64)(UINT32)mm.y);
+      kputs("\n");
+    }
+  }
   if (gu->msgbox_hwnd != 0u && hwnd == gu->msgbox_hwnd) {
     (void)msgbox_event(t, gu, hwnd, &m);
     return;
@@ -2946,6 +2998,316 @@ static void api_draw_menu_bar(trap_frame_t *f) {
   f->rax = 1u;
 }
 
+/* ---- resources in the loaded image ------------------------------------ */
+
+static int res_u16(task_t *t, UINT64 va, UINT16 *v) {
+  UINT16 x = 0;
+
+  if (user_copy(t->cr3, va, &x, 2u, 0) != 0) {
+    return -1;
+  }
+  *v = x;
+  return 0;
+}
+
+static int res_u32(task_t *t, UINT64 va, UINT32 *v) {
+  UINT32 x = 0;
+
+  if (user_copy(t->cr3, va, &x, 4u, 0) != 0) {
+    return -1;
+  }
+  *v = x;
+  return 0;
+}
+
+/* One level of the resource tree: the offset of the first entry whose integer
+ * id matches, or 0 when there is none. Every offset in the tree is measured
+ * from the start of the resource directory itself, so this function keeps
+ * working in offsets instead of addresses: adding the node's own RVA to a
+ * child offset is what sent the second lookup into the middle of the string
+ * table. Entries with the high bit set are named, and a program that asks by
+ * MAKEINTRESOURCE cannot reach them anyway, so they are skipped. */
+static UINT32 res_dir_find(task_t *t, UINT64 base, UINT32 res_rva,
+                           UINT32 dir_off, UINT32 id) {
+  UINT16 named = 0;
+  UINT16 ids = 0;
+  UINT32 total;
+  UINT32 i;
+  UINT64 dir = base + (UINT64)res_rva + (UINT64)dir_off;
+
+  if (res_u16(t, dir + 12u, &named) != 0 || res_u16(t, dir + 14u, &ids) != 0) {
+    return 0u;
+  }
+  total = (UINT32)named + (UINT32)ids;
+  for (i = 0; i < total; i++) {
+    UINT32 name = 0;
+    UINT32 off = 0;
+
+    if (res_u32(t, dir + 16u + (UINT64)i * 8u, &name) != 0 ||
+        res_u32(t, dir + 20u + (UINT64)i * 8u, &off) != 0) {
+      return 0u;
+    }
+    if ((name & 0x80000000u) != 0u) {
+      continue; /* a named entry: not reachable by integer id */
+    }
+    if (name == id) {
+      return off & 0x7FFFFFFFu;
+    }
+  }
+  return 0u;
+}
+
+/* Walk type -> name -> first language and return the bytes. */
+static int pe_find_resource(task_t *t, UINT64 base, UINT32 type, UINT32 name,
+                            UINT64 *out_va, UINT32 *out_size) {
+  UINT32 lfanew = 0;
+  UINT32 res_rva = 0;
+  UINT32 res_size = 0;
+  UINT64 opt;
+  UINT32 dir1;
+  UINT32 dir2;
+  UINT64 node;
+  UINT32 off = 0;
+  UINT32 data_rva = 0;
+  UINT32 data_size = 0;
+
+  if (base == 0u || res_u32(t, base + 0x3Cu, &lfanew) != 0) {
+    return -1;
+  }
+  opt = base + (UINT64)lfanew + 24u;
+  /* Optional header: data directory 2 is the resource table, and the
+   * directory starts at +112 in a PE32+ optional header. */
+  if (res_u32(t, opt + 112u + 2u * 8u, &res_rva) != 0 ||
+      res_u32(t, opt + 112u + 2u * 8u + 4u, &res_size) != 0) {
+    return -1;
+  }
+  if (res_rva == 0u || res_size == 0u) {
+    kputs("[WIN32] res: no resource directory (lfanew=");
+    kputs_hex((UINT64)lfanew);
+    kputs(" rva=");
+    kputs_hex((UINT64)res_rva);
+    kputs(")\n");
+    return -1; /* no resource section in this image */
+  }
+  dir1 = res_dir_find(t, base, res_rva, 0u, type);
+  if (dir1 == 0u) {
+    kputs("[WIN32] res: no type ");
+    kputs_hex((UINT64)type);
+    kputs(" under rva ");
+    kputs_hex((UINT64)res_rva);
+    kputs(" base ");
+    kputs_hex(base);
+    kputs("\n");
+    return -1;
+  }
+  dir2 = res_dir_find(t, base, res_rva, dir1, name);
+  if (dir2 == 0u) {
+    kputs("[WIN32] res: no id ");
+    kputs_hex((UINT64)name);
+    kputs(" under ");
+    kputs_hex((UINT64)dir1);
+    kputs("\n");
+    return -1;
+  }
+  /* Third level is the language; take the first one, which is what Windows
+   * does when the program does not ask for one. */
+  node = base + (UINT64)res_rva + (UINT64)dir2;
+  {
+    UINT16 langs = 0;
+
+    if (res_u16(t, node + 14u, &langs) != 0 || langs == 0u || 
+        res_u32(t, node + 20u, &off) != 0) {
+      return -1;
+    }
+  }
+  {
+    UINT64 data_entry = base + (UINT64)res_rva + (UINT64)(off & 0x7FFFFFFFu);
+
+    if (res_u32(t, data_entry, &data_rva) != 0 ||
+        res_u32(t, data_entry + 4u, &data_size) != 0) {
+      return -1;
+    }
+  }
+  *out_va = base + (UINT64)data_rva;
+  *out_size = data_size;
+  return 0;
+}
+
+/* UTF-16LE to UTF-8, the encoding every string this layer draws uses. */
+static UINT32 res_utf16_to_utf8(const UINT8 *src, UINT16 units, char *out,
+                                UINT32 cap) {
+  UINT32 n = 0;
+  UINT16 i;
+
+  for (i = 0; i < units && n + 4u < cap; i++) {
+    UINT32 cp = (UINT32)src[i * 2u] | ((UINT32)src[i * 2u + 1u] << 8);
+
+    if (cp == 0u) {
+      break;
+    }
+    if (cp < 0x80u) {
+      out[n++] = (char)cp;
+    } else if (cp < 0x800u) {
+      out[n++] = (char)(0xC0u | (cp >> 6));
+      out[n++] = (char)(0x80u | (cp & 0x3Fu));
+    } else {
+      out[n++] = (char)(0xE0u | (cp >> 12));
+      out[n++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+      out[n++] = (char)(0x80u | (cp & 0x3Fu));
+    }
+  }
+  out[n] = '\0';
+  return n;
+}
+
+static void api_find_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+  UINT64       base = (t != NULL) ? t->win32_image_base : 0u;
+  UINT64       va = 0u;
+  UINT32       size = 0u;
+  UINT32       i;
+
+  /* MAKEINTRESOURCE(n) is the number itself, so anything above the id range
+   * is a real string name; those are the named entries this layer does not
+   * index yet, and the honest answer is "not found". */
+  if (gu == NULL || f->rdx >= 0x10000u || f->r8 >= 0x10000u) {
+    f->rax = 0u;
+    return;
+  }
+  if (pe_find_resource(t, base, (UINT32)f->r8, (UINT32)f->rdx, &va, &size) !=
+      0) {
+    kputs("[WIN32] findresource: type=");
+    kputs_hex((UINT64)(UINT32)f->r8);
+    kputs(" id=");
+    kputs_hex((UINT64)(UINT32)f->rdx);
+    kputs(" not in the image\n");
+    f->rax = 0u;
+    return;
+  }
+  for (i = 0; i < WIN32_RES_MAX; i++) {
+    if (gu->res[i].used && gu->res[i].va == va) {
+      f->rax = (UINT64)gu->res[i].h;
+      return;
+    }
+  }
+  for (i = 0; i < WIN32_RES_MAX; i++) {
+    if (!gu->res[i].used) {
+      gu->res[i].used = 1u;
+      gu->res[i].h = WIN32_RES_HANDLE_BASE | i;
+      gu->res[i].va = va;
+      gu->res[i].size = size;
+      f->rax = (UINT64)gu->res[i].h;
+      return;
+    }
+  }
+  f->rax = 0u; /* the table is full */
+}
+
+static win32_res_t *win32_res(win32_gui_t *gu, UINT32 h) {
+  UINT32 i;
+
+  if (gu == NULL || (h & 0xFF000000u) != WIN32_RES_HANDLE_BASE) {
+    return NULL;
+  }
+  i = h & 0xFFu;
+  if (i >= WIN32_RES_MAX || !gu->res[i].used) {
+    return NULL;
+  }
+  return &gu->res[i];
+}
+
+static void api_load_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_res_t *r = win32_res(gu, (UINT32)f->rdx);
+
+  /* LoadResource hands back a handle to the same bytes; the image is already
+   * mapped, so there is nothing to load. */
+  f->rax = (r != NULL) ? (UINT64)r->h : 0u;
+}
+
+static void api_lock_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  /* LockResource takes the resource handle as its only argument, so it is in
+   * RDI. Reading the second argument slot got whatever the caller happened to
+   * leave there and handed the program a null pointer. */
+  win32_res_t *r = win32_res(gu, (UINT32)f->rdi);
+
+  f->rax = (r != NULL) ? r->va : 0u;
+}
+
+static void api_size_of_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_res_t *r = win32_res(gu, (UINT32)f->rdx);
+
+  f->rax = (r != NULL) ? (UINT64)r->size : 0u;
+}
+
+/* LoadStringA: a string table block holds 16 entries, each a WORD length
+ * followed by that many UTF-16 code units. The block is named by its
+ * 1-based number, which is id/16 + 1. */
+static void api_load_string(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  UINT64       base = (t != NULL) ? t->win32_image_base : 0u;
+  UINT32       id = (UINT32)f->rdx;
+  UINT64       va = 0u;
+  UINT32       size = 0u;
+  UINT32       block = id / 16u + 1u;
+  UINT32       index = id % 16u;
+  UINT32       i;
+  UINT64       p;
+  UINT32       end;
+  UINT16       len = 0;
+  UINT8        raw[2u * 255u];
+  char        *dst = (char *)(UINTN)f->r8;
+  UINT32       cap = (UINT32)f->r9;
+
+  if (t == NULL || f->r8 == 0u || cap == 0u ||
+      pe_find_resource(t, base, RT_STRING, block, &va, &size) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  p = va;
+  end = size;
+  for (i = 0; i < index; i++) {
+    if (res_u16(t, p, &len) != 0 || (UINT32)len * 2u + 2u > end) {
+      f->rax = 0u;
+      return;
+    }
+    p += 2u + (UINT64)len * 2u;
+    end -= 2u + (UINT32)len * 2u;
+  }
+  if (res_u16(t, p, &len) != 0 || len == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  if (len > 255u) {
+    len = 255u;
+  }
+  if ((UINT32)len * 2u > end || user_copy(t->cr3, p + 2u, raw,
+                                          (UINT64)len * 2u, 0) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  {
+    char tmp[2u * 255u + 4u];
+    UINT32 n = res_utf16_to_utf8(raw, len, tmp, sizeof(tmp));
+
+    if (n + 1u > cap) {
+      n = cap - 1u;
+    }
+    if (user_copy(t->cr3, f->r8, tmp, n, 1) != 0) {
+      f->rax = 0u;
+      return;
+    }
+    (void)dst;
+    f->rax = (UINT64)n;
+  }
+}
+
 /* ---- MessageBoxA: a modal box the layer owns --------------------------- */
 
 /* The box is not a program window: it has no class and no procedure, so the
@@ -2964,14 +3326,29 @@ static void msgbox_paint(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
 }
 
 /* Buttons in a box are numbered 1..n; the answer a click carries depends on
- * the button set the program asked for, exactly as Windows maps them. */
+ * the button set the program asked for, exactly as Windows maps them. The
+ * position is counted over the box's own buttons, because the child slots are
+ * shared with the window's own controls and a global slot number says nothing
+ * about which button it is. */
 static UINT32 msgbox_button_id(win32_gui_t *gu, win32_child_t *c) {
-  UINT32 id = (UINT32)(c->hwnd & 0xFFu) + 1u;
+  UINT32 pos = 0u;
+  UINT32 i;
 
-  if (gu->msgbox_type == WIN32_MB_YESNO) {
-    return (id == 1u) ? WIN32_IDYES : WIN32_IDNO;
+  for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+    win32_child_t *k = &gu->kid[i];
+
+    if (!k->used || k->parent != c->parent || k->kind != WIN32_CHILD_BUTTON) {
+      continue;
+    }
+    if (k == c) {
+      break;
+    }
+    pos++;
   }
-  return (id == 1u) ? WIN32_IDOK : WIN32_IDCANCEL;
+  if (gu->msgbox_type == WIN32_MB_YESNO) {
+    return (pos == 0u) ? WIN32_IDYES : WIN32_IDNO;
+  }
+  return (pos == 0u) ? WIN32_IDOK : WIN32_IDCANCEL;
 }
 
 static int msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
@@ -2979,6 +3356,31 @@ static int msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
   win32_wnd_t *w = gui_window(gu, hwnd);
 
   if (w == NULL) {
+    kputs("[WIN32] msgbox: event for a window it no longer knows\n");
+    return 0;
+  }
+  if (m->hdr.type == NWM_EV_KEY) {
+    /* Enter and Escape settle a message box the way they do on Windows: a
+     * box is meant to be answerable without aiming at a button. */
+    nwm_ev_key_t k;
+
+    if (m->hdr.len < sizeof(k)) {
+      return 0;
+    }
+    memcpy(&k, m->payload, sizeof(k));
+    kputs("[WIN32] msgbox: key=");
+    kputs_hex(k.key);
+    kputs("\n");
+    if (k.key == ND_KEY_ENTER || k.key == '\r' || k.key == '\n') {
+      gu->msgbox_result = (gu->msgbox_type == WIN32_MB_YESNO) ? WIN32_IDYES
+                                                             : WIN32_IDOK;
+    } else if (k.key == ND_KEY_ESC || k.key == 0x1Bu) {
+      gu->msgbox_result = WIN32_IDCANCEL;
+    }
+    if (gu->msgbox_result != 0u) {
+      (void)t;
+      msgbox_paint(t, gu, w);
+    }
     return 0;
   }
   if (m->hdr.type == NWM_EV_CLOSE) {
@@ -2999,6 +3401,15 @@ static int msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
 
     memcpy(&mm, m->payload, sizeof(mm));
     hit = gui_child_hit(gu, hwnd, mm.x, mm.y);
+    kputs("[WIN32] msgbox: mouse type=");
+    kputs_hex(mm.type);
+    kputs(" at ");
+    kputs_hex((UINT64)(UINT32)mm.x);
+    kputs(",");
+    kputs_hex((UINT64)(UINT32)mm.y);
+    kputs(" hit=");
+    kputs_hex(hit != NULL ? hit->hwnd : 0u);
+    kputs("\n");
     if (mm.type == ND_EV_MOUSE_DOWN) {
       if (hit != NULL && hit->kind == WIN32_CHILD_BUTTON) {
         hit->pressed = 1u;
@@ -3117,6 +3528,13 @@ static void api_message_box(trap_frame_t *f) {
     f->rax = 0u;
     return;
   }
+  /* A box is modal: the caller sits inside this call, so this is the only
+   * place that can drain the compositor events the box needs. Without the
+   * pump here a click on OK was delivered to the inbox and then sat there
+   * until the box was gone, which looks exactly like "the mouse does not
+   * work in a message box". */
+  gui_pump(t, gu);
+  gui_timers(gu);
   if (gu->msgbox_hwnd == 0u && gu->msgbox_result == 0u) {
     char     text[WIN32_MSGBOX_MAX_LINES * WIN32_CHILD_TEXT_MAX];
     char     caption[NWM_TITLE_MAX];
@@ -3237,6 +3655,16 @@ static void api_message_box(trap_frame_t *f) {
     kputs_hex(gu->msgbox_hwnd);
     kputs(" buttons=");
     kputs_hex(nbtn);
+    kputs(" rect=");
+    kputs_hex((UINT64)(UINT32)bx);
+    kputs(",");
+    kputs_hex((UINT64)(UINT32)by);
+    kputs(" size=");
+    kputs_hex((UINT64)(UINT32)cw);
+    kputs(",");
+    kputs_hex((UINT64)(UINT32)ch);
+    kputs(" win=");
+    kputs_hex(win);
     kputs("\n");
     msgbox_paint(t, gu, gui_window(gu, gu->msgbox_hwnd));
   }
@@ -5875,6 +6303,21 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_DRAW_MENU_BAR:
     api_draw_menu_bar(f);
+    return;
+  case WIN32_API_FIND_RESOURCE:
+    api_find_resource(f);
+    return;
+  case WIN32_API_LOAD_RESOURCE:
+    api_load_resource(f);
+    return;
+  case WIN32_API_LOCK_RESOURCE:
+    api_lock_resource(f);
+    return;
+  case WIN32_API_SIZE_OF_RESOURCE:
+    api_size_of_resource(f);
+    return;
+  case WIN32_API_LOAD_STRING:
+    api_load_string(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
