@@ -437,7 +437,7 @@ fn page_about(w: &mut wm::Win, s: &State) {
     w.text(CONTENT_X + 14, 400, ui::dim(), line.str());
 }
 
-fn draw(w: &mut wm::Win, s: &State) {
+fn draw(w: &mut wm::Win, s: &State, menu: &ui::Menu) {
     w.clear();
     w.fill(0, 0, CW, CH, ui::bg());
     nav(w, s);
@@ -478,6 +478,7 @@ fn draw(w: &mut wm::Win, s: &State) {
     }
     let v = "0.9";
     w.text(CW - 14 - ui::width(v), CH - 24, ui::dim(), v);
+    menu.draw(w);
     /* One paint for the whole frame: every item is on the list by now. */
     w.invalidate();
 }
@@ -516,6 +517,47 @@ fn load_tasks(port: u64, out: &mut [sinfo::TaskRec; MAX_ROWS]) -> usize {
 }
 
 /* ---- entry ------------------------------------------------------------ */
+
+fn settings_menu(menu: &mut ui::Menu, x: i32, y: i32, s: &State) {
+    if x < NAV_W as i32 {
+        menu.set(&[
+            ui::MenuItem::new(ui::l("系统", "System"), 11, 0),
+            ui::MenuItem::new(ui::l("个性化", "Personalization"), 12, 0),
+            ui::MenuItem::new(ui::l("应用", "Apps"), 13, 0),
+            ui::MenuItem::new(ui::l("更新", "Update"), 14, 0),
+            ui::MenuItem::new(ui::l("关于", "About"), 15, 0),
+        ]);
+    } else {
+        menu.set(&[
+            ui::MenuItem::new(ui::l("刷新状态", "Refresh status"), 1, 0),
+            ui::MenuItem::new(ui::l("打开安装程序", "Open installer"), 2, 0),
+            ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+            ui::MenuItem::new(ui::l("系统", "System"), 11, 0),
+            ui::MenuItem::new(ui::l("个性化", "Personalization"), 12, 0),
+            ui::MenuItem::new(ui::l("应用", "Apps"), 13, 0),
+            ui::MenuItem::new(ui::l("更新", "Update"), 14, 0),
+        ]);
+    }
+    let _ = s;
+    menu.open(x, y, CW, CH);
+}
+
+fn settings_action(action: u16, w: &mut wm::Win, s: &mut State, sys_port: u64) {
+    match action {
+        1 => {
+            load_stats(sys_port, &mut s.st);
+            s.n_tasks = load_tasks(sys_port, &mut s.tasks);
+            s.note = "状态已刷新";
+        }
+        2 => handle_click(w, s, (CONTENT_X + CONTENT_W - 138) as i32, 206, sys_port),
+        11 => handle_click(w, s, 12, 72, sys_port),
+        12 => handle_click(w, s, 12, 114, sys_port),
+        13 => handle_click(w, s, 12, 156, sys_port),
+        14 => handle_click(w, s, 12, 198, sys_port),
+        15 => handle_click(w, s, 12, 240, sys_port),
+        _ => {}
+    }
+}
 
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
@@ -579,6 +621,7 @@ pub extern "C" fn _start() -> ! {
         n_updates: 0,
     };
 
+    let mut menu = ui::Menu::new();
     if let Some(t) = sinfo::theme(sys_port) {
         s.accent = t.accent;
         s.wallpaper = t.wallpaper;
@@ -587,7 +630,7 @@ pub extern "C" fn _start() -> ! {
     s.displays = sinfo::display(sys_port).unwrap_or(s.displays);
     load_stats(sys_port, &mut s.st);
     s.n_tasks = load_tasks(sys_port, &mut s.tasks);
-    draw(&mut win, &s);
+    draw(&mut win, &s, &menu);
 
     let mut idle = 0u32;
     loop {
@@ -597,18 +640,58 @@ pub extern "C" fn _start() -> ! {
                     win.destroy();
                     sys::exit(0);
                 }
-                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
-                    handle_click(&mut win, &mut s, m.x, m.y, sys_port);
-                    draw(&mut win, &s);
+                wm::Ev::Mouse(m)
+                    if menu.is_open() && m.kind == wm::MOUSE_MOVE =>
+                {
+                    menu.motion(m.x, m.y);
+                    draw(&mut win, &s, &menu);
                 }
-                wm::Ev::Mouse(m) => {
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_RIGHT =>
+                {
+                    settings_menu(&mut menu, m.x, m.y, &s);
+                    draw(&mut win, &s, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
+                    if let Some(action) = menu.click(m.x, m.y) {
+                        settings_action(action, &mut win, &mut s, sys_port);
+                    } else {
+                        menu.close();
+                    }
+                    draw(&mut win, &s, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT =>
+                {
+                    settings_menu(&mut menu, m.x, m.y, &s);
+                    draw(&mut win, &s, &menu);
+                }
+                wm::Ev::Key(k, _) if k == wm::KEY_ESC && menu.is_open() => {
+                    menu.close();
+                    draw(&mut win, &s, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if !menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
+                    handle_click(&mut win, &mut s, m.x, m.y, sys_port);
+                    draw(&mut win, &s, &menu);
+                }
+                wm::Ev::Mouse(m) if !menu.is_open() => {
                     /* Hover only needs a repaint when the nav rail changes
                      * highlight; everything else is static between clicks. */
                     let old = s.hover;
                     s.hover = (m.x as i16, m.y as i16);
                     let nav_area = |p: (i16, i16)| p.0 < NAV_W && p.1 >= 62 && p.1 < 62 + 42 * PAGES.len() as i16;
                     if nav_area(old) || nav_area(s.hover) {
-                        draw(&mut win, &s);
+                        draw(&mut win, &s, &menu);
                     }
                 }
                 _ => {}
@@ -628,13 +711,13 @@ pub extern "C" fn _start() -> ! {
             if let Some(d) = sinfo::display(sys_port) {
                 s.displays = d;
             }
-            draw(&mut win, &s);
+            draw(&mut win, &s, &menu);
         }
         if s.confirm_left > 0 {
             s.confirm_left -= 1;
             if s.confirm_left == 0 && s.confirm_pid != 0 {
                 s.confirm_pid = 0;
-                draw(&mut win, &s);
+                draw(&mut win, &s, &menu);
             }
         }
         if idle >= 40 {
@@ -642,12 +725,12 @@ pub extern "C" fn _start() -> ! {
             if s.page == Page::System || s.page == Page::Apps {
                 load_stats(sys_port, &mut s.st);
                 s.n_tasks = load_tasks(sys_port, &mut s.tasks);
-                draw(&mut win, &s);
+                draw(&mut win, &s, &menu);
             } else if s.page == Page::Update {
                 s.svc = sys::update_status();
                 let n = sys::update_list(&mut s.updates);
                 s.n_updates = if n < 0 { 0 } else { (n as usize).min(MAX_ROWS) };
-                draw(&mut win, &s);
+                draw(&mut win, &s, &menu);
             }
         }
         sys::yield_now();

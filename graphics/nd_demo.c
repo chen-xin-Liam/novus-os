@@ -470,6 +470,7 @@ static ng_widget_t *g_win_demo;
 static ng_widget_t *g_win_widgets;
 static ng_widget_t *g_start_menu;
 static ng_widget_t *g_quick;
+static ng_widget_t *g_menu;
 static ng_widget_t *g_clock_label;
 static ng_widget_t *g_date_label;
 static ng_widget_t *g_run_dot[6];
@@ -905,6 +906,155 @@ static void on_reboot(ng_ctx_t *c, ng_widget_t *w) {
   power_reboot();
 }
 
+/* ---- desktop context menu --------------------------------------------- */
+
+enum {
+  CM_NONE = 0,
+  CM_REFRESH,
+  CM_FILES,
+  CM_TASKS,
+  CM_SETTINGS,
+  CM_TERMINAL,
+  CM_DEVMGR,
+  CM_NET,
+  CM_SETUP,
+  CM_START,
+  CM_QUICK,
+  CM_VOLUME,
+  CM_LIGHT,
+  CM_DARK,
+  CM_AUTO,
+  CM_REBOOT,
+  CM_SHUTDOWN,
+  CM_CLOSE_MENU,
+  CM_ABOUT
+};
+
+static void on_menu_select(ng_ctx_t *c, ng_widget_t *w, INT32 value) {
+  (void)c;
+  (void)w;
+  switch (value) {
+  case CM_REFRESH: {
+    nd_surface_t *s = nd_screen();
+
+    status_refresh();
+    set_status("桌面已刷新");
+    if (s != 0) {
+      ng_damage(nd_rect(0, 0, s->w, s->h));
+    }
+    break;
+  }
+  case CM_FILES: launch("fileman"); break;
+  case CM_TASKS: launch("taskman"); break;
+  case CM_SETTINGS: launch("settings"); break;
+  case CM_TERMINAL: launch("nsh"); break;
+  case CM_DEVMGR: launch("devmgmt"); break;
+  case CM_NET: launch("netman"); break;
+  case CM_SETUP: launch("setup"); break;
+  case CM_START: on_start(0, 0); break;
+  case CM_QUICK: on_quick(0, 0); break;
+  case CM_VOLUME: on_volume(0, 0); break;
+  case CM_LIGHT: on_mode_light(0, 0); break;
+  case CM_DARK: on_mode_dark(0, 0); break;
+  case CM_AUTO: on_mode_auto(0, 0); break;
+  case CM_REBOOT: on_reboot(0, 0); break;
+  case CM_SHUTDOWN: on_shutdown(0, 0); break;
+  case CM_CLOSE_MENU: overlays_close(); break;
+  case CM_ABOUT: on_about(0, 0); break;
+  default: break;
+  }
+}
+
+static void menu_entries(const char **labels, INT32 *ids, UINT8 *flags,
+                         const char *const *texts, const INT32 *values,
+                         const UINT8 *bits, UINT32 count) {
+  UINT32 i;
+
+  for (i = 0; i < count; i++) {
+    labels[i] = texts[i];
+    ids[i] = values[i];
+    flags[i] = bits[i];
+  }
+}
+
+static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
+  static const char *desktop_text[] = {"刷新桌面", "文件管理器", "任务管理器",
+                                       "终端", "设置", "关于本系统"};
+  static const INT32 desktop_ids[] = {CM_REFRESH, CM_FILES, CM_TASKS,
+                                      CM_TERMINAL, CM_SETTINGS, CM_ABOUT};
+  static const UINT8 desktop_flags[] = {0, 0, 0, 0, 0, 0};
+  static const char *start_text[] = {"设置", "终端", "设备管理器", "",
+                                     "关闭开始菜单"};
+  static const INT32 start_ids[] = {CM_SETTINGS, CM_TERMINAL, CM_DEVMGR, 0,
+                                    CM_CLOSE_MENU};
+  static const UINT8 start_flags[] = {0, 0, 0, NG_MENU_SEPARATOR, 0};
+  static const char *quick_text[] = {"浅色", "深色", "跟随时间", "",
+                                     "重启", "关机"};
+  static const INT32 quick_ids[] = {CM_LIGHT, CM_DARK, CM_AUTO, 0,
+                                    CM_REBOOT, CM_SHUTDOWN};
+  static const UINT8 quick_flags[] = {0, 0, 0, NG_MENU_SEPARATOR, 0,
+                                      NG_MENU_DANGER};
+  static const char *task_text[] = {"任务管理器", "设置", "刷新桌面"};
+  static const INT32 task_ids[] = {CM_TASKS, CM_SETTINGS, CM_REFRESH};
+  static const UINT8 task_flags[] = {0, 0, 0};
+  static const char *tray_text[] = {"快速设置", "音量", "网络", "刷新桌面"};
+  static const INT32 tray_ids[] = {CM_QUICK, CM_VOLUME, CM_NET, CM_REFRESH};
+  static const UINT8 tray_flags[] = {0, 0, 0, 0};
+  const char *labels[NG_MENU_MAX];
+  INT32 ids[NG_MENU_MAX];
+  UINT8 flags[NG_MENU_MAX];
+  const char **texts = desktop_text;
+  const INT32 *values = desktop_ids;
+  const UINT8 *bits = desktop_flags;
+  UINT32 count = 6u;
+  nd_surface_t *s;
+  INT32 W;
+  INT32 H;
+  INT32 tx;
+
+  if (w == 0 || c == 0) {
+    return;
+  }
+  if (g_start_menu != 0 &&
+      (g_start_menu->flags & NG_WF_VISIBLE) != 0u &&
+      nd_rect_contains(g_start_menu->abs, c->mouse_x, c->mouse_y)) {
+    texts = start_text; values = start_ids; bits = start_flags; count = 5u;
+  } else if (g_quick != 0 &&
+             (g_quick->flags & NG_WF_VISIBLE) != 0u &&
+             nd_rect_contains(g_quick->abs, c->mouse_x, c->mouse_y)) {
+    texts = quick_text; values = quick_ids; bits = quick_flags; count = 6u;
+  } else {
+    s = nd_screen();
+    if (s == 0) {
+      return;
+    }
+    W = s->w;
+    H = s->h;
+    tx = (W - 660) / 2;
+    if (c->mouse_y >= H - 66) {
+      if (c->mouse_x <= tx + 100) {
+        texts = task_text; values = task_ids; bits = task_flags; count = 3u;
+      } else if (c->mouse_x >= tx + 116 &&
+                 c->mouse_x <= tx + 116 + 6 * 46) {
+        texts = task_text; values = task_ids; bits = task_flags; count = 3u;
+      } else if (c->mouse_x >= tx + 660 - 220) {
+        texts = tray_text; values = tray_ids; bits = tray_flags; count = 4u;
+      } else {
+        texts = task_text; values = task_ids; bits = task_flags; count = 3u;
+      }
+    }
+  }
+  menu_entries(labels, ids, flags, texts, values, bits, count);
+  ng_menu_items(w, labels, ids, flags, count);
+  {
+    nd_surface_t *screen = nd_screen();
+
+    ng_menu_open(w, c->mouse_x, c->mouse_y,
+                 screen != 0 ? screen->w : 1280,
+                 screen != 0 ? screen->h : 720);
+  }
+}
+
 static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_widget_t *win;
   static const char *items[5] = {"创建进程", "映射页面", "检查 NX 保护",
@@ -1215,6 +1365,7 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
     g_date_label->u.label.align = 2;
   }
 
+  g_menu = ng_menu(ctx->root, on_menu_context, on_menu_select);
   ng_layout();
   clock_refresh();
   running_refresh();

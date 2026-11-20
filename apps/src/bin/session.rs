@@ -15,7 +15,8 @@ fn as_str(bytes: &[u8], len: usize) -> &str {
 }
 
 fn draw(w: &mut wm::Win, username: &[u8; 32], user_len: usize,
-        password_len: usize, focus: u8, setup: bool, logged: bool, note: &str) {
+        password_len: usize, focus: u8, setup: bool, logged: bool, note: &str,
+        menu: &ui::Menu) {
     w.clear();
     ui::shell(w, CW, CH, "本地账户", ui::accent());
     w.text(18, 38, ui::dim(), if setup { "首次启动：创建本地账户" } else { "Novus OS 登录" });
@@ -38,6 +39,7 @@ fn draw(w: &mut wm::Win, username: &[u8; 32], user_len: usize,
     ui::button(w, 112, 192, 96, 26, "关机", ui::warn());
     ui::button(w, 218, 192, 96, 26, "重启", ui::accent());
     w.text(18, 232, ui::dim(), note);
+    menu.draw(w);
     w.invalidate();
 }
 
@@ -68,6 +70,28 @@ fn erase(buf: &mut [u8], len: &mut usize) {
 /* The session operation travels as a fixed-size syscall request, while the
  * username/password buffers stay owned by this process. The syscall copies
  * the request before returning, so these stack buffers need no shared memory. */
+fn session_menu(menu: &mut ui::Menu, x: i32, y: i32, logged: bool) {
+    if logged {
+        menu.set(&[
+            ui::MenuItem::new("用户名", 1, 0),
+            ui::MenuItem::new("密码", 2, 0),
+            ui::MenuItem::new("注销", 3, ui::MENU_DANGER),
+            ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+            ui::MenuItem::new("关机", 4, ui::MENU_DANGER),
+            ui::MenuItem::new("重启", 5, 0),
+        ]);
+    } else {
+        menu.set(&[
+            ui::MenuItem::new("用户名", 1, 0),
+            ui::MenuItem::new("密码", 2, 0),
+            ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+            ui::MenuItem::new("关机", 4, ui::MENU_DANGER),
+            ui::MenuItem::new("重启", 5, 0),
+        ]);
+    }
+    menu.open(x, y, CW, CH);
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] session manager up\n");
@@ -86,7 +110,8 @@ pub extern "C" fn _start() -> ! {
         ui::init(sys_port);
     }
     let mut note = if setup { "创建首个账户，密码至少 4 字节" } else { "输入用户名和密码" };
-    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
+    let mut menu = ui::Menu::new();
+    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
     /* The login window deliberately remains the session bootstrap service:
      * dismissing its close button cannot strand the desktop without a way to
      * authenticate, log out, or request a power transition. */
@@ -95,9 +120,83 @@ pub extern "C" fn _start() -> ! {
             match ev {
                 wm::Ev::Close => {
                     note = "登录窗口保持运行；请登录、注销或关机";
-                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
                 }
-                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
+                wm::Ev::Mouse(m)
+                    if menu.is_open() && m.kind == wm::MOUSE_MOVE =>
+                {
+                    menu.motion(m.x, m.y);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_RIGHT =>
+                {
+                    session_menu(&mut menu, m.x, m.y, logged);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
+                    if let Some(action) = menu.click(m.x, m.y) {
+                        match action {
+                            1 => focus = 0,
+                            2 => focus = 1,
+                            3 => {
+                                if logged {
+                                    let _ = sys::session(3, &username, user_len, &password, pass_len);
+                                    logged = false;
+                                    pass_len = 0;
+                                    password = [0; 64];
+                                    note = "已注销";
+                                } else {
+                                    let op = if setup { 1 } else { 2 };
+                                    let rc = sys::session(op, &username, user_len, &password, pass_len);
+                                    if rc == 0 {
+                                        logged = true;
+                                        setup = false;
+                                        note = if op == 1 { "账户已创建并登录" } else { "登录成功" };
+                                        pass_len = 0;
+                                        password = [0; 64];
+                                    } else {
+                                        note = match rc {
+                                            -2 => "账户已存在或尚未创建",
+                                            -3 => "尝试次数过多，请稍后再试",
+                                            -4 => "需要可写持久 NovusFS 磁盘才能创建账户",
+                                            _ => "登录失败：检查用户名和密码",
+                                        };
+                                        pass_len = 0;
+                                        password = [0; 64];
+                                    }
+                                }
+                            }
+                            4 => { let _ = sys::power_off(); }
+                            5 => { let _ = sys::reboot(); }
+                            _ => {}
+                        }
+                    } else {
+                        menu.close();
+                    }
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT =>
+                {
+                    session_menu(&mut menu, m.x, m.y, logged);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
+                }
+                wm::Ev::Key(k, _) if k == wm::KEY_ESC && menu.is_open() => {
+                    menu.close();
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if !menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
                     if m.y >= 64 && m.y < 94 { focus = 0; }
                     else if m.y >= 104 && m.y < 134 { focus = 1; }
                     else if m.y >= 150 && m.y < 180 {
@@ -131,7 +230,7 @@ pub extern "C" fn _start() -> ! {
                         if m.x >= 112 && m.x < 208 { let _ = sys::power_off(); }
                         else if m.x >= 218 && m.x < 314 { let _ = sys::reboot(); }
                     }
-                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
                 }
                 wm::Ev::Key(key, _mods) => {
                     if key == KEY_ENTER || key == wm::KEY_TAB {
@@ -144,13 +243,13 @@ pub extern "C" fn _start() -> ! {
                     } else {
                         add_char(&mut password, &mut pass_len, key, 63);
                     }
-                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
+                    draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
                 }
                 _ => {}
             }
         }
         if sys_port != 0 && ui::poll(sys_port) {
-            draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note);
+            draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
         }
         sys::yield_now();
     }

@@ -126,8 +126,14 @@ struct KeyEvent {
     pad: [u8; 3],
 }
 
+pub const MOUSE_MOVE: u8 = 1;
 pub const MOUSE_DOWN: u8 = 2;
 pub const MOUSE_UP: u8 = 3;
+
+/// Mouse button masks carried by `MouseEvent.button` (matches ND_BUTTON_*).
+pub const BUTTON_LEFT: u8 = 1;
+pub const BUTTON_RIGHT: u8 = 2;
+pub const BUTTON_MIDDLE: u8 = 4;
 
 // Key values that are not text. Text keys carry their Unicode codepoint, so
 // these live above U+10FFFF and can never collide with a character.

@@ -87,12 +87,22 @@ __declspec(dllimport) int   GetMenuItemCount(u64 menu);
 __declspec(dllimport) int   SetMenu(u64 hwnd, u64 menu);
 __declspec(dllimport) u64   GetMenu(u64 hwnd);
 __declspec(dllimport) int   DrawMenuBar(u64 hwnd);
+__declspec(dllimport) i32   TrackPopupMenu(u64 menu, u32 flags, i32 x, i32 y,
+                                           i32 reserved, u64 hwnd,
+                                           const RECT *rect);
 __declspec(dllimport) int   SetWindowTextA(u64 hwnd, const char *text);
 
 #define WM_PAINT    0x000Fu
 #define WM_CLOSE    0x0010u
 #define WM_DESTROY  0x0002u
 #define WM_COMMAND  0x0111u
+#define WM_RBUTTONDOWN 0x0204u
+#define WM_RBUTTONUP   0x0205u
+#define WM_CONTEXTMENU 0x007Bu
+
+#define TPM_RIGHTALIGN 0x0008u
+#define TPM_BOTTOMALIGN 0x0020u
+#define TPM_RETURNCMD  0x0100u
 
 #define MF_STRING    0x00000000u
 #define MF_POPUP     0x00000010u
@@ -173,7 +183,10 @@ static void expect_true(const char *what, int ok) {
 }
 
 static u64 g_hwnd;
+static u64 g_ctx;
 static u32 g_cmds;
+static u32 g_rdown;
+static u32 g_rup;
 
 static i64 WndProc(u64 hwnd, u32 msg, u64 wp, i64 lp) {
   (void)hwnd;
@@ -199,6 +212,26 @@ static i64 WndProc(u64 hwnd, u32 msg, u64 wp, i64 lp) {
     TextOutA(hdc, 16, 32, "menus: File / Edit", 18);
     TextOutA(hdc, 16, 54, "click the bar, then an item", 27);
     EndPaint(hwnd, &ps);
+    return 0;
+  }
+  case WM_RBUTTONDOWN:
+    g_rdown++;
+    return 0;
+  case WM_RBUTTONUP:
+    g_rup++;
+    return 0;
+  case WM_CONTEXTMENU: {
+    i32 x = (i32)(lp & 0xFFFF);
+    i32 y = (i32)((lp >> 16) & 0xFFFF);
+    i32 id;
+
+    say("[MENU] WM_CONTEXTMENU\n");
+    id = TrackPopupMenu(g_ctx, TPM_RETURNCMD | TPM_RIGHTALIGN | TPM_BOTTOMALIGN,
+                        x, y, 0, hwnd, 0);
+    say("[MENU] TrackPopupMenu id=");
+    say_hex((u64)(i64)id);
+    say("\n");
+    expect_true("TrackPopupMenu result", id == 201 || id == 0);
     return 0;
   }
   case WM_COMMAND: {
@@ -276,6 +309,13 @@ void novus_win32_main(void) {
   expect("GetMenuItemCount(file)", (u64)(u32)GetMenuItemCount(file), 3u);
   expect("GetMenuItemCount(edit)", (u64)(u32)GetMenuItemCount(edit), 1u);
 
+  g_ctx = CreatePopupMenu();
+  expect_true("CreatePopupMenu(context)", g_ctx != 0u);
+  expect("AppendMenuA(context, refresh)",
+         AppendMenuA(g_ctx, MF_STRING, 201u, "刷新"), 1u);
+  expect("AppendMenuA(context, properties)",
+         AppendMenuA(g_ctx, MF_STRING, 202u, "属性"), 1u);
+
   expect("SetMenu", (u64)(u32)SetMenu(hwnd, bar), 1u);
   expect("GetMenu", GetMenu(hwnd), bar);
   expect("DrawMenuBar", (u64)(u32)DrawMenuBar(hwnd), 1u);
@@ -288,6 +328,11 @@ void novus_win32_main(void) {
     TranslateMessage(&msg);
     DispatchMessageA(&msg);
   }
+  say("[MENU] WM_RBUTTONDOWN=");
+  say_hex(g_rdown);
+  say(" WM_RBUTTONUP=");
+  say_hex(g_rup);
+  say("\n");
   say(g_fail == 0 ? "[MENU] PASS\n" : "[MENU] FAILED\n");
   ExitProcess(g_fail == 0 ? 0u : 1u);
 }

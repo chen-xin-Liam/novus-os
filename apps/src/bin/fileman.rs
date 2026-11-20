@@ -53,6 +53,7 @@ const KEY_UP: u32 = wm::KEY_UP;
 const KEY_DOWN: u32 = wm::KEY_DOWN;
 const KEY_ENTER: u32 = wm::KEY_ENTER;
 const KEY_BACK: u32 = wm::KEY_BACK;
+const KEY_ESC: u32 = wm::KEY_ESC;
 
 #[derive(Clone, Copy)]
 struct Row {
@@ -107,6 +108,7 @@ struct State {
     views: [View; HIST],
     pos: usize,
     count: usize,
+    menu: ui::Menu,
 }
 
 impl State {
@@ -401,6 +403,132 @@ impl State {
             }
         }
     }
+
+    fn item_path(&self, idx: usize, out: &mut [u8; PATH_CAP]) -> Option<usize> {
+        if !self.disk || idx >= self.n {
+            return None;
+        }
+        let name = self.rows[idx].name();
+        let mut len = self.path_len;
+
+        if len > 1 {
+            if len + 1 >= PATH_CAP {
+                return None;
+            }
+            out[len] = b'/';
+            len += 1;
+        }
+        if len + name.len() >= PATH_CAP {
+            return None;
+        }
+        out[len..len + name.len()].copy_from_slice(name.as_bytes());
+        Some(len + name.len())
+    }
+
+    fn new_folder(&mut self, port: u64) {
+        if !self.disk {
+            self.status = "仅在磁盘视图可新建文件夹";
+            return;
+        }
+        let mut path = [0u8; PATH_CAP];
+        let base = self.path_len;
+
+        path[..base].copy_from_slice(&self.path[..base]);
+        for n in 0..10u32 {
+            let mut suffix = ui::Buf::new();
+
+            suffix.s("/新建文件夹");
+            if n > 0 {
+                suffix.s("(").num(n).s(")");
+            }
+            let bytes = suffix.str().as_bytes();
+            if base + bytes.len() >= PATH_CAP {
+                break;
+            }
+            path[base..base + bytes.len()].copy_from_slice(bytes);
+            let text = core::str::from_utf8(&path[..base + bytes.len()]).unwrap_or("");
+            if fs::mkdir(text) {
+                self.status = "已新建文件夹";
+                self.refresh(port);
+                return;
+            }
+        }
+        self.status = "无法新建文件夹";
+    }
+
+    fn rename_selected(&mut self, port: u64) {
+        if !self.disk {
+            self.status = "仅在磁盘视图可重命名";
+            return;
+        }
+        if self.n == 0 {
+            return;
+        }
+        let mut from = [0u8; PATH_CAP];
+        let Some(len) = self.item_path(self.sel, &mut from) else {
+            self.status = "路径过长";
+            return;
+        };
+        let mut to = [0u8; PATH_CAP];
+
+        to[..len].copy_from_slice(&from[..len]);
+        let suffix = b".bak";
+        if len + suffix.len() >= PATH_CAP {
+            self.status = "路径过长";
+            return;
+        }
+        to[len..len + suffix.len()].copy_from_slice(suffix);
+        let a = core::str::from_utf8(&from[..len]).unwrap_or("");
+        let b = core::str::from_utf8(&to[..len + suffix.len()]).unwrap_or("");
+        self.status = if fs::rename(a, b) {
+            "已重命名（追加 .bak）"
+        } else {
+            "重命名失败：文件系统不支持或目标已存在"
+        };
+        self.refresh(port);
+    }
+
+    fn delete_selected(&mut self, port: u64) {
+        if !self.disk {
+            self.status = "仅在磁盘视图可删除";
+            return;
+        }
+        if self.n == 0 {
+            return;
+        }
+        let mut path = [0u8; PATH_CAP];
+        let Some(len) = self.item_path(self.sel, &mut path) else {
+            self.status = "路径过长";
+            return;
+        };
+        let text = core::str::from_utf8(&path[..len]).unwrap_or("");
+        self.status = if fs::unlink(text) {
+            "已删除选中项"
+        } else {
+            "删除失败：目录非空或文件系统不支持"
+        };
+        self.refresh(port);
+    }
+
+    fn properties(&mut self) {
+        if self.n > 0 && self.sel < self.n {
+            self.status = kind_label(self, &self.rows[self.sel]);
+        }
+    }
+
+    fn menu_action(&mut self, action: u16, port: u64) {
+        match action {
+            1 => self.open_selected(port),
+            2 => self.properties(),
+            3 => self.up(port),
+            4 => self.refresh(port),
+            5 => self.new_folder(port),
+            6 => self.rename_selected(port),
+            7 => self.delete_selected(port),
+            8 => self.back(port),
+            _ => {}
+        }
+    }
 }
 
 /* ---- geometry --------------------------------------------------------- */
@@ -687,7 +815,56 @@ fn draw(w: &mut wm::Win, st: &mut State, accent: u32) {
                cb.str());
     }
 
+    st.menu.draw(w);
     w.invalidate();
+}
+
+fn fileman_menu(st: &mut State, x: i32, y: i32) {
+    let hit = hit_test(st, x, y);
+
+    match hit {
+        Hit::Row(i) => {
+            if i >= st.n {
+                return;
+            }
+            st.sel = i;
+            if st.disk {
+                st.menu.set(&[
+                    ui::MenuItem::new(ui::l("打开", "Open"), 1, 0),
+                    ui::MenuItem::new(ui::l("属性", "Properties"), 2, 0),
+                    ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+                    ui::MenuItem::new(ui::l("重命名 (.bak)", "Rename (.bak)"), 6, 0),
+                    ui::MenuItem::new(ui::l("删除", "Delete"), 7, ui::MENU_DANGER),
+                ]);
+            } else {
+                let verb = if st.rows[i].kind == sinfo::KIND_APP
+                    || st.rows[i].kind == sinfo::KIND_EXE
+                {
+                    ui::l("运行", "Run")
+                } else {
+                    ui::l("打开", "Open")
+                };
+                st.menu.set(&[
+                    ui::MenuItem::new(verb, 1, 0),
+                    ui::MenuItem::new(ui::l("属性", "Properties"), 2, 0),
+                ]);
+            }
+        }
+        _ => {
+            let mut items = [
+                ui::MenuItem::new(ui::l("返回", "Back"), 8, 0),
+                ui::MenuItem::new(ui::l("上级", "Up"), 3, 0),
+                ui::MenuItem::new(ui::l("刷新", "Refresh"), 4, 0),
+                ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+                ui::MenuItem::new(ui::l("新建文件夹", "New folder"), 5, 0),
+            ];
+            if !st.disk {
+                items[4] = ui::MenuItem::new(ui::l("属性", "Properties"), 2, 0);
+            }
+            st.menu.set(&items);
+        }
+    }
+    st.menu.open(x, y, CW, CH);
 }
 
 #[no_mangle]
@@ -728,6 +905,7 @@ pub extern "C" fn _start() -> ! {
         views: [start; HIST],
         pos: 0,
         count: 1,
+        menu: ui::Menu::new(),
     };
 
     if !st.reload(sys_port) {
@@ -742,7 +920,39 @@ pub extern "C" fn _start() -> ! {
                     win.destroy();
                     sys::exit(0);
                 }
-                wm::Ev::Mouse(m) if m.kind == 1 => {
+                wm::Ev::Mouse(m)
+                    if st.menu.is_open() && m.kind == wm::MOUSE_MOVE =>
+                {
+                    st.menu.motion(m.x, m.y);
+                    draw(&mut win, &mut st, accent);
+                }
+                wm::Ev::Mouse(m)
+                    if st.menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_RIGHT =>
+                {
+                    fileman_menu(&mut st, m.x, m.y);
+                    draw(&mut win, &mut st, accent);
+                }
+                wm::Ev::Mouse(m)
+                    if st.menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
+                    if let Some(a) = st.menu.click(m.x, m.y) {
+                        st.menu_action(a, sys_port);
+                    } else {
+                        st.menu.close();
+                    }
+                    draw(&mut win, &mut st, accent);
+                }
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT =>
+                {
+                    fileman_menu(&mut st, m.x, m.y);
+                    draw(&mut win, &mut st, accent);
+                }
+                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_MOVE => {
                     let (hb, hn, hr) = match hit_test(&st, m.x, m.y) {
                         Hit::Btn(i) => (i as i8, -1, -1),
                         Hit::Open => (4, -1, -1),
@@ -758,7 +968,11 @@ pub extern "C" fn _start() -> ! {
                         draw(&mut win, &mut st, accent);
                     }
                 }
-                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
+                wm::Ev::Mouse(m)
+                    if !st.menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
                     let mut redraw = true;
 
                     match hit_test(&st, m.x, m.y) {
@@ -799,6 +1013,13 @@ pub extern "C" fn _start() -> ! {
                         }
                         KEY_ENTER => st.open_selected(sys_port),
                         KEY_BACK => st.up(sys_port),
+                        KEY_ESC => {
+                            if st.menu.is_open() {
+                                st.menu.close();
+                            } else {
+                                redraw = false;
+                            }
+                        }
                         _ => redraw = false,
                     }
                     if redraw {
