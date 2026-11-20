@@ -2,7 +2,7 @@
 
 感谢参与 Novus OS 开发。
 
-Novus OS 是 x86_64 UEFI 桌面操作系统：内核主体为 C，内置应用为 Rust `no_std`，并包含自研 NovusFS、NovusDisplay、Novus-WM、NUC 可执行格式、NKM 内核模块格式与 Win32 兼容层。项目采用 GPLv2，最低内存 2 GiB，推荐 8 GiB，并坚持“不依赖外部开源项目、全部自研”的约束。
+Novus OS 是 x86_64 UEFI 桌面操作系统：内核主体为 C，内置应用为 Rust `no_std`，并包含自研 NovusFS、NovusDisplay、Novus-WM、NUC 可执行格式、NKM 内核模块格式与 Win32 兼容层。项目采用 GPLv2，最低内存 4 GiB，推荐 8 GiB，并坚持“不依赖外部开源项目、全部自研”的约束。
 
 > **规范优先级**：遇到文档与代码不一致时，以当前源码、冻结格式规范和实际构建结果为准。`README.md` 的部分章节保留了历史规划，例如 `system/`、`drivers/`、`user/shell/`、`user/micropython/` 和 `make menuconfig`，这些与当前工作树并不一致。若修正文档或发现冲突，请在 PR 中说明。
 
