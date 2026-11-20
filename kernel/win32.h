@@ -29,8 +29,9 @@
  * NUC image area (0x400000) and of each other:
  *
  *   0x50000000  PE image (relocated from its preferred base)
- *   0x42000000  TEB: one page, installed as MSR_FS_BASE on every switch
- *   0x60000000  one page of API thunks
+ *   0x42000000  TEB: two pages, installed as MSR_FS_BASE on every switch
+ *   0x60000000  two pages of API thunks
+ *   0x60002000  module TLS data (per-process, copied from the PE template)
  *   0x70000000  command line / image name
  *   0x90000000  return trampoline: ExitProcess(RAX)
  *   0xA0000000  user stack top (64 KiB below it)
@@ -38,6 +39,7 @@
 #define WIN32_IMAGE_BASE  0x0000000050000000ULL
 #define WIN32_TEB_VA      0x0000000042000000ULL
 #define WIN32_THUNK_VA    0x0000000060000000ULL
+#define WIN32_TLS_DATA_VA 0x0000000060002000ULL
 #define WIN32_ARGV_VA     0x0000000070000000ULL
 #define WIN32_TRAMPOLINE  0x0000000090000000ULL
 #define WIN32_STACK_TOP   0x00000000A0000000ULL
@@ -53,7 +55,7 @@
 /* ExitProcess .. GetTextMetricsA, indexed by id. One row (GetLocalTime)
  * shares GetSystemTime's id, so the table has one more row than ids; this
  * bounds both. */
-#define WIN32_API_COUNT 133u
+#define WIN32_API_COUNT 134u
 
 /* TEB field offsets, as the x64 ABI defines them: the self pointer at 0x30,
  * ClientId at 0x40 with both ids pointer-wide, StackBase/StackLimit at

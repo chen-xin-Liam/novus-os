@@ -22,6 +22,7 @@
 #define PE_ENOMEM   -4
 #define PE_EIMPORT  -5
 #define PE_ERELOC   -6
+#define PE_ETLS     -7
 
 /* Validate `img` and start it as a Win32 compatibility process. Returns 0
  * on success, or one of the PE_E* codes. */

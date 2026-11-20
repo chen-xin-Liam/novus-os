@@ -1,0 +1,4 @@
+#ifndef NOVUS_CSTDIO
+#define NOVUS_CSTDIO
+#include "__novus_cstdio.h"
+#endif

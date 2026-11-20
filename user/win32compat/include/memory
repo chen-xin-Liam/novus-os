@@ -1,0 +1,21 @@
+#ifndef NOVUS_MEMORY
+#define NOVUS_MEMORY
+#include "__novus_rt.h"
+namespace std {
+  /* C++98 auto_ptr */
+  template <class T> class auto_ptr {
+    T* p;
+  public:
+    typedef T element_type;
+    explicit auto_ptr(T* q=0):p(q){}
+    auto_ptr(auto_ptr& o):p(o.release()){}
+    auto_ptr& operator=(auto_ptr& o){ if(this!=&o){ delete p; p=o.release(); } return *this; }
+    ~auto_ptr(){ delete p; }
+    T* release(){ T* t=p; p=0; return t; }
+    void reset(T* q=0){ if(q!=p){ delete p; p=q; } }
+    T& operator*() const { return *p; }
+    T* operator->() const { return p; }
+    T* get() const { return p; }
+  };
+}
+#endif

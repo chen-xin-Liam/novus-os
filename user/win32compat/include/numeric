@@ -1,0 +1,9 @@
+#ifndef NOVUS_NUMERIC
+#define NOVUS_NUMERIC
+namespace std {
+  template <class It, class T> inline T accumulate(It first, It last, T init) {
+    for (; first!=last; ++first) init = init + *first;
+    return init;
+  }
+}
+#endif

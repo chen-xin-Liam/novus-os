@@ -1,0 +1,42 @@
+#ifndef NOVUS_STRING
+#define NOVUS_STRING
+#include "__novus_rt.h"
+#include <cstddef>
+namespace std {
+
+class string {
+  char* p;
+  novus_size_t len;
+  void init(const char* s, novus_size_t n) {
+    len = n; p = (char*)novus_alloc(len+1);
+    novus_memcpy(p, s, len); p[len] = 0;
+  }
+public:
+  typedef novus_size_t size_type;
+  string():p(0),len(0){ char* q=(char*)novus_alloc(1); q[0]=0; p=q; }
+  string(const char* s){ init(s, novus_strlen(s)); }
+  string(const char* s, novus_size_t n){ init(s, n); }
+  string(const string& o){ init(o.p, o.len); }
+  ~string(){ novus_free(p); }
+  string& operator=(const string& o){ if(this!=&o){ novus_free(p); init(o.p,o.len);} return *this; }
+  string& operator=(const char* s){ novus_free(p); init(s,novus_strlen(s)); return *this; }
+  string& operator+=(const char* s){ novus_size_t n=novus_strlen(s); char* q=(char*)novus_alloc(len+n+1); novus_memcpy(q,p,len); novus_memcpy(q+len,s,n); q[len+n]=0; novus_free(p); p=q; len+=n; return *this; }
+  string& operator+=(const string& o){ return operator+=(o.p); }
+  const char* c_str() const { return p; }
+  size_type size() const { return len; }
+  size_type length() const { return len; }
+  bool empty() const { return len==0; }
+  char operator[](novus_size_t i) const { return p[i]; }
+  char& operator[](novus_size_t i) { return p[i]; }
+  friend inline bool operator==(const string& a,const string& b){ return a.len==b.len && novus_strcmp(a.p,b.p)==0; }
+  friend inline bool operator==(const string& a,const char* b){ return novus_strcmp(a.p,b)==0; }
+  friend inline bool operator==(const char* a,const string& b){ return novus_strcmp(a,b.p)==0; }
+  friend inline bool operator!=(const string& a,const string& b){ return !(a==b); }
+  friend inline bool operator<(const string& a,const string& b){ return novus_strcmp(a.p,b.p)<0; }
+};
+
+inline string operator+(const string& a, const string& b){ string r(a); r+=b; return r; }
+inline string operator+(const string& a, const char* b){ string r(a); r+=b; return r; }
+
+} /* namespace std */
+#endif

@@ -1,0 +1,4 @@
+#ifndef NOVUS_VECTOR
+#define NOVUS_VECTOR
+#include "__novus_vector.h"
+#endif

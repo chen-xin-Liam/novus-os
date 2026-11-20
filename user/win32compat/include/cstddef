@@ -1,0 +1,13 @@
+#ifndef NOVUS_CSTDDEF
+#define NOVUS_CSTDDEF
+#include "__novus_rt.h"
+#ifndef NULL
+#define NULL 0
+#endif
+namespace std {
+  typedef novus_size_t size_t;
+  typedef novus_ptrdiff_t ptrdiff_t;
+}
+using std::size_t;
+using std::ptrdiff_t;
+#endif

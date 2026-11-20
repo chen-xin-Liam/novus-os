@@ -176,6 +176,10 @@ static const app_t g_win32[] = {
      * click path into WM_COMMAND and typing into an edit. */
     {"ctrldemo.exe", k_app_ctrldemo_exe, &k_app_ctrldemo_exe_len},
     {"menudemo.exe", k_app_menudemo_exe, &k_app_menudemo_exe_len},
+    /* ISO C++98 standard-library functional test, compiled from the
+     * unmodified sample against the project's own C++98 headers. Exercises
+     * containers, strings, streams, exceptions, RTTI and CRT from /exe. */
+    {"cpp98test.exe", k_app_cpp98test_exe, &k_app_cpp98test_exe_len},
 };
 
 UINT32 apps_win32_count(void) {

@@ -1,0 +1,4 @@
+#ifndef NOVUS_FSTREAM
+#define NOVUS_FSTREAM
+#include "__novus_stream.h"
+#endif

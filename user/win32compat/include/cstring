@@ -1,0 +1,23 @@
+#ifndef NOVUS_CSTRING
+#define NOVUS_CSTRING
+#include "__novus_rt.h"
+extern "C" {
+  inline novus_size_t strlen(const char* s){ return novus_strlen(s); }
+  inline int strcmp(const char* a,const char* b){ return novus_strcmp(a,b); }
+  inline int strncmp(const char* a,const char* b,novus_size_t n){ return novus_strncmp(a,b,n); }
+  inline char* strcpy(char* d,const char* s){ return novus_strcpy(d,s); }
+  inline char* strncpy(char* d,const char* s,novus_size_t n){ return novus_strncpy(d,s,n); }
+  inline void* memcpy(void* d,const void* s,novus_size_t n){ return novus_memcpy(d,s,n); }
+  inline void* memmove(void* d,const void* s,novus_size_t n){ return novus_memmove(d,s,n); }
+  inline void* memset(void* d,int c,novus_size_t n){ return novus_memset(d,c,n); }
+  inline int memcmp(const void* a,const void* b,novus_size_t n){ return novus_memcmp(a,b,n); }
+  inline const char* strchr(const char* s,int c){ return novus_strchr(s,c); }
+  inline char* strcat(char* d,const char* s){ novus_strcpy(d+novus_strlen(d),s); return d; }
+  inline const char* strerror(int){ return "error"; }
+}
+namespace std {
+  using ::strlen; using ::strcmp; using ::strncmp; using ::strcpy; using ::strncpy;
+  using ::memcpy; using ::memmove; using ::memset; using ::memcmp; using ::strchr;
+  using ::strcat; using ::strerror;
+}
+#endif

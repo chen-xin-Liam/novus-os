@@ -1,0 +1,8 @@
+#ifndef NOVUS_CSETJMP
+#define NOVUS_CSETJMP
+/* __builtin_setjmp/longjmp are self-contained (verified in baseline). */
+typedef struct { void* __novus_jb[8]; } novus_jmp_buf_t;
+#define jmp_buf novus_jmp_buf_t
+#define setjmp(jb)   __builtin_setjmp((jb).__novus_jb)
+#define longjmp(jb,v) __builtin_longjmp((jb).__novus_jb, (v))
+#endif

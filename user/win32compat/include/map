@@ -1,0 +1,4 @@
+#ifndef NOVUS_MAP
+#define NOVUS_MAP
+#include "__novus_assoc.h"
+#endif

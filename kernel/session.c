@@ -57,7 +57,8 @@ static int desktop_app(const char *name) {
       text_equal(name, "settings") || text_equal(name, "netman") ||
       text_equal(name, "devmgmt") || text_equal(name, "demo") ||
       text_equal(name, "hello.exe") || text_equal(name, "tlsdemo.exe") ||
-      text_equal(name, "msgdemo.exe") || text_equal(name, "fileio.exe");
+      text_equal(name, "msgdemo.exe") || text_equal(name, "fileio.exe") ||
+      text_equal(name, "cpp98test.exe");
 }
 
 static void desktop_stop(void) {

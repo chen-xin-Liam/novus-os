@@ -1,0 +1,7 @@
+#ifndef NOVUS_TYPEINFO
+#define NOVUS_TYPEINFO
+#include "__novus_except.h"
+namespace std {
+  typedef novus_type_info type_info;
+}
+#endif

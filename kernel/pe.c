@@ -7,9 +7,10 @@
  *
  * The image is always mapped at WIN32_IMAGE_BASE (0x50000000), which is not
  * a sane preferred base, so the base relocation table is mandatory; an
- * image linked without one cannot run here and is refused. Directories the
- * prototype does not implement (TLS, delay imports) are refused too rather
- * than silently ignored.
+ * image linked without one cannot run here and is refused. A module TLS
+ * directory is honoured (its raw template is copied into TEB slot 0), which
+ * is what statically linked C++ runtimes need; delay imports remain refused
+ * rather than silently ignored.
  */
 
 #include "kernel.h"
@@ -37,8 +38,16 @@
 #define PE_RELOC_DIR64  10u
 
 #define PE_MAX_SECTIONS 32u
-#define PE_MAX_IMPORTS  64u
-#define PE_MAX_RELOCS   4096u
+/* A statically linked C++ runtime pulls in far more imports and base
+ * relocations than the small C samples do. The limits are generous but still
+ * bounded so a malformed image cannot drive an unbounded loop. */
+#define PE_MAX_IMPORTS  256u
+#define PE_MAX_RELOCS   65536u
+
+/* IMAGE_TLS_DIRECTORY64 is 40 bytes; a module's raw TLS template is capped
+ * so one image cannot monopolize the fixed TLS data window. */
+#define PE_TLS_DIR_SIZE    40u
+#define PE_TLS_MAX_PAGES   64u
 
 typedef struct {
   UINT32 va;       /* RVA */
@@ -254,8 +263,9 @@ static int pe_validate(const UINT8 *img, UINT32 size, pe_info_t *out) {
     out->dir_rva[i] = rd32(img + opt + 112u + i * 8u);
     out->dir_size[i] = rd32(img + opt + 112u + i * 8u + 4u);
   }
-  if (out->dir_rva[PE_DIR_TLS] != 0u ||
-      out->dir_rva[PE_DIR_DELAY] != 0u) {
+  /* TLS is supported by pe_tls(); delay imports are not, and are refused
+   * rather than passed over in silence. */
+  if (out->dir_rva[PE_DIR_DELAY] != 0u) {
     return PE_EFORMAT;
   }
 
@@ -517,6 +527,100 @@ static int pe_teb(vm_space_t *sp, UINT32 pid, UINT32 tid) {
   return pe_write(sp, WIN32_TEB_VA + WIN32_TEB_TID_OFF, &id64, 8u);
 }
 
+/* ---- module TLS (IMAGE_TLS_DIRECTORY64) -------------------------------- */
+
+/* A statically linked C++ runtime keeps per-thread state (unwind globals,
+ * errno-like variables) in module TLS. Windows describes it with a 40-byte
+ * directory whose fields are VAs. pe_relocate() already added the load delta
+ * to them (the linker puts the directory's own pointers in the .reloc table),
+ * so the values read here are addresses in the loaded image.
+ *
+ *   +0  start of raw template     +8  end of raw template
+ *   +16 VA of DWORD TLS index     +24 VA of callback array (0 = none)
+ *   +32 zero-fill byte count      +36 characteristics
+ *
+ * The Win32 layer reserves TEB TLS slot 0 for the image (its TlsAlloc never
+ * returns 0), and compiler-emitted thread-local accesses read
+ * %fs:[WIN32_TEB_TLS_OFF + index*8]. We copy the raw template to a fresh
+ * page, point slot 0 at it, and publish index 0 through the module's index
+ * variable. Callbacks are accepted but not invoked: no sample registers one,
+ * and driving ring-3 callbacks from the loader is a separate mechanism. */
+static int pe_tls(vm_space_t *sp, const pe_info_t *info, UINT64 base) {
+  UINT8 d[PE_TLS_DIR_SIZE];
+  UINT64 start, end, index_va, callbacks;
+  UINT32 zero_fill;
+  UINT64 raw_size, total, off;
+  UINT32 pages;
+  UINT64 tls_va = WIN32_TLS_DATA_VA;
+  UINT32 index = 0u;
+
+  if (info->dir_rva[PE_DIR_TLS] == 0u) {
+    return 0; /* no module TLS: the legacy path is unchanged */
+  }
+  if (info->dir_size[PE_DIR_TLS] < PE_TLS_DIR_SIZE ||
+      pe_read(sp, base + info->dir_rva[PE_DIR_TLS], d, PE_TLS_DIR_SIZE) != 0) {
+    return PE_ETLS;
+  }
+  start = rd64(d);
+  end = rd64(d + 8);
+  index_va = rd64(d + 16);
+  callbacks = rd64(d + 24);
+  zero_fill = rd32(d + 32);
+
+  /* The template must lie inside the mapped image in ascending order. */
+  if (end < start || start < base ||
+      end > base + info->size_of_image) {
+    return PE_ETLS;
+  }
+  /* The index variable must be a writable DWORD inside the image. */
+  if (index_va < base || index_va + 4u > base + info->size_of_image) {
+    return PE_ETLS;
+  }
+  /* A callback array, when present, must at least hold its terminator. */
+  if (callbacks != 0u &&
+      (callbacks < base || callbacks + 8u > base + info->size_of_image)) {
+    return PE_ETLS;
+  }
+
+  raw_size = end - start;
+  total = raw_size + (UINT64)zero_fill;
+  if (total < raw_size) {
+    return PE_ETLS; /* overflow */
+  }
+  if (total == 0u) {
+    total = 8u; /* keep slot 0 a valid, non-null pointer */
+  }
+  pages = (UINT32)((total + 4095u) / 4096u);
+  if (pages > PE_TLS_MAX_PAGES) {
+    return PE_ETLS;
+  }
+  if (pe_map(sp, tls_va, pages, NULL, 0u,
+             VM_PROT_WRITE | VM_PROT_USER) != 0) {
+    return PE_ENOMEM;
+  }
+  /* Copy the raw template page-safe through the loaded image. Zero fill is
+   * already present: pe_map() handed us cleared pages. */
+  for (off = 0u; off < raw_size; ) {
+    UINT8 chunk[256];
+    UINT64 n = raw_size - off;
+
+    if (n > sizeof(chunk)) {
+      n = sizeof(chunk);
+    }
+    if (pe_read(sp, start + off, chunk, (UINT32)n) != 0 ||
+        pe_write(sp, tls_va + off, chunk, (UINT32)n) != 0) {
+      return PE_ETLS;
+    }
+    off += n;
+  }
+  /* Publish the reserved index and point TEB slot 0 at the template. */
+  if (pe_write(sp, index_va, &index, 4u) != 0 ||
+      pe_write(sp, WIN32_TEB_VA + WIN32_TEB_TLS_OFF, &tls_va, 8u) != 0) {
+    return PE_ETLS;
+  }
+  return 0;
+}
+
 int pe_load(const char *name, const UINT8 *img, UINT32 size) {
   pe_info_t info;
   vm_space_t sp;
@@ -660,6 +764,19 @@ int pe_load(const char *name, const UINT8 *img, UINT32 size) {
     kputs("[PE] ");
     kputs(name);
     kputs(": TEB not mapped, TlsAlloc will fail\n");
+  }
+
+  /* Module TLS goes after the TEB: it writes slot 0 of that same page. A
+   * malformed TLS directory must not leave a half-started task behind. */
+  rc = pe_tls(&t->space, &info, base);
+  if (rc != 0) {
+    /* The space now belongs to the task; sched_kill leaves reaping to the
+     * scheduler sweep, so it frees the page tables exactly once. */
+    (void)sched_kill(t->pid);
+    kputs("[PE] ");
+    kputs(name);
+    kputs(": TLS setup failed\n");
+    return rc;
   }
 
   kputs("[PE] ");

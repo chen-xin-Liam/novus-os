@@ -1,0 +1,20 @@
+#ifndef NOVUS_ITERATOR
+#define NOVUS_ITERATOR
+#include "__novus_vector.h"
+namespace std {
+
+/* back_insert_iterator backed by a vector-like container. */
+template <class Container> class back_insert_iterator {
+  Container* c;
+public:
+  typedef back_insert_iterator<Container> self;
+  explicit back_insert_iterator(Container& x):c(&x){}
+  self& operator=(const typename Container::value_type& v){ c->push_back(v); return *this; }
+  self& operator*(){ return *this; }
+  self& operator++(){ return *this; }
+  self& operator++(int){ return *this; }
+};
+template <class Container> inline back_insert_iterator<Container> back_inserter(Container& c){ return back_insert_iterator<Container>(c); }
+
+} /* namespace std */
+#endif

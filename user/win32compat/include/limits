@@ -1,0 +1,25 @@
+#ifndef NOVUS_LIMITS
+#define NOVUS_LIMITS
+#include <climits>
+#include <cfloat>
+namespace std {
+  template <class T> struct numeric_limits;
+  template <> struct numeric_limits<int> {
+    static int min(){ return INT_MIN; }
+    static int max(){ return INT_MAX; }
+    static bool is_signed(){ return true; }
+  };
+  template <> struct numeric_limits<unsigned int> {
+    static unsigned int min(){ return 0; } static unsigned int max(){ return UINT_MAX; }
+    static bool is_signed(){ return false; }
+  };
+  template <> struct numeric_limits<long> {
+    static long min(){ return LONG_MIN; } static long max(){ return LONG_MAX; }
+    static bool is_signed(){ return true; }
+  };
+  template <> struct numeric_limits<double> {
+    static double min(){ return DBL_MIN; } static double max(){ return DBL_MAX; }
+    static bool is_signed(){ return true; }
+  };
+}
+#endif

@@ -1,0 +1,4 @@
+#ifndef NOVUS_QUEUE
+#define NOVUS_QUEUE
+#include "__novus_seq.h"
+#endif

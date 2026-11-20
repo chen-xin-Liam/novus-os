@@ -1,0 +1,13 @@
+#ifndef NOVUS_ALGORITHM
+#define NOVUS_ALGORITHM
+namespace std {
+  template <class T> inline void novus_swap(T& a, T& b) { T t=a; a=b; b=t; }
+  template <class It> inline void sort(It first, It last) {
+    for (It i=first; i!=last; ++i)
+      for (It j=i; j!=first; --j) {
+        if (*j < *(j-1)) novus_swap(*j, *(j-1));
+        else break;
+      }
+  }
+}
+#endif

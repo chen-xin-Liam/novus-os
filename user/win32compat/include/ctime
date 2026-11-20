@@ -1,0 +1,23 @@
+#ifndef NOVUS_CTIME
+#define NOVUS_CTIME
+#include "__novus_rt.h"
+typedef long long time_t;
+struct tm { int tm_sec, tm_min, tm_hour, tm_mday, tm_mon, tm_year, tm_wday, tm_yday, tm_isdst; };
+extern "C" {
+  inline time_t time(time_t*) { return (time_t)novus_ticks() / 1000ull + 11644473600ull; }
+  inline struct tm* localtime(const time_t* t) {
+    static struct tm s;
+    unsigned long long sec = (unsigned long long)*t;
+    s.tm_sec = (int)(sec % 60); sec /= 60;
+    s.tm_min = (int)(sec % 60); sec /= 60;
+    s.tm_hour = (int)(sec % 24); sec /= 24;
+    s.tm_wday = (int)((sec + 4) % 7);
+    s.tm_mday = (int)(sec % 31) + 1;
+    s.tm_mon = 0; s.tm_year = 120; s.tm_yday = 0; s.tm_isdst = 0;
+    return &s;
+  }
+  inline char* ctime(const time_t*) { static char b[32]="Thu Jan  1 00:00:00 2026"; return b; }
+  inline double difftime(time_t a, time_t b) { return (double)(a-b); }
+}
+namespace std { using ::time_t; using ::tm; using ::time; using ::localtime; using ::ctime; using ::difftime; }
+#endif

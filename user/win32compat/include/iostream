@@ -1,0 +1,6 @@
+#ifndef NOVUS_IOSTREAM
+#define NOVUS_IOSTREAM
+#include "__novus_rt.h"
+#include "__novus_except.h"
+#include "__novus_stream.h"
+#endif

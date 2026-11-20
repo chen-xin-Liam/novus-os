@@ -1,0 +1,20 @@
+#ifndef NOVUS_STDEXCEPT
+#define NOVUS_STDEXCEPT
+#include "__novus_rt.h"
+namespace std {
+  class exception { public: virtual ~exception(){} virtual const char* what() const { return "exception"; } };
+  class runtime_error : public exception {
+    const char* m;
+  public:
+    explicit runtime_error(const char* s):m(s){}
+    virtual const char* what() const { return m; }
+  };
+  class logic_error : public exception {
+    const char* m;
+  public:
+    explicit logic_error(const char* s):m(s){}
+    virtual const char* what() const { return m; }
+  };
+  class bad_alloc : public exception { public: virtual const char* what() const { return "bad_alloc"; } };
+}
+#endif

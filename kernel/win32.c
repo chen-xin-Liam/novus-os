@@ -261,6 +261,9 @@ enum {
   WIN32_API_GET_MENU,
   WIN32_API_DESTROY_MENU,
   WIN32_API_DRAW_MENU_BAR,
+  /* Console text color, used by self-hosted C++ programs that port
+   * SetConsoleTextAttribute/FOREGROUND_* style output. */
+  WIN32_API_SET_CONSOLE_TEXT_ATTR,
 };
 
 typedef struct {
@@ -412,6 +415,7 @@ static const win32_api_t g_api[] = {
     {"user32.dll", "GetMenu", WIN32_API_GET_MENU},
     {"user32.dll", "DestroyMenu", WIN32_API_DESTROY_MENU},
     {"user32.dll", "DrawMenuBar", WIN32_API_DRAW_MENU_BAR},
+    {"kernel32.dll", "SetConsoleTextAttribute", WIN32_API_SET_CONSOLE_TEXT_ATTR},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -888,6 +892,47 @@ static void api_write(trap_frame_t *f) {
   n = (UINT32)len;
   if (f->r9 != 0u) {
     (void)user_copy(t->cr3, f->r9, &n, 4u, 1);
+  }
+  f->rax = 1u;
+}
+
+/* SetConsoleTextAttribute: the self-hosted C++98 test colors PASS/FAIL via
+ * FOREGROUND_* bits. The Win32 console prototype has no real color buffer, so
+ * emit the corresponding ANSI SGR sequence to the serial log. The sequence is
+ * written immediately before the text the program prints, giving the same
+ * visual result in any ANSI-capable terminal. */
+static void api_set_console_text_attr(trap_frame_t *f) {
+  UINT32 attr = (UINT32)f->rdx; /* arg1(handle)->rdi, arg2(attr)->rdx */
+  int fg;
+
+  if ((attr & 0x0007u) == 0x0007u) {
+    fg = 37;                       /* grey/white: reset to default */
+  } else if ((attr & 0x0005u) == 0x0005u) {
+    fg = 35;                       /* red+blue -> magenta */
+  } else if ((attr & 0x0006u) == 0x0006u) {
+    fg = 33;                       /* green+red -> yellow */
+  } else if ((attr & 0x0003u) == 0x0003u) {
+    fg = 36;                       /* blue+green -> cyan */
+  } else if ((attr & 0x0004u) != 0u) {
+    fg = 31;                       /* red */
+  } else if ((attr & 0x0002u) != 0u) {
+    fg = (attr & 0x0008u) ? 92 : 32; /* bright green / green */
+  } else if ((attr & 0x0001u) != 0u) {
+    fg = 34;                       /* blue */
+  } else {
+    fg = 37;
+  }
+  /* Emit a fixed SGR code so no integer formatter is needed in the gate. */
+  switch (fg) {
+    case 31: kputs("\x1b[31m"); break;
+    case 32: kputs("\x1b[32m"); break;
+    case 33: kputs("\x1b[33m"); break;
+    case 34: kputs("\x1b[34m"); break;
+    case 35: kputs("\x1b[35m"); break;
+    case 36: kputs("\x1b[36m"); break;
+    case 37: kputs("\x1b[37m"); break;
+    case 92: kputs("\x1b[92m"); break;
+    default: kputs("\x1b[0m"); break;
   }
   f->rax = 1u;
 }
@@ -5343,10 +5388,10 @@ static void api_invalidate_rect(trap_frame_t *f) {
 /* ---- thread-local storage --------------------------------------------- */
 
 /* One bit per TEB TLS slot, process-wide because the layer runs one Win32
- * process. Bit 0 stays set: slot 0 belongs to the image's TLS directory
- * (the loader has no PE TLS support yet), so TlsAlloc must not hand it out
- * and a compiler-emitted %fs-based access keeps reading a null slot
- * instead of somebody else's value. */
+ * process. Bit 0 stays set: slot 0 belongs to the image's TLS directory,
+ * which the loader fills from the PE TLS template (pe_tls); TlsAlloc must
+ * not hand it out, so a compiler-emitted %fs-based module-TLS access reads
+ * the template pointer instead of somebody else's value. */
 static UINT64 g_tls_used = 1u;
 
 static int win32_teb_read(task_t *t, UINT64 off, void *buf, UINT32 len) {
@@ -5875,6 +5920,9 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_DRAW_MENU_BAR:
     api_draw_menu_bar(f);
+    return;
+  case WIN32_API_SET_CONSOLE_TEXT_ATTR:
+    api_set_console_text_attr(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
