@@ -136,8 +136,9 @@ if iso is not None:
                'ISO fsinfo', False)
     check_meta(iso_fs.read_file('.novusfs/mounts.json', 'joliet'),
                'ISO mounts.json')
-    check(iso_fs.lookup('EFI/BOOT/BOOTX64.EFI', 'primary') is not None,
-          'ISO primary: UEFI boot file missing')
+    boot_entry = iso_fs.lookup('EFI/BOOT/BOOTX64.EFI', 'primary')
+    check(boot_entry is not None and not boot_entry[2],
+          'ISO primary: UEFI boot file missing or not a file')
     check(iso_fs.lookup('SYSTEM.IMG', 'primary') is not None,
           'ISO primary: SYSTEM.IMG missing')
 
