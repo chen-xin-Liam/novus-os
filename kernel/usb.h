@@ -27,6 +27,10 @@ void usb_hid_poll(void);
 #define USB_INFO_KEYBOARD 2u
 #define USB_INFO_MOUSE    3u
 
+/* HID interface protocols from the HID class spec. */
+#define USB_HID_KEYBOARD 1u
+#define USB_HID_MOUSE    2u
+
 typedef struct {
   UINT8  kind;       /* USB_INFO_*, 0 when the device is not one of them */
   UINT8  speed;      /* 1 low, 2 full, 3 high, 4 super */
@@ -52,5 +56,21 @@ typedef struct {
  * indicator state.  Returns 0 on success; callers must not assume failure
  * is fatal — old keyboards simply ignore the command. */
 int hid_kbd_set_leds(hid_kbd_led_t *led);
+
+/* ---- shared configuration-descriptor parser -------------------------- */
+
+typedef struct {
+  UINT8  iface;     /* bInterfaceNumber */
+  UINT8  subclass;  /* HID boot subclass (1) when present */
+  UINT8  protocol;  /* 1 keyboard, 2 mouse */
+  UINT8  ep_num;    /* interrupt IN endpoint number */
+  UINT16 mps;       /* its wMaxPacketSize */
+} usb_hid_iface_t;
+
+/* Find the HID interface with the requested protocol (1 keyboard, 2 mouse;
+ * 0 accepts either). Returns 0 on success. Used by both host controllers so
+ * descriptor parsing is not duplicated in uhci.c. */
+int usb_find_hid_iface(const UINT8 *cfg, UINT32 len, UINT8 want_protocol,
+                       usb_hid_iface_t *out);
 
 #endif /* NOVUS_USB_H */
