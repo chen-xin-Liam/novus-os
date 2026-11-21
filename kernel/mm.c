@@ -200,39 +200,70 @@ void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size) {
     return;
   }
 
-  /* PML4[0]: identity map of the low 4 GiB = 4 PDPT slices, each backed
-   * by one PD of 512 x 2 MiB entries. */
+  /* PML4[0]: identity map of the whole of physical RAM, [0, ram_top).
+   *
+   * This used to stop at 4 GiB, on the theory that the kernel image and its
+   * stack live low and everything else reaches memory through the physmap
+   * window. That theory is wrong on a machine with enough RAM: the boot
+   * stage allocates the kernel stack, the GDT/TSS and the IDT through the
+   * PMM, and the PMM hands out the first conventional pages it finds - which
+   * on this laptop is 0x2B62E5040, 11.6 GiB up. Every pointer in the handoff
+   * block is a raw physical address, so the moment CR3 flips to tables that
+   * only describe the low 4 GiB, the first return address read off that
+   * stack is unmapped: #PF, and the IDT that would catch it is unmapped too,
+   * so it double-faults into a triple fault and the machine stops dead -
+   * with the console it was drawing through now mapped, which is how this
+   * finally became visible.
+   *
+   * Identity-mapping RAM to ram_top costs one PD (4 KiB) per GiB and removes
+   * the whole class of "the boot stage put something high". */
   pdpt = mm_table_new(&pdpt_phys);
   if (pdpt == 0) {
     return;
   }
   pml4->e[0] = MM_PTE_PRESENT | MM_PTE_WRITE | (pdpt_phys & MM_PTE_ADDR4K_MASK);
-  for (i = 0; i < 4; i++) {
-    UINT64 pd_phys;
-    mm_table_t *pd = mm_table_new(&pd_phys);
-    if (pd == 0) {
-      return;
+  {
+    UINT64 n_pd = (ram_top_bytes + 0x3FFFFFFFULL) >> 30; /* ceil to 1 GiB */
+
+    if (n_pd == 0u) {
+      n_pd = 1u; /* even an empty map has to describe something */
     }
-    pdpt->e[i] = MM_PTE_PRESENT | MM_PTE_WRITE | (pd_phys & MM_PTE_ADDR4K_MASK);
-    mm_fill_pd_2m(pd, (UINT64)i << 30);
+    if (n_pd > 512u) {
+      kputs("[MM] identity map clamped to 512 GiB (ram_top=");
+      kputs_hex(ram_top_bytes);
+      kputs(")\n");
+      n_pd = 512u;
+    }
+    for (i = 0; (UINT64)i < n_pd; i++) {
+      UINT64 pd_phys;
+      mm_table_t *pd = mm_table_new(&pd_phys);
+      if (pd == 0) {
+        return;
+      }
+      pdpt->e[i] = MM_PTE_PRESENT | MM_PTE_WRITE | (pd_phys & MM_PTE_ADDR4K_MASK);
+      mm_fill_pd_2m(pd, (UINT64)i << 30);
+    }
+    kputs("[MM] identity map ");
+    kputs_hex(ram_top_bytes);
+    kputs(" bytes, ");
+    kputs_hex(n_pd);
+    kputs(" x 1 GiB\n");
   }
 
-  /* Keep the captured scanout reachable at its own physical address.
+  /* Then take the captured scanout out of that range and mark it uncached.
    *
-   * The boot text console (fbcon) writes through a raw physical pointer.
-   * When the framebuffer sits above 4 GiB - every UEFI machine whose
-   * graphics aperture the firmware placed high, which is most laptops -
-   * nothing maps it, so the console has to stop drawing before the CR3
-   * switch and resume afterwards through the device window. That pause is
-   * exactly where the log goes dark, and a real machine that dies inside
-   * mm_init then dies silently. Mapping the framebuffer identity-style,
-   * uncached, removes the pause: the console keeps drawing across the
-   * switch, so a fault or a hang prints where the user can see it. */
-  if (fb_size != 0u && fb_phys >= 0x100000000ULL) {
+   * The identity map above describes RAM, and mm_fill_pd_2m marks every one
+   * of those pages write-back. A framebuffer is MMIO: left write-back its
+   * pixels sit in cache and the panel never sees them, which is the same
+   * black screen by a different route. The boot text console (fbcon) draws
+   * through the framebuffer's physical address, so this also keeps it alive
+   * across the CR3 switch instead of pausing inside mm_init - the pause is
+   * what made the earlier failure silent. */
+  if (fb_size != 0u) {
     UINT64 p_start = fb_phys & ~0x1FFFFFULL;
     UINT64 p_end = (fb_phys + fb_size + 0x1FFFFFULL) & ~0x1FFFFFULL;
     UINT64 p;
-    UINT32 pages = 0;
+    UINT64 pages = 0;
 
     for (p = p_start; p < p_end; p += 0x200000ULL) {
       UINT32 sl = (UINT32)((p >> 30) & 0x1FFu);
@@ -252,10 +283,10 @@ void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size) {
                                   (p & MM_PTE_ADDR2M_MASK) | fb_bits;
       pages++;
     }
-    kputs("[MM] framebuffer identity-mapped at ");
+    kputs("[MM] framebuffer at ");
     kputs_hex(fb_phys);
-    kputs(", ");
-    kputs_hex((UINT64)pages << 21);
+    kputs(" marked uncached over ");
+    kputs_hex(pages << 21);
     kputs(" bytes, cache-");
     kputs((g_pat_ok != 0) ? "write-combining\n" : "disabled\n");
   }
