@@ -33,6 +33,7 @@ static const app_t g_apps[] = {
     {"setup", k_app_setup, &k_app_setup_len},
     {"nsh", k_app_nsh, &k_app_nsh_len},
     {"devmgmt", k_app_devmgmt, &k_app_devmgmt_len},
+    {"novusd", k_app_novusd, &k_app_novusd_len},
 };
 
 /* These positions are also the IDs sent by sysinfo's spawn request and the

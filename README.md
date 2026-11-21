@@ -324,6 +324,7 @@ UEFI引导后，显示自定义开机Logo，进度条，自检状态文字；自
    - C++98：cppcc编译器编译输出.nuc原生程序
    - MicroPython：用户态MicroPython运行时，可编写脚本应用，可调用Novus原生GUI API
 3. 应用两种形态：编译后的`.nuc`原生二进制；MicroPython脚本应用。
+4. 内置安全守护 `novusd`（源码 `user/novusd`）：常驻后台，提供 EICAR 签名检测、按需/定时扫描、隔离、增量更新与目录快照监控；在 nsh 中用 `novusd status|selftest|scan <path> [--quarantine]|quarantine ...|update <pkg>|schedule <path> <ms>|monitor [ms]|sandbox <app>` 调用。命令经 `/temp/novusd/req.bin`、`rsp.bin` 传递（内核 spawn 无 argv）。安全日志写入 `/Novus/logs/security/novusd.log`，详见 `docs/NovusDefender 内置应用.md`。
 
 ---
 

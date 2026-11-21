@@ -31,12 +31,17 @@ pub mod install;
 pub mod shell;
 pub mod nuomi;
 pub mod devmgr;
+pub mod novusd_proto;
 
+#[cfg(target_os = "none")]
 use core::panic::PanicInfo;
 
 /// A panic in a user program is a bug in that program, not a kernel
 /// problem: report it on COM1 and exit with a distinguishable code so the
 /// task manager shows what happened.
+// Bare-metal binaries need the handler; host-side users of this crate (e.g.
+// the novusd workspace's tests) link std and would get a duplicate lang item.
+#[cfg(target_os = "none")]
 #[panic_handler]
 fn panic(_info: &PanicInfo) -> ! {
     sys::write(b"[APP] panic\n");
