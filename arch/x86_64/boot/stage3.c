@@ -1600,7 +1600,14 @@ done:
 /* A text menu on the firmware console. It is not a shell: it offers
  * exactly the operations this milestone implements, and it never blocks
  * forever - an unattended boot falls through to the kernel once the
- * input goes quiet. */
+ * input goes quiet.
+ *
+ * The wait is short on purpose. Every boot that nobody interrupts - which
+ * is the normal one - pays this wait in full before the kernel even starts,
+ * so it used to cost twenty seconds of pure boot latency. Three seconds is
+ * still enough to read five entries and press a digit. */
+
+#define MENU_INPUT_TIMEOUT_MS 3000u
 
 static EFI_INPUT_KEY menu_wait_key(void) {
   EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin =
@@ -1615,11 +1622,11 @@ static EFI_INPUT_KEY menu_wait_key(void) {
   }
   /* Bounded poll. WaitForEvent would be tidier, but a bounded poll
    * keeps the menu from hanging on a firmware that never signals. */
-  for (spins = 0; spins < 20000u; spins++) {
+  for (spins = 0; spins < MENU_INPUT_TIMEOUT_MS; spins++) {
     if (conin->ReadKeyStroke(conin, &key) == EFI_SUCCESS) {
       return key;
     }
-    g_bs->Stall(1000u); /* 1 ms; twenty seconds at most */
+    g_bs->Stall(1000u); /* 1 ms; MENU_INPUT_TIMEOUT_MS at most */
   }
   return key;
 }
@@ -1635,7 +1642,9 @@ static void menu_show(void) {
   say_line(L"   4  Continue into the kernel");
   say_line(L"   5  Continue into the kernel (no desktop, shell only)");
   say_line(L"");
-  say(L"  choice [4]: ");
+  say(L"  choice [4, auto in ");
+  boot_put_dec(MENU_INPUT_TIMEOUT_MS / 1000u);
+  say_line(L" s]: ");
 }
 
 /* The unattended path. A machine with no keyboard - or a scripted run -

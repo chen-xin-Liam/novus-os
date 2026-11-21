@@ -607,7 +607,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
             kputs("[BOOT] boot stage chose no-desktop: skipping the menu\n");
           } else {
             /* Boot menu: choose the desktop (default) or a bare shell. It draws on
-             * the framebuffer, reads the USB keyboard and counts down five seconds
+             * the framebuffer, reads the USB keyboard and counts down two seconds
              * before defaulting to the desktop. */
             boot_menu_select();
           }
