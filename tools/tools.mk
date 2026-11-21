@@ -349,12 +349,16 @@ $(NOVUS_IMG): $(MKFSNOVUS) graphics/nd_font_data.bin $(FONT_SRC) | out
 esp: $(ESP_IMG)
 
 # ESP template: what the installer writes to a target disk's ESP. Built
-# separately from the live ESP because an image cannot contain itself.
-$(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(WPKG_IMG) | out
+# separately from the live ESP because an image cannot contain itself. It
+# carries the cppcc smoke program too, so a disk image written to a USB
+# stick runs the same M7 demo the live medium does.
+$(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(WPKG_IMG) \
+			$(NUC_ESP_DEPS) $(CPPCC_ESP_DEPS) | out
 	$(MKFAT) $@ $(ESP_TPL_SIZE_MB) \
 	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
 	    $(NOVUS_IMG):SYSTEM.IMG \
-	    $(WPKG_IMG):WPAPERS.PKG
+	    $(WPKG_IMG):WPAPERS.PKG \
+	    $(NUC_ESP_ARGS) $(CPPCC_ESP_ARGS)
 
 # The live ESP. BOOTX64.EFI is the firmware's default fallback path;
 # NOVUS/SYSTEM.IMG is the live root; NOVUS/ESP.IMG is the install

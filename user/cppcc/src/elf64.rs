@@ -24,6 +24,8 @@ const PHDR_SIZE: u64 = 56;
 const PHNUM: u64 = 3;
 
 struct Section {
+    /// Kept for diagnostics; a static image has no section headers to carry it.
+    #[allow(dead_code)]
     name: &'static str,
     kind: SegmentKind,
     vaddr: u64,

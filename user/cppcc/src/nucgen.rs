@@ -20,7 +20,7 @@ const RELOC_32: u32 = 1;
 pub(crate) const RELOC_PC32: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub(crate) enum SegmentKind {
+pub enum SegmentKind {
     Text,
     Rodata,
     Data,
@@ -57,7 +57,7 @@ impl SegmentKind {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct NucSymbol {
+pub struct NucSymbol {
     pub name: String,
     pub sym_type: u8,
     pub bind: u8,
@@ -67,7 +67,7 @@ pub(crate) struct NucSymbol {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct NucRelocation {
+pub struct NucRelocation {
     pub place_segment: SegmentKind,
     pub place_offset: u64,
     pub kind: u32,
@@ -75,7 +75,7 @@ pub(crate) struct NucRelocation {
 }
 
 #[derive(Clone, Debug, Default)]
-pub(crate) struct CodeSections {
+pub struct CodeSections {
     pub text: Vec<u8>,
     pub rodata: Vec<u8>,
     pub data: Vec<u8>,

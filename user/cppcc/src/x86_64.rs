@@ -13,6 +13,9 @@ const RELOC_PC32: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
+// The encoding table is deliberately complete even though today's generator
+// only reaches for a subset of it.
+#[allow(dead_code)]
 enum Reg {
     Rax = 0,
     Rcx = 1,

@@ -75,7 +75,7 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     let mut layout: Vec<Section> = Vec::new();
     let mut cursor = SECTION_ALIGN;
     let mut offset = HEADERS_SIZE;
-    let mut rva_for = |name: &'static str, kind: Option<SegmentKind>, data_len: u64, mem_len: u64, characteristics: u32, layout: &mut Vec<Section>, cursor: &mut u64, offset: &mut u64| {
+    let rva_for = |name: &'static str, kind: Option<SegmentKind>, data_len: u64, mem_len: u64, characteristics: u32, layout: &mut Vec<Section>, cursor: &mut u64, offset: &mut u64| {
         layout.push(Section {
             name,
             kind,
