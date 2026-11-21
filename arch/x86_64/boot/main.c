@@ -429,12 +429,23 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_put_dec(d->width);
     boot_puts(L"x");
     boot_put_dec(d->height);
-    boot_puts(L"\r\n");
+    boot_puts(L" at ");
+    boot_put_hex(d->fb_phys);
+    boot_puts(L", ");
+    boot_put_dec(d->fb_size);
+    boot_puts(L" bytes\r\n");
     if (nd_boot_splash()) {
       /* The text phase is over: the screen now shows the splash and the
        * rest of the boot log goes to COM1. */
       boot_quiet(1);
       nd_boot_stage(4, "正在启动");
+    } else if (d->fb_phys >= 0x100000000ULL) {
+      /* The numbers are the point here: the splash is skipped only when
+       * the scanout sits above the 4 GiB the boot stage can address, and
+       * on a laptop that is the difference between the splash and a text
+       * log. Print it where the firmware console can still show it. */
+      boot_puts(L"[BOOT] boot splash unavailable: framebuffer above 4 GiB, "
+                L"kernel text console takes over\r\n");
     } else {
       boot_puts(L"[BOOT] boot splash unavailable, text console stays\r\n");
     }
@@ -465,8 +476,16 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
   status = boot_exit_bs(ImageHandle, bs, &mmap, &map_size, &map_key, &desc_size);
   if (EFI_ERROR(status)) {
-    /* Boot services are gone or unusable; no firmware console here. */
-    return EFI_LOAD_ERROR;
+    /* The firmware would not give up boot services, so the kernel stage
+     * cannot run. ConOut is still ours at this point - say what happened and
+     * stop, rather than returning into a boot manager that leaves the last
+     * line of this log frozen on the screen with nothing behind it. */
+    boot_puts(L"[FATAL] ExitBootServices failed. status=");
+    boot_put_hex((UINT64)status);
+    boot_puts(L"\r\n");
+    for (;;) {
+      __asm__ volatile("cli; hlt");
+    }
   }
 
   /* Hand control to the assembly kernel entry: it installs the BSP

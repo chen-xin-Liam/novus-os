@@ -24,6 +24,7 @@
 #include "nd_input.h"
 #include "sched.h"
 #include "msr.h"
+#include "fbcon.h"
 
 #ifndef CONFIG_NOVUS_DISPLAY
 /* Without a display the menu cannot be shown; fall straight through to the
@@ -206,6 +207,11 @@ void boot_menu_select(void) {
   nd_input_init();
   kputs("[BOOT] menu: input armed, enabling interrupts\n");
   cpu_sti(); /* safe: see the comment above this function */
+
+  /* The menu owns the screen from here: the frame the text console was
+   * drawing on is about to be covered by the backdrop, and a log line
+   * painted after that would sit on top of the menu. */
+  fbcon_end();
 
   /* Paint the initial frame immediately so the menu is visible at once. */
   boot_menu_paint(s, sel, BOOT_MENU_TIMEOUT_TICKS / 100u);

@@ -303,6 +303,12 @@ UINT32 nd_font_height(UINT32 scale);
  * with CJK needs 16. Callers centre with this, not with nd_font_height. */
 UINT32 nd_text_height(const char *text, UINT32 scale);
 
+/* The 7 rows of one glyph, bit 4 the leftmost of the five columns. Values
+ * outside 32..126 come back blank rather than as a garbage shape. The
+ * kernel's fallback text console draws with these directly, straight onto
+ * the framebuffer, before nd_init() exists. */
+const UINT8 *nd_font_rows(UINT8 ch);
+
 void nd_text(nd_surface_t *s, INT32 x, INT32 y, const char *text, nd_color_t c,
              UINT32 scale);
 /* `max_px` limits the painted width (0 = unlimited); clipping at a

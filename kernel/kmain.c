@@ -16,6 +16,8 @@
 #include "vga.h"
 #include "serial.h"
 #include "irq.h"
+#include "gdt.h"
+#include "idt.h"
 #include "shared_mem.h"
 #include "pmm.h"
 #include "mm.h"
@@ -60,6 +62,7 @@
 #include "nd.h"
 #include "nd_input.h"
 #include "con.h"
+#include "fbcon.h"
 #include "nd_font_uni.h"
 #include "nd_icon.h"
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
@@ -82,6 +85,11 @@ void kputs(const char *s) {
   UINT64 flags = irq_save();
   vga_puts(s);
   serial_puts(s);
+#if CONFIG_NOVUS_DISPLAY
+  /* Third sink: the framebuffer, when the graphical splash is not running.
+   * It is what makes a laptop without a serial port readable at all. */
+  fbcon_puts(s);
+#endif
   irq_restore(flags);
 }
 
@@ -203,7 +211,30 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   serial_init();
   vga_init();
 
+  /* The boot stage hands over either with the splash on the glass or with
+   * the firmware text still up, and the second case is the one that used to
+   * go silent: the kernel's console had a VGA text buffer and a UART to
+   * write to, and a laptop has neither. Take the framebuffer for the log
+   * here, before the first line is printed, so the whole kernel stage is
+   * readable on screen. The desktop repaints over it at the end. */
+#if CONFIG_NOVUS_DISPLAY
+  if (nd_boot_splash() == 0) {
+    (void)fbcon_begin();
+  }
+#endif
+
   kputs("Novus OS M1 - A-core (BSP) kernel stage\n");
+
+  /* From here until sched_init() installed one, a fault was a triple fault:
+   * no IDT meant the CPU reset, and a machine that reboots mid-boot looks
+   * like a power problem rather than a bad address. Load the GDT and the IDT
+   * before the first code that can fault - the page tables, the framebuffer
+   * mapping, every device probe - so an exception prints its vector, error
+   * code and RIP and then stops. The timer branch of trap_dispatch() is the
+   * only one that needs the scheduler, and the LAPIC timer is not armed
+   * until much later; interrupts stay masked until the boot menu. */
+  gdt_init();
+  idt_init();
 
   /* The boot stage handed over with the splash on the glass. Keep it
    * active and keep advancing it: the user watches one progress bar from
@@ -231,8 +262,17 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   pmm_init(mmap_addr, map_size, desc_size);
   pmm_selftest();
 
-  /* Build the page tables, switch CR3 (identity low 4 GiB + physmap). */
+  /* Build the page tables, switch CR3 (identity low 4 GiB + physmap). The
+   * text console draws through the firmware's mapping until that happens;
+   * it drops the alias for the switch and remaps the framebuffer after it,
+   * because a scanout above 4 GiB is not part of the new identity map. */
+#if CONFIG_NOVUS_DISPLAY
+  fbcon_before_mm();
+#endif
   mm_init(pmm_ram_top());
+#if CONFIG_NOVUS_DISPLAY
+  (void)fbcon_after_mm();
+#endif
   mm_selftest();
 
   heap_init();
@@ -242,8 +282,20 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* Bind the display now the heap exists and re-paint the splash onto an
    * uncacheable framebuffer - the only mapping the panel actually reads. This
    * also wbinvd's away the cache lines the firmware wrote through a cacheable
-   * identity alias, so every progress step from here is shown cleanly. */
-  nd_init();
+   * identity alias, so every progress step from here is shown cleanly.
+   *
+   * A display that cannot be bound is not a boot to continue past: every
+   * step below - the device probes, the desktop, the shell - draws or waits
+   * on a screen that is not there. Say so on the text console and park,
+   * instead of walking into the dark. */
+  if (nd_init() == 0) {
+    kputs("[ND] no drawable framebuffer: the desktop stage cannot start\n");
+    kputs("[ND] the log above is the whole kernel stage; the machine stays "
+          "here\n");
+    for (;;) {
+      __asm__ volatile("cli; hlt");
+    }
+  }
   nd_boot_splash();
   nd_boot_stage(88, "初始化内存");
   nd_boot_stage(90, "映射内存");

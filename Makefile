@@ -75,6 +75,7 @@ E2E ?= 0
 SRC := arch/x86_64/boot/main.c \
        arch/x86_64/boot/stage3.c \
        kernel/kmain.c \
+       kernel/fbcon.c \
        kernel/vga.c \
        kernel/serial.c \
        kernel/novuslib.c \

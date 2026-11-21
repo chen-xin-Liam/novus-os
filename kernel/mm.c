@@ -494,7 +494,13 @@ static int mm_mtrr_wc_cover(UINT64 lo, UINT64 hi) {
 void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags) {
   UINT64 base = g_devmap_next;
   UINT64 cur = base;
-  UINT32 n = (UINT32)(((size + 0x1FFFFFu) >> 21) & 0xFFFFFFFFu);
+  /* Pages are counted from the 2 MiB boundary the range is rounded down to,
+   * not from `phys`: a framebuffer that starts 512 KiB into a 2 MiB page
+   * needs the whole of that page plus enough pages for the rest, so the
+   * offset has to be added before the division or the tail of the scanout
+   * lands outside the mapping. */
+  UINT64 off = phys & 0x1FFFFFULL;
+  UINT32 n = (UINT32)(((off + size + 0x1FFFFFULL) >> 21) & 0xFFFFFFFFu);
   UINT32 i;
   UINT32 cache_bits = 0u;
 
