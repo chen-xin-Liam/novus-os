@@ -26,6 +26,11 @@
 #define MIN_USABLE_BYTES 0x80000000ULL /* 2 GiB, Novus OS spec 1.2 */
 #define MMAP_RETRIES     8
 #define RAM_TOP_ALIGN    0x200000ULL   /* ram_top rounds up to 2 MiB */
+#define PM_TIMER_PORT    0x608u
+#define PM_TIMER_MASK    0x00FFFFFFu
+#define PM_TIMER_TARGET  200000u
+#define PM_TIMER_SPINS   20000000u
+#define PM_TIMER_HZ      3579545ULL
 
 /* COM1, driven directly: the boot stage must not depend on the kernel's
  * driver, and 115200 8N1 is what the runner and every log reader expect.
@@ -44,7 +49,7 @@ static void boot_serial_write(const CHAR16 *s);
 static EFI_BOOT_SERVICES *g_bs = 0;
 
 static UINT64 g_timeline_start;
-static UINT64 g_timeline_khz;
+static UINT64 g_timeline_hz;
 
 static UINT64 timeline_rdtsc(void) {
   UINT32 lo = 0;
@@ -53,34 +58,67 @@ static UINT64 timeline_rdtsc(void) {
   return ((UINT64)hi << 32) | (UINT64)lo;
 }
 
-static UINT64 timeline_ms(void) {
-  UINT32 a = 0, b = 0, c = 0, d = 0;
+static UINT64 timeline_pm_timer_hz(void) {
+  UINT32 p0 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+  UINT32 p1 = p0;
+  UINT32 delta = 0;
+  UINT32 spins;
+  UINT64 tsc0;
+  UINT64 tsc1;
 
-  if (g_timeline_start == 0u) {
-    g_timeline_start = timeline_rdtsc();
-    cpuid(0u, 0u, &a, &b, &c, &d);
-    if (a >= 0x15u) {
-      UINT32 ea = 0, eb = 0, ec = 0;
-      cpuid(0x15u, 0u, &ea, &eb, &ec, &d);
-      if (ea != 0u && eb != 0u && ec != 0u) {
-        g_timeline_khz = ((UINT64)eb * (UINT64)ec) /
-                         ((UINT64)ea * 1000u);
-      }
+  __asm__ volatile("lfence" : : : "memory");
+  tsc0 = timeline_rdtsc();
+  for (spins = 0; spins < PM_TIMER_SPINS; spins++) {
+    p1 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+    delta = (p1 - p0) & PM_TIMER_MASK;
+    if (delta >= PM_TIMER_TARGET) {
+      break;
     }
-    if (g_timeline_khz == 0u && a >= 0x16u) {
-      UINT32 mhz = 0;
-      cpuid(0x16u, 0u, &mhz, &b, &c, &d);
-      g_timeline_khz = (UINT64)mhz * 1000u;
+    __asm__ volatile("pause");
+  }
+  if (spins == PM_TIMER_SPINS || delta == 0u) {
+    return 0u;
+  }
+  __asm__ volatile("lfence" : : : "memory");
+  tsc1 = timeline_rdtsc();
+  if (tsc1 <= tsc0) {
+    return 0u;
+  }
+  return ((tsc1 - tsc0) * PM_TIMER_HZ) / delta;
+}
+
+static UINT64 timeline_probe_hz(void) {
+  UINT32 max_leaf = 0, a = 0, b = 0, c = 0, d = 0;
+
+  cpuid(0u, 0u, &max_leaf, &b, &c, &d);
+  if (max_leaf >= 0x15u) {
+    cpuid(0x15u, 0u, &a, &b, &c, &d);
+    if (a != 0u && b != 0u && c != 0u) {
+      return ((UINT64)b * (UINT64)c) / a;
     }
   }
-  if (g_timeline_khz == 0u) {
+  if (max_leaf >= 0x16u) {
+    cpuid(0x16u, 0u, &a, &b, &c, &d);
+    if (a != 0u) {
+      return (UINT64)a * 1000000ULL;
+    }
+  }
+  return timeline_pm_timer_hz();
+}
+
+static UINT64 timeline_ms(void) {
+  if (g_timeline_start == 0u) {
+    g_timeline_start = timeline_rdtsc();
+    g_timeline_hz = timeline_probe_hz();
+  }
+  if (g_timeline_hz == 0u) {
     return 0u;
   }
   {
     UINT64 now = timeline_rdtsc();
-    return now >= g_timeline_start
-               ? (now - g_timeline_start) / g_timeline_khz
-               : 0u;
+    UINT64 cycles = now >= g_timeline_start ? now - g_timeline_start : 0u;
+    return (cycles / g_timeline_hz) * 1000u +
+           ((cycles % g_timeline_hz) * 1000u) / g_timeline_hz;
   }
 }
 

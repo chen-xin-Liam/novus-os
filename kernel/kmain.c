@@ -109,7 +109,13 @@ void kputs_hex(UINT64 v) {
 }
 
 static UINT64 g_timeline_start;
-static UINT64 g_timeline_khz;
+static UINT64 g_timeline_hz;
+
+#define PM_TIMER_PORT    0x608u
+#define PM_TIMER_MASK    0x00FFFFFFu
+#define PM_TIMER_TARGET  200000u
+#define PM_TIMER_SPINS   20000000u
+#define PM_TIMER_HZ      3579545ULL
 
 static UINT64 timeline_rdtsc(void) {
   UINT32 lo = 0;
@@ -118,52 +124,98 @@ static UINT64 timeline_rdtsc(void) {
   return ((UINT64)hi << 32) | (UINT64)lo;
 }
 
+static UINT64 timeline_pm_timer_hz(void) {
+  UINT32 p0 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+  UINT32 p1 = p0;
+  UINT32 delta = 0;
+  UINT32 spins;
+  UINT64 tsc0;
+  UINT64 tsc1;
+
+  __asm__ volatile("lfence" : : : "memory");
+  tsc0 = timeline_rdtsc();
+  for (spins = 0; spins < PM_TIMER_SPINS; spins++) {
+    p1 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+    delta = (p1 - p0) & PM_TIMER_MASK;
+    if (delta >= PM_TIMER_TARGET) {
+      break;
+    }
+    __asm__ volatile("pause");
+  }
+  if (spins == PM_TIMER_SPINS || delta == 0u) {
+    return 0u;
+  }
+  __asm__ volatile("lfence" : : : "memory");
+  tsc1 = timeline_rdtsc();
+  if (tsc1 <= tsc0) {
+    return 0u;
+  }
+  return ((tsc1 - tsc0) * PM_TIMER_HZ) / delta;
+}
+
+static UINT64 timeline_probe_hz(void) {
+  UINT32 max_leaf = 0, a = 0, b = 0, c = 0, d = 0;
+
+  cpuid(0u, 0u, &max_leaf, &b, &c, &d);
+  if (max_leaf >= 0x15u) {
+    cpuid(0x15u, 0u, &a, &b, &c, &d);
+    if (a != 0u && b != 0u && c != 0u) {
+      return ((UINT64)b * (UINT64)c) / a;
+    }
+  }
+  if (max_leaf >= 0x16u) {
+    cpuid(0x16u, 0u, &a, &b, &c, &d);
+    if (a != 0u) {
+      return (UINT64)a * 1000000ULL;
+    }
+  }
+  return timeline_pm_timer_hz();
+}
+
 void novus_timeline(const char *stage) {
-  UINT32 a = 0, b = 0, c = 0, d = 0;
-  UINT64 ms;
-  char buf[32];
+  UINT64 elapsed;
+  UINT64 value;
+  int has_frequency;
+  char buf[64];
   UINTN i = 0;
   UINTN j;
   char rev[20];
 
   if (g_timeline_start == 0u) {
     g_timeline_start = timeline_rdtsc();
-    cpuid(0u, 0u, &a, &b, &c, &d);
-    if (a >= 0x15u) {
-      UINT32 ea = 0, eb = 0, ec = 0;
-      cpuid(0x15u, 0u, &ea, &eb, &ec, &d);
-      if (ea != 0u && eb != 0u && ec != 0u) {
-        g_timeline_khz = ((UINT64)eb * (UINT64)ec) / ((UINT64)ea * 1000u);
-      }
-    }
-    if (g_timeline_khz == 0u && a >= 0x16u) {
-      UINT32 mhz = 0;
-      cpuid(0x16u, 0u, &mhz, &b, &c, &d);
-      g_timeline_khz = (UINT64)mhz * 1000u;
-    }
+    g_timeline_hz = timeline_probe_hz();
   }
 
-  if (g_timeline_khz != 0u) {
+  {
     UINT64 now = timeline_rdtsc();
-    ms = now >= g_timeline_start
-             ? (now - g_timeline_start) / g_timeline_khz
-             : 0u;
-  } else {
-    ms = sched_ticks() * 10u;
+    elapsed = now >= g_timeline_start ? now - g_timeline_start : 0u;
   }
+  has_frequency = g_timeline_hz != 0u;
+  value = has_frequency
+              ? (elapsed / g_timeline_hz) * 1000u +
+                    ((elapsed % g_timeline_hz) * 1000u) / g_timeline_hz
+              : elapsed;
 
   kputs("[T] +");
   do {
-    rev[i++] = (char)('0' + (char)(ms % 10u));
-    ms /= 10u;
-  } while (ms != 0u && i < sizeof(rev));
+    rev[i++] = (char)('0' + (char)(value % 10u));
+    value /= 10u;
+  } while (value != 0u && i < sizeof(rev));
   j = 0;
   while (i > 0u) {
     buf[j++] = rev[--i];
   }
-  buf[j++] = 'm';
-  buf[j++] = 's';
-  buf[j++] = ' ';
+  if (has_frequency) {
+    buf[j++] = 'm';
+    buf[j++] = 's';
+    buf[j++] = ' ';
+  } else {
+    const char unknown[] = "cyc (tsc hz unknown) ";
+    UINTN k;
+    for (k = 0; unknown[k] != '\0'; k++) {
+      buf[j++] = unknown[k];
+    }
+  }
   if (stage != 0) {
     while (*stage != '\0' && j + 1u < sizeof(buf)) {
       buf[j++] = *stage++;
