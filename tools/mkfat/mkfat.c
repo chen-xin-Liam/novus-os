@@ -17,8 +17,13 @@
  * FATs, no long file names. Every file the ESP carries is addressed by
  * its 8.3 name.
  *
+ * The size argument is in MiB and may be fractional (rounded down to a
+ * whole 512-byte sector). Keep it strictly below 32 MiB when the image is
+ * used as an El Torito boot image: the catalog's sector-count field is
+ * 16 bits in 512-byte units.
+ *
  * Usage:
- *   mkfat <out.img> <size-mb> <src>:<dest> [<src>:<dest> ...]
+ *   mkfat <out.img> <size-mib> <src>:<dest> [<src>:<dest> ...]
  */
 
 #include <stdio.h>
@@ -803,20 +808,23 @@ static void seed_layout(void) {
 /* ------------------------------------------------------------------ */
 
 int main(int argc, char **argv) {
-  int          size_mb;
+  double       size_mib;
   FILE        *out;
   size_t       i;
 
   if (argc < 4) {
-    fprintf(stderr, "usage: mkfat <out.img> <size-mb> <src>:<dest> ...\n");
+    fprintf(stderr, "usage: mkfat <out.img> <size-mib> <src>:<dest> ...\n");
     return 2;
   }
 
-  size_mb = atoi(argv[2]);
-  if (size_mb <= 0 || size_mb > 4096) {
-    die("size-mb must be between 1 and 4096");
+  size_mib = atof(argv[2]);
+  if (!(size_mib > 0.0 && size_mib <= 4096.0)) {
+    die("size-mib must be between 0 and 4096");
   }
-  image_bytes = (uint64_t)size_mb * 1024u * 1024u;
+  image_bytes = (uint64_t)(size_mib * 1024.0 * 1024.0 + 0.5);
+  if (image_bytes < SECTOR_SIZE) {
+    die("size-mib too small for one sector");
+  }
   total_sectors = image_bytes / SECTOR_SIZE;
 
   image = (uint8_t *)calloc(1, (size_t)image_bytes);
@@ -898,8 +906,8 @@ int main(int argc, char **argv) {
     die("cannot close output file");
   }
 
-  printf("mkfat: wrote %s (%lu MiB, %u clusters, FAT%d)\n",
-         argv[1], (unsigned long)(image_bytes / (1024u * 1024u)),
+  printf("mkfat: wrote %s (%.2f MiB, %u clusters, FAT%d)\n",
+         argv[1], (double)image_bytes / (1024.0 * 1024.0),
          cluster_count, fat_type);
   return 0;
 }

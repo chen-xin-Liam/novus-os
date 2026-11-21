@@ -153,7 +153,7 @@ make iso-force             # 无条件重建 ISO
 | `HOSTCFLAGS` | `-O2 -std=c11 -Wall -Wextra -D_GNU_SOURCE` | 主机工具编译参数 |
 | `SYS_SIZE_MB` | `8` | NovusFS 系统镜像 |
 | `ESP_TPL_SIZE_MB` | `16` | 安装模板 ESP |
-| `ESP_SIZE_MB` | `31` | live ESP |
+| `ESP_SIZE_MB` | `31.5` | live ESP（支持小数 MiB） |
 | `DISK_SIZE_MB` | `64` | 完整磁盘镜像 |
 | `NKM_SEED` | 固定种子 | 测试密钥种子；随意更换会导致与内核内嵌公钥不匹配 |
 | `DEVICE` | 无 | `make install` 的目标，必须显式提供 |
@@ -168,12 +168,12 @@ make iso-force             # 无条件重建 ISO
 | `out/apps/<name>.bin` | 内置应用扁平镜像，`xxd` 后生成 `k_app_<name>` 符号 |
 | `out/novus.img` | 8 MiB NovusFS 系统镜像，含 `/Novus/fonts/font.bin` |
 | `out/esp-tpl.img` | 16 MiB 安装模板 FAT ESP |
-| `out/esp.img` | 31 MiB live FAT ESP |
+| `out/esp.img` | 31.5 MiB live FAT ESP |
 | `out/novus-live.iso` | ISO 9660 + Joliet + El Torito + isohybrid |
 | `out/novus-disk.img` | 默认 64 MiB，GPT + ESP + NovusFS |
 | `out/qemu-smoke*` | QEMU 冒烟截图、串口日志、结果 JSON |
 
-El Torito 的 sector count 只有 16 位、单位 512 字节，因此启动项必须严格小于 32 MiB；live ESP 取 31 MiB 是安全余量。FAT ESP 只支持 8.3 短名，镜像内资源命名必须遵守。构建产物位于 `build/`、`out/`、`esp/` 和各处 `target/`，不得提交。
+El Torito 的 sector count 只有 16 位、单位 512 字节，因此启动项必须严格小于 32 MiB；live ESP 取 31.5 MiB 是安全余量（`mkfat` 的 size 参数支持小数 MiB）。FAT ESP 只支持 8.3 短名，镜像内资源命名必须遵守。构建产物位于 `build/`、`out/`、`esp/` 和各处 `target/`，不得提交。
 
 ---
 

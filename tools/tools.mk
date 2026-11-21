@@ -66,13 +66,16 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # ---------------------------------------------------------------------------
 # Images
 # ---------------------------------------------------------------------------
-# Sizes in MiB. The live ESP carries, on top of the boot files, a copy of
+# Sizes in MiB (fractional values are allowed; mkfat rounds down to a whole
+# 512-byte sector). The live ESP carries, on top of the boot files, a copy of
 # itself (NOVUS/ESP.IMG) that the installer writes to a target disk, so
 # it is necessarily the largest of the three images.
-# mkfat now picks FAT16 for small images, so the install template can
-# stay well under the 32 MiB limit imposed by the El Torito hard-disk
-# emulation sector-count field. The live ESP is only slightly larger
-# because it also carries the template.
+# mkfat now picks FAT16 for small images, so both images stay inside the
+# 32 MiB limit imposed by the El Torito sector-count field: that field is
+# 16 bits in 512-byte units, so exactly 32 MiB would wrap to zero and fail
+# mkiso's catalog check. The live ESP also carries the signed test module
+# and the demo NUC, which pushed 31 MiB past what the FAT and the 512-byte
+# cluster rounding can hold; 31.5 MiB leaves headroom without crossing it.
 #
 # Both images also carry the wallpaper package (WPAPERS.PKG, about
 # 3.7 MiB), which is what keeps the photos out of the loader: the boot stage
@@ -81,7 +84,7 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # the template - so it is the term that sets these two numbers.
 SYS_SIZE_MB     ?= 8
 ESP_TPL_SIZE_MB ?= 16
-ESP_SIZE_MB     ?= 31
+ESP_SIZE_MB     ?= 31.5
 
 ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
