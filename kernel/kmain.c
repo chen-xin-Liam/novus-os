@@ -224,6 +224,10 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 #endif
 
   kputs("Novus OS M1 - A-core (BSP) kernel stage\n");
+  /* Which build this is, in the log itself. Every diagnosis so far has
+   * started by guessing from a photo whether the running image was the one
+   * just built; a timestamp ends that. */
+  kputs("[BOOT] kernel built " __DATE__ " " __TIME__ " rev 33\n");
 
   /* From here until sched_init() installed one, a fault was a triple fault:
    * no IDT meant the CPU reset, and a machine that reboots mid-boot looks
