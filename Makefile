@@ -42,6 +42,7 @@ CROSS ?= x86_64-w64-mingw32-
 CC := $(CROSS)gcc
 CXX := $(CROSS)g++
 OBJCOPY := $(CROSS)objcopy
+WINDRES := $(CROSS)windres
 
 # Fail early with a clear message when the cross compiler is missing.
 ifeq ($(shell command -v $(CC) 2>/dev/null),)
@@ -516,7 +517,7 @@ $(WIN32_BLOB_H): $(WIN32_BINS) | build
 # object and the linker puts it in the image, which is how a Windows program
 # gets its strings and menus out of itself.
 out/win32/resdemo.res.o: user/win32compat/samples/resdemo.rc | out
-	windres -I user/win32compat/samples -i $< -o $@
+	$(WINDRES) -I user/win32compat/samples -i $< -o $@
 
 out/win32/resdemo.exe: user/win32compat/samples/resdemo.c out/win32/resdemo.res.o | out
 	$(CC) -O2 -ffreestanding -fno-stack-protector \
