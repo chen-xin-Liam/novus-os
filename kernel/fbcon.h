@@ -27,14 +27,10 @@
  * firmware's own mapping. */
 int fbcon_begin(void);
 
-/* Stop drawing while mm_init() swaps CR3. A framebuffer above 4 GiB is
- * reachable through the firmware mapping and not through the kernel's, so
- * the alias has to be dropped and re-made rather than kept. */
-void fbcon_before_mm(void);
-
-/* Re-map the framebuffer through mm_map_phys() and start drawing again.
- * Returns 1 when the console is live after the call. */
-int fbcon_after_mm(void);
+/* The console needs no pause around mm_init(): mm_init() keeps the
+ * framebuffer identity-mapped, uncached, before it switches CR3, so the
+ * raw physical pointer this console draws through stays valid and the log
+ * keeps scrolling across the switch. */
 
 /* Give the screen back: everything from here is the desktop's. */
 void fbcon_end(void);

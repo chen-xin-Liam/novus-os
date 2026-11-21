@@ -204,33 +204,12 @@ int fbcon_begin(void) {
   return 1;
 }
 
-void fbcon_before_mm(void) {
-  /* mm_init() replaces the page tables with its own: low 4 GiB gets a
-   * write-back identity map and the framebuffer's MMIO does not survive
-   * unless it happens to sit below 4 GiB, where it arrives cacheable and
-   * therefore invisible until someone flushes. Either way the alias this
-   * console was using is no longer the one to draw through, so it stops
-   * here and picks the mapping up again after the switch. */
-  g_fb.state = 0u;
-}
-
-int fbcon_after_mm(void) {
-  void *base;
-
-  if (g_fb.wanted == 0u || g_fb.phys == 0u) {
-    return 0;
-  }
-  base = mm_map_phys(g_fb.phys, g_fb.size, MM_MAP_WC);
-  if (base == 0) {
-    g_fb.px = 0;
-    return 0;
-  }
-  /* mm_map_phys() rounds the physical base down to a 2 MiB boundary; put
-   * the pointer back on the first real pixel. */
-  g_fb.px = (UINT32 *)((UINT8 *)base + (g_fb.phys & 0x1FFFFFULL));
-  g_fb.state = 1u;
-  return 1;
-}
+/* Nothing to do around mm_init() any more: the console draws through the
+ * framebuffer's own physical address, and mm_init() keeps that range
+ * identity-mapped uncached before it switches CR3 (see the framebuffer
+ * identity-map step there). The console therefore stays live straight
+ * through the switch, which is the whole point: a machine that faults or
+ * hangs inside mm_init() now prints it instead of going dark. */
 
 void fbcon_end(void) {
   g_fb.state = 0u;

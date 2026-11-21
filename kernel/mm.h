@@ -24,8 +24,13 @@ void mm_heap_unmap(UINT64 offset, UINT32 pages);
 
 /* Build the page-table hierarchy (identity map of the low 4 GiB through
  * PML4[0] plus the direct physical map of [0, ram_top_bytes) through
- * PML4[256]), switch CR3 and run the physmap read-back selftest. */
-void mm_init(UINT64 ram_top_bytes);
+ * PML4[256]), switch CR3 and run the physmap read-back selftest.
+ *
+ * [fb_phys, fb_phys + fb_size) - zero when there is no captured scanout -
+ * is identity-mapped uncached on the way, so the boot text console, which
+ * draws through the framebuffer's physical address, keeps working across
+ * the CR3 switch instead of having to go dark inside this function. */
+void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size);
 
 /* Current CR3 value, read with inline assembly. */
 UINT64 mm_get_cr3(void);

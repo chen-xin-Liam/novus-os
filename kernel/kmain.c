@@ -262,17 +262,27 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   pmm_init(mmap_addr, map_size, desc_size);
   pmm_selftest();
 
-  /* Build the page tables, switch CR3 (identity low 4 GiB + physmap). The
-   * text console draws through the firmware's mapping until that happens;
-   * it drops the alias for the switch and remaps the framebuffer after it,
-   * because a scanout above 4 GiB is not part of the new identity map. */
+  /* Build the page tables and switch CR3 (identity low 4 GiB + physmap).
+   * The captured scanout goes with it: a framebuffer above 4 GiB is not
+   * part of the identity map, and the text console draws through a raw
+   * physical pointer, so mm_init() maps that range itself (uncached) before
+   * the switch. Without that the console has to stop drawing for the
+   * duration of mm_init() - and a machine that dies in there then dies with
+   * nothing on screen, which is precisely how this boot used to fail. */
+  {
+    UINT64 fb_phys = 0u;
+    UINT64 fb_size = 0u;
 #if CONFIG_NOVUS_DISPLAY
-  fbcon_before_mm();
+    {
+      const nd_display_t *dd = nd_display();
+      if (dd != 0) {
+        fb_phys = dd->fb_phys;
+        fb_size = dd->fb_size;
+      }
+    }
 #endif
-  mm_init(pmm_ram_top());
-#if CONFIG_NOVUS_DISPLAY
-  (void)fbcon_after_mm();
-#endif
+    mm_init(pmm_ram_top(), fb_phys, fb_size);
+  }
   mm_selftest();
 
   heap_init();
