@@ -28,6 +28,7 @@
 
 #include "bootio.h"
 #include "uefi.h"
+#include "cpu.h"      /* cpuid: the boot stage clock reads the TSC ratio */
 #include "kernel.h"
 #include "nd.h"
 #include "shared_mem.h"
@@ -812,7 +813,7 @@ static int fat32_try_lba(blkdev_t *d, INT64 base, const CHAR16 *path,
   if (fat32_parse_volume(ctx, bpb) != 0) {
     return -1;
   }
-  if (fat32_find_root(ctx, path, &clus, &size) != 0) {
+  if (path != NULL && fat32_find_root(ctx, path, &clus, &size) != 0) {
     return -1;
   }
   return 0;
@@ -866,6 +867,27 @@ static int fat32_scan_device(blkdev_t *d, const CHAR16 *path,
       if (fat32_try_lba(d, (INT64)start, path, ctx) == 0) {
         return 0;
       }
+    }
+  }
+  /* 2b) GPT: the boot ESP is one of the partitions in the primary table.
+   * Reading it is a header plus one entry array - a few hundred sectors -
+   * while the sweep below costs one transfer per sector. On firmware that
+   * moves 512 bytes per call the sweep is tens of thousands of transfers
+   * (a minute or more on a USB stick), and it used to run for *every*
+   * esp_read() whose file did not exist, because a volume that is valid
+   * but lacks the file simply continued the sweep. */
+  {
+    gpt_table_t t;
+    if (gpt_read(d, &t) == 0) {
+      UINTN k;
+      for (k = 0; k < t.count; k++) {
+        if (fat32_try_lba(d, (INT64)t.part[k].first_sector, path, ctx) == 0) {
+          return 0;
+        }
+      }
+      /* The table lists the whole disk: a FAT volume outside it does not
+       * exist, so there is nothing left to sweep for. */
+      return -1;
     }
   }
   /* 3) Brute-force scan (slow) for media where LBA 0 is neither a FAT volume
@@ -944,6 +966,40 @@ static void fat32_close(fat32_ctx_t *ctx) {
  * firmware's Block I/O transfer limit accepts it. */
 #define FAT32_MAX_RUN_SECTORS 512u /* 256 KiB per Block I/O call */
 
+/* The live ESP cannot change while the boot stage runs, so the volume is
+ * located once and kept open for every later read.
+ *
+ * Locating it is the expensive part, not reading it: a GPT walk plus a FAT
+ * parse is a few hundred transfers, and the sweep that used to run whenever
+ * a file was missing was one transfer per sector of the device. On a
+ * firmware that moves 512 bytes per call that is minutes, and the loader
+ * reads SYSTEM.IMG, WPAPERS.PKG, DEMO.NUC and probes for INSTALL.YES, so it
+ * paid that walk once per file and once for the marker that never exists. */
+static fat32_ctx_t g_esp_vol;
+static int         g_esp_vol_state; /* 0 untried, 1 located, -1 no volume */
+
+/* Borrow the located volume. Returns -1 when there is none; the FAT buffer
+ * stays owned by the cache, so callers must not fat32_close() it. */
+static int esp_volume(fat32_ctx_t *out) {
+  if (g_esp_vol_state == 0) {
+    /* Only the volume is located here, not a file: the built-in reader
+     * resolves 8.3 names in the root directory, so a path under EFI/BOOT
+     * would never match and every read would retry the walk. A miss is
+     * not cached, so a later file gets its own attempt. */
+    if (fat32_locate_best(NULL, &g_esp_vol) == 0) {
+      g_esp_vol_state = 1;
+    } else {
+      say_line(L"[FAT] ESP volume not located yet");
+      return -1;
+    }
+  }
+  if (g_esp_vol_state < 0 || g_esp_vol.dev == NULL) {
+    return -1;
+  }
+  *out = g_esp_vol;
+  return 0;
+}
+
 static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
                          UINT64 *out_len) {
   fat32_ctx_t ctx;
@@ -952,21 +1008,19 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
   UINT8      *buf;
   UINT64      wrote;
 
-  if (fat32_locate_best(path, &ctx) != 0) {
+  if (esp_volume(&ctx) != 0) {
     say_line(L"[FAT] locate failed");
     return -1;
   }
   esp_report_route("built-in FAT reader", ctx.dev);
   if (fat32_find_root(&ctx, path, &clus, &size) != 0 || size == 0 ||
       size > (64u * 1024u * 1024u)) {
-    fat32_close(&ctx);
-    return -1;
+    return -1; /* the volume stays cached: the file may simply not exist */
   }
   /* Round the buffer up to a whole sector so the final partial-sector read
    * can never spill past the allocation. */
   buf = (UINT8 *)efi_alloc(((size + 511u) / 512u) * 512u);
   if (buf == NULL) {
-    fat32_close(&ctx);
     return -1;
   }
   {
@@ -999,7 +1053,6 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
       if (fat32_read_sectors(&ctx, fat32_cluster_lba(&ctx, run_start),
                             run_sect, buf + wrote) != 0) {
         efi_free(buf);
-        fat32_close(&ctx);
         return -1;
       }
       wrote += (UINT64)run_sect * 512u;
@@ -1007,7 +1060,7 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
     }
   }
   }
-  fat32_close(&ctx);
+  /* The volume is cached for the whole boot stage, so it is not closed. */
   *out_buf = buf;
   *out_len = size;
   esp_report_route("built-in FAT reader", ctx.dev);
@@ -1726,6 +1779,10 @@ static void menu_run(void) {
 /* Public entry points                                                 */
 /* ------------------------------------------------------------------ */
 
+/* Defined with the stage clock below; the boot stage starts the clock as
+ * early as it can. */
+static void boot_clock_init(void);
+
 void stage3_init(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
   g_image = image;
   g_st = st;
@@ -1733,6 +1790,10 @@ void stage3_init(EFI_HANDLE image, EFI_SYSTEM_TABLE *st) {
 
   /* Point NovusFS at EFI pool memory for the whole boot stage. */
   novusfs_set_allocator(efi_alloc, efi_free);
+
+  /* Start the stage clock here, before anything touches the medium, so the
+   * splash can show how long each load step really took. */
+  boot_clock_init();
 }
 
 /* One line per device, with the two facts that decide whether the rest
@@ -1803,6 +1864,93 @@ void stage3_prepare(void) {
   shm->boot_mode = SHM_BOOT_MODE_LIVE;
 }
 
+/* ------------------------------------------------------------------ */
+/* Boot stage clock                                                    */
+/* ------------------------------------------------------------------ */
+/* A laptop has no COM1, so the only evidence of where the boot spends
+ * its time is what the splash shows. Every stage label carries the
+ * seconds elapsed since the boot stage started ("挂载系统镜像 12.4s"),
+ * which is enough to tell a slow read from a slow kernel without a
+ * serial port. The clock is the TSC, whose frequency CPUID leaf 0x15
+ * reports as crystal clock x ratio; a CPU that does not report it gets
+ * no number rather than a wrong one. */
+
+static UINT64 g_tsc_start;
+static UINT64 g_tsc_khz;
+
+static UINT64 boot_rdtsc(void) {
+  UINT32 lo = 0;
+  UINT32 hi = 0;
+
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((UINT64)hi << 32) | (UINT64)lo;
+}
+
+static void boot_clock_init(void) {
+  UINT32 a = 0, b = 0, c = 0, d = 0;
+
+  g_tsc_start = boot_rdtsc();
+  cpuid(0u, 0u, &a, &b, &c, &d);
+  if (a >= 0x15u) {
+    UINT32 ea = 0, eb = 0, ec = 0;
+    cpuid(0x15u, 0u, &ea, &eb, &ec, &d);
+    if (ea != 0u && eb != 0u && ec != 0u) {
+      g_tsc_khz = ((UINT64)eb * (UINT64)ec) / ((UINT64)ea * 1000u);
+    }
+  }
+  if (g_tsc_khz == 0u && a >= 0x16u) {
+    UINT32 mhz = 0;
+    cpuid(0x16u, 0u, &mhz, &b, &c, &d); /* base frequency, MHz */
+    g_tsc_khz = (UINT64)mhz * 1000u;
+  }
+}
+
+/* Milliseconds since boot_clock_init(), 0 when the clock is unknown. */
+static UINT64 boot_ms(void) {
+  UINT64 now;
+
+  if (g_tsc_khz == 0u) {
+    return 0;
+  }
+  now = boot_rdtsc();
+  if (now < g_tsc_start) {
+    return 0;
+  }
+  return (now - g_tsc_start) / g_tsc_khz;
+}
+
+/* `nd_boot_stage` with the elapsed time appended to the label. */
+static void stage_at(UINT32 percent, const char *text) {
+  char    label[64];
+  UINT32  n = 0;
+  UINT32  i = 0;
+  UINT64  ms = boot_ms();
+  UINT32  sec = (UINT32)(ms / 1000u);
+  UINT32  tenth = (UINT32)((ms % 1000u) / 100u);
+
+  /* 34 leaves room for the longest Chinese stage name in UTF-8 plus the
+   * ` 123.4s` suffix inside SPLASH_LABEL_MAX (48). */
+  while (text[i] != '\0' && n < 34u) {
+    label[n++] = text[i++];
+  }
+  label[n++] = ' ';
+  if (sec >= 1000u) {
+    label[n++] = (char)('0' + (sec / 1000u) % 10u);
+  }
+  if (sec >= 100u) {
+    label[n++] = (char)('0' + (sec / 100u) % 10u);
+  }
+  if (sec >= 10u) {
+    label[n++] = (char)('0' + (sec / 10u) % 10u);
+  }
+  label[n++] = (char)('0' + sec % 10u);
+  label[n++] = '.';
+  label[n++] = (char)('0' + tenth);
+  label[n++] = 's';
+  label[n] = '\0';
+  nd_boot_stage(percent, label);
+}
+
 /* Everything that reads the medium: the integrity check, the signed
  * modules, the application, the wallpaper package, the live root and the
  * install ESP template. Each step advances the boot progress bar, because
@@ -1811,28 +1959,45 @@ void stage3_prepare(void) {
  * The log still goes out on COM1; the screen belongs to the splash by now,
  * so nothing here may write the firmware console. */
 void stage3_load(void) {
-  nd_boot_stage(12, "校验系统");
+  UINT32 boot_mode = shared_mem_get() != NULL ? shared_mem_get()->boot_mode
+                                              : SHM_BOOT_MODE_LIVE;
+
+  stage_at(12, "校验系统");
 #if CONFIG_NOVUS_MERKLE
-  (VOID)syspart_verify();
+  /* Verify the NovusFS partition only for the installer, which is about to
+   * write over a disk and wants to know what is on it. A live boot mounts
+   * SYSTEM.IMG from the ESP and never touches that partition, and the
+   * kernel verifies that image from RAM after mount - so re-reading the
+   * whole partition through firmware Block I/O here is pure boot latency.
+   * On a USB stick with a firmware that moves one sector per call it was
+   * minutes. Menu option 1 still runs the full check on demand. */
+  if (boot_mode == SHM_BOOT_MODE_INSTALL) {
+    (VOID)syspart_verify();
+  } else {
+    say_line(L"[MRKL] live boot: partition check skipped (option 1 runs it)");
+    if (shared_mem_get() != NULL) {
+      shared_mem_get()->merkle_status = SHM_MERKLE_UNKNOWN;
+    }
+  }
 #endif
 
 #if CONFIG_NOVUS_NKM
-  nd_boot_stage(26, "加载内核模块");
+  stage_at(26, "加载内核模块");
   modules_load();
 #endif
 
   /* M4: stage the NUC application next to the module. */
-  nd_boot_stage(38, "加载应用程序");
+  stage_at(38, "加载应用程序");
   app_load();
 
   /* The photo package: one file, same staging path as everything else. */
-  nd_boot_stage(50, "加载壁纸");
+  stage_at(50, "加载壁纸");
   wpkg_load();
 
   /* Live root: adopt the NovusFS image off the ESP into reserved pages.
    * Without it the kernel has no filesystem at all, so a failure here is
    * worth saying loudly - but it is still not fatal. */
-  nd_boot_stage(64, "挂载系统镜像");
+  stage_at(64, "挂载系统镜像");
   if (esp_read_reserved(L"SYSTEM.IMG", &g_live_base, &g_live_size) ==
       0) {
     say(L"[BOOT] live root: ");
@@ -1850,7 +2015,7 @@ void stage3_load(void) {
    * its template has to come off the live medium while the firmware file
    * protocol still exists. Without it the graphical installer still runs
    * and says so, instead of failing halfway through a disk. */
-  nd_boot_stage(78, "准备安装介质");
+  stage_at(78, "准备安装介质");
   if (esp_read_reserved(L"ESP.IMG", &g_esp_tpl_base, &g_esp_tpl_size) == 0) {
     say(L"[BOOT] install ESP template: ");
     boot_put_dec(g_esp_tpl_size / 1024u);
