@@ -28,6 +28,20 @@
 #define ND_MOD_CTRL  0x02u
 #define ND_MOD_ALT   0x04u
 
+/* Input source tags for same-frame arbitration. USB devices use
+ * ND_INPUT_SRC_USB + their device index, so two real mice keep separate
+ * identities: only movement duplicated inside one nd_input_poll() frame is
+ * suppressed, not the second mouse's own movement on later frames. */
+#define ND_INPUT_SRC_OTHER      0u
+#define ND_INPUT_SRC_PS2_MOUSE  1u
+#define ND_INPUT_SRC_PS2_KBD    2u
+#define ND_INPUT_SRC_VMWARE     3u
+#define ND_INPUT_SRC_TOUCHPAD   4u
+#define ND_INPUT_SRC_USB        8u
+/* USB indices run to USB_MAX_DEVICES-1 (16), so reserve room for
+ * ND_INPUT_SRC_USB + 15 plus a spare slot for the legacy source. */
+#define ND_INPUT_SRC_COUNT      32u
+
 /* Text keys carry their Unicode codepoint (0..0x10FFFF) in `key`. Keys that
  * are not text live above the Unicode range, so a codepoint can never be
  * mistaken for a control key. */
@@ -65,10 +79,25 @@ void nd_input_push(const nd_event_t *ev);
 
 void nd_input_mouse(INT32 *x, INT32 *y, UINT8 *buttons);
 
-/* Feed a relative mouse update from an external source (USB HID). `buttons`
- * is the ND_BUTTON_* mask; dy is positive downwards. Applies the same clamping
- * and button-edge detection as the PS/2 path, so USB and PS/2 mice share one
- * queue. `dx`/`dy` are the per-sample deltas (already sign-applied). */
+/* Feed a mouse update from an external source (USB HID, touchpad, ...).
+ * `buttons` is the ND_BUTTON_* mask; dy is positive downwards. `absolute`
+ * means dx/dy were computed from a device-reported position: absolute
+ * sources are applied at once and are never arbitrated away. Relative
+ * samples are held until the end of the current nd_input_poll() frame, where
+ * the source with the newest event timestamp wins; the rest are counted as
+ * suppressed. All in-tree sources feed from inside nd_input_poll(). */
+void nd_input_feed_mouse_src(UINT8 src, INT32 dx, INT32 dy, UINT8 buttons,
+                             int absolute);
+
+/* Source-aware key feed. Two sources reporting the same key in one frame
+ * produce one event; one source repeating a key keeps its old behaviour. */
+void nd_input_feed_key(UINT8 src, UINT32 key, UINT8 mods);
+
+/* Compatibility wrapper: feeds from an unlabelled source. */
 void nd_input_feed_mouse(INT32 dx, INT32 dy, UINT8 buttons);
+
+/* Cumulative counts of suppressed MOUSE_MOVE / KEY events, for the log and
+ * for tests. */
+void nd_input_arbitration_stats(UINT32 *moves, UINT32 *keys);
 
 #endif /* NOVUS_ND_INPUT_H */

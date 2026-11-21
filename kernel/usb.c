@@ -153,6 +153,7 @@ typedef struct usb_dev {
   UINT8   hid_prev_buttons;
   UINT8   hid_pending; /* 1 while an interrupt transfer is outstanding */
   UINT8   hid_caps;    /* caps-lock toggle */
+  hid_kbd_led_t hid_kbd_led; /* current keyboard LED state: Num/Caps/Scroll */
 } usb_t;
 
 /* One registered USB disk may be a LUN on a multi-LUN device, or a device on a
@@ -176,6 +177,13 @@ typedef struct {
 #define USB_MAX_CONTROLLERS 8u
 #define USB_MAX_DEVICES    16u
 #define USB_MAX_DISKS      16u
+
+/* Keyboard LED bitmap: bit 0 = Num Lock, bit 1 = Caps Lock, bit 2 = Scroll
+ * Lock.  A boot-protocol keyboard mirrors these in its status-byte report so
+ * SET_REPORT and GET_REPORT must agree or we lose sync. */
+#define HID_KBD_LED_NUM_LOCK        (1u << 0)
+#define HID_KBD_LED_CAPS_LOCK       (1u << 1)
+#define HID_KBD_LED_SCROLL_LOCK     (1u << 2)
 
 static xhci_t g_hc[USB_MAX_CONTROLLERS];
 static usb_t  g_dev[USB_MAX_DEVICES];
@@ -966,6 +974,75 @@ static int hid_set_protocol(usb_t *u) {
   return control_xfer(u, setup, NULL, 0, 0);
 }
 
+/* SET_REPORT type = 0x02 (OUTPUT) to program the keyboard LEDs.
+ * Returns 0 on success.  We tolerate failure because legacy keyboards often
+ * ignore this request, and we must not treat an ignored LED command as fatal. */
+static int hid_set_leds(usb_t *u, UINT8 value) {
+  UINT8 setup[8];
+  memset(setup, 0, sizeof(setup));
+  setup[0] = 0x21;   /* host-to-device, class, interface */
+  setup[1] = 0x09;   /* SET_REPORT */
+  setup[2] = 0x02;   /* report type = OUTPUT */
+  setup[3] = 0;      /* report id = 0 for boot keyboard */
+  setup[4] = u->iface;
+  setup[6] = 1;      /* wLength */
+  memcpy(u->hc->data, &value, 1);
+  return control_xfer(u, setup, NULL, 0, 0);
+}
+
+/* GET_REPORT type = 0x01 (INPUT) to read back the current LED state from the
+ * keyboard so our software copy stays in sync.  Returns 0 on success. */
+static int hid_get_led_report(usb_t *u, UINT8 *out) {
+  UINT8 setup[8];
+  memset(setup, 0, sizeof(setup));
+  setup[0] = 0xA1;   /* device-to-host, class, interface */
+  setup[1] = 0x01;   /* GET_REPORT */
+  setup[2] = 0x01;   /* report type = INPUT */
+  setup[3] = 0;      /* report id */
+  setup[4] = u->iface;
+  setup[6] = 1;
+  return control_xfer(u, setup, out, 1, 1);
+}
+
+/* Synchronise the OS-side LED state to the keyboard hardware.  The first call
+ * may fail if the keyboard has not yet received a valid key press (see the
+ * SET_REPORT error rollback below); subsequent calls are best-effort. */
+static void kbd_sync_leds(usb_t *u) {
+  UINT8 val = 0;
+
+  if ((u->hid_kbd_led.num_lock    & 1u) != 0u) val |= HID_KBD_LED_NUM_LOCK;
+  if ((u->hid_kbd_led.cap_lock    & 1u) != 0u) val |= HID_KBD_LED_CAPS_LOCK;
+  if ((u->hid_kbd_led.scroll_lock & 1u) != 0u) val |= HID_KBD_LED_SCROLL_LOCK;
+  (void)hid_set_leds(u, val);
+}
+
+int hid_kbd_set_leds(hid_kbd_led_t *led) {
+  UINTN d;
+  for (d = 0; d < g_ndev; d++) {
+    usb_t *u = &g_dev[d];
+    if (u->kind != USB_KIND_HID || u->hid_kind != USB_HID_KEYBOARD) {
+      continue;
+    }
+    if (led != NULL) {
+      u->hid_kbd_led.num_lock    = led->num_lock;
+      u->hid_kbd_led.cap_lock    = led->cap_lock;
+      u->hid_kbd_led.scroll_lock = led->scroll_lock;
+    }
+    kbd_sync_leds(u);
+    /* Read back the INPUT report so the next poll will set caps lock
+     * correctly even when the bootloader never sent one. */
+    {
+      UINT8 rep = 0;
+      if (hid_get_led_report(u, &rep) == 0) {
+        u->hid_kbd_led.num_lock    = (UINT8)((rep >> 0) & 1u);
+        u->hid_kbd_led.cap_lock    = (UINT8)((rep >> 1) & 1u);
+        u->hid_kbd_led.scroll_lock = (UINT8)((rep >> 2) & 1u);
+      }
+    }
+  }
+  return 0;
+}
+
 /* Ask the device for its own report descriptor and build a layout from it.
  * This is the part that adapts to different mice: a device that reports
  * extra buttons, a wheel, or absolute coordinates describes all of that
@@ -1040,7 +1117,10 @@ static int hid_configure(usb_t *u) {
 }
 
 /* How many bytes to ask for on the interrupt endpoint: the generic layout
- * knows its own report length, the boot layouts are fixed by the HID spec. */
+ * knows its own report length, the boot layouts are fixed by the HID spec.
+ * Boot mouse reports are exactly 3 bytes (buttons + dx + dy); overflow bits
+ * reported in a 4th byte are discarded per the HID spec §7.2 since we do not
+ * track them. */
 static UINT16 hid_report_len(const usb_t *u) {
   if (u->hid_generic != 0u) {
     UINT32 bytes = hid_report_bytes(&u->hid_layout);
@@ -1049,7 +1129,7 @@ static UINT16 hid_report_len(const usb_t *u) {
       return (UINT16)bytes;
     }
   }
-  return (u->hid_kind == USB_HID_KEYBOARD) ? 8u : 4u;
+  return (u->hid_kind == USB_HID_KEYBOARD) ? 8u : 3u;
 }
 
 /* Submit one interrupt IN transfer and leave it outstanding; the device
@@ -1077,7 +1157,7 @@ static int hid_intr_submit(usb_t *u) {
   return 0;
 }
 
-static void hid_decode_keyboard(usb_t *u) {
+static void hid_decode_keyboard(usb_t *u, UINT8 src) {
   UINT8 mods = 0;
   int k;
   int i;
@@ -1085,14 +1165,11 @@ static void hid_decode_keyboard(usb_t *u) {
   int shift = ((rep[0] & 0x22u) != 0u); /* L/R Shift */
   int ctrl  = ((rep[0] & 0x11u) != 0u); /* L/R Ctrl  */
   int alt   = ((rep[0] & 0x44u) != 0u); /* L/R Alt   */
-  INT32 mx = 0;
-  INT32 my = 0;
 
   if (shift) { mods |= ND_MOD_SHIFT; }
   if (ctrl)  { mods |= ND_MOD_CTRL; }
   if (alt)   { mods |= ND_MOD_ALT; }
 
-  nd_input_mouse(&mx, &my, NULL);
   for (k = 2; k < 8; k++) {
     UINT8 code = rep[k];
 
@@ -1109,19 +1186,13 @@ static void hid_decode_keyboard(usb_t *u) {
     }
     if (code == 0x39u) { /* Caps Lock: toggle on press */
       u->hid_caps ^= 1u;
+      kbd_sync_leds(u);
     } else {
       UINT32 key = hid_key(code, mods, u->hid_caps);
 
       if (key != 0u) {
-        nd_event_t ev;
-
-        memset(&ev, 0, sizeof(ev));
-        ev.type = ND_EV_KEY;
-        ev.key = key;
-        ev.mods = mods;
-        ev.x = (INT16)mx;
-        ev.y = (INT16)my;
-        nd_input_push(&ev);
+        /* Same key from a second keyboard in this frame is one keystroke. */
+        nd_input_feed_key(src, key, mods);
       }
     }
   }
@@ -1130,7 +1201,7 @@ static void hid_decode_keyboard(usb_t *u) {
   }
 }
 
-static void hid_decode_mouse(usb_t *u) {
+static void hid_decode_mouse(usb_t *u, UINT8 src) {
   const UINT8 *rep = u->hid_report;
   UINT8 buttons;
   INT32 dx = 0;
@@ -1161,10 +1232,10 @@ static void hid_decode_mouse(usb_t *u) {
                           (UINT64)(h - 1)) / u->hid_layout.y_range);
 
       nd_input_mouse(&mx, &my, NULL);
-      nd_input_feed_mouse(tx - mx, ty - my, buttons);
+      nd_input_feed_mouse_src(src, tx - mx, ty - my, buttons, 1);
       return;
     }
-    nd_input_feed_mouse(dx, dy, buttons);
+    nd_input_feed_mouse_src(src, dx, dy, buttons, 0);
     if (wheel != 0) {
       nd_event_t ev;
 
@@ -1180,18 +1251,12 @@ static void hid_decode_mouse(usb_t *u) {
   dx = (INT32)(INT8)rep[1];
   dy = (INT32)(INT8)rep[2];
 
-  /* Movement and button edges go through the shared feed path; a wheel
-   * delta (byte 3, present on wheel mice) is a separate wheel event. */
+  /* Boot-protocol mouse reports are exactly 3 bytes (buttons, dx, dy).
+   * The HID spec §7.2 mentions an optional overflow byte; we discard it
+   * because this kernel has no state to propagate overflow back into.
+   * A wheel event must NOT be synthesised from byte 3 on a 3-byte report. */
   u->hid_prev_buttons = buttons;
-  nd_input_feed_mouse(dx, dy, buttons);
-  if (rep[1] == 0 && rep[2] == 0 && rep[3] != 0) {
-    nd_event_t ev;
-
-    memset(&ev, 0, sizeof(ev));
-    ev.type = ND_EV_WHEEL;
-    ev.dy = (INT16)(INT8)rep[3];
-    nd_input_push(&ev);
-  }
+  nd_input_feed_mouse_src(src, dx, dy, buttons, 0);
 }
 
 /* Called from the input tick. Collect a completed HID report (from the deferral
@@ -1238,10 +1303,22 @@ void usb_hid_poll(void) {
         memset(u->hid_report, 0, sizeof(u->hid_report));
         memcpy(u->hid_report, u->hid_buf, done);
         u->hid_last_len = (UINT8)done;
+        /* Boot-protocol keyboards: byte 0 is the LED indicator status.
+         * 0x00 = reserved / no information; 0x01 = SET_REPORT rolled back,
+         * meaning our software copy may be stale — read back the real state
+         * before decoding so the next poll starts from the true baseline. */
+        if (u->hid_kind == USB_HID_KEYBOARD && u->hid_report[0] == 0x01u) {
+          UINT8 rep = 0;
+          (void)hid_get_led_report(u, &rep);
+          u->hid_kbd_led.num_lock    = (UINT8)((rep >> 0) & 1u);
+          u->hid_kbd_led.cap_lock    = (UINT8)((rep >> 1) & 1u);
+          u->hid_kbd_led.scroll_lock = (UINT8)((rep >> 2) & 1u);
+        }
+        /* Device index keeps two physical HID mice as two sources. */
         if (u->hid_kind == USB_HID_KEYBOARD) {
-          hid_decode_keyboard(u);
+          hid_decode_keyboard(u, (UINT8)(ND_INPUT_SRC_USB + d));
         } else {
-          hid_decode_mouse(u);
+          hid_decode_mouse(u, (UINT8)(ND_INPUT_SRC_USB + d));
         }
       }
       u->hid_pending = 0u;
@@ -1252,7 +1329,7 @@ void usb_hid_poll(void) {
   }
 }
 
-static int attach_device(usb_t *u, UINT32 port, UINT32 speed) {
+static int attach_base(usb_t *u, UINT32 port, UINT32 speed) {
   UINT32 slot_out = 0;
   UINT8  buf[256];
   UINT8  setup[8];
@@ -1306,39 +1383,42 @@ static int attach_device(usb_t *u, UINT32 port, UINT32 speed) {
   if (rc != 0) {
     return -1;
   }
+  return 0;
+}
 
-  if (u->kind == USB_KIND_HID) {
-    /* The descriptor goes first: it is the only source that says whether
-     * this interface is a pointer, and what its reports look like. */
-    (void)hid_read_descriptor(u);
-    if (u->hid_kind == 0u) {
-      kputs("[USB] HID interface ignored (no pointer or keyboard)\n");
-      return -1;
-    }
-    if (u->hid_subclass == 1u) {
-      /* Boot-capable: the legacy fixed layout is the smaller ask, and the
-       * generic layout above is what decodes the reports either way. A
-       * device that stalls the request still works through its descriptor. */
-      (void)hid_set_protocol(u);
-    }
-    rc = hid_configure(u);
-    if (rc != 0) {
-      return -1;
-    }
-    rc = hid_intr_submit(u); /* arm the first interrupt IN transfer */
-    if (rc != 0) {
-      return -1;
-    }
-    kputs("[USB] HID device attached\n");
-    return 0;
+/* Configure one HID interface on an already-addressed device.  Called once per
+ * HID interface so a composite keyboard+mouse receiver gets two entries even
+ * though the hardware presents as a single USB device. */
+static int attach_hid_interface(usb_t *u) {
+  int rc;
+
+  /* hid_read_descriptor must run before set_protocol: it tells us whether this
+   * interface is actually a pointer or a keyboard. */
+  (void)hid_read_descriptor(u);
+  if (u->hid_kind == 0u) {
+    kputs("[USB] HID interface ignored (no pointer or keyboard)\n");
+    return -1;
   }
-
-  /* Mass-storage: bring up the bulk endpoints. */
-  ep_ring_reset(u->ep_in, u->ep_in_phys, &u->ep_in_idx, &u->ep_in_cycle);
-  ep_ring_reset(u->ep_out, u->ep_out_phys, &u->ep_out_idx, &u->ep_out_cycle);
-  rc = configure_endpoints(u);
+  if (u->hid_subclass == 1u) {
+    /* Boot-capable: prefer the legacy fixed layout. A stall from set_protocol
+     * is non-fatal — the generic descriptor path above still works. */
+    (void)hid_set_protocol(u);
+  }
+  /* Initialise LED bookkeeping so the first kbd_sync_leds call writes a known
+   * value (all-off) instead of random stack garbage. */
+  memset(&u->hid_kbd_led, 0, sizeof(u->hid_kbd_led));
+  rc = hid_configure(u);
   if (rc != 0) {
     return -1;
+  }
+  rc = hid_intr_submit(u); /* arm the first interrupt IN transfer */
+  if (rc != 0) {
+    return -1;
+  }
+  if (u->hid_kind == USB_HID_KEYBOARD) {
+    kputs("[USB] keyboard attached\n");
+  } else {
+    kputs("[USB] mouse attached\n");
   }
   return 0;
 }
@@ -1506,21 +1586,110 @@ int usb_init(void) {
         }
         ep_ring_reset(u->ep0, u->ep0_phys, &u->ep0_idx, &u->ep0_cycle);
 
-        if (attach_device(u, port, speed) != 0) {
+        if (attach_base(u, port, speed) != 0) {
           kputs("[USB] enumeration failed\n");
           continue;
         }
 
         if (u->kind == USB_KIND_HID) {
-          kputs("[USB] HID device ready\n");
-          g_ndev++;
+          /* HID device: one usb_t per interface so a composite keyboard+mouse
+           * receiver gets two entries instead of dropping one half. */
+          UINTN hid_start = g_ndev;
+          UINT8 setup[8];
+          UINT32 i = 0;
+
+          memset(setup, 0, sizeof(setup));
+          setup[0] = 0x81;       /* device-to-host, standard, interface */
+          setup[1] = 0x06;       /* GET_DESCRIPTOR */
+          setup[2] = 0x04;       /* interface descriptor type */
+          setup[4] = 0;          /* start at interface 0 */
+          setup[6] = 9; setup[7] = 0;
+
+          while (i < 4u && setup[4] < 4u) { /* scan up to 4 interfaces */
+            UINT8 bInterfaceNumber;
+            UINT8 tmp[9];
+
+            /* Re-read just the interface header we need. */
+            setup[4] = (UINT8)i;
+            if (control_xfer(u, setup, tmp, 9, 1) != 0) { break; }
+            bInterfaceNumber = tmp[2];
+            setup[4] = (UINT8)bInterfaceNumber;
+
+            if (tmp[5] == 0x03u /* class == HID */) {
+              usb_t *v = &g_dev[g_ndev];
+
+              if (g_ndev >= USB_MAX_DEVICES) { break; }
+              /* Share the same slot/DCBAA as u but own independent rings. */
+              memcpy(v, u, sizeof(*v));
+              v->hid_in_num = 0u;  /* parse_config below fills this in */
+              v->hid_in_dci = 0u;
+              v->hid_kind = 0u;
+              v->hid_generic = 0u;
+              v->hid_subclass = 0u;
+              /* Clear per-interface state that must NOT be shared. */
+              v->ep0 = (trb_t *)dma_contig(XHCI_EP0_RING, &v->ep0_phys);
+              v->hid_in = (trb_t *)dma_contig(XHCI_BULK_RING, &v->hid_in_phys);
+              v->hid_buf = (UINT8 *)dma_contig(1, &v->hid_buf_phys);
+              if (v->ep0 == NULL || v->hid_in == NULL || v->hid_buf == NULL) {
+                kputs("[USB] no DMA for second HID iface\n");
+                break;
+              }
+              ep_ring_reset(v->ep0, v->ep0_phys, &v->ep0_idx, &v->ep0_cycle);
+              v->iface = bInterfaceNumber;
+              /* Re-parse config targeting this interface only. */
+              {
+                UINT8 cfb[256];
+                UINT16 cft;
+                memset(setup, 0, sizeof(setup));
+                setup[0] = 0x80; setup[1] = 0x06; setup[2] = 0x00;
+                setup[3] = 0x02; setup[6] = 9; setup[7] = 0;
+                if (control_xfer(u, setup, cfb, 9, 1) == 0) {
+                  cft = (UINT16)(cfb[2] | (cfb[3] << 8));
+                  if (cft >= 9u && cft <= 255u) {
+                    setup[6] = (UINT8)cft;
+                    if (control_xfer(u, setup, cfb, cft, 1) == 0) {
+                      parse_config(v, cfb, cft);
+                    }
+                  }
+                }
+              }
+              if (v->hid_kind == 0u) {
+                /* No HID on this interface — skip it. */
+                pmm_free_contig(v->ep0, XHCI_EP0_RING);
+                pmm_free_contig(v->hid_in, XHCI_BULK_RING);
+                pmm_free_contig(v->hid_buf, 1);
+                break;
+              }
+              if (attach_hid_interface(v) == 0) {
+                kputs("[USB] HID interface ready\n");
+                g_ndev++;
+              } else {
+                pmm_free_contig(v->ep0, XHCI_EP0_RING);
+                pmm_free_contig(v->hid_in, XHCI_BULK_RING);
+                pmm_free_contig(v->hid_buf, 1);
+                break;
+              }
+            }
+            i++;
+            setup[4] = (UINT8)(i + 1u);
+          }
+          /* All HID interfaces attached; count them all. */
+          (void)hid_start;
           continue;
         }
 
-        /* Mass-storage: register one block device per LUN. */
+        /* Mass-storage (or non-HID device): register one block device per LUN. */
         {
           int max_lun = usb_max_lun(u);
           int lun;
+
+          /* Bring up the bulk endpoints before any mass-storage commands. */
+          ep_ring_reset(u->ep_in, u->ep_in_phys, &u->ep_in_idx, &u->ep_in_cycle);
+          ep_ring_reset(u->ep_out, u->ep_out_phys, &u->ep_out_idx, &u->ep_out_cycle);
+          if (configure_endpoints(u) != 0) {
+            kputs("[USB] storage endpoint config failed\n");
+            continue;
+          }
 
           for (lun = 0; lun <= max_lun; lun++) {
             usb_disk_t *d;
