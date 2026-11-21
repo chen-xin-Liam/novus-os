@@ -90,6 +90,8 @@ SRC := arch/x86_64/boot/main.c \
        kernel/idt.c \
         kernel/irq.c \
         kernel/acpi.c \
+        kernel/touchpad.c \
+        kernel/hid.c \
         kernel/power.c \
     kernel/trap.c \
     kernel/session.c \

@@ -147,7 +147,13 @@ static nd_rect_t g_cursor_damage;
 
 static void present_probe(void);
 
-/* The pointer shape: X = black outline, W = white body, . = transparent. */
+/* The pointer shape: X = black outline, W = white body, . = transparent.
+ *
+ * The tail is a straight vertical bar (columns 5..8) that hangs off the
+ * bottom edge of the head, exactly like the system pointer it imitates. An
+ * earlier version drifted the tail one column right on every row below the
+ * head, which read as a bent, frayed needle on a 1920x1080 panel - the tip
+ * landed on the last row with a single black pixel and no fill. */
 static const char *const g_cursor_shape[ND_CURSOR_H] = {
     "X...........",
     "XX..........",
@@ -160,15 +166,15 @@ static const char *const g_cursor_shape[ND_CURSOR_H] = {
     "XWWWWWWWX...",
     "XWWWWWWWWX..",
     "XWWWWWWWWWX.",
-    "XWWWWWWXXXXX",
+    "XWWWWWWXXXX.",
     "XWWWXWWX....",
     "XWWX.XWWX...",
     "XWX..XWWX...",
-    "XX....XWWX..",
-    "X......XWWX.",
-    "........XWWX",
-    ".........XWX",
-    "..........X.",
+    "XX...XWWX...",
+    "X....XWWX...",
+    ".....XWWX...",
+    "......XWX...",
+    "............",
 };
 
 /* ---- boot stage ------------------------------------------------------- */

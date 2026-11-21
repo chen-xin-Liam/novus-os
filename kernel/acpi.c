@@ -156,6 +156,120 @@ const acpi_table_t *acpi_find_table(UINT64 mmap, UINT64 size, UINT64 stride,
   return scan_rsdp(0xE0000u, 0x20000u, signature);
 }
 
+/* Walk one root table (XSDT or RSDT) and hand every valid child table to the
+ * visitor. Returns how many children were visited. */
+static UINTN root_walk(UINT64 address, int extended, acpi_visit_fn visit,
+                       void *ctx) {
+  const acpi_table_t *root = acpi_table(address);
+  UINT32 step = extended ? 8u : 4u;
+  UINT32 offset;
+  UINTN count = 0;
+
+  if (root == NULL ||
+      memcmp(root->signature, extended ? "XSDT" : "RSDT", 4) != 0) {
+    return 0;
+  }
+  for (offset = sizeof(*root); offset + step <= root->length;
+       offset += step) {
+    UINT64 child = 0;
+    const acpi_table_t *table;
+
+    memcpy(&child, (const UINT8 *)root + offset, step);
+    table = acpi_table(child);
+    if (table != NULL) {
+      count++;
+      if (visit != NULL) {
+        visit(table, ctx);
+      }
+    }
+  }
+  return count;
+}
+
+/* Same RSDP discovery as acpi_find_table, but every table the root lists is
+ * visited instead of only the first one with a given signature: the DSDT and
+ * the whole SSDT set are where a platform describes devices the PCI bus does
+ * not enumerate (an I2C-HID touchpad, for one), and which of those tables
+ * carries it is model-specific. */
+UINTN acpi_scan_all(UINT64 mmap, UINT64 size, UINT64 stride,
+                    acpi_visit_fn visit, void *ctx) {
+  UINT64 offset;
+  UINT16 ebda;
+  UINT64 starts[34];
+  UINT64 bytes[34];
+  UINTN  probes;
+  UINTN  p;
+
+  probes = 0;
+  if (stride >= sizeof(EFI_MEMORY_DESCRIPTOR) && size >= stride &&
+      phys_range(mmap, size)) {
+    for (offset = 0; offset <= size - stride; offset += stride) {
+      const EFI_MEMORY_DESCRIPTOR *desc =
+          (const EFI_MEMORY_DESCRIPTOR *)(UINTN)(mmap + offset);
+
+      /* Every firmware-reserved ACPI range is a candidate, not just the
+       * first one or two: the RSDP lives in whichever of them the firmware
+       * chose, and a machine can describe several (reclaim memory for the
+       * tables, NVS for the data next to them). */
+      if ((desc->Type == EfiACPIReclaimMemory ||
+           desc->Type == EfiACPIMemoryNVS) && desc->Pages <= 4096u &&
+          probes < 32u) {
+        starts[probes] = desc->PhysicalStart;
+        bytes[probes] = desc->Pages * 4096u;
+        probes++;
+      }
+    }
+  }
+  /* The descriptor ranges are only a hint. Firmware that keeps the RSDP in
+   * the EBDA or in the conventional high-memory window still has to be
+   * found, so both legacy windows are always probed as well. */
+  memcpy(&ebda, (const void *)(UINTN)0x40Eu, sizeof(ebda));
+  if (ebda >= 0x8000u && ebda < 0xA000u && probes < 34u) {
+    starts[probes] = (UINT64)ebda << 4;
+    bytes[probes] = 1024u;
+    probes++;
+  }
+  if (probes < 34u) {
+    starts[probes] = 0xE0000u;
+    bytes[probes] = 0x20000u;
+    probes++;
+  }
+
+  for (p = 0; p < probes; p++) {
+    UINT64 address;
+    UINT64 end;
+
+    if (!phys_range(starts[p], bytes[p])) {
+      continue;
+    }
+    end = starts[p] + bytes[p];
+    for (address = (starts[p] + 15u) & ~15ULL; address + 20u <= end;
+         address += 16u) {
+      const rsdp_t *rsdp = (const rsdp_t *)(UINTN)address;
+      UINTN visited;
+
+      if (memcmp(rsdp->signature, "RSD PTR ", 8) != 0 ||
+          !checksum_ok(rsdp, 20)) {
+        continue;
+      }
+      visited = 0;
+      if (rsdp->revision >= 2u && address + sizeof(*rsdp) <= end &&
+          rsdp->length >= sizeof(*rsdp) && rsdp->length <= 4096u &&
+          rsdp->length <= end - address &&
+          checksum_ok(rsdp, rsdp->length)) {
+        visited = root_walk(rsdp->xsdt, 1, visit, ctx);
+      }
+      if (visited == 0u) {
+        visited = root_walk(rsdp->rsdt, 0, visit, ctx);
+      }
+      if (visited != 0u) {
+        return visited;
+      }
+    }
+  }
+  return 0;
+}
+
 UINTN acpi_xapic_ids(UINT64 mmap, UINT64 size, UINT64 stride,
                      UINT8 *ids, UINTN capacity) {
   const acpi_table_t *madt;

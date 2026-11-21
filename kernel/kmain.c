@@ -43,6 +43,7 @@
 #include "usb.h"
 /* M12: the device table the device manager reads. */
 #include "devtab.h"
+#include "touchpad.h"
 #include "gpt.h"
 #include "power.h"
 #include "session.h"
@@ -227,7 +228,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* Which build this is, in the log itself. Every diagnosis so far has
    * started by guessing from a photo whether the running image was the one
    * just built; a timestamp ends that. */
-  kputs("[BOOT] kernel built " __DATE__ " " __TIME__ " rev 35\n");
+  kputs("[BOOT] kernel built " __DATE__ " " __TIME__ " rev 37\n");
 
   /* From here until sched_init() installed one, a fault was a triple fault:
    * no IDT meant the CPU reset, and a machine that reboots mid-boot looks
@@ -346,6 +347,11 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * disturb a transfer: every storage driver has probed and the network
    * stack has not started yet. */
   devtab_init(mmap_addr, map_size, desc_size);
+  /* The touchpad is the one input device the boot log has never mentioned:
+   * it is HID behind the PCH's I2C controller, not the PS/2 aux port. The
+   * probe prints the firmware's own description of it (controller + slave
+   * address) and the PCI serial-bus list it has to match against. */
+  touchpad_probe(mmap_addr, map_size, desc_size);
   nd_boot_stage(93, "检测设备");
   kputs("[BOOT] device table built\n");
 
