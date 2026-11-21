@@ -169,6 +169,8 @@ void fbcon_puts(const char *text) {
 
 int fbcon_active(void) { return g_fb.state != 0u; }
 
+void *fbcon_framebuffer(void) { return (void *)g_fb.px; }
+
 int fbcon_begin(void) {
   const nd_display_t *d = nd_display();
 

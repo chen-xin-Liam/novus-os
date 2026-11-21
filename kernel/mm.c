@@ -282,6 +282,12 @@ void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size) {
     UINT64 p;
     UINT64 pages = 0;
 
+    kputs("[MM] framebuffer pages ");
+    kputs_hex(p_start);
+    kputs("..");
+    kputs_hex(p_end);
+    kputs("\n");
+
     for (p = p_start; p < p_end; p += 0x200000ULL) {
       UINT32 sl = (UINT32)((p >> 30) & 0x1FFu);
       mm_table_t *pd;

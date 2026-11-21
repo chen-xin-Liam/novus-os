@@ -390,7 +390,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* Which stage is running, before anything that could hang. The kernel
    * stamps its own version after ExitBootServices; this one proves the
    * firmware actually started the image that was just written. */
-  boot_puts(L"[BOOT] boot stage rev 34\r\n");
+  boot_puts(L"[BOOT] boot stage rev 35\r\n");
 
   /* M3: everything below this line may touch real disks, so the block
    * device table, the EFI system partition and the filesystem allocator

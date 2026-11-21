@@ -38,6 +38,12 @@ void fbcon_end(void);
 /* 1 while the console owns the screen. */
 int fbcon_active(void);
 
+/* The surface the console draws through, or NULL when it never started:
+ * a raw pointer to the captured framebuffer that the kernel has already
+ * proven writable by printing the boot log on it. The display stack uses
+ * this instead of building a second mapping for the same scanout. */
+void *fbcon_framebuffer(void);
+
 /* Append one string; embedded '\n' starts a new line and the log scrolls
  * once it reaches the bottom of its box. A no-op when inactive. */
 void fbcon_puts(const char *text);

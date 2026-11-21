@@ -35,6 +35,7 @@
 #include "kernel.h"
 #include "mm.h"
 #include "cpu.h"
+#include "fbcon.h"
 #include "nd.h"
 #include <stddef.h>
 
@@ -108,6 +109,19 @@ static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
    * hardware before the desktop ever paints. The devmap below is for a
    * framebuffer above ram_top (a card's VRAM aperture), which no identity
    * page covers. */
+  /* The text console, when it started, is already drawing on this exact
+   * scanout through a raw pointer - the boot log on the screen is the
+   * proof. Take that pointer when it is the same framebuffer: no second
+   * mapping, no cache-policy guesswork, and the address is one that has
+   * demonstrably worked on this machine. */
+  {
+    void *console_fb = fbcon_framebuffer();
+
+    if (console_fb != 0 && (UINT64)(UINTN)console_fb == phys) {
+      kputs("[ND] scanout taken from the text console\n");
+      return console_fb;
+    }
+  }
   if (phys != 0u && size <= mm_ram_top() && phys <= mm_ram_top() - size) {
     kputs("[ND] framebuffer inside the identity map, used as it stands\n");
     return (void *)(UINTN)phys;
