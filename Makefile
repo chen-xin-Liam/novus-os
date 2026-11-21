@@ -409,6 +409,16 @@ $(ICON_BLOB_H): $(ICON_IMGS) | build
 
 build/graphics_nd_icon.o: $(ICON_BLOB_H)
 
+# Boot logo: the splash runs before the heap and before any image decoder, so
+# boot.png is baked into a plain ARGB blob that nd_boot.c can blit directly.
+BOOT_LOGO_PNG := assets/splash/boot.png
+BOOT_LOGO_H   := build/boot_logo.h
+
+$(BOOT_LOGO_H): $(BOOT_LOGO_PNG) tools/splash/mkbootlogo.py | build
+	python3 tools/splash/mkbootlogo.py $@
+
+build/graphics_nd_boot.o: $(BOOT_LOGO_H)
+
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
 # embedded trampoline binary.
