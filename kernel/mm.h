@@ -22,15 +22,22 @@
 int mm_heap_map(UINT64 offset, UINT32 pages);
 void mm_heap_unmap(UINT64 offset, UINT32 pages);
 
-/* Build the page-table hierarchy (identity map of the low 4 GiB through
- * PML4[0] plus the direct physical map of [0, ram_top_bytes) through
- * PML4[256]), switch CR3 and run the physmap read-back selftest.
+/* Build the page-table hierarchy (identity map of the described physical
+ * address space through PML4[0] plus the direct physical map of
+ * [0, ram_top_bytes) through PML4[256]), switch CR3 and run the physmap
+ * read-back selftest.
+ *
+ * [mmap_addr, mmap_addr + map_size) with `desc_size` is the UEFI memory map
+ * still valid at call time. RAM descriptors are mapped write-back; device
+ * MMIO, the legacy hole and every gap stay uncached, so a BAR reached
+ * through its raw physical address is never cached.
  *
  * [fb_phys, fb_phys + fb_size) - zero when there is no captured scanout -
- * is identity-mapped uncached on the way, so the boot text console, which
- * draws through the framebuffer's physical address, keeps working across
- * the CR3 switch instead of having to go dark inside this function. */
-void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size);
+ * is identity-mapped write-combining on the way, so the boot text console,
+ * which draws through the framebuffer's physical address, keeps working
+ * across the CR3 switch instead of having to go dark inside this function. */
+void mm_init(UINT64 ram_top_bytes, UINT64 mmap_addr, UINT64 map_size,
+             UINT64 desc_size, UINT64 fb_phys, UINT64 fb_size);
 
 /* End of the identity-mapped window (exclusive). A physical address below
  * this can be used as a pointer as it stands; one above it has to go

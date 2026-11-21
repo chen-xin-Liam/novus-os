@@ -186,6 +186,30 @@ void nd_present(nd_rect_t r);
 /* 1 when presents are synchronised to the display's vertical blank. */
 int nd_present_vsync(void);
 
+/* ---- frame timing ----------------------------------------------------- */
+
+/* Raw TSC and its calibrated rate. Shell paint code uses the same clock as
+ * the HAL so a paint and its present can be compared in one log stream. */
+UINT64 nd_tsc(void);
+UINT64 nd_tsc_khz(void);
+
+/* Write one `[NDF]` line with a measured interval and the rectangle it
+ * covers. Called after the measurement, so serial output is not timed. */
+void nd_frame_timing(const char *label, UINT64 t0, UINT64 t1,
+                     UINT32 w, UINT32 h);
+
+/* Running totals for every nd_present() since boot. Full-screen frames are
+ * logged individually; small damage frames are counted here and summarised
+ * every 60 presents. */
+typedef struct {
+  UINT64 frames;
+  UINT64 cycles;
+  UINT64 pixels;
+  UINT64 max_cycles;
+} nd_frame_stats_t;
+
+void nd_frame_stats(nd_frame_stats_t *out);
+
 /* Software mouse pointer, composited on top of a present.
  *
  * `nd_cursor_set` only moves it and records the damage the move exposes;

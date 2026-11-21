@@ -1651,6 +1651,7 @@ void nd_boot_transition(void) {
     INT32  lift = -((i * 32) / out_frames);
     UINT8  veil = (UINT8)(255u - ((255u * (UINT32)i) /
                                   (UINT32)total_frames));
+    UINT64 t0 = nd_tsc();
 
     nd_surface_reset_clip(canvas);
     nd_demo_paint(full);
@@ -1663,6 +1664,8 @@ void nd_boot_transition(void) {
                        (UINT8)(255u - fade));
     }
     nd_present(full);
+    nd_frame_timing("frame-out", t0, nd_tsc(),
+                    (UINT32)full.w, (UINT32)full.h);
     nd_wait_ms(20);
   }
 
@@ -1674,16 +1677,25 @@ void nd_boot_transition(void) {
     INT32  dy = span - (INT32)(((UINT64)span * p) / 1000u);
     UINT8  veil = (UINT8)(255u - ((255u * (UINT32)(out_frames + i)) /
                                   (UINT32)total_frames));
+    UINT64 t0 = nd_tsc();
 
     nd_dock_shift(dy);
     nd_demo_paint(full);
     nd_blend_rect(canvas, full, ND_RGB(0, 0, 0), veil);
     nd_present(full);
+    nd_frame_timing("frame-in", t0, nd_tsc(),
+                    (UINT32)full.w, (UINT32)full.h);
     nd_wait_ms(24);
   }
-  nd_dock_shift(0);
-  nd_demo_paint(full);
-  nd_present(full);
+  {
+    UINT64 t0 = nd_tsc();
+
+    nd_dock_shift(0);
+    nd_demo_paint(full);
+    nd_present(full);
+    nd_frame_timing("frame-final", t0, nd_tsc(),
+                    (UINT32)full.w, (UINT32)full.h);
+  }
 }
 
 void nd_demo_init(void) {
@@ -1691,13 +1703,21 @@ void nd_demo_init(void) {
   nd_surface_t *frame = nd_canvas();
   ng_ctx_t     *ctx;
 
+  novus_timeline("demo init start");
   g_demo_ready = 0;
   if (screen == 0) {
     return;
   }
   /* Decode the wallpaper for this screen size before the first frame; a
-   * failure just leaves the gradient in place. */
-  nd_wallpaper_init(screen->w, screen->h);
+   * failure just leaves the gradient in place. Timed once so a slow JPEG
+   * is not mistaken for a slow framebuffer present. */
+  {
+    UINT64 t0 = nd_tsc();
+
+    nd_wallpaper_init(screen->w, screen->h);
+    nd_frame_timing("wallpaper-init", t0, nd_tsc(),
+                    (UINT32)screen->w, (UINT32)screen->h);
+  }
   nd_input_init();
   /* The desktop is composed into the off-screen buffer, not painted onto
    * the glass: the boot splash stays visible until the first frame is
@@ -1729,6 +1749,20 @@ void nd_demo_init(void) {
   nd_boot_splash_end();
   nd_present(nd_rect(0, 0, screen->w, screen->h));
   kputs("[ND] demo desktop painted\n");
+  {
+    nd_frame_stats_t st;
+
+    nd_frame_stats(&st);
+    kputs("[NDF] totals frames=");
+    kputs_hex(st.frames);
+    kputs(" cycles=");
+    kputs_hex(st.cycles);
+    kputs(" pixels=");
+    kputs_hex(st.pixels);
+    kputs(" max_cycles=");
+    kputs_hex(st.max_cycles);
+    kputs("\n");
+  }
 }
 
 /* Rebuild the shell after a light/dark or accent change. Client windows
@@ -1823,6 +1857,14 @@ void nd_demo_tick(void) {
   nd_rect_t  cd;
   int        have = 0;
   nd_event_t ev;
+  static int timeline_logged;
+  static UINT32 frame_seq;
+  UINT64 t0;
+
+  if (!timeline_logged) {
+    timeline_logged = 1;
+    novus_timeline("demo tick start");
+  }
 
   if (!g_demo_ready) {
     return;
@@ -1844,8 +1886,17 @@ void nd_demo_tick(void) {
   if (have) {
     d = nd_rect_intersect(d, nd_rect(0, 0, nd_canvas()->w, nd_canvas()->h));
     if (!nd_rect_empty(d)) {
+      t0 = nd_tsc();
       nd_demo_paint(d);
       nd_present(d);
+      frame_seq++;
+      /* One line per steady-state frame is too much serial traffic; the
+       * running counters in nd_present() cover the rest. Large repaints and
+       * every 60th frame are enough to see a regression. */
+      if (d.w * d.h >= 0x100000 || (frame_seq % 60u) == 0u) {
+        nd_frame_timing("tick", t0, nd_tsc(),
+                        (UINT32)d.w, (UINT32)d.h);
+      }
     }
   }
 }

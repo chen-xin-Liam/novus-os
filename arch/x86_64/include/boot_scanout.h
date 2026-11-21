@@ -22,8 +22,12 @@
 
 /* Already covered by the firmware's own tables: use it as it stands. */
 #define BOOT_SCANOUT_PRESENT 1
-/* Was missing; now mapped by this call (uncached, identity). */
+/* Was missing; now mapped by this call with the UC fallback (identity). */
 #define BOOT_SCANOUT_MAPPED 2
+/* Was missing; now mapped with a 2 MiB leaf selecting IA32_PAT entry 4
+ * (write-combining). The kernel installs the same policy after its CR3
+ * switch; this path is only taken when firmware already enabled CR4.PAT. */
+#define BOOT_SCANOUT_MAPPED_WC 3
 #define BOOT_SCANOUT_FAILED 0
 
 /* Returns BOOT_SCANOUT_PRESENT, BOOT_SCANOUT_MAPPED, or BOOT_SCANOUT_FAILED

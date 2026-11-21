@@ -6,9 +6,10 @@
  * the C/Rust mixed-link path (README 16.4) on real kernel code.
  *
  * Layout decisions:
- * - 256 KiB static bitmap in .bss: 2 Mi pages ~= 8 GiB RAM coverage.
+ * - 2 MiB static bitmap in .bss: 16 Mi pages ~= 64 GiB RAM coverage.
  *   Pages beyond bitmap capacity stay unallocatable and are accounted
- *   into the reserved count.
+ *   into the reserved count. The size is chosen for 32/64 GiB machines:
+ *   256 KiB (8 GiB) left most of a modern laptop's RAM untouchable.
  * - Explicitly reserved regions (README 2.3 "共享内存规范" + M1 spec):
  *   physical 0x7E000-0x7FFFF (shared-memory pages, A/B core handoff),
  *   physical 0x8000 (AP trampoline page), physical 0x0 (BIOS/IVT,
@@ -22,8 +23,8 @@
 #include "kernel.h"
 
 #define PMM_PAGE_SIZE    4096ULL
-#define PMM_BITMAP_BYTES 262144ULL                 /* 256 KiB in .bss */
-#define PMM_BITMAP_BITS  (PMM_BITMAP_BYTES * 8ULL) /* 2 Mi pages ~= 8 GiB */
+#define PMM_BITMAP_BYTES 2097152ULL                  /* 2 MiB in .bss        */
+#define PMM_BITMAP_BITS  (PMM_BITMAP_BYTES * 8ULL)   /* 16 Mi pages ~= 64 GiB */
 #define PMM_2M_MASK      0x1FFFFFULL
 #define PMM_SPIN_LIMIT   (1ULL << 20)
 
@@ -128,6 +129,13 @@ void pmm_init(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   pmm_top   = (top + PMM_2M_MASK) & ~PMM_2M_MASK;
   pmm_total = pmm_top / PMM_PAGE_SIZE;
   pmm_bits  = (pmm_total <= PMM_BITMAP_BITS) ? pmm_total : PMM_BITMAP_BITS;
+  if (pmm_total > pmm_bits) {
+    kputs("[PMM] WARN: bitmap covers ");
+    kputs_hex(pmm_bits * PMM_PAGE_SIZE);
+    kputs(" bytes, RAM extends to ");
+    kputs_hex(pmm_top);
+    kputs("; upper RAM unallocatable\n");
+  }
 
   /* Start with every tracked page marked used, then free the
    * conventional-memory runs below. Pages covered by other descriptor
@@ -329,7 +337,7 @@ void pmm_selftest(void) {
     return;
   }
 
-  kputs("[PMM] bitmap 256KiB, pages: total/reserved/free = ");
+  kputs("[PMM] bitmap 2MiB, pages: total/reserved/free = ");
   kputs_hex(pmm_total_pages());
   kputs("/");
   kputs_hex(pmm_reserved_pages());

@@ -8,8 +8,12 @@
  * missing levels must appear, existing huge pages must be accepted, a foreign
  * entry must be refused, and nothing may be written twice.
  *
- *   gcc -Iarch/x86_64/include -o out/scanout_walk_test.exe \
- *       scripts/scanout_walk_test.c arch/x86_64/boot/scanout.c
+ *   gcc -DBOOT_SCANOUT_HOST -Iarch/x86_64/include \
+ *       -o out/scanout_walk_test.exe scripts/scanout_walk_test.c \
+ *       arch/x86_64/boot/scanout.c
+ *
+ * BOOT_SCANOUT_HOST makes the boot stage use its UC fallback instead of
+ * reading CR4/IA32_PAT on a machine where this test is only a process.
  */
 
 #include <stdio.h>
@@ -59,7 +63,9 @@ static void check(int cond, const char *what) {
 
 #define MAP_PHYS 0x100000000ULL /* 4 GiB: the aperture a discrete card hands out */
 #define MAP_SIZE 0x02100000ULL  /* 33 MiB: a 4K panel at 4 bytes per pixel */
-#define LEVEL_OK (PTE_PRESENT | PTE_RW | PTE_PWT | PTE_PCD)
+/* Host build takes the UC fallback: PCD selects the uncached PAT entry and
+ * PWT stays clear, matching mm_map_phys(MM_MAP_UC). */
+#define LEAF_OK (PTE_PRESENT | PTE_RW | PTE_PCD)
 
 static UINT64 *pml4(void) { return (UINT64 *)(UINTN)g_tables[0]; }
 
@@ -73,25 +79,47 @@ static void prebuild_to_pd(void) {
   pdpt[4] = ((UINT64)(UINTN)pd) | PTE_PRESENT | PTE_RW;
 }
 
+/* Accept either a 2 MiB leaf or a 4 KiB leaf, but insist that the leaf
+ * really covers this address and carries the UC fallback bits. */
 static int all_present(UINT64 phys, UINT64 size) {
   UINT64 a;
 
   for (a = phys; a < phys + size; a += 0x1000ULL) {
     UINT64 *pdpt = (UINT64 *)(UINTN)(pml4()[0] & ADDR_4K);
     UINT64  e3 = pdpt[(a >> 30) & 0x1FFu];
-    UINT64 *pd = (UINT64 *)(UINTN)(e3 & ADDR_4K);
-    UINT64  e2 = pd[(a >> 21) & 0x1FFu];
-    UINT64 *pt = (UINT64 *)(UINTN)(e2 & ADDR_4K);
-    UINT64  e1 = pt[(a >> 12) & 0x1FFu];
+    UINT64 *pd;
+    UINT64  e2;
 
-    if ((e1 & PTE_PRESENT) == 0u) {
+    if ((e3 & PTE_PRESENT) == 0u) {
       return 0;
     }
-    if ((e1 & ADDR_4K) != (a & ADDR_4K)) {
+    if ((e3 & PTE_PS) != 0u) {
+      if ((e3 & ADDR_1G) != (a & ADDR_1G)) {
+        return 0;
+      }
+      continue;
+    }
+    pd = (UINT64 *)(UINTN)(e3 & ADDR_4K);
+    e2 = pd[(a >> 21) & 0x1FFu];
+    if ((e2 & PTE_PRESENT) == 0u) {
       return 0;
     }
-    if ((e1 & LEVEL_OK) != LEVEL_OK) {
-      return 0;
+    if ((e2 & PTE_PS) != 0u) {
+      if ((e2 & ADDR_2M) != (a & ADDR_2M) ||
+          (e2 & LEAF_OK) != LEAF_OK) {
+        return 0;
+      }
+      continue;
+    }
+    {
+      UINT64 *pt = (UINT64 *)(UINTN)(e2 & ADDR_4K);
+      UINT64  e1 = pt[(a >> 12) & 0x1FFu];
+
+      if ((e1 & PTE_PRESENT) == 0u ||
+          (e1 & ADDR_4K) != (a & ADDR_4K) ||
+          (e1 & LEAF_OK) != LEAF_OK) {
+        return 0;
+      }
     }
   }
   return 1;
@@ -107,15 +135,28 @@ int main(void) {
   rc = boot_scanout_walk(pml4(), MAP_PHYS, MAP_SIZE, pool_alloc, 0, &added);
   check(rc == BOOT_SCANOUT_MAPPED, "empty tables: reports MAPPED");
   check(added == 1, "empty tables: writes reported, so CR3 gets reloaded");
-  check(g_pool_used == 1 + 1 + 1 + 17,
-        "one PDPT, one PD and one PT per 2 MiB the scanout touches");
+  /* 33 MiB spans 16 whole 2 MiB blocks plus a 1 MiB tail; the tail keeps
+   * 4 KiB granularity, so one PT is allocated for it. */
+  check(g_pool_used == 1 + 1 + 1 + 1,
+        "one PDPT, one PD, 16 huge leaves and one PT for the tail");
   check(all_present(MAP_PHYS, MAP_SIZE),
-        "every 4 KiB page identity-mapped, writable, PCD|PWT");
+        "every page identity-mapped, writable, UC fallback");
 
   baseline = g_pool_used;
   rc = boot_scanout_walk(pml4(), MAP_PHYS, MAP_SIZE, pool_alloc, 0, &added);
   check(rc == BOOT_SCANOUT_PRESENT, "second call: already present");
   check(added == 0 && g_pool_used == baseline, "second call: nothing written");
+
+  /* An unaligned aperture cannot use huge leaves at its edges: both 2 MiB
+   * blocks are partial, so each gets its own 4 KiB table. */
+  pool_reset();
+  rc = boot_scanout_walk(pml4(), MAP_PHYS + 0x1000ULL, 0x202000ULL,
+                         pool_alloc, 0, &added);
+  check(rc == BOOT_SCANOUT_MAPPED, "unaligned range: reports MAPPED");
+  check(all_present(MAP_PHYS + 0x1000ULL, 0x202000ULL),
+        "unaligned range: every 4 KiB page covered");
+  check(g_pool_used == 5,
+        "unaligned range: one PT per touched 2 MiB block");
 
   /* A 2 MiB page covering the scanout is a mapping too. */
   pool_reset();

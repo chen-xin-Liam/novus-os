@@ -232,6 +232,68 @@ static void test_ps2(void) {
   CHECK((g_head + 1u) % ND_EVENT_QUEUE == g_tail);
 }
 
+static void test_input_arbitration(void) {
+  nd_event_t event;
+  UINT32 moves;
+  UINT32 keys;
+  UINT32 base_moves;
+  UINT32 base_keys;
+
+  memset(&display, 0, sizeof(display));
+  g_head = 0;
+  g_tail = 0;
+  g_mx = 100;
+  g_my = 100;
+  g_buttons = 0;
+  nd_input_arbitration_stats(&base_moves, &base_keys);
+
+  /* One source: every sample is still delivered as before. */
+  nd_arb_frame_begin();
+  nd_input_feed_mouse_src(ND_INPUT_SRC_PS2_MOUSE, 5, -2, 0, 0);
+  nd_input_feed_mouse_src(ND_INPUT_SRC_PS2_MOUSE, 3, 1, 0, 0);
+  nd_arb_frame_end();
+  CHECK(nd_input_pop(&event) && event.type == ND_EV_MOUSE_MOVE &&
+        event.dx == 5 && event.x == 105 && event.y == 98);
+  CHECK(nd_input_pop(&event) && event.type == ND_EV_MOUSE_MOVE &&
+        event.dx == 3 && event.x == 108 && event.y == 99);
+  CHECK(!nd_input_pop(&event));
+  nd_input_arbitration_stats(&moves, &keys);
+  CHECK(moves == base_moves && keys == base_keys);
+
+  /* Two sources in one frame: newest timestamp wins, one move is emitted. */
+  nd_arb_frame_begin();
+  nd_input_feed_mouse_src(ND_INPUT_SRC_PS2_MOUSE, 10, 0, 0, 0);
+  nd_input_feed_mouse_src(ND_INPUT_SRC_USB, 7, 0, 0, 0);
+  nd_arb_frame_end();
+  CHECK(nd_input_pop(&event) && event.type == ND_EV_MOUSE_MOVE &&
+        event.dx == 7 && event.x == 115);
+  CHECK(!nd_input_pop(&event));
+  nd_input_arbitration_stats(&moves, &keys);
+  CHECK(moves == base_moves + 1u);
+
+  /* Absolute pointers are never arbitrated away; they suppress the stale
+   * relative delta instead. */
+  nd_arb_frame_begin();
+  nd_input_feed_mouse_src(ND_INPUT_SRC_PS2_MOUSE, -9, 0, 0, 0);
+  nd_input_feed_mouse_src(ND_INPUT_SRC_VMWARE, 20, 0, 0, 1);
+  nd_arb_frame_end();
+  CHECK(nd_input_pop(&event) && event.type == ND_EV_MOUSE_MOVE &&
+        event.dx == 20 && event.x == 135);
+  CHECK(!nd_input_pop(&event));
+  nd_input_arbitration_stats(&moves, &keys);
+  CHECK(moves == base_moves + 2u);
+
+  /* Two keyboards reporting the same key in one frame: one keystroke. */
+  nd_arb_frame_begin();
+  nd_input_feed_key(ND_INPUT_SRC_PS2_KBD, 'a', 0);
+  nd_input_feed_key(ND_INPUT_SRC_USB, 'a', 0);
+  nd_arb_frame_end();
+  CHECK(nd_input_pop(&event) && event.type == ND_EV_KEY && event.key == 'a');
+  CHECK(!nd_input_pop(&event));
+  nd_input_arbitration_stats(&moves, &keys);
+  CHECK(keys == base_keys + 1u);
+}
+
 static void test_serial(void) {
   port_head = 2;
   port_tail = 0;
@@ -321,6 +383,7 @@ static void test_probe_failures(void) {
 int main(void) {
   test_irq();
   test_ps2();
+  test_input_arbitration();
   test_serial();
   test_e1000();
   test_probe_failures();

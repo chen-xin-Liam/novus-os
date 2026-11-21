@@ -82,6 +82,84 @@ static int          g_frame_ok;
 /* Vertical retrace probe: 0 not yet run, 1 usable, 2 not usable. */
 static UINT8 g_retrace;
 
+/* ---- frame timing ----------------------------------------------------- */
+
+static nd_frame_stats_t g_present_stats;
+static UINT32           g_present_seq;
+
+UINT64 nd_tsc(void) {
+  UINT32 lo = 0;
+  UINT32 hi = 0;
+
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((UINT64)hi << 32) | (UINT64)lo;
+}
+
+UINT64 nd_tsc_khz(void) {
+  static UINT64 khz;
+  UINT32 a = 0, b = 0, c = 0, d = 0;
+
+  if (khz != 0u) {
+    return khz;
+  }
+  cpuid(0u, 0u, &a, &b, &c, &d);
+  if (a >= 0x15u) {
+    UINT32 ea = 0, eb = 0, ec = 0;
+
+    cpuid(0x15u, 0u, &ea, &eb, &ec, &d);
+    if (ea != 0u && eb != 0u && ec != 0u) {
+      khz = ((UINT64)eb * (UINT64)ec) / ((UINT64)ea * 1000u);
+    }
+  }
+  if (khz == 0u && a >= 0x16u) {
+    UINT32 mhz = 0;
+
+    cpuid(0x16u, 0u, &mhz, &b, &c, &d);
+    khz = (UINT64)mhz * 1000u;
+  }
+  return khz; /* 0 means "unknown": log cycles only, no invented time base */
+}
+
+/* Console-safe decimal writer: kputs_hex would make a cycle count unreadable
+ * and a second serializer here would itself skew the measurement. */
+static void nd_dec(UINT64 v) {
+  char  buf[24];
+  UINT32 i = sizeof(buf) - 1u;
+
+  buf[i] = '\0';
+  do {
+    buf[--i] = (char)('0' + (v % 10u));
+    v /= 10u;
+  } while (v != 0u && i != 0u);
+  kputs(&buf[i]);
+}
+
+void nd_frame_timing(const char *label, UINT64 t0, UINT64 t1,
+                     UINT32 w, UINT32 h) {
+  UINT64 cycles = (t1 >= t0) ? (t1 - t0) : 0u;
+  UINT64 khz = nd_tsc_khz();
+
+  kputs("[NDF] ");
+  kputs(label);
+  kputs(" ");
+  nd_dec(w);
+  kputs("x");
+  nd_dec(h);
+  kputs(" cycles=");
+  nd_dec(cycles);
+  if (khz != 0u) {
+    kputs(" us=");
+    nd_dec((cycles * 1000u) / khz);
+  }
+  kputs("\n");
+}
+
+void nd_frame_stats(nd_frame_stats_t *out) {
+  if (out != 0) {
+    *out = g_present_stats;
+  }
+}
+
 /* Map a framebuffer uncacheable and return a pointer to its first pixel.
  * mm_map_phys() accepts any physical address but aligns the mapping to a 2
  * MiB boundary, so the offset between fb_phys and that boundary is added
@@ -123,7 +201,12 @@ static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
       return console_fb;
     }
   }
-  if (phys != 0u && size <= mm_ram_top() && phys <= mm_ram_top() - size) {
+  /* Only the scanout mm_init() marked write-combining may be used as it
+   * stands. A second, mirrored output that happens to sit below ram_top is
+   * inside the identity map but follows the generic MMIO policy (UC), so it
+   * still needs its own WC mapping. */
+  if (phys != 0u && phys == g_disp.fb_phys &&
+      size <= mm_ram_top() && phys <= mm_ram_top() - size) {
     kputs("[ND] framebuffer inside the identity map, used as it stands\n");
     return (void *)(UINTN)phys;
   }
@@ -271,6 +354,7 @@ static void gop_apply_preferred(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINT32 pw,
 
 int nd_capture_boot(void *system_table) {
   EFI_SYSTEM_TABLE *st = (EFI_SYSTEM_TABLE *)system_table;
+  novus_timeline("nd boot capture start");
   EFI_GUID          gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
   EFI_HANDLE       *handles = NULL;
   UINTN             n = 0;
@@ -358,9 +442,11 @@ int nd_capture_boot(void *system_table) {
     kputs_hex(p->fb_phys);
     kputs((boot_map == BOOT_SCANOUT_PRESENT)
               ? " already mapped by the firmware\n"
-              : (boot_map == BOOT_SCANOUT_MAPPED)
-                    ? " mapped uncached for the boot stage\n"
-                    : " not reachable from the boot page tables\n");
+              : (boot_map == BOOT_SCANOUT_MAPPED_WC)
+                    ? " mapped write-combining for the boot stage\n"
+                    : (boot_map == BOOT_SCANOUT_MAPPED)
+                          ? " mapped uncached for the boot stage\n"
+                          : " not reachable from the boot page tables\n");
 
     g_disp.available = 1;
     g_disp.bgr = p->bgr;
@@ -391,6 +477,7 @@ static UINT32      g_reported_count;
 
 int nd_init(void) {
   UINT32 i;
+  novus_timeline("nd init start");
 
   g_screen_ready = 0;
   g_frame_ok = 0;
@@ -767,15 +854,22 @@ static void cursor_overlay(void) {
 
 void nd_present(nd_rect_t r) {
   nd_rect_t area;
+  UINT64    t0;
+  UINT64    cycles;
+  int       full;
 
   if (!g_screen_ready || g_screen.px == 0) {
     return;
   }
-  kputs("[ND] present entered\n");
   area = nd_rect_intersect(r, nd_rect(0, 0, g_screen.w, g_screen.h));
   if (nd_rect_empty(area)) {
     return;
   }
+  /* Start before the blank wait: on a machine whose CRTC has no usable
+   * retrace bit that wait is a bounded spin, and it is part of what the
+   * caller experiences as a frame. The serial line is written after the
+   * final TSC read, so logging is never inside the measured interval. */
+  t0 = nd_tsc();
   present_wait_blank(area);
   if (g_frame_ok) {
     surface_copy(&g_screen, &g_frame, area);
@@ -786,6 +880,28 @@ void nd_present(nd_rect_t r) {
    * hold halfway through the blit above. */
   nd_mirror_rect(area);
   cursor_overlay();
+  /* A write-combining framebuffer keeps stores in a buffer until a fence
+   * or another serialising event. Without this the scanout can read old
+   * pixels after a small present, and a following UC reader (the text
+   * console before it stands down) can disagree with what was just drawn. */
+  __asm__ volatile("sfence" : : : "memory");
+  cycles = nd_tsc() - t0;
+
+  full = (area.w == g_screen.w && area.h == g_screen.h);
+  g_present_stats.frames++;
+  g_present_stats.cycles += cycles;
+  g_present_stats.pixels += (UINT64)area.w * (UINT64)area.h;
+  if (cycles > g_present_stats.max_cycles) {
+    g_present_stats.max_cycles = cycles;
+  }
+  g_present_seq++;
+  /* Whole-screen presents are the expensive ones (boot handover, theme
+   * change, language change) and are logged one by one. Steady-state damage
+   * presents are summarised every 60 frames instead of flooding COM1. */
+  if (full || (g_present_seq % 60u) == 0u) {
+    nd_frame_timing("present", t0, t0 + cycles,
+                    (UINT32)area.w, (UINT32)area.h);
+  }
 }
 
 const nd_output_t *nd_outputs(UINT32 *count) {
