@@ -1157,6 +1157,62 @@ static void handle_request(const ipc_msg_t *m) {
   }
 }
 
+/* Commands from the shell's title-bar menu. 0 restore, 1 minimize,
+ * 2 maximize/restore toggle, 3 close. Runs in the tick that dispatched the
+ * menu click, so it only mutates window state and damages the old and new
+ * rectangles; the compositor paints them on the same tick. */
+void nwm_window_command(UINT32 id, UINT32 op) {
+  nwm_window_t *w = win_get(id);
+
+  if (w == 0 || w->used == 0u) {
+    return;
+  }
+  damage_frame(w->rect);
+  switch (op) {
+  case 0u: /* restore */
+    if (w->state == 2u) {
+      w->rect = w->restore;
+    }
+    w->state = 0;
+    focus_set((int)(w - g_wins));
+    break;
+  case 1u: /* minimize */
+    w->state = 1;
+    if (g_focus == (int)(w - g_wins)) {
+      focus_set(-1);
+    }
+    break;
+  case 2u: /* maximize / restore toggle */
+    if (w->state == 2u) {
+      w->rect = w->restore;
+      w->state = 0;
+    } else {
+      nd_surface_t *s = screen();
+
+      w->restore = w->rect;
+      w->state = 2;
+      w->rect = nd_rect(0, 0, s != 0 ? s->w : 1024, s != 0 ? s->h : 768);
+    }
+    break;
+  case 3u: { /* close, the same pair the title-bar button sends */
+    UINT32     win = w->id;
+    ipc_msg_t  self;
+
+    deliver(w->owner, NWM_EV_CLOSE, &win, 4);
+    memset(&self, 0, sizeof(self));
+    self.hdr.type = NWM_REQ_DESTROY;
+    self.hdr.len = 4;
+    self.hdr.sender = NWM_PID_SHELL;
+    memcpy(self.payload, &win, 4);
+    handle_request(&self);
+    return;
+  }
+  default:
+    break;
+  }
+  damage_frame(w->rect);
+}
+
 /* ---- input routing ---------------------------------------------------- */
 
 static void deliver_mouse(nwm_window_t *w, const nd_event_t *ev) {
@@ -1238,6 +1294,12 @@ static void route(const nd_event_t *ev) {
     nd_demo_dispatch(ev);
     return;
   }
+  /* Any press that missed an overlay dismisses the shell's context menu
+   * before it reaches a window or the desktop, so the menu cannot stay on
+   * screen after the click that should have closed it. */
+  if (ev->type == ND_EV_MOUSE_DOWN && modal < 0 && g_drag < 0) {
+    nd_shell_menu_close();
+  }
   if (modal >= 0) {
     /* A press outside the sheet is swallowed; the pointer still moves so
      * the cursor keeps tracking, and a release still ends a capture. */
@@ -1286,9 +1348,22 @@ static void route(const nd_event_t *ev) {
     z_raise(idx);
     focus_set(idx);
     damage_frame(g_wins[idx].rect);
-    g_capture = idx;
     if (ev->y < g_wins[idx].rect.y + NWM_TITLE_H) {
-      UINT8 b = title_button(&g_wins[idx], ev->x, ev->y);
+      UINT8 b;
+
+      /* The caption is not a drag surface for the right button: a right
+       * press opens the window's context menu instead (drawing by the
+       * shell's overlay so it matches the desktop and dock menus). */
+      if ((ev->button & ND_BUTTON_RIGHT) != 0u) {
+        nd_shell_window_menu(ev->x, ev->y, g_wins[idx].id,
+                             (UINT8)g_wins[idx].state);
+        break;
+      }
+      if ((ev->button & ND_BUTTON_LEFT) == 0u) {
+        break;
+      }
+      g_capture = idx;
+      b = title_button(&g_wins[idx], ev->x, ev->y);
 
       if (b == 1u) {
         UINT32    id = g_wins[idx].id;
@@ -1327,6 +1402,7 @@ static void route(const nd_event_t *ev) {
         g_drag_dy = ev->y - g_wins[idx].rect.y;
       }
     } else {
+      g_capture = idx;
       deliver_mouse(&g_wins[idx], ev);
     }
     break;
@@ -1339,6 +1415,15 @@ static void route(const nd_event_t *ev) {
       g_drag = -1;
       g_capture = -1;
       break;
+    }
+    if ((ev->button & ND_BUTTON_RIGHT) != 0u) {
+      idx = hit_test(ev->x, ev->y);
+      if (idx >= 0 && ev->y < g_wins[idx].rect.y + NWM_TITLE_H) {
+        /* The caption only saw a right press; do not pair it with a
+         * client event the client never received a press for. */
+        g_capture = -1;
+        break;
+      }
     }
     idx = (g_capture >= 0 && g_wins[g_capture].used) ? g_capture
                                                      : hit_test(ev->x, ev->y);
@@ -1519,12 +1604,18 @@ static void shutdown_begin(void);
 static void shutdown_advance(void);
 static int  g_sh_req;
 static UINT32 g_sh_phase;
-static UINT32 g_sh_hold;
+static UINT32 g_sh_power_hold;
 #define NWM_SH_PHASE_POWER 5u
-/* Frames are 30 ms apart (three 10 ms ticks). The compositor ticks ten
- * times faster than an animation needs: at one frame per tick the whole
- * fade is gone before the eye sees it. */
-#define NWM_SH_TICK_SPACING 2u
+/* The timer tick is 10 ms (kernel/sched.c), so one frame per tick is a
+ * 10 ms frame budget - inside the 16 ms limit - while each nwm_tick() still
+ * does exactly one bounded paint. The old 2-tick hold made every frame
+ * 30 ms and turned the fade into a hard cut.
+ *
+ * The final black frame is different: it is already composited when the
+ * phase becomes POWER, but S5 must not tear it down during scanout. Hold
+ * the screen for two full ticks (~20 ms, one 60 Hz refresh) before writing
+ * the sleep register. */
+#define NWM_SH_POWER_HOLD_TICKS 2u
 
 void nwm_tick(void) {
   nd_event_t ev;
@@ -1540,18 +1631,23 @@ void nwm_tick(void) {
     return;
   }
   if (g_sh_phase == NWM_SH_PHASE_POWER) {
-    /* The last veil frame is on the glass: nothing may repaint over it. */
+    /* Nothing may repaint over the last veil frame. Give it a full display
+     * interval before S5 instead of killing the panel mid-scanout. */
+    if (g_sh_power_hold != 0u) {
+      g_sh_power_hold--;
+      return;
+    }
     g_sh_phase = 0;
-    power_off_now();
+    /* Arm the flush→park→S5 tail. A task services it from syscall context;
+     * the tick itself keeps the S5 fallback if none ever runs. */
+    power_off_deferred();
     return;
   }
   if (g_sh_phase != 0u) {
-    if (g_sh_hold != 0u) {
-      g_sh_hold--;
-      return;
-    }
-    g_sh_hold = NWM_SH_TICK_SPACING;
     shutdown_advance();
+    if (g_sh_phase == NWM_SH_PHASE_POWER) {
+      g_sh_power_hold = NWM_SH_POWER_HOLD_TICKS - 1u;
+    }
     return;
   }
   nd_input_poll();

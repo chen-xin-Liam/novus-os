@@ -345,6 +345,12 @@ int  ng_take_damage(nd_rect_t *out);
 void ng_focus_set(ng_widget_t *w);
 ng_widget_t *ng_focus_get(void);
 
+/* Drop transient pointer state - hover, press, capture, drag - and the
+ * keyboard focus. The shutdown calls this before its first fade frame so
+ * no widget keeps the highlight of the click that requested the power
+ * transition. */
+void ng_pointer_reset(void);
+
 /* Client area of a window in absolute coordinates. */
 nd_rect_t ng_window_client(ng_widget_t *w);
 

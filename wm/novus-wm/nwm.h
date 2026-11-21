@@ -68,6 +68,10 @@ void   nwm_theme_set_mode(UINT32 mode);
 /* Windows currently held, for the sysinfo stats reply. */
 UINT32 nwm_window_count(void);
 
+/* Window commands from the shell's title-bar context menu: 0 restore,
+ * 1 minimize, 2 maximize/restore toggle, 3 close. */
+void nwm_window_command(UINT32 id, UINT32 op);
+
 /* ---- kernel-callable window API (M9 Win32 compatibility layer) --------
  *
  * A Win32 process is a ring-3 task, not an IPC client: it cannot speak the
