@@ -146,6 +146,7 @@ SRC := arch/x86_64/boot/main.c \
        kernel/net_dhcp.c \
        kernel/net_tcp.c \
        kernel/net_dns.c \
+       kernel/net_ntp.c \
        kernel/net_ncsi.c \
        kernel/net_ids.c \
        kernel/net_e1000.c \
@@ -242,6 +243,7 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_IPC=$(if $(filter y,$(CONFIG_NOVUS_IPC)),1,0) \
           -DCONFIG_NOVUS_PCI=$(if $(filter y,$(CONFIG_NOVUS_PCI)),1,0) \
           -DCONFIG_NOVUS_NET=$(if $(filter y,$(CONFIG_NOVUS_NET)),1,0) \
+          -DCONFIG_NOVUS_NTP=$(if $(filter y,$(CONFIG_NOVUS_NTP)),1,0) \
           -DCONFIG_NOVUS_WIN32=$(if $(filter y,$(CONFIG_NOVUS_WIN32)),1,0) \
           -DNOVUS_HTTPS_E2E_PROBE=$(E2E) \
           $(if $(filter 1,$(E2E)),-DTLS13_KERN_DEBUG=1,)

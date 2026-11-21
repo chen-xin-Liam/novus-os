@@ -72,6 +72,15 @@ config NOVUS_NET
 	  drivers, WiFi device class, ARP / IPv4 / ICMP / UDP / DHCP and a
 	  minimal TCP client. Requires NOVUS_PCI.
 
+config NOVUS_NTP
+	bool
+	default y
+	depends on NOVUS_NET
+	help
+	  Automatically synchronise the wall clock from ntp.aliyun.com (SNTP
+	  over UDP/123) once DHCP is bound, then once an hour. Uses the DNS
+	  resolver and falls back to 203.107.6.88 if DNS is unavailable.
+
 config NOVUS_NOVUSFS
 	bool
 	default y

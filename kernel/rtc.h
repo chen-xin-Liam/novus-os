@@ -22,8 +22,14 @@ int rtc_now(UINT8 *hour, UINT8 *minute);
  * arithmetic twice. */
 int rtc_now_date(UINT16 *year, UINT8 *month, UINT8 *day);
 
-/* Current Unix timestamp (seconds since 1970-01-01) from the CMOS RTC, or 0
- * when the clock reads invalid. Used for TLS certificate validity checks. */
+/* Current Unix timestamp (seconds since 1970-01-01), including any software
+ * correction installed by rtc_set_unix(). Returns 0 when the CMOS chip reads
+ * invalid. Used for TLS certificate validity checks and time sync. */
 UINT64 rtc_unix(void);
+
+/* Correct the software clock to `now` without touching CMOS. The value is an
+ * offset from the hardware clock, so the RTC keeps ticking between NTP syncs
+ * and all readers (taskbar, Win32, TLS) see the corrected time. */
+void rtc_set_unix(UINT64 now);
 
 #endif /* NOVUS_RTC_H */

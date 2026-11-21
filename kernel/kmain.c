@@ -722,6 +722,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * nd_input_init() arms the keyboard queue and con_init() binds the
        * framebuffer text console nsh will draw into. */
       (void)net_init();
+      net_ntp_init();
       devtab_refresh();
       nd_input_init();
       con_init(nd_screen());
@@ -760,6 +761,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
          * the applications, so the network app has a link to show, the device
          * manager sees the adapter, and the boot menu can read arrow keys. */
         (void)net_init();
+        net_ntp_init();
         devtab_refresh();
         kputs("[BOOT] session and network ready\n");
 

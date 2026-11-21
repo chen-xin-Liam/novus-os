@@ -495,6 +495,10 @@ void net_udp_input(const UINT8 *p, UINT32 len, UINT32 src) {
     net_dns_input(p + 8, len - 8u, src);
     return;
   }
+  if (dport == NET_NTP_LOCAL_PORT) { /* reply from the SNTP server */
+    net_ntp_input(p + 8, len - 8u, src);
+    return;
+  }
   (void)src;
 }
 
@@ -545,6 +549,7 @@ void net_tick(void) {
   net_icmp_tick();
   net_tcp_tick();
   net_dns_tick();
+  net_ntp_tick();
   net_ncsi_tick();
 }
 

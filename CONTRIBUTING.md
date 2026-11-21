@@ -113,6 +113,7 @@ source "$HOME/.cargo/env"
 - Kconfig 中的 `depends on` 不会自动校验，需要人工保证，例如 `IRQ → SCHED`、`GUI → DISPLAY`、`WM → GUI + IPC`。
 - `CONFIG_USER_MOCHI` 和 `CONFIG_USER_CPPCC` 都可能占用 `APPS/DEMO.NUC` 槽位；当前工作树没有 `user/mochi` 子模块。
 - `E2E=1` 是独立 make 变量，会加入测试根证书和 HTTPS 探针；所有相关 `make` 调用必须一致带 `E2E=1`，不能混用对象。
+- `CONFIG_NOVUS_NTP=y` 默认开启：DHCP 拿到地址后用 DNS 解析 `ntp.aliyun.com`（失败回退 `203.107.6.88`），经 UDP/123 每小时校准软件时钟；串口日志标记为 `[NTP]`。
 
 ### 3.2 常用命令
 

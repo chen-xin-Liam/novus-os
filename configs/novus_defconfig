@@ -80,6 +80,8 @@ CONFIG_NOVUS_GUI=y
 CONFIG_NOVUS_IPC=y
 CONFIG_NOVUS_PCI=y
 CONFIG_NOVUS_NET=y
+# Automatically sync the wall clock from ntp.aliyun.com after DHCP.
+CONFIG_NOVUS_NTP=y
 
 # M6: Novus-WM window manager and the GUI protocol server. Requires
 # CONFIG_NOVUS_GUI and CONFIG_NOVUS_IPC.

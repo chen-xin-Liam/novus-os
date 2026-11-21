@@ -140,6 +140,19 @@ UINT32 net_dns_addr(void);
 void   net_dns_input(const UINT8 *p, UINT32 len, UINT32 src);
 void   net_dns_tick(void);
 
+/* ---- SNTP: automatic wall-clock sync from ntp.aliyun.com --------------- */
+
+/* Fixed local UDP port for the one outstanding NTP query. */
+#define NET_NTP_LOCAL_PORT 12345u
+
+/* Started after net_init(); driven from net_tick(). Resolves the server via
+ * DNS once, keeps the address cached, then re-syncs hourly. */
+void net_ntp_init(void);
+void net_ntp_input(const UINT8 *p, UINT32 len, UINT32 src);
+void net_ntp_tick(void);
+int  net_ntp_status(void); /* 0 off, 1 link, 2 dns, 3 sent, 4 waiting, 5 synced */
+UINT32 net_ntp_server(void);
+
 /* ---- NCSI: is the machine really on the internet? --------------------- */
 
 #define NET_NCSI_IDLE         0u
