@@ -4,6 +4,7 @@
 #include "cpu.h"
 #include "irq.h"
 #include "kernel.h"
+#include "sched.h"
 #include <stddef.h>
 
 #define FADT_DSDT 40u
@@ -265,6 +266,7 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   UINT64 dsdt_address;
   UINT8 revision;
   UINT32 flags;
+  int via_gas = 0;
 
   power_ready = 0;
   reset_ready = 0;
@@ -284,6 +286,7 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
    * also supplies the _S5_ sleep types. */
   if (fadt->length >= FADT_X_PM1A_CNT + 12u &&
       gas_parse(raw + FADT_X_PM1A_CNT, &pm1a) && pm1a.width >= 16u) {
+    via_gas = 1;
     if (fadt->length >= FADT_X_PM1B_CNT + 12u) {
       (void)gas_parse(raw + FADT_X_PM1B_CNT, &pm1b);
     }
@@ -323,7 +326,15 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
     return;
   }
   power_ready = 1;
-  kputs("[POWER] ACPI shutdown ready, PM1a=");
+  /* Everything a real-machine report needs is on this one line: which FADT
+   * was found (revision and length decide which layout is legal), which
+   * path supplied the control block, and the sleep types the DSDT's own
+   * _S5_ package claims. QEMU answers 0/0, HP firmware usually 4 or 5. */
+  kputs("[POWER] ACPI shutdown ready: FADT rev=");
+  kputs_hex(revision);
+  kputs(" len=");
+  kputs_hex(fadt->length);
+  kputs(via_gas ? " PM1a(GAS)=" : " PM1a(legacy)=");
   kputs_hex(pm1a.address);
   kputs(" S5=");
   kputs_hex(slp_typ_a);
@@ -413,6 +424,65 @@ void power_off(void) { power_off_common(1); }
 
 /* Power off from an interrupt context: no disk polling, just the S5 write. */
 void power_off_now(void) { power_off_common(0); }
+
+/* ---- deferred shutdown ------------------------------------------------ */
+
+/* The compositor runs in the timer interrupt, so by the time it has put the
+ * last black frame on the glass it still cannot flush a write cache: a
+ * flush is a polling command and USB backends need a multi-step state
+ * machine. Instead the tick arms this state machine; the first task to
+ * enter a syscall runs the blocking tail with interrupts enabled, and the
+ * tick itself only acts as a one-second watchdog. States are volatile
+ * because the two halves run in different contexts. */
+#define POWER_SHUTDOWN_IDLE      0u
+#define POWER_SHUTDOWN_PENDING   1u
+#define POWER_SHUTDOWN_SERVICING 2u
+#define POWER_SHUTDOWN_TIMEOUT_TICKS 100u /* 100 Hz: one second */
+
+static volatile UINT32 g_shutdown_state = POWER_SHUTDOWN_IDLE;
+static volatile UINT64 g_shutdown_deadline;
+
+void power_off_deferred(void) {
+  if (g_shutdown_state != POWER_SHUTDOWN_IDLE) {
+    return; /* already armed or being serviced */
+  }
+  g_shutdown_deadline = sched_ticks() + POWER_SHUTDOWN_TIMEOUT_TICKS;
+  g_shutdown_state = POWER_SHUTDOWN_PENDING; /* publish after the deadline */
+  kputs("[POWER] shutdown queued for task context\n");
+}
+
+int power_shutdown_pending(void) {
+  return (g_shutdown_state == POWER_SHUTDOWN_PENDING) ? 1 : 0;
+}
+
+/* Runs from syscall_dispatch, i.e. from a ring-3 task with a ring-0 stack
+ * and interrupts on. Once SERVICING is published the tick's watchdog will
+ * not cut the flush short. Never returns: power_off_common() halts. */
+void power_shutdown_service(void) {
+  if (g_shutdown_state != POWER_SHUTDOWN_PENDING) {
+    return;
+  }
+  g_shutdown_state = POWER_SHUTDOWN_SERVICING;
+  kputs("[POWER] flushing and parking block devices\n");
+  kputs_hex((UINT64)blkdev_standby_all());
+  kputs(" disks at rest\n");
+  power_off_common(0);
+}
+
+/* Timer context. Do not touch a disk here: if no task made a syscall in
+ * time, fall back to the old immediate-S5 path rather than leaving the
+ * machine with a black screen forever. */
+void power_shutdown_tick(void) {
+  if (g_shutdown_state != POWER_SHUTDOWN_PENDING) {
+    return;
+  }
+  if (sched_ticks() < g_shutdown_deadline) {
+    return;
+  }
+  g_shutdown_state = POWER_SHUTDOWN_IDLE;
+  kputs("[POWER] shutdown service timed out; S5 without park\n");
+  power_off_common(0);
+}
 
 void power_reboot(void) {
   UINT64 flags;
