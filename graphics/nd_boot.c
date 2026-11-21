@@ -26,6 +26,7 @@
 
 #include "kernel.h"
 #include "nd.h"
+#include "nd_oemlogo.h"
 
 #define SPLASH_TOP    0x0A0F17u
 #define SPLASH_BOTTOM 0x131C2Bu
@@ -50,6 +51,7 @@ static struct {
   UINT8        active;
   char         label[SPLASH_LABEL_MAX];
   nd_rect_t    mark;
+  nd_rect_t    logo;    /* where the vendor logo sits, when there is one */
   nd_rect_t    status;
   nd_surface_t scratch; /* used only before nd_init() */
 } g_splash __attribute__((section(".data")));
@@ -122,14 +124,47 @@ static void splash_backdrop(nd_surface_t *s, nd_rect_t r) {
  * their own height instead of hugging one edge. */
 static void splash_layout(nd_surface_t *s) {
   INT32 cx = s->w / 2;
+  INT32 band = SPLASH_MARK;
   INT32 mark_top = (s->h * 26) / 100 - SPLASH_MARK / 2;
   INT32 status_y = s->h - (s->h / 5) - SPLASH_STATUS_H / 2;
+
+  /* The machine's own logo takes the place of the card, scaled only when
+   * the capture is larger than the band the splash keeps for it: the
+   * firmware paints it at panel resolution, so on most laptops it lands
+   * here at its native size and stays crisp. */
+  if (nd_oem_logo_available()) {
+    INT32 lw = nd_oem_logo_width();
+    INT32 lh = nd_oem_logo_height();
+    INT32 maxw = (s->w * 62) / 100;
+    INT32 maxh = (s->h * 22) / 100;
+
+    if (maxw < 120) {
+      maxw = s->w - 48;
+    }
+    if (lw > maxw && lw > 0) {
+      lh = (lh * maxw) / lw;
+      lw = maxw;
+    }
+    if (lh > maxh && lh > 0) {
+      lw = (lw * maxh) / lh;
+      lh = maxh;
+    }
+    band = lh;
+    mark_top = (s->h * 26) / 100 - lh / 2;
+    g_splash.logo = nd_rect(cx - lw / 2, mark_top, lw, lh);
+  } else {
+    g_splash.logo = nd_rect(cx - SPLASH_MARK / 2, mark_top, SPLASH_MARK,
+                            SPLASH_MARK);
+  }
 
   if (mark_top < 40) {
     mark_top = 40;
   }
-  if (status_y < mark_top + SPLASH_MARK + 72) {
-    status_y = mark_top + SPLASH_MARK + 72;
+  if (nd_oem_logo_available()) {
+    g_splash.logo.y = mark_top;
+  }
+  if (status_y < mark_top + band + 72) {
+    status_y = mark_top + band + 72;
   }
   g_splash.mark = nd_rect(cx - SPLASH_MARK / 2, mark_top, SPLASH_MARK,
                           SPLASH_MARK);
@@ -168,6 +203,15 @@ static void splash_brand(nd_surface_t *s) {
   const char *word = "Novus OS";
   UINT32     ww, wy;
 
+  /* The machine's own logo, when the boot stage caught one: nothing else
+   * is drawn under it, because the point of showing the vendor mark is
+   * that the screen looks like this laptop's boot screen and not like an
+   * advertisement for an operating system. */
+  if (nd_oem_logo_available()) {
+    nd_oem_logo_draw(s, g_splash.logo, 255);
+    return;
+  }
+
   nd_round_rect(s, mark, SPLASH_MARK_R, SPLASH_CARD);
   nd_round_frame(s, mark, SPLASH_MARK_R, 1, SPLASH_LINE);
   splash_letter(s, mark);
@@ -175,6 +219,48 @@ static void splash_brand(nd_surface_t *s) {
   ww = nd_text_width(word, SPLASH_WORD);
   wy = mark.y + SPLASH_MARK + 30;
   nd_text(s, (s->w - (INT32)ww) / 2, wy, word, SPLASH_TEXT, SPLASH_WORD);
+}
+
+/* The rectangle the logo moves through during the intro: its first frame
+ * sits `rise` pixels lower than its resting place, so the band has to
+ * cover both and the backdrop under it has to be rebuilt every frame. */
+static nd_rect_t splash_logo_band(INT32 rise) {
+  nd_rect_t a = g_splash.logo;
+
+  a = nd_rect(a.x - 8, a.y - 8, a.w + 16, a.h + 16 + rise);
+  return a;
+}
+
+/* Opening move of the splash: the logo fades in as it lifts the last few
+ * pixels into place. `delay_ms` is the boot stage's Stall; the kernel
+ * passes NULL and the splash simply appears finished, because by then the
+ * user has been looking at it for the whole kernel stage anyway. */
+void nd_boot_splash_intro(void (*delay_ms)(UINT32)) {
+  nd_surface_t *s = splash_surface();
+  const INT32   frames = 10;
+  const INT32   rise = 24;
+  INT32         i;
+
+  if (!g_splash.active || s == 0 || !nd_oem_logo_available() || delay_ms == 0) {
+    return;
+  }
+  nd_surface_reset_clip(s);
+  for (i = 0; i <= frames; i++) {
+    UINT8     fade = (UINT8)((255 * i) / frames);
+    INT32     dy = rise - (rise * i) / frames;
+
+    splash_backdrop(s, splash_logo_band(rise));
+    nd_oem_logo_draw(s, nd_rect(g_splash.logo.x, g_splash.logo.y + dy,
+                                g_splash.logo.w, g_splash.logo.h),
+                     (i == 0) ? 0u : (UINT8)fade);
+    if (i == 0) {
+      continue; /* the empty band is the start state, nothing to hold on */
+    }
+    delay_ms(20);
+  }
+  /* Last frame exactly on the resting rect, fully opaque. */
+  splash_backdrop(s, splash_logo_band(rise));
+  nd_oem_logo_draw(s, g_splash.logo, 255);
 }
 
 /* The one line: whatever the boot is doing right now, centred, no
@@ -202,6 +288,19 @@ static void splash_status(nd_surface_t *s) {
 
 void nd_boot_splash_end(void) { g_splash.active = 0; }
 
+/* Where the splash put the machine's logo. The desktop transition lifts
+ * the same pixels from the same place, so the handover reads as one
+ * continuous movement rather than as two screens that happen to share a
+ * colour. Returns 0 when there was no captured logo. */
+int nd_boot_logo_rect(nd_rect_t *out) {
+  if (out == 0 || !nd_oem_logo_available() || g_splash.logo.w <= 0) {
+    return 0;
+  }
+  *out = g_splash.logo;
+  return 1;
+}
+
+
 int nd_boot_splash_active(void) { return g_splash.active != 0; }
 
 int nd_boot_splash(void) {
@@ -218,6 +317,12 @@ int nd_boot_splash(void) {
   g_splash.label[0] = '\0';
   splash_layout(s);
   nd_surface_reset_clip(s);
+  /* The firmware drew its logo and its console through its own cacheable
+   * mapping. Those dirty lines can land on the framebuffer after our first
+   * fill and ghost through the backdrop - the vendor text sitting on top of
+   * the splash is that writeback seen from the other side. Flush once, then
+   * paint over a clean surface. */
+  __asm__ volatile("wbinvd" ::: "memory");
   splash_backdrop(s, nd_rect(0, 0, s->w, s->h));
   splash_brand(s);
   return 1;

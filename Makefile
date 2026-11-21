@@ -117,6 +117,7 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_core.c \
        graphics/nd_hal.c \
        graphics/nd_boot.c \
+       graphics/nd_oemlogo.c \
        graphics/nd_input.c \
        graphics/nd_jpeg.c \
        graphics/nd_wallpaper.c \

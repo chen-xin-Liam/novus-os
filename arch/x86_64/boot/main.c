@@ -15,6 +15,7 @@
 #include "bootio.h"
 #include "stage3.h"
 #include "nd.h"
+#include "nd_oemlogo.h"
 
 /* A-core switch (README 2.2 step 7): 1 = skip the boot self-check
  * output. The Makefile passes -DCONFIG_NOVUS_A_CORE_DISABLE=0/1. */
@@ -35,6 +36,16 @@
 
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_con = 0;
 static int g_quiet;
+
+/* Firmware Stall, kept for the splash intro: it is the only sub-tick sleep
+ * that exists before the kernel arms its LAPIC timer. */
+static EFI_BOOT_SERVICES *g_bs = 0;
+
+static void boot_stall_ms(UINT32 ms) {
+  if (g_bs != 0 && g_bs->Stall != 0) {
+    (void)g_bs->Stall((UINTN)ms * 1000u);
+  }
+}
 
 /* CPU and memory facts gathered by the boot self-check. Collection
  * always runs (even with the A-core switch on, cpuid just stops
@@ -369,7 +380,24 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
   g_con = SystemTable->ConOut;
   g_quiet = 0;
+  g_bs = bs;
   boot_serial_init();
+
+  /* The one picture worth keeping from the firmware: its own boot logo,
+   * which is on the scanout right now and which the ClearScreen below is
+   * about to erase. Capture it first, then draw our own screen around it -
+   * the owner of the machine sees the vendor mark they already recognise,
+   * from the first frame of the boot, on any hardware. */
+  if (nd_oem_logo_capture(SystemTable)) {
+    boot_puts(L"[BOOT] firmware boot logo captured: ");
+    boot_put_dec((UINT64)nd_oem_logo_width());
+    boot_puts(L"x");
+    boot_put_dec((UINT64)nd_oem_logo_height());
+    boot_puts(L"\r\n");
+  } else {
+    boot_puts(L"[BOOT] no firmware boot logo on screen; the splash draws its "
+              L"own mark\r\n");
+  }
 
   /* Publish the spec 2.3 shared memory block before anything else.
    * The A-core switch decides whether the self-check output happens;
@@ -390,7 +418,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* Which stage is running, before anything that could hang. The kernel
    * stamps its own version after ExitBootServices; this one proves the
    * firmware actually started the image that was just written. */
-  boot_puts(L"[BOOT] boot stage rev 37\r\n");
+  boot_puts(L"[BOOT] boot stage rev 41\r\n");
 
   /* M3: everything below this line may touch real disks, so the block
    * device table, the EFI system partition and the filesystem allocator
@@ -442,6 +470,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
       /* The text phase is over: the screen now shows the splash and the
        * rest of the boot log goes to COM1. */
       boot_quiet(1);
+      /* Opening move: the logo lifts and fades in, with the firmware's
+       * own Stall providing the frames. ~200 ms, before the payload reads
+       * start, so it never delays anything the user is waiting for. */
+      nd_boot_splash_intro(boot_stall_ms);
       nd_boot_stage(4, "正在启动");
     } else if (d->fb_phys >= 0x100000000ULL) {
       /* The numbers are the point here: the splash is skipped only when
