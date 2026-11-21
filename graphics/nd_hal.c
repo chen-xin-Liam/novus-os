@@ -37,6 +37,7 @@
 #include "cpu.h"
 #include "fbcon.h"
 #include "nd.h"
+#include "boot_scanout.h"
 #include <stddef.h>
 
 #define ND_FB_MAX_WIDTH  8192u
@@ -346,6 +347,20 @@ int nd_capture_boot(void *system_table) {
   /* The first output carries the desktop; the others mirror it. */
   {
     nd_output_t *p = &g_outputs[0];
+    int          boot_map;
+
+    /* The splash and the firmware-logo capture draw straight through this
+     * physical address before the kernel's tables exist, so ask the live
+     * boot tables whether it is reachable - and build the mapping when it
+     * is not, instead of refusing every scanout above 4 GiB. */
+    boot_map = boot_scanout_map(st->BootServices, p->fb_phys, p->fb_size);
+    kputs("[ND] scanout ");
+    kputs_hex(p->fb_phys);
+    kputs((boot_map == BOOT_SCANOUT_PRESENT)
+              ? " already mapped by the firmware\n"
+              : (boot_map == BOOT_SCANOUT_MAPPED)
+                    ? " mapped uncached for the boot stage\n"
+                    : " not reachable from the boot page tables\n");
 
     g_disp.available = 1;
     g_disp.bgr = p->bgr;
@@ -355,6 +370,7 @@ int nd_capture_boot(void *system_table) {
     g_disp.bpp = 32;
     g_disp.fb_phys = p->fb_phys;
     g_disp.fb_size = p->fb_size;
+    g_disp.fb_boot_usable = (boot_map != BOOT_SCANOUT_FAILED) ? 1u : 0u;
     g_disp.backend = (count > 1u) ? "GOP framebuffer, mirrored"
                                   : "GOP framebuffer";
   }

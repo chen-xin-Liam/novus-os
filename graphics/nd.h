@@ -111,6 +111,7 @@ void nd_surface_reset_clip(nd_surface_t *s);
 typedef struct {
   UINT8       available; /* 1 = a linear framebuffer was captured */
   UINT8       bgr;       /* 1 = memory byte order B,G,R,X */
+  UINT8       fb_boot_usable; /* 1 = the boot stage's page tables reach it */
   UINT32      width;
   UINT32      height;
   UINT32      pitch;     /* pixels per scanline */
@@ -365,6 +366,18 @@ void nd_demo_paint(nd_rect_t clip);
  * hidden, which is the price of a static widget pool. */
 void nd_demo_theme_sync(void);
 
+/* Open the title-bar context menu for a WM client window at screen (x, y).
+ * `state` is the WM window state: 2 means maximized, which swaps the
+ * maximize item for restore. The items call back into nwm_window_command().
+ * Called by the WM on a right press over a caption; the shared menu is an
+ * overlay, so it is composited above the windows. */
+void nd_shell_window_menu(INT32 x, INT32 y, UINT32 win_id, UINT8 state);
+
+/* Close the shell's shared context menu if it is open. The WM calls this
+ * before it delivers a press to a client window or to the desktop, so the
+ * menu cannot outlive the click that dismissed it. */
+void nd_shell_menu_close(void);
+
 /* ---- shell animation ------------------------------------------------- */
 
 /* Sleep on hlt until `ms` have elapsed on the 10 ms tick. Used by the two
@@ -381,8 +394,9 @@ void  nd_dock_shift(INT32 dy);
  * the shutdown slide uses it, and the boot slide starts from it. */
 INT32 nd_dock_span(void);
 
-/* Close the shell's floating cards (start menu, quick settings) without
- * touching windows: the first step of a shutdown. */
+/* Close the shell's floating cards (start menu, quick settings), its
+ * context menu and any hover/press highlight, without touching windows:
+ * the first step of a shutdown. */
 void nd_shell_close_overlays(void);
 
 /* Splash to desktop: the vendor logo lifts and fades off the top, the dock

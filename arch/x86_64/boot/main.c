@@ -395,8 +395,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_put_dec((UINT64)nd_oem_logo_height());
     boot_puts(L"\r\n");
   } else {
-    boot_puts(L"[BOOT] no firmware boot logo on screen; the splash draws its "
-              L"own mark\r\n");
+    boot_puts(L"[BOOT] no firmware boot logo: ");
+    boot_put_ascii((const CHAR8 *)nd_oem_logo_reason(), 96);
+    boot_puts(L"; the splash draws its own mark\r\n");
   }
 
   /* Publish the spec 2.3 shared memory block before anything else.
@@ -418,7 +419,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* Which stage is running, before anything that could hang. The kernel
    * stamps its own version after ExitBootServices; this one proves the
    * firmware actually started the image that was just written. */
-  boot_puts(L"[BOOT] boot stage rev 41\r\n");
+  boot_puts(L"[BOOT] boot stage rev 42\r\n");
 
   /* M3: everything below this line may touch real disks, so the block
    * device table, the EFI system partition and the filesystem allocator
@@ -475,12 +476,14 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
        * start, so it never delays anything the user is waiting for. */
       nd_boot_splash_intro(boot_stall_ms);
       nd_boot_stage(4, "正在启动");
-    } else if (d->fb_phys >= 0x100000000ULL) {
-      /* The numbers are the point here: the splash is skipped only when
-       * the scanout sits above the 4 GiB the boot stage can address, and
-       * on a laptop that is the difference between the splash and a text
-       * log. Print it where the firmware console can still show it. */
-      boot_puts(L"[BOOT] boot splash unavailable: framebuffer above 4 GiB, "
+    } else if (d->fb_phys != 0 && !d->fb_boot_usable) {
+      /* The numbers are the point here: the splash is skipped only when the
+       * boot stage could not map the scanout at all, and on a laptop that is
+       * the difference between the splash and a text log. Print it where the
+       * firmware console can still show it. */
+      boot_puts(L"[BOOT] boot splash unavailable: framebuffer at ");
+      boot_put_hex(d->fb_phys);
+      boot_puts(L" is not reachable from the boot page tables, "
                 L"kernel text console takes over\r\n");
     } else {
       boot_puts(L"[BOOT] boot splash unavailable, text console stays\r\n");

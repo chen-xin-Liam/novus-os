@@ -20,6 +20,7 @@
 #include "kernel.h"
 #include "nd_internal.h"
 #include "nd_oemlogo.h"
+#include "boot_scanout.h"
 #include <stddef.h>
 
 /* Bounds of what is kept. Vendor logos are wide and short; a 448x176
@@ -35,6 +36,13 @@ static UINT32 g_px[OEM_MAX_W * OEM_MAX_H] __attribute__((section(".data")));
 static INT32  g_w __attribute__((section(".data")));
 static INT32  g_h __attribute__((section(".data")));
 static UINT8  g_ready __attribute__((section(".data")));
+/* Why the last capture gave up. The real machine is the only place where a
+ * vendor's splash can be inspected, so the boot log has to say which shape
+ * check rejected it rather than just "no logo"; that is the line that tells
+ * whether the matching conditions need loosening for this machine. */
+static const char *g_reason __attribute__((section(".data"))) = "not attempted";
+
+#define NO_LOGO(why) do { g_reason = (why); return 0; } while (0)
 
 static UINT32 rd_le32(const UINT32 *p) { return *p; }
 
@@ -68,6 +76,7 @@ int nd_oem_logo_capture(void *system_table) {
   UINTN             n = 0;
   UINTN             i;
   UINT32           *fb = 0;
+  UINT64            base = 0;
   UINT32            w = 0, h = 0, pitch = 0;
   UINT8             bgr = 1u;
   UINT32            step;
@@ -83,12 +92,12 @@ int nd_oem_logo_capture(void *system_table) {
   g_w = 0;
   g_h = 0;
   if (st == 0 || st->BootServices == 0) {
-    return 0;
+    NO_LOGO("no EFI system table");
   }
   if (EFI_ERROR(st->BootServices->LocateHandleBuffer(AllHandles, &gop_guid,
                                                      NULL, &n, &handles)) ||
       handles == 0) {
-    return 0;
+    NO_LOGO("the firmware lists no GOP handle");
   }
   for (i = 0; i < n && fb == 0; i++) {
     EFI_GRAPHICS_OUTPUT_PROTOCOL         *gop = NULL;
@@ -115,12 +124,26 @@ int nd_oem_logo_capture(void *system_table) {
       continue;
     }
     fb = (UINT32 *)(UINTN)gop->Mode->FrameBufferBase;
+    base = gop->Mode->FrameBufferBase;
     w = info->HorizontalResolution;
     h = info->VerticalResolution;
     pitch = info->PixelsPerScanLine;
   }
   if (fb == 0 || w < 320u || h < 200u) {
-    return 0;
+    NO_LOGO("no linear scanout of at least 320x200");
+  }
+
+  /* Reading the picture means reading the scanout, so the boot stage's own
+   * page tables have to cover it first. A discrete card's VRAM aperture is
+   * above 4 GiB and nothing in the firmware is obliged to have mapped it;
+   * ask, and build the mapping when it is missing, rather than dropping the
+   * logo on exactly the machines whose splash needs it most. */
+  if (boot_scanout_map(st->BootServices, base, boot_scanout_bytes(pitch, h)) ==
+      BOOT_SCANOUT_FAILED) {
+    kputs("[ND] firmware logo skipped: scanout at ");
+    kputs_hex(base);
+    kputs(" is not reachable from the boot page tables\n");
+    NO_LOGO("scanout is not reachable from the boot page tables");
   }
 
   /* Background from the corners, averaged over a small patch so a single
@@ -172,7 +195,7 @@ int nd_oem_logo_capture(void *system_table) {
     }
   }
   if (marks == 0u) {
-    return 0;
+    NO_LOGO("nothing on the scanout differs from its background");
   }
   bw = maxx - minx + step;
   bh = maxy - miny + step;
@@ -181,10 +204,10 @@ int nd_oem_logo_capture(void *system_table) {
    * that the differenced box is mostly ink rather than a stray watermark
    * in one corner. Anything else is not a logo we should paste. */
   if (bw < 24u || bh < 12u) {
-    return 0;
+    NO_LOGO("the marked box is smaller than 24x12");
   }
   if (bw > (w * 7u) / 10u || bh > (h * 5u) / 10u) {
-    return 0;
+    NO_LOGO("the marked box covers most of the screen (full-screen splash)");
   }
   {
     INT32 cxm = (INT32)(minx + bw / 2u) - (INT32)(w / 2u);
@@ -193,11 +216,11 @@ int nd_oem_logo_capture(void *system_table) {
     if (cxm < 0) cxm = -cxm;
     if (cym < 0) cym = -cym;
     if ((UINT32)cxm > w / 4u || (UINT32)cym > h / 4u) {
-      return 0;
+      NO_LOGO("the marked box is off centre");
     }
   }
   if (marks * 8u < (bw / step) * (bh / step)) {
-    return 0;
+    NO_LOGO("the marked box is mostly empty (POST text?)");
   }
 
   while ((bw / k) > OEM_MAX_W || (bh / k) > OEM_MAX_H) {
@@ -206,7 +229,7 @@ int nd_oem_logo_capture(void *system_table) {
   ow = (INT32)(bw / k);
   oh = (INT32)(bh / k);
   if (ow <= 0 || oh <= 0) {
-    return 0;
+    NO_LOGO("the box has no pixels after scaling");
   }
 
   for (y = 0; y < (UINT32)oh; y++) {
@@ -232,6 +255,7 @@ int nd_oem_logo_capture(void *system_table) {
   g_w = ow;
   g_h = oh;
   g_ready = 1;
+  g_reason = "captured";
   return 1;
 }
 
@@ -240,6 +264,8 @@ int nd_oem_logo_available(void) { return g_ready != 0; }
 INT32 nd_oem_logo_width(void) { return g_w; }
 
 INT32 nd_oem_logo_height(void) { return g_h; }
+
+const char *nd_oem_logo_reason(void) { return g_reason; }
 
 void nd_oem_logo_draw(nd_surface_t *dst, nd_rect_t r, UINT8 fade) {
   nd_rect_t clip;

@@ -76,6 +76,7 @@ E2E ?= 0
 # Source list is pinned for M2; extend it in later milestones.
 SRC := arch/x86_64/boot/main.c \
        arch/x86_64/boot/stage3.c \
+       arch/x86_64/boot/scanout.c \
        kernel/kmain.c \
        kernel/fbcon.c \
        kernel/vga.c \

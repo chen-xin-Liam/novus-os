@@ -39,6 +39,13 @@ int   nd_oem_logo_available(void);
 INT32 nd_oem_logo_width(void);
 INT32 nd_oem_logo_height(void);
 
+/* Why the last capture returned 0, in one short phrase ("the marked box
+ * covers most of the screen (full-screen splash)", ...). The boot log prints
+ * it so a machine that shows no logo says which shape check refused it -
+ * that is the line a "loosen the matching conditions" decision is made from,
+ * and the real machine is the only place it can be observed. */
+const char *nd_oem_logo_reason(void);
+
 /* Draw the logo into `dst`, scaled to fit it exactly, composited with
  * per-pixel transparency and `fade` (0 = invisible, 255 = as captured).
  * Self-contained on purpose: it has to work in the boot stage, where there

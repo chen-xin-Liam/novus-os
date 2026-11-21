@@ -18,7 +18,9 @@
  * glyphs, no second implementation to keep in sync. The only special case is
  * the surface: before nd_init() there is no heap and possibly no high
  * mapping, so the splash binds a static surface straight to the framebuffer
- * the boot stage captured, as long as it sits in the low 4 GiB.
+ * the boot stage captured, provided the boot stage's page tables cover it -
+ * which nd_capture_boot() establishes by probing the live tables and adding
+ * an uncached identity mapping when the firmware left one out.
  *
  * Updates repaint the status line only. Repainting the whole screen on every
  * step would be the very flicker this milestone is about.
@@ -70,18 +72,17 @@ nd_surface_t *splash_surface(void) {
     return &g_splash.scratch;
   }
   d = nd_display();
-  if (d == 0 || !d->available || d->fb_phys == 0 ||
-      d->fb_phys >= 0x100000000ULL || d->width == 0 || d->height == 0) {
-    /* The splash draws before the paging layer exists, so it can only use a
-     * framebuffer the boot identity map already covers. On a discrete card
-     * the firmware framebuffer lives inside the card's VRAM aperture, which
-     * is above 4 GiB: the splash is skipped there and the first thing drawn
-     * is the desktop, through the aperture mapping set up later. Say why
-     * instead of going quiet. */
-    if (d != 0 && d->available && d->fb_phys >= 0x100000000ULL) {
+  /* What matters is whether the boot stage's page tables actually cover
+   * this framebuffer, not where it sits: nd_capture_boot() already asked,
+   * and built an uncached identity mapping when the firmware had none. */
+  if (d == 0 || !d->available || d->fb_phys == 0 || !d->fb_boot_usable ||
+      d->width == 0 || d->height == 0) {
+    /* Say why instead of going quiet: a splash that does not appear is
+     * otherwise indistinguishable from one that was never attempted. */
+    if (d != 0 && d->available && d->fb_phys != 0 && !d->fb_boot_usable) {
       kputs("[ND] boot splash skipped: framebuffer at ");
       kputs_hex(d->fb_phys);
-      kputs(" is above the 4 GiB identity map\n");
+      kputs(" is not mapped by the boot stage\n");
     }
     return 0;
   }
@@ -237,8 +238,12 @@ static nd_rect_t splash_logo_band(INT32 rise) {
  * user has been looking at it for the whole kernel stage anyway. */
 void nd_boot_splash_intro(void (*delay_ms)(UINT32)) {
   nd_surface_t *s = splash_surface();
-  const INT32   frames = 10;
-  const INT32   rise = 24;
+  /* 16 steps at 24 ms: long enough for the eye to read a fade rather than
+   * a flash, short enough that the boot stage still feels responsive. The
+   * alpha follows an ease-out curve; the old 10 linear steps spent most of
+   * their time at near-final opacity and read as a cut. */
+  const INT32   frames = 16;
+  const INT32   rise = 28;
   INT32         i;
 
   if (!g_splash.active || s == 0 || !nd_oem_logo_available() || delay_ms == 0) {
@@ -246,17 +251,20 @@ void nd_boot_splash_intro(void (*delay_ms)(UINT32)) {
   }
   nd_surface_reset_clip(s);
   for (i = 0; i <= frames; i++) {
-    UINT8     fade = (UINT8)((255 * i) / frames);
+    UINT32    p = ((UINT32)i * 1000u) / (UINT32)frames;
+    UINT32    q = 1000u - p;
+    UINT32    eased = 1000u - (q * q) / 1000u;
+    UINT8     fade = (UINT8)((255u * eased) / 1000u);
     INT32     dy = rise - (rise * i) / frames;
 
     splash_backdrop(s, splash_logo_band(rise));
     nd_oem_logo_draw(s, nd_rect(g_splash.logo.x, g_splash.logo.y + dy,
                                 g_splash.logo.w, g_splash.logo.h),
-                     (i == 0) ? 0u : (UINT8)fade);
+                     (i == 0) ? 0u : fade);
     if (i == 0) {
       continue; /* the empty band is the start state, nothing to hold on */
     }
-    delay_ms(20);
+    delay_ms(24);
   }
   /* Last frame exactly on the resting rect, fully opaque. */
   splash_backdrop(s, splash_logo_band(rise));
