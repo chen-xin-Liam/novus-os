@@ -14,6 +14,7 @@
 
 #include "usb.h"
 #include "hid_boot.h"
+#include "uhci.h"
 #include "kernel.h"
 #include "pci.h"
 #include "pmm.h"
@@ -1208,6 +1209,7 @@ int hid_kbd_set_leds(hid_kbd_led_t *led) {
       }
     }
   }
+  uhci_kbd_set_leds(led);
   return 0;
 }
 
@@ -1499,6 +1501,7 @@ void usb_hid_poll(void) {
       hid_intr_submit(u); /* initial arm / recovery */
     }
   }
+  uhci_hid_poll();
 }
 
 static int attach_base(usb_t *u, UINT32 port, UINT32 speed) {
@@ -1709,10 +1712,11 @@ int usb_init(void) {
     if (ci >= (int)USB_MAX_CONTROLLERS) {
       break;
     }
-    /* Only the xHCI programming interface is handled here. EHCI (prog_if
-     * 0x20) is deliberately NOT used: a USB 2.0 high-speed device on a
-     * machine that only has EHCI stays unsupported, because the companion
-     * controller is what the devices would have to be routed to. */
+    /* This loop drives the xHCI programming interface only (prog_if 0x30).
+     * UHCI (prog_if 0x00) is a completely different register model and is
+     * brought up by uhci_init() at the end of this function; EHCI (0x20) is
+     * deliberately NOT used, so a USB 2.0 high-speed device on a machine
+     * that only has EHCI stays unsupported. */
     if (devices[i].class_code != 0x0Cu || devices[i].subclass != 0x03u ||
         devices[i].prog_if != 0x30u) {
       continue;
@@ -1966,20 +1970,20 @@ int usb_init(void) {
   }
   /* The old machine's USB frontend: i440fx exposes UHCI only, which was
    * invisible to the old class/prog_if filter above. */
-  g_usb_disks += 0;
+  g_usb_disks += (UINTN)uhci_init();
   return (int)g_usb_disks;
 }
 
 /* ---- enumeration for the device manager -------------------------------- */
 
-UINTN usb_device_count(void) { return g_ndev; }
+UINTN usb_device_count(void) { return g_ndev + uhci_device_count(); }
 
 int usb_device_info(UINTN index, usb_info_t *out) {
   usb_t *u;
   UINTN  i;
 
   if (index >= g_ndev) {
-    return -1;
+    return uhci_device_info(index - g_ndev, out);
   }
   if (out == NULL || index >= g_ndev) {
     return -1;

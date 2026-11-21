@@ -73,4 +73,16 @@ typedef struct {
 int usb_find_hid_iface(const UINT8 *cfg, UINT32 len, UINT8 want_protocol,
                        usb_hid_iface_t *out);
 
+/* ---- UHCI host controller (class 0C/03/00) ---------------------------- */
+
+/* Bring up every UHCI controller found on PCI and enumerate the devices on
+ * its root ports. Never fatal; returns the number of disks registered.
+ * The other entry points are called from the shared USB poll / device
+ * manager paths in usb.c. */
+int   uhci_init(void);
+void  uhci_hid_poll(void);
+int   uhci_kbd_set_leds(hid_kbd_led_t *led);
+UINTN uhci_device_count(void);
+int   uhci_device_info(UINTN index, usb_info_t *out);
+
 #endif /* NOVUS_USB_H */
