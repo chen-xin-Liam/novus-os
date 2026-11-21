@@ -1,0 +1,25 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust/nd-core",
+    "rust/nd-platform-api",
+    "rust/nd-platform-linux",
+    "rust/nd-platform-novus",
+    "rust/nd-cli",
+    "rust/nd-tests",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+
+[profile.release]
+opt-level = "s"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+opt-level = 1

@@ -1,0 +1,6 @@
+# Anchored to the installed stable toolchain (rustc 1.99.1 in this WSL image).
+[toolchain]
+channel = "stable"
+targets = ["x86_64-unknown-linux-gnu", "x86_64-unknown-none"]
+profile = "minimal"
+components = ["rustfmt", "clippy"]

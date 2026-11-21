@@ -33,6 +33,7 @@ static const app_t g_apps[] = {
     {"setup", k_app_setup, &k_app_setup_len},
     {"nsh", k_app_nsh, &k_app_nsh_len},
     {"devmgmt", k_app_devmgmt, &k_app_devmgmt_len},
+    {"novusd", k_app_novusd, &k_app_novusd_len},
 };
 
 /* These positions are also the IDs sent by sysinfo's spawn request and the
@@ -176,6 +177,10 @@ static const app_t g_win32[] = {
      * click path into WM_COMMAND and typing into an edit. */
     {"ctrldemo.exe", k_app_ctrldemo_exe, &k_app_ctrldemo_exe_len},
     {"menudemo.exe", k_app_menudemo_exe, &k_app_menudemo_exe_len},
+    /* ISO C++98 standard-library functional test, compiled from the
+     * unmodified sample against the project's own C++98 headers. Exercises
+     * containers, strings, streams, exceptions, RTTI and CRT from /exe. */
+    {"cpp98test.exe", k_app_cpp98test_exe, &k_app_cpp98test_exe_len},
     {"resdemo.exe", k_app_resdemo_exe, &k_app_resdemo_exe_len},
     /* Typing into an edit: caret movement with the arrow keys, insertion in
      * the middle, Tab between controls, and a button that prints what the
@@ -190,10 +195,6 @@ static const app_t g_win32[] = {
      * rejection line rather than a silent nothing. */
     {"hello32.exe", k_app_hello32_exe, &k_app_hello32_exe_len},
     {"dosdemo.com", k_app_dosdemo_com, &k_app_dosdemo_com_len},
-    /* ISO C++98 standard-library functional test, compiled from the
-     * unmodified sample against the project's own C++98 headers. Exercises
-     * containers, strings, streams, exceptions, RTTI and CRT from /exe. */
-    {"cpp98test.exe", k_app_cpp98test_exe, &k_app_cpp98test_exe_len},
 };
 
 UINT32 apps_win32_count(void) {

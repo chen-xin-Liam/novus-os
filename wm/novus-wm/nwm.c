@@ -1638,9 +1638,11 @@ void nwm_tick(void) {
       return;
     }
     g_sh_phase = 0;
-    /* Arm the flush→park→S5 tail. A task services it from syscall context;
-     * the tick itself keeps the S5 fallback if none ever runs. */
-    power_off_deferred();
+    /* Write S5 now, from the tick. The deferred form (flush, park, then S5
+     * from task context) lives on the branch that owns kernel/power.c; until
+     * it is committed here, the compositor must not call a function this
+     * tree does not have. */
+    power_off_now();
     return;
   }
   if (g_sh_phase != 0u) {

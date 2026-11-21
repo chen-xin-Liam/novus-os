@@ -1,0 +1,10 @@
+# Build artifacts
+build/
+out/
+target/
+*.o
+*.a
+*.bin
+*.nuc
+*.tmp
+tests/data/work/

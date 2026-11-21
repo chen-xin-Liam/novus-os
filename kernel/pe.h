@@ -22,13 +22,11 @@
 #define PE_ENOMEM   -4
 #define PE_EIMPORT  -5
 #define PE_ERELOC   -6
+#define PE_ETLS     -7
 /* A well-formed 32-bit image. The loader understands only PE32+ today; the
  * compatibility executor a PE32 needs is a separate subsystem, so this is its
  * own code instead of a generic format error. */
-#define PE_E32      -7
-/* A PE32+ image whose TLS directory cannot be laid out: the template copy,
- * the index allocation or the callbacks pointer failed. */
-#define PE_ETLS     -8
+#define PE_E32      -8
 
 /* What an image is, independent of whether this layer can run it. The probe
  * reads the DOS/NT headers only, so it answers for PE32, PE32+, x86, x86-64

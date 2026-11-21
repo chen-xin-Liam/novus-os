@@ -1,1 +1,18 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 32 32" fill="#FFFFFF"><rect x="4" y="4" width="10" height="10" rx="1.2"/><rect x="18" y="4" width="10" height="10" rx="1.2"/><rect x="4" y="18" width="10" height="10" rx="1.2"/><rect x="18" y="18" width="10" height="10" rx="1.2"/></svg>
+<svg xmlns="http://www.w3.org/2000/svg" width="2048" height="2048" viewBox="0 0 254 247" preserveAspectRatio="xMidYMid meet"><rect x="-100" y="-100" width="600" height="600" fill="#ffffff"/><g transform="">
+<defs>
+  <linearGradient id="back" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#00548e"/><stop offset="1" stop-color="#012f5c"/></linearGradient>
+  <linearGradient id="front" x1=".1" y1="0" x2=".9" y2="1"><stop offset="0" stop-color="#08bdf5"/><stop offset=".48" stop-color="#0ba9ef"/><stop offset="1" stop-color="#008cdb"/></linearGradient>
+</defs>
+<!-- Rear overlapping window -->
+<path d="M64 42 Q64 31 80 28 L218 13 Q240 10 240 30 L240 166 Q240 181 225 185 L203 192 L188 185 L199 69 Q199 50 178 51 L64 66 Z" fill="url(#back)" />
+<!-- Dark inner outline/overlap -->
+<path d="M39 79 L179 53 Q205 49 208 74 L208 206" fill="none" stroke="#092d46" stroke-width="10" stroke-linejoin="round" />
+<!-- Main cyan front window -->
+<path d="M20 94 Q20 78 36 74 L180 49 Q202 45 203 69 L203 206 Q203 226 183 224 L37 208 Q20 206 20 188 Z" fill="url(#front)" />
+<!-- Three white window indicators -->
+<circle cx="43" cy="130" r="7" fill="#fff" />
+<circle cx="66" cy="126" r="7" fill="#fff" />
+<circle cx="92" cy="123" r="7" fill="#fff" />
+<!-- Bold white N emblem -->
+<path d="M101 117 L119 115 L153 157 L153 112 L174 110 L174 190 L156 189 L119 147 L119 190 L100 190 Z" fill="#fff" />
+</g></svg>

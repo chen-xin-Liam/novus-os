@@ -1,0 +1,21 @@
+[package]
+name = "nd-platform-novus"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "novusd"
+path = "src/bin/novusd.rs"
+required-features = ["app"]
+
+[dependencies]
+nd-core = { path = "../nd-core", default-features = false, features = ["novus"] }
+nd-platform-api = { path = "../nd-platform-api" }
+novus-apps = { path = "../../../../apps" }
+
+[features]
+default = []
+app = []

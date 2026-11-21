@@ -1,0 +1,12 @@
+[package]
+name = "nd-core"
+version.workspace = true
+edition.workspace = true
+build = "build.rs"
+
+[dependencies]
+nd-platform-api = { path = "../nd-platform-api" }
+
+[features]
+default = []
+novus = []

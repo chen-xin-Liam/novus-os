@@ -6,17 +6,21 @@
  * the same screen so the user sees one continuous boot instead of a wall of
  * firmware text followed by a black screen.
  *
- * The composition is deliberately spare: the brand lockup (the Novus mark on
- * its card, the wordmark under it) sits in the upper third, and the single
- * line that matters - the step the boot is on right now - sits centred in the
- * lower fifth. One line, no percentage, no progress bar: a boot screen is
+ * The composition is deliberately spare: the boot logo from
+ * assets/splash/boot.png sits in the upper third, and the single line that
+ * matters - the step the boot is on right now - sits centred in the lower
+ * fifth. One line, no percentage, no progress bar: a boot screen is
  * something to glance at, and a bar that walks 4, 88, 90, 91 percent in three
  * tenths of a second reads as a stutter rather than as progress.
  *
- * It is drawn with the ordinary renderer (nd_fill_rect/nd_round_rect/nd_text),
- * not with a separate "boot drawing" path: the same primitives, the same
- * glyphs, no second implementation to keep in sync. The only special case is
- * the surface: before nd_init() there is no heap and possibly no high
+ * The logo is whichever mark this machine actually has: the firmware's own
+ * boot logo when the boot stage caught one, otherwise the baked ARGB array
+ * from tools/splash/mkbootlogo.py. The bake exists because there is no PNG
+ * decoder and no heap this early in boot; the capture exists because on a
+ * laptop the screen should look like that laptop's boot screen. Everything
+ * else uses the ordinary renderer (nd_fill_rect/nd_round_rect/nd_text), so
+ * there is no separate "boot drawing" path to keep in sync. The only special
+ * case is the surface: before nd_init() there is no heap and possibly no high
  * mapping, so the splash binds a static surface straight to the framebuffer
  * the boot stage captured, provided the boot stage's page tables cover it -
  * which nd_capture_boot() establishes by probing the live tables and adding
@@ -28,21 +32,15 @@
 
 #include "kernel.h"
 #include "nd.h"
-#include "nd_oemlogo.h"
+#include "boot_logo.h"   /* baked fallback mark */
+#include "nd_oemlogo.h"  /* the firmware's own logo, when captured */
 
 #define SPLASH_TOP    0x0A0F17u
 #define SPLASH_BOTTOM 0x131C2Bu
 #define SPLASH_TEXT   0xE8EEF8u
 #define SPLASH_DIM    0x9AA6BAu
-#define SPLASH_TRACK  0x24303Fu
-#define SPLASH_ACCENT 0x4CC2FFu
-#define SPLASH_CARD   0x1B2532u
-#define SPLASH_LINE   0x33415Au
 
-#define SPLASH_MARK     112  /* the brand card, pixels */
-#define SPLASH_MARK_R   26   /* its corner radius */
-#define SPLASH_WORD     4    /* "Novus OS" scale */
-#define SPLASH_STATUS_H 44   /* the one status line's band */
+#define SPLASH_STATUS_H  44  /* the one status line's band */
 #define SPLASH_LABEL_MAX 56
 
 /* .data, not .bss: the boot stage paints the splash before ExitBootServices
@@ -119,107 +117,99 @@ static void splash_backdrop(nd_surface_t *s, nd_rect_t r) {
   }
 }
 
-/* Upper third: the brand lockup, centred. Lower fifth: the status band.
- * Both are centred horizontally on the whole screen, so a 768- and a
- * 1080-line panel put the mark and the line in the same places relative to
+/* Upper third: the boot logo, centred and scaled down only when the panel
+ * cannot fit it. Lower fifth: the status band. Both are centred horizontally,
+ * so a 768- and a 1080-line panel put them in the same places relative to
  * their own height instead of hugging one edge. */
 static void splash_layout(nd_surface_t *s) {
-  INT32 cx = s->w / 2;
-  INT32 band = SPLASH_MARK;
-  INT32 mark_top = (s->h * 26) / 100 - SPLASH_MARK / 2;
-  INT32 status_y = s->h - (s->h / 5) - SPLASH_STATUS_H / 2;
+  /* Two marks can land here and they have different shapes: the firmware's
+   * capture arrives at panel resolution (so it is capped at 22% of the
+   * height to keep the status line its room), while the baked fallback is
+   * a fixed lockup that may take 45%. Everything after the caps is shared,
+   * so both sit in the same place relative to their own panel height. */
+  int   oem = nd_oem_logo_available();
+  INT32 lw = oem ? nd_oem_logo_width() : BOOT_LOGO_W;
+  INT32 lh = oem ? nd_oem_logo_height() : BOOT_LOGO_H;
+  INT32 max_w = oem ? (s->w * 62) / 100 : s->w - 64;
+  INT32 max_h = oem ? (s->h * 22) / 100 : (s->h * 45) / 100;
+  INT32 logo_top;
+  INT32 status_y;
 
-  /* The machine's own logo takes the place of the card, scaled only when
-   * the capture is larger than the band the splash keeps for it: the
-   * firmware paints it at panel resolution, so on most laptops it lands
-   * here at its native size and stays crisp. */
-  if (nd_oem_logo_available()) {
-    INT32 lw = nd_oem_logo_width();
-    INT32 lh = nd_oem_logo_height();
-    INT32 maxw = (s->w * 62) / 100;
-    INT32 maxh = (s->h * 22) / 100;
-
-    if (maxw < 120) {
-      maxw = s->w - 48;
-    }
-    if (lw > maxw && lw > 0) {
-      lh = (lh * maxw) / lw;
-      lw = maxw;
-    }
-    if (lh > maxh && lh > 0) {
-      lw = (lw * maxh) / lh;
-      lh = maxh;
-    }
-    band = lh;
-    mark_top = (s->h * 26) / 100 - lh / 2;
-    g_splash.logo = nd_rect(cx - lw / 2, mark_top, lw, lh);
-  } else {
-    g_splash.logo = nd_rect(cx - SPLASH_MARK / 2, mark_top, SPLASH_MARK,
-                            SPLASH_MARK);
+  if (oem && max_w < 120) {
+    max_w = s->w - 48;
   }
-
-  if (mark_top < 40) {
-    mark_top = 40;
+  if (max_w < 32 || max_h < 32 || lw <= 0 || lh <= 0) {
+    g_splash.mark = nd_rect(0, 0, 0, 0);
+    g_splash.logo = g_splash.mark;
+    g_splash.status = nd_rect(0, 0, s->w, 0);
+    return;
   }
-  if (nd_oem_logo_available()) {
-    g_splash.logo.y = mark_top;
+  if (lw > max_w) {
+    lh = (lh * max_w + lw / 2) / lw;
+    lw = max_w;
   }
-  if (status_y < mark_top + band + 72) {
-    status_y = mark_top + band + 72;
+  if (lh > max_h) {
+    lw = (lw * max_h + lh / 2) / lh;
+    lh = max_h;
   }
-  g_splash.mark = nd_rect(cx - SPLASH_MARK / 2, mark_top, SPLASH_MARK,
-                          SPLASH_MARK);
+  logo_top = (s->h * 26) / 100 - lh / 2;
+  if (logo_top < 24) {
+    logo_top = 24;
+  }
+  status_y = s->h - (s->h / 5) - SPLASH_STATUS_H / 2;
+  if (status_y < logo_top + lh + 32) {
+    status_y = logo_top + lh + 32;
+  }
+  g_splash.mark = nd_rect((s->w - lw) / 2, logo_top, lw, lh);
+  g_splash.logo = g_splash.mark;
   g_splash.status = nd_rect(0, status_y, s->w, SPLASH_STATUS_H);
 }
 
-/* The mark: three strokes, drawn as rectangles rather than as a glyph. The
- * 5x7 font's "N" at 6x expands into a staircase that reads as a mirrored N;
- * a logo should not depend on the fallback bitmap looking right at an
- * unusual scale, and three rectangles are crisper at any size anyway. */
-static void splash_letter(nd_surface_t *s, nd_rect_t card) {
-  const INT32 pad = 28;
-  const INT32 w = 7;
-  INT32 top = card.y + pad;
-  INT32 bot = card.y + card.h - pad - 1;
-  INT32 lx = card.x + pad;
-  INT32 rx = card.x + card.w - pad - 1 - w;
-  INT32 span = rx - (lx + w - 1);
-  INT32 rows = bot - top;
-  INT32 i;
+/* Copy the baked logo. At 1:1 nd_blit handles clipping and the framebuffer's
+ * channel order; on a small panel, sample it nearest-neighbour so no scaling
+ * table or scratch buffer is needed before the heap exists. */
+static void splash_logo(nd_surface_t *s) {
+  nd_rect_t  r = g_splash.mark;
+  nd_surface_t img;
 
-  nd_fill_rect(s, nd_rect(lx, top, w, rows + 1), SPLASH_ACCENT);
-  nd_fill_rect(s, nd_rect(rx, top, w, rows + 1), SPLASH_ACCENT);
-  if (span <= 0 || rows <= 0) {
+  if (r.w <= 0 || r.h <= 0) {
     return;
   }
-  for (i = 0; i <= span; i++) {
-    INT32 y = top + (INT32)(((INT64)i * (INT64)rows) / (INT64)span);
-
-    nd_fill_rect(s, nd_rect(lx + w - 1 + i, y, 1, w), SPLASH_ACCENT);
-  }
-}
-
-static void splash_brand(nd_surface_t *s) {
-  nd_rect_t  mark = g_splash.mark;
-  const char *word = "Novus OS";
-  UINT32     ww, wy;
-
-  /* The machine's own logo, when the boot stage caught one: nothing else
-   * is drawn under it, because the point of showing the vendor mark is
-   * that the screen looks like this laptop's boot screen and not like an
-   * advertisement for an operating system. */
+  /* The firmware's own mark wins when the boot stage caught one: the point
+   * of showing it is that the screen looks like this machine's boot screen
+   * and not like an advertisement for an operating system. */
   if (nd_oem_logo_available()) {
-    nd_oem_logo_draw(s, g_splash.logo, 255);
+    nd_oem_logo_draw(s, r, 255);
     return;
   }
+  img.px = (UINT32 *)(UINTN)g_boot_logo;
+  img.w = BOOT_LOGO_W;
+  img.h = BOOT_LOGO_H;
+  img.stride = BOOT_LOGO_W;
+  img.clip = nd_rect(0, 0, img.w, img.h);
+  img.owned = 0;
+  img.fb = 0;
+  img.bgr = 0;
+  img.pad = 0;
 
-  nd_round_rect(s, mark, SPLASH_MARK_R, SPLASH_CARD);
-  nd_round_frame(s, mark, SPLASH_MARK_R, 1, SPLASH_LINE);
-  splash_letter(s, mark);
+  if (r.w == BOOT_LOGO_W && r.h == BOOT_LOGO_H) {
+    nd_blit(s, r.x, r.y, &img, img.clip);
+    return;
+  }
+  {
+    nd_rect_t clip = nd_rect_intersect(r, s->clip);
+    INT32     x, y;
 
-  ww = nd_text_width(word, SPLASH_WORD);
-  wy = mark.y + SPLASH_MARK + 30;
-  nd_text(s, (s->w - (INT32)ww) / 2, wy, word, SPLASH_TEXT, SPLASH_WORD);
+    for (y = clip.y; y < clip.y + clip.h; y++) {
+      INT32 sy = ((y - r.y) * BOOT_LOGO_H) / r.h;
+      for (x = clip.x; x < clip.x + clip.w; x++) {
+        INT32 sx = ((x - r.x) * BOOT_LOGO_W) / r.w;
+
+        s->px[(UINT32)y * s->stride + (UINT32)x] =
+            nd_hw_pixel(s, g_boot_logo[(UINT32)sy * BOOT_LOGO_W + (UINT32)sx]);
+      }
+    }
+  }
 }
 
 /* The rectangle the logo moves through during the intro: its first frame
@@ -332,7 +322,7 @@ int nd_boot_splash(void) {
    * paint over a clean surface. */
   __asm__ volatile("wbinvd" ::: "memory");
   splash_backdrop(s, nd_rect(0, 0, s->w, s->h));
-  splash_brand(s);
+  splash_logo(s);
   return 1;
 }
 

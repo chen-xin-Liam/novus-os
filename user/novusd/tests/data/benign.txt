@@ -1,0 +1,1 @@
+This is a harmless text sample used as a false-positive control.

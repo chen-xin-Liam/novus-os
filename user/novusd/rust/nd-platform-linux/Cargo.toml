@@ -1,0 +1,8 @@
+[package]
+name = "nd-platform-linux"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+nd-core = { path = "../nd-core" }
+nd-platform-api = { path = "../nd-platform-api" }

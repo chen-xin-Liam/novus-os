@@ -90,7 +90,7 @@ fn join_path(parent: &[u8], name: &[u8], out: &mut [u8]) -> usize {
     n
 }
 
-const KNOWN_APPS: &[&str] = &["fileman", "taskman", "settings", "netman", "session", "setup", "nsh", "devmgmt"];
+const KNOWN_APPS: &[&str] = &["fileman", "taskman", "settings", "netman", "session", "setup", "nsh", "devmgmt", "novusd"];
 
 type Bfn = fn(&mut Shell, &Cmd, &[u8], &mut dyn Sink) -> i32;
 
@@ -1249,6 +1249,116 @@ fn cmd_umount(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -
     }
 }
 
+/* ---- novusd: file-backed command channel -------------------------------- */
+
+fn novusd_read(path: &str, buf: &mut [u8]) -> Option<usize> {
+    let fd = fs::open(path, false)?;
+    let n = fs::read(fd, buf);
+    fs::close(fd);
+    if n < 0 { None } else { Some(n as usize) }
+}
+
+fn cmd_novusd(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    use crate::novusd_proto as np;
+
+    let req_path = core::str::from_utf8(np::REQ_PATH).unwrap_or("");
+    let rsp_path = core::str::from_utf8(np::RSP_PATH).unwrap_or("");
+
+    // The daemon has no cwd of its own, so resolve path-like arguments here.
+    let wants_path = matches!(cmd.argv.get(0).copied().unwrap_or(&[]),
+        b"scan" | b"update" | b"schedule");
+    let mut abs = [0u8; PATH_MAX];
+    let mut args = [0u8; 240];
+    let mut n = 0usize;
+    for i in 1..cmd.argc {
+        let mut a = cmd.argv[i];
+        if a.is_empty() || n >= args.len() {
+            continue;
+        }
+        if i == 1 && wants_path {
+            let len = shell.abs_path(a, &mut abs);
+            if len > 0 {
+                a = &abs[..len];
+            }
+        }
+        if n > 0 {
+            args[n] = b' ';
+            n += 1;
+        }
+        let take = a.len().min(args.len() - n);
+        args[n..n + take].copy_from_slice(&a[..take]);
+        n += take;
+    }
+
+    let mut rbuf = [0u8; 4096];
+    let seq = novusd_read(rsp_path, &mut rbuf)
+        .and_then(|len| np::response_from(&rbuf[..len]).ok())
+        .map(|rsp| rsp.seq.wrapping_add(1))
+        .unwrap_or(1);
+
+    let req = np::make_request(seq, 0, &args[..n]);
+    let _ = fs::mkdir("/temp");
+    let _ = fs::mkdir("/temp/novusd");
+    let Some(fd) = fs::open(req_path, true) else {
+        puts(out, "novusd: cannot open request file\n");
+        return 1;
+    };
+    let _ = fs::write(fd, crate::ipc::bytes_of(&req));
+    fs::close(fd);
+
+    // Console-mode nsh constructs Shell with no cached port; look sysinfo up
+    // here so the daemon can still be started from a serial session.
+    let sys_port = if shell.sys_port != 0 {
+        shell.sys_port
+    } else {
+        crate::ipc::lookup(sinfo::PORT_NAME).unwrap_or(0)
+    };
+
+    // APPS_ERUNNING (-100) means the resident daemon is already serving.
+    if sys_port != 0 {
+        match sinfo::spawn_name(sys_port, "novusd") {
+            Some(rc) if rc >= 0 || rc == -100 => {}
+            Some(rc) => {
+                puts(out, "novusd: spawn refused (");
+                put_dec(out, rc.unsigned_abs() as u64);
+                puts(out, ")\n");
+                return 1;
+            }
+            None => {
+                puts(out, "novusd: sysinfo unavailable\n");
+                return 1;
+            }
+        }
+    }
+
+    let start = if sys_port != 0 {
+        sinfo::stats(sys_port).map(|s| s.uptime).unwrap_or(0)
+    } else {
+        0
+    };
+    let mut spins = 0u32;
+    loop {
+        if let Some(len) = novusd_read(rsp_path, &mut rbuf) {
+            if let Ok(rsp) = np::response_from(&rbuf[..len]) {
+                if rsp.magic == *np::RSP_MAGIC && rsp.seq == seq {
+                    let take = (rsp.len as usize).min(rsp.out.len());
+                    putb(out, &rsp.out[..take]);
+                    return if rsp.code == 0 { 0 } else { 1 };
+                }
+            }
+        }
+        spins = spins.wrapping_add(1);
+        if spins & 0x3F == 0 && sys_port != 0 {
+            let now = sinfo::stats(sys_port).map(|s| s.uptime).unwrap_or(start);
+            if now.wrapping_sub(start) > 1200 {
+                puts(out, "novusd: daemon did not answer\n");
+                return 1;
+            }
+        }
+        crate::sys::yield_now();
+    }
+}
+
 /* ---- dispatch ---------------------------------------------------------- */
 
 /// Resolve and run a command. Returns the exit status (127 = not found).
@@ -1334,4 +1444,5 @@ const BUILTINS: &[(&str, Bfn)] = &[
     ("umount", cmd_umount),
     ("nuomi", cmd_nuomi),
     ("update", cmd_update),
+    ("novusd", cmd_novusd),
 ];

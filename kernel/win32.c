@@ -264,6 +264,10 @@ enum {
   WIN32_API_GET_MENU,
   WIN32_API_DESTROY_MENU,
   WIN32_API_DRAW_MENU_BAR,
+  WIN32_API_TRACK_POPUP_MENU,
+  /* Console text color, used by self-hosted C++ programs that port
+   * SetConsoleTextAttribute/FOREGROUND_* style output. */
+  WIN32_API_SET_CONSOLE_TEXT_ATTR,
   /* Fifteenth block: resources. The image is mapped, so the tree in .rsrc
    * can be walked from here. */
   WIN32_API_FIND_RESOURCE,
@@ -280,10 +284,6 @@ enum {
   /* The version calls pair with this one: IsWow64Process takes a process
    * handle, and the pseudo handle for "this process" is what programs pass. */
   WIN32_API_GET_CURRENT_PROCESS,
-  WIN32_API_TRACK_POPUP_MENU,
-  /* Console text color, used by self-hosted C++ programs that port
-   * SetConsoleTextAttribute/FOREGROUND_* style output. */
-  WIN32_API_SET_CONSOLE_TEXT_ATTR,
 };
 
 typedef struct {
@@ -439,13 +439,13 @@ static const win32_api_t g_api[] = {
     {"user32.dll", "GetMenu", WIN32_API_GET_MENU},
     {"user32.dll", "DestroyMenu", WIN32_API_DESTROY_MENU},
     {"user32.dll", "DrawMenuBar", WIN32_API_DRAW_MENU_BAR},
+    {"user32.dll", "TrackPopupMenu", WIN32_API_TRACK_POPUP_MENU},
+    {"kernel32.dll", "SetConsoleTextAttribute", WIN32_API_SET_CONSOLE_TEXT_ATTR},
     {"kernel32.dll", "FindResourceA", WIN32_API_FIND_RESOURCE},
     {"kernel32.dll", "LoadResource", WIN32_API_LOAD_RESOURCE},
     {"kernel32.dll", "LockResource", WIN32_API_LOCK_RESOURCE},
     {"kernel32.dll", "SizeofResource", WIN32_API_SIZE_OF_RESOURCE},
     {"kernel32.dll", "LoadStringA", WIN32_API_LOAD_STRING},
-    {"user32.dll", "TrackPopupMenu", WIN32_API_TRACK_POPUP_MENU},
-    {"kernel32.dll", "SetConsoleTextAttribute", WIN32_API_SET_CONSOLE_TEXT_ATTR},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -3383,6 +3383,68 @@ static void api_draw_menu_bar(trap_frame_t *f) {
   f->rax = 1u;
 }
 
+/* TrackPopupMenu(hMenu, flags, x, y, reserved, hwnd, reserved).
+ * The popup is a layer-owned overlay on the target window. TPM_RETURNCMD
+ * pumps compositor events until a command is chosen, so the call can return
+ * the id the same way the Win32 API does; without it the choice is posted as
+ * WM_COMMAND and the call returns immediately. */
+static void api_track_popup_menu(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_gui_t  *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_menu_t *m;
+  win32_wnd_t  *w;
+  UINT64        reserved;
+  UINT64        hwnd64;
+  UINT32        flags;
+  INT32         x;
+  INT32         y;
+  UINT32        spins = 0u;
+
+  if (gu == NULL || stack_arg(f, t, 5u, &reserved) != 0 ||
+      stack_arg(f, t, 6u, &hwnd64) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  (void)reserved;
+  w = gui_window(gu, (UINT32)hwnd64);
+  m = win32_menu(gu, (UINT32)f->rdi);
+  if (w == NULL || m == NULL || m->n == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  flags = (UINT32)f->rdx;
+  x = (INT32)f->r8;
+  y = (INT32)f->r9;
+  if ((flags & TPM_RIGHTALIGN) != 0u) {
+    x -= WIN32_MENU_POPUP_W;
+  } else if ((flags & TPM_CENTERALIGN) != 0u) {
+    x -= WIN32_MENU_POPUP_W / 2;
+  }
+  if ((flags & TPM_BOTTOMALIGN) != 0u) {
+    y -= gui_popup_height(m);
+  } else if ((flags & TPM_VCENTERALIGN) != 0u) {
+    y -= gui_popup_height(m) / 2;
+  }
+  w->ctx_menu = (UINT32)f->rdi;
+  w->ctx_open = 1u;
+  w->ctx_retcmd = (flags & TPM_RETURNCMD) != 0u ? 1u : 0u;
+  w->ctx_result = 0u;
+  w->ctx_x = x;
+  w->ctx_y = y;
+  w->dirty = 1u;
+  gui_ctx_draw(t, gu, w);
+  (void)nwm_owner_flush(t->pid, w->win);
+  if (w->ctx_retcmd) {
+    while (w->ctx_open && spins++ < 200000u) {
+      gui_pump(t, gu);
+      sched_yield();
+    }
+    f->rax = w->ctx_result;
+  } else {
+    f->rax = 1u;
+  }
+}
+
 /* ---- resources in the loaded image ------------------------------------ */
 
 static int res_u16(task_t *t, UINT64 va, UINT16 *v) {
@@ -3500,7 +3562,7 @@ static int pe_find_resource(task_t *t, UINT64 base, UINT32 type, UINT32 name,
   {
     UINT16 langs = 0;
 
-    if (res_u16(t, node + 14u, &langs) != 0 || langs == 0u || 
+    if (res_u16(t, node + 14u, &langs) != 0 || langs == 0u ||
         res_u32(t, node + 20u, &off) != 0) {
       return -1;
     }
@@ -3690,68 +3752,6 @@ static void api_load_string(trap_frame_t *f) {
     }
     (void)dst;
     f->rax = (UINT64)n;
-  }
-}
-
-/* TrackPopupMenu(hMenu, flags, x, y, reserved, hwnd, reserved).
- * The popup is a layer-owned overlay on the target window. TPM_RETURNCMD
- * pumps compositor events until a command is chosen, so the call can return
- * the id the same way the Win32 API does; without it the choice is posted as
- * WM_COMMAND and the call returns immediately. */
-static void api_track_popup_menu(trap_frame_t *f) {
-  task_t       *t = sched_current();
-  win32_gui_t  *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
-  win32_menu_t *m;
-  win32_wnd_t  *w;
-  UINT64        reserved;
-  UINT64        hwnd64;
-  UINT32        flags;
-  INT32         x;
-  INT32         y;
-  UINT32        spins = 0u;
-
-  if (gu == NULL || stack_arg(f, t, 5u, &reserved) != 0 ||
-      stack_arg(f, t, 6u, &hwnd64) != 0) {
-    f->rax = 0u;
-    return;
-  }
-  (void)reserved;
-  w = gui_window(gu, (UINT32)hwnd64);
-  m = win32_menu(gu, (UINT32)f->rdi);
-  if (w == NULL || m == NULL || m->n == 0u) {
-    f->rax = 0u;
-    return;
-  }
-  flags = (UINT32)f->rdx;
-  x = (INT32)f->r8;
-  y = (INT32)f->r9;
-  if ((flags & TPM_RIGHTALIGN) != 0u) {
-    x -= WIN32_MENU_POPUP_W;
-  } else if ((flags & TPM_CENTERALIGN) != 0u) {
-    x -= WIN32_MENU_POPUP_W / 2;
-  }
-  if ((flags & TPM_BOTTOMALIGN) != 0u) {
-    y -= gui_popup_height(m);
-  } else if ((flags & TPM_VCENTERALIGN) != 0u) {
-    y -= gui_popup_height(m) / 2;
-  }
-  w->ctx_menu = (UINT32)f->rdi;
-  w->ctx_open = 1u;
-  w->ctx_retcmd = (flags & TPM_RETURNCMD) != 0u ? 1u : 0u;
-  w->ctx_result = 0u;
-  w->ctx_x = x;
-  w->ctx_y = y;
-  w->dirty = 1u;
-  gui_ctx_draw(t, gu, w);
-  (void)nwm_owner_flush(t->pid, w->win);
-  if (w->ctx_retcmd) {
-    while (w->ctx_open && spins++ < 200000u) {
-      gui_pump(t, gu);
-      sched_yield();
-    }
-    f->rax = w->ctx_result;
-  } else {
-    f->rax = 1u;
   }
 }
 
@@ -7188,6 +7188,12 @@ void win32_syscall(trap_frame_t *f) {
   case WIN32_API_DRAW_MENU_BAR:
     api_draw_menu_bar(f);
     return;
+  case WIN32_API_TRACK_POPUP_MENU:
+    api_track_popup_menu(f);
+    return;
+  case WIN32_API_SET_CONSOLE_TEXT_ATTR:
+    api_set_console_text_attr(f);
+    return;
   case WIN32_API_FIND_RESOURCE:
     api_find_resource(f);
     return;
@@ -7202,11 +7208,6 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_LOAD_STRING:
     api_load_string(f);
-  case WIN32_API_TRACK_POPUP_MENU:
-    api_track_popup_menu(f);
-    return;
-  case WIN32_API_SET_CONSOLE_TEXT_ATTR:
-    api_set_console_text_attr(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;
