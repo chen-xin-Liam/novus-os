@@ -81,6 +81,11 @@ typedef struct {
   UINT32      pend_text_n;
   nwm_text_t  pend_text[NWM_MAX_TEXTS];
   UINT8       frame_open;
+  /* Submission counter: every SHAPE/TEXT takes the next number, which is how
+   * the frame is replayed in the order the program drew instead of all fills
+   * first and all text after. A layer that paints over a client needs that. */
+  UINT16      seq_n;
+  UINT16      seq_pad;
   nd_rect_t restore; /* geometry to come back to from maximized */
 } nwm_window_t;
 
@@ -552,19 +557,27 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_fill_rect(s, client, t->win_bg);
   paint_commands(w, client);
   {
-    UINT32 k;
+    UINT32 si = 0;
+    UINT32 ti = 0;
 
-    for (k = 0; k < w->shape_n; k++) {
-      const nwm_shape_t *sh = &w->shape[k];
+    /* Replay in submission order. Two pass-through lists would paint every
+     * fill before every text run, so anything a client drew before the layer
+     * covered it up (a menu popup over the window's own labels) came back
+     * through the fill. Comparing the sequence numbers restores the order the
+     * program actually asked for, which is the same order Windows composes in. */
+    while (si < w->shape_n || ti < w->text_n) {
+      if (ti >= w->text_n ||
+          (si < w->shape_n && w->shape[si].seq <= w->text[ti].seq)) {
+        const nwm_shape_t *sh = &w->shape[si++];
 
-      paint_shape(client, sh->op, sh->x, sh->y, sh->w, sh->h, sh->color,
-                  (sh->op == NWM_OP_ROUND_FRAME) ? 1 : 1, (INT32)sh->pad);
-    }
-    for (k = 0; k < w->text_n; k++) {
-      const nwm_text_t *tx = &w->text[k];
+        paint_shape(client, sh->op, sh->x, sh->y, sh->w, sh->h, sh->color,
+                    (sh->op == NWM_OP_ROUND_FRAME) ? 1 : 1, (INT32)sh->pad);
+      } else {
+        const nwm_text_t *tx = &w->text[ti++];
 
-      nd_text(s, client.x + tx->x, client.y + tx->y, tx->text, tx->color,
-              (tx->scale != 0u) ? tx->scale : 1u);
+        nd_text(s, client.x + tx->x, client.y + tx->y, tx->text, tx->color,
+                (tx->scale != 0u) ? tx->scale : 1u);
+      }
     }
   }
   if (eff < 255u) {
@@ -941,12 +954,14 @@ static void req_shape(const ipc_msg_t *m) {
     return;
   }
   if (w->frame_open) {
+    s.seq = w->seq_n++;
     if (w->pend_shape_n >= NWM_MAX_SHAPES) {
       ack(m, w->id, NWM_EFULL);
       return;
     }
     w->pend_shape[w->pend_shape_n++] = s;
   } else {
+    s.seq = w->seq_n++;
     if (w->shape_n >= NWM_MAX_SHAPES) {
       ack(m, w->id, NWM_EFULL);
       return;
@@ -992,6 +1007,7 @@ static void req_text(const ipc_msg_t *m) {
   }
   t.text[len] = '\0';
   t.len = (UINT8)len;
+  t.seq = w->seq_n++;
   if (w->frame_open) {
     w->pend_text[w->pend_text_n++] = t;
   } else {

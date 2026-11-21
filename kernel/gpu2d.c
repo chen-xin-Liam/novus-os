@@ -210,9 +210,20 @@ int gpu2d_hardware(void) {
   return (g_ops != 0 && g_ops != &g_backend_soft) ? 1 : 0;
 }
 
+/* Lazy bring-up: the first span, row or blit of a boot builds the backend.
+ * Say which one did it, so a "[GPU2D] backend" line in a stopped log can be
+ * placed: from a draw (the desktop is already painting) or from kmain's
+ * explicit call much later in the sequence. */
+static void gpu2d_lazy(const char *what) {
+  kputs("[GPU2D] lazy init on the first ");
+  kputs(what);
+  kputs("\n");
+  gpu2d_init();
+}
+
 void gpu2d_fill_span(UINT32 *row, UINT32 count, UINT32 hw) {
   if (g_ops == 0) {
-    gpu2d_init();
+    gpu2d_lazy("span");
   }
   g_spans++;
   g_ops->fill_span(row, count, hw);
@@ -220,7 +231,7 @@ void gpu2d_fill_span(UINT32 *row, UINT32 count, UINT32 hw) {
 
 void gpu2d_copy_row(UINT32 *dst, const UINT32 *src, UINT32 count) {
   if (g_ops == 0) {
-    gpu2d_init();
+    gpu2d_lazy("row copy");
   }
   g_ops->copy_row(dst, src, count);
 }
@@ -228,7 +239,7 @@ void gpu2d_copy_row(UINT32 *dst, const UINT32 *src, UINT32 count) {
 void gpu2d_blit(UINT32 *dst, UINT32 dstride, const UINT32 *src, UINT32 sstride,
                 UINT32 w, UINT32 h) {
   if (g_ops == 0) {
-    gpu2d_init();
+    gpu2d_lazy("blit");
   }
   g_blits++;
   g_ops->blit(dst, dstride, src, sstride, w, h);

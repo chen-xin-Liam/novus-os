@@ -40,12 +40,9 @@ static void desktop_start(void) {
       kputs("[SESSION] desktop app launch failed\n");
     }
   }
-#if CONFIG_NOVUS_WIN32
-  /* TEMP (verification): open the control demo so its window is on screen
-   * for the click test. */
-  (void)apps_win32_launch(6u);
-  (void)apps_win32_launch(7u);
-#endif
+  /* The Win32 samples are not auto-started: they live in /exe and are opened
+   * from the shell like any other program, so a stock desktop boots the same
+   * three shell apps every time. */
   if (shm->app_img_base != 0 && shm->app_img_size != 0 &&
       nuc_load((const void *)(UINTN)shm->app_img_base, shm->app_img_size, "demo") != 0) {
     kputs("[SESSION] staged app refused\n");

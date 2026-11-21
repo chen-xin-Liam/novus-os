@@ -16,6 +16,8 @@
 #include "vga.h"
 #include "serial.h"
 #include "irq.h"
+#include "gdt.h"
+#include "idt.h"
 #include "shared_mem.h"
 #include "pmm.h"
 #include "mm.h"
@@ -41,6 +43,7 @@
 #include "usb.h"
 /* M12: the device table the device manager reads. */
 #include "devtab.h"
+#include "touchpad.h"
 #include "gpt.h"
 #include "power.h"
 #include "session.h"
@@ -60,6 +63,7 @@
 #include "nd.h"
 #include "nd_input.h"
 #include "con.h"
+#include "fbcon.h"
 #include "nd_font_uni.h"
 #include "nd_icon.h"
 /* M6: kernel-assisted IPC and the Novus-WM window manager. */
@@ -82,6 +86,11 @@ void kputs(const char *s) {
   UINT64 flags = irq_save();
   vga_puts(s);
   serial_puts(s);
+#if CONFIG_NOVUS_DISPLAY
+  /* Third sink: the framebuffer, when the graphical splash is not running.
+   * It is what makes a laptop without a serial port readable at all. */
+  fbcon_puts(s);
+#endif
   irq_restore(flags);
 }
 
@@ -203,7 +212,34 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   serial_init();
   vga_init();
 
+  /* The boot stage hands over either with the splash on the glass or with
+   * the firmware text still up, and the second case is the one that used to
+   * go silent: the kernel's console had a VGA text buffer and a UART to
+   * write to, and a laptop has neither. Take the framebuffer for the log
+   * here, before the first line is printed, so the whole kernel stage is
+   * readable on screen. The desktop repaints over it at the end. */
+#if CONFIG_NOVUS_DISPLAY
+  if (nd_boot_splash() == 0) {
+    (void)fbcon_begin();
+  }
+#endif
+
   kputs("Novus OS M1 - A-core (BSP) kernel stage\n");
+  /* Which build this is, in the log itself. Every diagnosis so far has
+   * started by guessing from a photo whether the running image was the one
+   * just built; a timestamp ends that. */
+  kputs("[BOOT] kernel built " __DATE__ " " __TIME__ " rev 37\n");
+
+  /* From here until sched_init() installed one, a fault was a triple fault:
+   * no IDT meant the CPU reset, and a machine that reboots mid-boot looks
+   * like a power problem rather than a bad address. Load the GDT and the IDT
+   * before the first code that can fault - the page tables, the framebuffer
+   * mapping, every device probe - so an exception prints its vector, error
+   * code and RIP and then stops. The timer branch of trap_dispatch() is the
+   * only one that needs the scheduler, and the LAPIC timer is not armed
+   * until much later; interrupts stay masked until the boot menu. */
+  gdt_init();
+  idt_init();
 
   /* The boot stage handed over with the splash on the glass. Keep it
    * active and keep advancing it: the user watches one progress bar from
@@ -231,8 +267,27 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   pmm_init(mmap_addr, map_size, desc_size);
   pmm_selftest();
 
-  /* Build the page tables, switch CR3 (identity low 4 GiB + physmap). */
-  mm_init(pmm_ram_top());
+  /* Build the page tables and switch CR3 (identity low 4 GiB + physmap).
+   * The captured scanout goes with it: a framebuffer above 4 GiB is not
+   * part of the identity map, and the text console draws through a raw
+   * physical pointer, so mm_init() maps that range itself (uncached) before
+   * the switch. Without that the console has to stop drawing for the
+   * duration of mm_init() - and a machine that dies in there then dies with
+   * nothing on screen, which is precisely how this boot used to fail. */
+  {
+    UINT64 fb_phys = 0u;
+    UINT64 fb_size = 0u;
+#if CONFIG_NOVUS_DISPLAY
+    {
+      const nd_display_t *dd = nd_display();
+      if (dd != 0) {
+        fb_phys = dd->fb_phys;
+        fb_size = dd->fb_size;
+      }
+    }
+#endif
+    mm_init(pmm_ram_top(), fb_phys, fb_size);
+  }
   mm_selftest();
 
   heap_init();
@@ -242,13 +297,30 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* Bind the display now the heap exists and re-paint the splash onto an
    * uncacheable framebuffer - the only mapping the panel actually reads. This
    * also wbinvd's away the cache lines the firmware wrote through a cacheable
-   * identity alias, so every progress step from here is shown cleanly. */
-  nd_init();
+   * identity alias, so every progress step from here is shown cleanly.
+   *
+   * A display that cannot be bound is not a boot to continue past: every
+   * step below - the device probes, the desktop, the shell - draws or waits
+   * on a screen that is not there. Say so on the text console and park,
+   * instead of walking into the dark. */
+  if (nd_init() == 0) {
+    kputs("[ND] no drawable framebuffer: the desktop stage cannot start\n");
+    kputs("[ND] the log above is the whole kernel stage; the machine stays "
+          "here\n");
+    for (;;) {
+      __asm__ volatile("cli; hlt");
+    }
+  }
   nd_boot_splash();
   nd_boot_stage(88, "初始化内存");
   nd_boot_stage(90, "映射内存");
   nd_boot_stage(91, "初始化堆");
 #endif
+  /* Stage beacons. The boot log is the only instrument a machine without a
+   * serial port gives us, so every coarse phase leaves one line: when a
+   * boot stops, the last beacon names the call it stopped in instead of
+   * leaving it to be guessed from the surrounding driver chatter. */
+  kputs("[BOOT] display bound\n");
 
   power_init(mmap_addr, map_size, desc_size);
   (void)ahci_init();
@@ -259,6 +331,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * machine's default disk) is gone from the firmware block-device list
    * after ExitBootServices, so drive it natively. */
   (void)ide_init();
+  kputs("[BOOT] power and storage probed\n");
   /* Storage power: arm the idle timer explicitly instead of trusting the
    * static initialiser in blkdev.c - the kernel's .data is laid out behind
    * the boot-stage handoff block, so a default that lives there is not
@@ -274,12 +347,19 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * disturb a transfer: every storage driver has probed and the network
    * stack has not started yet. */
   devtab_init(mmap_addr, map_size, desc_size);
+  /* The touchpad is the one input device the boot log has never mentioned:
+   * it is HID behind the PCH's I2C controller, not the PS/2 aux port. The
+   * probe prints the firmware's own description of it (controller + slave
+   * address) and the PCI serial-bus list it has to match against. */
+  touchpad_probe(mmap_addr, map_size, desc_size);
   nd_boot_stage(93, "检测设备");
+  kputs("[BOOT] device table built\n");
 
 #if CONFIG_NOVUS_DISPLAY
   /* Both need the heap; neither needs the scheduler. */
   nd_boot_stage(95, "初始化显示");
   nd_selftest();
+  kputs("[BOOT] display selftest done\n");
 #endif
 
   /* M6: the IPC layer every task inbox comes from. It has to be up
@@ -288,6 +368,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 #if CONFIG_NOVUS_IPC
   ipc_init();
   ipc_selftest();
+  kputs("[BOOT] ipc ready\n");
 #endif
 
   /* M2: NovusFS on the ramdisk. It runs here because the filesystem
@@ -318,6 +399,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   if (ext4_selftest() != 0) {
     kputs("[WARN] ext4 selftest failed, continuing degraded\n");
   }
+  kputs("[BOOT] filesystem selftests done\n");
 
   /* M3: report what the boot stage found. The verification itself had to
    * happen before ExitBootServices - only the boot stage can still read
@@ -397,6 +479,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * This runs before lang_init / win32_init / session_init, so every
    * consumer of a canonical path sees the finished VFS. */
   (void)mountcfg_apply();
+  kputs("[BOOT] mounts applied\n");
 
   /* M3: the symbol table modules resolve against. A module that binds to
    * a symbol the kernel does not export is a link error, not a runtime
@@ -576,7 +659,9 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * first window is painted. The software path runs on the CPU over the
        * firmware framebuffer; a vendor engine plugs in here when it exists. */
       gpu2d_init();
+      kputs("[BOOT] gpu and 2d ready\n");
       sysinfo_init();
+      kputs("[BOOT] sysinfo ready\n");
       {
         int install_mode = (shared_mem_get() != NULL &&
                             shared_mem_get()->boot_mode == SHM_BOOT_MODE_INSTALL);
@@ -587,11 +672,13 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
         if (!install_mode) {
           session_init();
         }
+        kputs("[BOOT] session started\n");
         /* M10: bring up PCI, the network stack and the USB HID keyboard before
          * the applications, so the network app has a link to show, the device
          * manager sees the adapter, and the boot menu can read arrow keys. */
         (void)net_init();
         devtab_refresh();
+        kputs("[BOOT] session and network ready\n");
 
         if (install_mode) {
           nd_boot_stage(99, "绘制桌面");
@@ -607,7 +694,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
             kputs("[BOOT] boot stage chose no-desktop: skipping the menu\n");
           } else {
             /* Boot menu: choose the desktop (default) or a bare shell. It draws on
-             * the framebuffer, reads the USB keyboard and counts down five seconds
+             * the framebuffer, reads the USB keyboard and counts down two seconds
              * before defaulting to the desktop. */
             boot_menu_select();
           }

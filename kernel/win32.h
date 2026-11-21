@@ -55,7 +55,7 @@
 /* ExitProcess .. GetTextMetricsA, indexed by id. One row (GetLocalTime)
  * shares GetSystemTime's id, so the table has one more row than ids; this
  * bounds both. */
-#define WIN32_API_COUNT 134u
+#define WIN32_API_COUNT 143u
 
 /* TEB field offsets, as the x64 ABI defines them: the self pointer at 0x30,
  * ClientId at 0x40 with both ids pointer-wide, StackBase/StackLimit at

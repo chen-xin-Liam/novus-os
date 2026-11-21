@@ -40,6 +40,13 @@
  * keeping the level tables off the stack budget. */
 #define MERKLE_MAX_LEVELS 32u
 
+/* Leaf blocks read per device transfer while (re)building the tree. The
+ * leaves are contiguous, so one call can carry a run of them; 16 blocks is
+ * 64 KiB, which is large enough to amortise the per-transfer cost of a
+ * firmware Block I/O call and small enough to stay a harmless allocation
+ * next to the two block-sized buffers the rebuild already uses. */
+#define MERKLE_LEAF_BATCH 16u
+
 /* ------------------------------------------------------------------ */
 /* Shape                                                               */
 /* ------------------------------------------------------------------ */
@@ -166,6 +173,22 @@ static int node_write(merkle_cache_t *c, UINT64 idx, const UINT8 *in) {
   return 0;
 }
 
+/* Read `count` consecutive blocks starting at `first` in one transfer.
+ * `novusfs_read_block` deliberately moves exactly one block; the rebuild's
+ * leaf walk is the one caller that wants a run, so the sector arithmetic
+ * lives here instead of widening the block API. */
+static int merkle_read_leaf_run(novusfs_fs_t *fs, UINT64 first, UINT64 count,
+                                UINT8 *buf) {
+  if (fs == NULL || fs->dev == NULL || buf == NULL || count == 0) {
+    return -1;
+  }
+  if (fs->sb.total_blocks != 0 && first + count > fs->sb.total_blocks) {
+    return -1; /* defensive: never issue an out-of-range transfer */
+  }
+  return blkdev_read(fs->dev, first * (UINT64)NOVUSFS_SECTORS_PER_BLOCK,
+                     (UINTN)(count * (UINT64)NOVUSFS_SECTORS_PER_BLOCK), buf);
+}
+
 /* ------------------------------------------------------------------ */
 /* Build / rebuild                                                     */
 /* ------------------------------------------------------------------ */
@@ -181,7 +204,6 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
   UINT64 capacity;
   UINT32 levels;
   UINT32 lvl;
-  UINT64 i;
   /* One cache for both reading and writing, deliberately.
    *
    * Two caches would look tidier and would be wrong: the levels are laid
@@ -226,7 +248,7 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
     return -1;
   }
 
-  databuf = (UINT8 *)novusfs_alloc(NOVUSFS_BLOCK_SIZE);
+  databuf = (UINT8 *)novusfs_alloc((UINT64)MERKLE_LEAF_BATCH * NOVUSFS_BLOCK_SIZE);
   cache.buf = (UINT8 *)novusfs_alloc(NOVUSFS_BLOCK_SIZE);
   if (databuf == NULL || cache.buf == NULL) {
     kputs("[MRKL] WARN out of memory for tree buffers\n");
@@ -234,23 +256,45 @@ static int merkle_rebuild(novusfs_fs_t *fs, UINT8 *root, int persist) {
   }
   cache.fs = fs; cache.block = 0; cache.valid = 0; cache.dirty = 0;
 
-  /* Level 0: one hash per protected block. */
-  for (i = 0; i < leaf_count; i++) {
-    if (novusfs_read_block(fs, fs->sb.free_bmap_start + i, databuf) != 0) {
-      kputs("[MRKL] WARN read failed at block ");
-      kputs_hex(fs->sb.free_bmap_start + i);
-      kputs("\n");
-      goto done;
-    }
-    /* A node slot is 64 bytes and holds a 32-byte digest, so the tail
-     * has to be zeroed explicitly: sha256 fills only the first 32 bytes,
-     * and leaving the rest to whatever the buffer last held would make
-     * the root depend on stack contents instead of on the image - the
-     * same build twice would produce two different roots. */
-    memset(node, 0, MERKLE_NODE_SIZE);
-    novus_rs_sha256(databuf, NOVUSFS_BLOCK_SIZE, node);
-    if (node_write(&cache, base[0] + i, node) != 0) {
-      goto done;
+  /* Level 0: one hash per protected block.
+   *
+   * The leaves are the whole volume, so this is the loop that decides how
+   * long a rebuild takes on real hardware. Reading one block per call means
+   * one firmware transfer per 4 KiB - on a live USB medium that is thousands
+   * of round trips for a few MiB of data. Consecutive leaf blocks are read
+   * in runs of MERKLE_LEAF_BATCH blocks instead, which is the same bytes in
+   * the same order with a fraction of the calls. */
+  {
+    UINT64 done_blocks = 0;
+
+    while (done_blocks < leaf_count) {
+      UINT64 run = leaf_count - done_blocks;
+      UINT64 k;
+
+      if (run > (UINT64)MERKLE_LEAF_BATCH) {
+        run = (UINT64)MERKLE_LEAF_BATCH;
+      }
+      if (merkle_read_leaf_run(fs, fs->sb.free_bmap_start + done_blocks, run,
+                               databuf) != 0) {
+        kputs("[MRKL] WARN read failed at block ");
+        kputs_hex(fs->sb.free_bmap_start + done_blocks);
+        kputs("\n");
+        goto done;
+      }
+      for (k = 0; k < run; k++) {
+        /* A node slot is 64 bytes and holds a 32-byte digest, so the tail
+         * has to be zeroed explicitly: sha256 fills only the first 32 bytes,
+         * and leaving the rest to whatever the buffer last held would make
+         * the root depend on stack contents instead of on the image - the
+         * same build twice would produce two different roots. */
+        memset(node, 0, MERKLE_NODE_SIZE);
+        novus_rs_sha256(databuf + k * (UINT64)NOVUSFS_BLOCK_SIZE,
+                        NOVUSFS_BLOCK_SIZE, node);
+        if (node_write(&cache, base[0] + done_blocks + k, node) != 0) {
+          goto done;
+        }
+      }
+      done_blocks += run;
     }
   }
   /* Store the padding duplicate, if the leaf level was odd. */

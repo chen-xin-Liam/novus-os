@@ -24,6 +24,7 @@ typedef unsigned int       u32;
 typedef long long          i64;
 typedef int                i32;
 typedef unsigned short     u16;
+typedef unsigned char      u8;
 
 typedef struct {
   u16 wVersion;
@@ -48,6 +49,8 @@ __declspec(dllimport) i32   WSAGetLastError(void);
 __declspec(dllimport) void  WSASetLastError(i32 err);
 __declspec(dllimport) u64   socket(i32 af, i32 type, i32 proto);
 __declspec(dllimport) i32   connect(u64 s, const void *addr, i32 len);
+__declspec(dllimport) i32   send(u64 s, const void *buf, i32 len, i32 flags);
+__declspec(dllimport) i32   recv(u64 s, void *buf, i32 len, i32 flags);
 __declspec(dllimport) i32   closesocket(u64 s);
 __declspec(dllimport) void *gethostbyname(const char *name);
 __declspec(dllimport) i32   getaddrinfo(const char *node, const char *service,
@@ -59,6 +62,11 @@ __declspec(dllimport) char *inet_ntoa(u32 addr);
 #define WSAENETDOWN       10050
 #define WSAENOTSOCK       10038
 #define WSAHOST_NOT_FOUND 11001
+#define WSAEWOULDBLOCK    10035
+#define WSAENOTCONN       10057
+#define WSAETIMEDOUT      10060
+#define WSAEAFNOSUPPORT   10047
+#define WSAEPROTOTYPE     10041
 
 /* ---- console output (no CRT) ------------------------------------------- */
 
@@ -148,6 +156,7 @@ static int str_eq(const char *a, const char *b) {
 static void c_main(void) {
   WSADATA     data;
   u64         s;
+  u8          sa[16];
   void       *host;
   void      **ai = 0;
   char       *txt;
@@ -165,12 +174,12 @@ static void c_main(void) {
    * sentence a program's log will end up showing. */
   expect_true("WSADATA.szDescription starts with 'N'",
               data.szDescription[0] == 'N');
-  expect_true("WSADATA.szSystemStatus mentions the socket layer",
-              data.szSystemStatus[0] == 's');
-  /* No transport is open, so the limits are zero rather than a plausible-
-   * looking number that would invite a program to allocate for sockets it
-   * can never get. */
-  expect("WSADATA.iMaxSockets", (u64)data.iMaxSockets, 0u);
+  expect_true("WSADATA.szSystemStatus mentions the connection limit",
+              data.szSystemStatus[0] == 'o');
+  /* The engine is one connection, so the limit says one instead of a
+   * plausible-looking number that would invite a program to open sockets it
+   * can never use. */
+  expect("WSADATA.iMaxSockets", (u64)data.iMaxSockets, 1u);
   expect("WSADATA.iMaxUdpDg", (u64)data.iMaxUdpDg, 0u);
 
   /* 2. Address conversion, which needs no transport at all. */
@@ -190,27 +199,70 @@ static void c_main(void) {
   expect_true("inet_ntoa 0xFF010203 = 3.2.1.255",
               txt != 0 && str_eq(txt, "3.2.1.255"));
 
-  /* 3. The transport calls fail, with the code Windows uses when the
-   *    network subsystem is unavailable. That is the whole point: a program
-   *    reaches its error path instead of a socket it cannot use. */
+  /* 3. The socket descriptor layer. socket() hands out a handle now, so the
+   *    checks are about what the handle can and cannot do: a connect with no
+   *    link fails with the documented code, send/recv on an unconnected
+   *    socket say so, and closesocket on a handle from a neighbour answers
+   *    WSAENOTSOCK. Exact failure codes depend on the machine: WSAENETDOWN
+   *    when no device is up (QEMU with -net none), WSAETIMEDOUT when there
+   *    is a link but the peer does not answer. */
   s = socket(2 /* AF_INET */, 1 /* SOCK_STREAM */, 0);
-  expect("socket fails as INVALID_SOCKET", s, 0xFFFFFFFFFFFFFFFFu);
-  expect("WSAGetLastError after socket", (u64)(u32)WSAGetLastError(),
-         WSAENETDOWN);
-  expect("connect fails", (u64)(u32)connect(0x1234u, 0, 16),
+  expect_true("socket returns a handle", s != 0xFFFFFFFFFFFFFFFFu &&
+              (s & 0xFF000000u) == 0x26000000u);
+  {
+    u64  dg = socket(2, 2 /* SOCK_DGRAM */, 0);
+
+    expect("dgram socket is INVALID_SOCKET", dg, 0xFFFFFFFFFFFFFFFFu);
+    expect("WSAGetLastError after dgram socket", (u64)(u32)WSAGetLastError(),
+           WSAEPROTOTYPE);
+    expect("socket(AF_UNIX) refused", (u64)(u32)socket(1, 1, 0),
+           0xFFFFFFFFu);
+    expect("WSAGetLastError after AF_UNIX", (u64)(u32)WSAGetLastError(),
+           WSAEAFNOSUPPORT);
+  }
+  /* connect() on a handle that was never handed out: the owner and slot
+   * checks run before anything touches the engine. */
+  expect("connect on an unknown handle", (u64)(u32)connect(0x1234u, sa, 16),
          0xFFFFFFFFu);
   expect("WSAGetLastError after connect", (u64)(u32)WSAGetLastError(),
-         WSAENETDOWN);
+         WSAENOTSOCK);
+  {
+    i32 rc;
+    i32 err;
+
+    sa[0] = 2; sa[1] = 0;             /* AF_INET, little-endian u16 */
+    sa[2] = 0; sa[3] = 80;            /* port 80 in network order */
+    sa[4] = 127; sa[5] = 0; sa[6] = 0; sa[7] = 1; /* 127.0.0.1 */
+    sa[8] = 0; sa[9] = 0; sa[10] = 0; sa[11] = 0;
+    sa[12] = 0; sa[13] = 0; sa[14] = 0; sa[15] = 0;
+    rc = connect(s, sa, 16);
+    expect("connect fails without a link or a peer", (u64)(u32)rc,
+           0xFFFFFFFFu);
+    err = WSAGetLastError();
+    say("[WS] connect error code = ");
+    say_hex((u64)(u32)err);
+    say("\n");
+    expect_true("the error is a documented connect failure",
+                err == WSAENETDOWN || err == WSAETIMEDOUT ||
+                err == 10061 /* WSAECONNREFUSED */);
+  }
+  expect("send on an unconnected socket", (u64)(u32)send(s, (const void *)0, 0, 0),
+         0xFFFFFFFFu);
+  expect("WSAGetLastError after send", (u64)(u32)WSAGetLastError(),
+         WSAENOTCONN);
+  expect("recv on an unconnected socket", (u64)(u32)recv(s, (void *)0, 0, 0),
+         0xFFFFFFFFu);
+  expect("closesocket on the live handle", (u64)(u32)closesocket(s), 0u);
+  expect("closesocket again says not a socket", (u64)(u32)closesocket(s),
+         0xFFFFFFFFu);
+  expect("WSAGetLastError after double close", (u64)(u32)WSAGetLastError(),
+         WSAENOTSOCK);
   host = gethostbyname("example.com");
   expect("gethostbyname answers null", (u64)host, 0u);
   expect("WSAGetLastError after gethostbyname", (u64)(u32)WSAGetLastError(),
          WSAHOST_NOT_FOUND);
   expect("getaddrinfo fails", (u64)(u32)getaddrinfo("example.com", 0, 0, ai),
          0xFFFFFFFCu);
-  expect("closesocket on an unknown handle", (u64)(u32)closesocket(0x1234u),
-         0xFFFFFFFFu);
-  expect("WSAGetLastError after closesocket", (u64)(u32)WSAGetLastError(),
-         WSAENOTSOCK);
   /* Setting the error by hand must read back: a program that clears its
    * last error before a call relies on that. */
   WSASetLastError(0);

@@ -15,12 +15,16 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 * PE32+（x86-64）可执行文件加载，基址 `0x50000000`（无重定位表的镜像按其
   自身的链接基址加载）。
 * DIR64 基址重定位；按名称导入，IAT 填 thunk 地址。
-* 125 条 API（表里 126 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
+* 141 条 API（表里 142 行，`GetLocalTime` 复用 `GetSystemTime` 的 id）：控制台输出、
   tick、`Sleep`、错误码、命令行、模块基址、注册表读写、堆与 `VirtualAlloc`、
   `user32` 窗口、消息循环、投递与定时器、坐标换算、光标位置、窗口移动、焦点、
   `gdi32` 绘制与形状、TEB / TLS、屏幕度量、字体度量、文字测量与排版（含
   `DT_WORDBREAK` 折行），文件读写、目录枚举、`LoadLibrary` / `GetProcAddress`，
-  控件（`STATIC` / `BUTTON` / `EDIT`、`WM_COMMAND`、`GetDlgItem`）、`MessageBoxA`，
+  控件（`STATIC` / `BUTTON` / `EDIT`、`WM_COMMAND`、`GetDlgItem`）、`MessageBoxA`、
+  菜单条与下拉菜单（8 条 API）、PE 资源的读取（`FindResource` / `LoadResource` /
+  `LockResource` / `SizeofResource` / `LoadStringA`）、
+  版本与兼容模式（`GetVersion` / `GetVersionExA` / `IsWow64Process` /
+  `GetCurrentProcess`），
   以及 `ws2_32` 的握手、地址转换与错误码（传输调用如实返回 `WSAENETDOWN`）。
 * 每进程独立地址空间（`vm_space`）、独立的 Win32 ABI 标记，以及 `%fs` 指向的 TEB。
 * 文件管理器 `/exe` 虚拟目录，选中后运行。
@@ -28,9 +32,17 @@ M9 的目标是让一个真正由 Windows 工具链产出的 PE32+ `.exe` 在 ri
 未实现：
 
 * 磁盘上任意路径的 `.exe`：镜像来自内核内嵌表（`build/win32_blobs.h`）。
+* 32 位（PE32 / `0x014C`）可执行文件的执行。加载器能识别并如实拒绝，但跑不起来：
+  兼容执行器（32 位代码段的 `CS.L=0`、`iret` 进入、stdcall 栈 ABI、`int 0x80`
+  入口）没有建。
+* 16 位 `.COM`（实模式）与 16 位 NE / LE 可执行文件；`pe_probe` 对裸 MZ 头只输出
+  `DOS MZ executable (16-bit real mode)` 这一句描述，然后按"不是 PE"拒绝。
 * 序号导入、延迟导入、从磁盘映射真实 DLL、PE TLS 目录、多线程、SEH。
-* 菜单、模态对话框（`DialogBox` 与模板）、`ws2_32` 的传输部分（本块只起了握手与地址转换）、
-  `crypt32`、`comctl32`、`ole32`、`shell32`。
+* `DialogBox` 与 `DLGTEMPLATE`（模态框只有 `MessageBoxA` 这一种）、`TrackPopupMenu`
+  （下拉菜单只从菜单条展开）、`LoadMenuA`（不从资源里的 `MENU` 模板建菜单）、
+  菜单项的 `&` 快捷键下划线、子控件自己的窗口过程、`SendMessage` 的同步语义、
+  `ws2_32` 的传输部分（本块只起了握手与地址转换）、`crypt32`、`comctl32`、`ole32`、
+  `shell32`。
 
 ---
 
@@ -755,3 +767,140 @@ Windows 的对话框本质是"带子窗口的窗口"，所以这块先把子窗�
 `user/win32compat/samples/menudemo.c` 同时自检菜单栏与右键弹出层。
 仍未做：`DialogBox` 与 `DLGTEMPLATE`、`SendMessage` 的同步语义、子控件自己的窗口过程、
 `comctl32` 的通用控件。
+
+## 17. 第十三块：`MessageBoxA`
+
+消息框是层自己的窗口：没有注册类、没有窗口过程，因为调用它的是内核里的代码，不是程序里的函数指针。
+
+* 调用进来时，层按文本长度算出一个框（`nwm_owner_create`，屏幕居中），把文本按 320 像素宽折成最多 4 行，每行一个 `STATIC`；底部按 `MB_OK` / `MB_OKCANCEL` / `MB_YESNO` 摆 1 或 2 个 `BUTTON`。
+* 框建好之后调用者被 **park** 在 `MessageBoxA` 里：syscall 回退两字节、重放，直到结果落定。点按钮或点关闭盒时写 `msgbox_result`，下一次重放把框销毁并带着 `IDOK(1)` / `IDCANCEL(2)` / `IDYES(6)` / `IDNO(7)` 返回。
+* 文本里的 `\n` 和 `\r` 是硬换行，连续换行会得到一个空行——与 Windows 一致。
+* 键盘：框在屏幕上时，`Enter` 当默认按钮（`IDOK` / `IDYES`），`Esc` 当取消（`IDCANCEL`），与 Windows 的默认按钮行为同向；`IDNO` 没有快捷键。
+* 卡住过一次的原因值得记下来：`GetMessageA` 之外没人抽收件箱，模态期间点击被投进队列后一直躺着。所以 `MessageBoxA` 每次重放先自己 `gui_pump` + `gui_timers`，再判结果——模态循环必须自己驱动消息。
+* 按钮编号按"框里第几个 `BUTTON`"数位序（位置 0 是 OK/Yes），不能用全局子控件槽位算，否则框内 OK 会落到别的编号上被当成 Cancel。
+* 已知差异：`MB_ICON*`、`MB_DEFBUTTON*`、`MB_TOPMOST` 等标志位只被读取 `MB_OK/OKCANCEL/YESNO` 这一组低 4 位，图标与默认按钮没有画；owner 窗口只是在 WM 里被压到下面（没有禁用），因为 WM 还没有"模态"概念。
+
+验证：`ctrldemo.exe` 在建完控件、跑完断言后弹一个 `MB_OKCANCEL` 框，返回 1 或 2 即通过。
+
+## 18. 第十四块：菜单
+
+Windows 的菜单是"菜单条 + 下拉"两层：`CreateMenu` 建条，每个条项用 `MF_POPUP` 挂一个 `CreatePopupMenu` 建的下拉。这里照这个模型做，句柄从 `0x24000000` 起编号，每个菜单最多 8 项。
+
+* `AppendMenuA` 认 `MF_STRING`、`MF_POPUP`、`MF_SEPARATOR`、`MF_CHECKED`、`MF_DISABLED` / `MF_GRAYED`；`GetMenuItemCount` 返回项数。
+* 画：菜单栏画在客户区最上面 20 像素（浅灰底 + 一条分隔线），条项按文字宽度排；展开的下拉是白底 + 1 像素边框，勾选项前面画 `*`，禁用项用灰字，分隔项画一条横线。
+* 点：这一带的点击被层吃掉，不投给程序。点条项展开/收起下拉；点下拉项发 `WM_COMMAND`（`wParam` 是菜单项 id，通知码为 0，`lParam` 为 0，与 Windows 发菜单命令的形状一致）；点别处收起下拉。
+
+**这是一处明说的差异**：Windows 把菜单条放在非客户区，并从客户区高度里扣掉；Novus-WM 的标题区下面还没有菜单条，所以层把菜单条盖在客户区顶上，程序的 `GetClientRect` 仍然是整块。等 WM 协议加上菜单条（`NWM_REQ_MENU`）才能对齐。程序的绘制不会被裁掉，只是顶部 20 像素被菜单盖住——这一点在文档和样例注释里都写明了。
+
+验证：`menudemo.exe` 建 File/Edit 两条，File 里有 New、分隔线、Exit，Edit 里有勾选的 Undo；断言句柄非零、三次 `GetMenuItemCount`、`SetMenu`/`GetMenu` 往返、`DrawMenuBar`；画面上点 File 展开下拉、点 New 后串口出现 `[MENU] WM_COMMAND id=0x65`，标题变成 `menu: new`。
+
+仍未做：资源里的菜单（`LoadMenuA` 现在能把 `.rsrc` 翻出来，但还不会把 `MENU` 模板变成菜单对象）、`TrackPopupMenu`、快捷键下划线 `&`、`DialogBox` 与 `DLGTEMPLATE`、子控件自己的窗口过程。
+
+## 19. 第十五块：PE 资源
+
+Windows 程序把自己的字符串、图标、对话框模板、菜单模板都塞在镜像的 `.rsrc` 段里，运行时靠一棵三层字典树找：最高层是类型（`RT_STRING`=6、`RT_RCDATA`=10 ……），第二层是名字 / 编号，第三层是语言，叶子是 `IMAGE_RESOURCE_DATA_ENTRY`（给出数据在镜像里的 RVA 和长度）。
+
+这一块把这条链走通：
+
+* `pe_find_resource()` 从 `base + 0x3C` 取 `e_lfanew`，在可选头的数据目录第 2 项（`opt + 112 + 16`，PE32+）拿到资源目录的 RVA，然后按 类型 → 名字 → 首个语言 的次序三级遍历；`IMAGE_RESOURCE_DIRECTORY` 的命名项和数据项计数在 +12/+14，条目从 +16 起每 8 字节一个（名字，偏移），偏移高位为 1 表示"指向下一层目录"。命名项（字符串名）跳过并如实返回找不到——本层只支持整数 id。
+* 句柄从 `0x25000000` 起编号，进程内最多 8 个；同一份数据重复查找返回同一个句柄（表里按 RVA 去重）。
+* `LoadStringA` 走 `RT_STRING`：字符串表的块号是 `id/16 + 1`，块内序号 `id % 16`；块是一串 UTF-16（先 2 字节长度，再内容），逐项跳过直到目标项；取到后按码点转成 UTF-8 写回调用者的缓冲区，长度 0 就是"这个 id 没有"，超过 255 截断。
+
+**诚实边界**：`.rsrc` 的解析是按 PE 规范做的，但只认"整数 id + 首个语言"，不认命名项、不认多语言回退；`LoadStringA` 只处理 `RT_STRING` 块，不处理 `STRINGTABLE` 之外的字符串资源。
+
+一个容易踩的坑，第一次实现时正是栽在这里：资源树里**所有偏移都是相对"资源目录起点"**，不是相对当前那一层目录。第一层取到 `0x80000020`（指向下一层），第三层再取到的仍是相对同一个起点的绝对偏移；把它当"相对当前节点"叠加一遍就会读进字符串表中间，`FindResourceA` 报找不到。现在的写法是 `res_dir_find()` 只返回去掉最高位的偏移，调用方统一 `base + res_rva + off`。
+
+验证：`resdemo.exe`（源码 + `resdemo.rc`，`windres` 产出 `.rsrc`，`objdump` 确认 `.rsrc` 在 RVA `0x405000`，镜像 11,665 字节）断言 `RCDATA(1)` 长度 17 且内容就是 `.rc` 里那串 `novus-rcd-payload`、`LoadStringA(101)` = `console says hello`、`LoadStringA(202)` = `second line from the table`，以及缺失的 id / 类型如实返回 0。`windres` 不存结尾 NUL，所以长度是 17 而不是 18——这是样例一开始断言写错的地方。
+
+## 20. 合成顺序：按提交顺序重放
+
+下拉菜单在实机上暴露了一个合成器缺陷：程序先画自己的文字（"menus: File / Edit"），再画菜单下拉的白底，可是画面上白底盖不住那行字，字从下拉里透出来。
+
+根因在 `nwm.c` 的 `paint_window()`：它先把窗口的 `shape[]` 全部画完，再去循环 `text[]`，于是同一帧里"后提交的填充"永远压不住"先提交的文字"。Windows 的合成顺序就是程序调用的顺序，这里也必须一样。
+
+改法：`nwm_shape_t` / `nwm_text_t` 各加一个 `seq`，由合成器在收到 `NWM_REQ_SHAPE` / `NWM_REQ_TEXT` 时自增盖章（内核侧 wrapper 不用填，结构体大小由同一份头文件保证一致）；`paint_window()` 改成两个游标归并绘制，谁的 `seq` 小先画谁。这样一帧的绘制次序就等于程序提交的次序，层画的下拉能真正遮住底下程序的字。
+
+验证：`menudemo.exe` 实机点 File，下拉白底把整块区域盖干净（只在弹层右侧还能看到被弹层边界切开的 `item` 字样，那是弹层之外的部分）；点 New 仍是 `[MENU] WM_COMMAND id=65`、标题变 `menu: new`。
+
+## 21. 编辑框的插入点与 Tab 次序
+
+控件能拿文字还不够：编辑框的核心是**插入点**。这一块把 `caret` 从"画不画一根竖线"变成"竖线画在哪"。
+
+* 每个 `EDIT` 控件多一个 `ins`（按字节数索引的插入点）。`SetWindowTextA` 整串替换时把 `ins` 落到末尾，并把越界的 `ins` 夹回字符串长度。
+* 点击编辑框时按落点算插入点：从 0 开始累加每个前缀的宽度（`measure_text`），第一个宽度超过 `客户区 x - 文本起点` 的位置就是插入点。点在哪，竖线就站在哪，后面敲的字插在那。
+* 键：`←` `→` 移动一格，`Home` / `End` 到两端，`Delete` 删插入点右边一个，`Backspace` 删左边一个，可打印 ASCII 插在插入点（后面的字节整体后移）。
+* 这些键被控件吃掉，父窗口的 `WM_KEYDOWN` / `WM_CHAR` 不再到达——与 Windows 的编辑框一致（真正差异是这里没有"子控件自己的窗口过程"，所以是层在替控件处理，而不是控件自己处理）。
+* `Tab` 在窗口内可聚焦的控件之间循环（`BUTTON` 与 `EDIT`；`STATIC` 不可聚焦），`Shift+Tab` 反向。次序按创建顺序，与 Windows 的对话框 Tab 次序同向。切走时原控件的竖线熄灭，切到编辑框时竖线亮起并落到文本末尾。
+* 老版本把字符一律追加在末尾，`Delete` / `Home` / 方向键全无效果，插入点只有"末尾"这一个位置；`insert` 现在真的能在中间插入。
+
+验证：`editdemo.exe`（窗口 62,93 起 520×300，编辑框、读取按钮各一）。实机点编辑框（插入点落在点中的位置）→ 敲 `d` `e`；`←` 两次 → 敲 `Z` 得到 `abcZde`；`Delete` 删掉后面的 `d` 得 `abcZe`；`Home` 把插入点移到 0；再敲 `xyz` `1` 得 `abcZexyz1`，串口 `[EDIT] read len=9 text=abcZexyz1` 与屏幕标签一致；两次 `Tab` 先走到按钮（竖线熄灭）再回到编辑框（竖线亮起在末尾）。
+
+## 22. `ws2_32` 的描述符层
+
+第十一块只是把 API 面接通：`socket` 一律返回 `INVALID_SOCKET`、传输调用一律 `WSAENETDOWN`。这一块把描述符真的接上内核的 TCP 引擎（`net_tcp.c`）。
+
+* 句柄是 `0x26000000 | 槽位`，进程内 4 个槽；每个槽记着所有者 pid、目标地址和是否已连接。句柄带槽位、并且校验 pid，所以别的进程手里的旧句柄只会得到 `WSAENOTSOCK`。
+* `socket(af, type, proto)`：只接受 `AF_INET` + `SOCK_STREAM`，其他族/类型返回 `WSAEAFNOSUPPORT` / `WSAEPROTOTYPE`——不给出用不了的句柄。
+* `connect(s, name, len)`：读 16 字节 `sockaddr_in`（端口与地址网络序），调 `net_tcp_open` 发起握手，然后**让调用者 park**、由调度器驱动 engine 的 tick，最多等 80 × 50 ms；成功记 `connected`，失败按原因返回 `WSAENETDOWN`（没有活动网卡或本机没地址）或 `WSAETIMEDOUT`（有链路但对端不应答）。
+* `send` 按 256 字节一段从用户空间拷进内核再交给引擎；`recv` 从引擎的接收缓冲拷出并 `consume`，没有数据时返回 `WSAEWOULDBLOCK`；对端 `FIN` 之后返回 0（有序关闭）。
+* `closesocket` 关引擎、释放槽位；对已释放的句柄返回 `WSAENOTSOCK`。
+* `WSADATA.szSystemStatus` 写的是 "one TCP connection, no listening"，`iMaxSockets` 报 1——引擎就是一条连接，报个好看的数只会骗程序去开它拿不到的 socket。
+
+**诚实边界**：引擎只有一条连接，所以第二个想连的 socket 得到 `WSAENOBUFS`（不是伪造一条连接共享）；`bind` / `listen` / `accept` / `select` / `ioctlsocket` 返回 `WSAEOPNOTSUPP`，因为引擎没有监听路径；`gethostbyname` 仍是空（DNS 解算器存在但还没接进 `HOSTENT` 的返回路径）；UDP 没有。
+
+验证：`wsdemo.exe` 在 `-net none` 的机器上跑完整个自测，`[WS] FAIL count = 0x0`、`[WS] PASS`：句柄落在 `0x26000000`、`SOCK_DGRAM` 被 `10041` 拒、`AF_UNIX` 被 `10047` 拒、未知句柄的 `connect` 得 `10038`、127.0.0.1:80 的 `connect` 得 `0x2742`(=10050，无网卡)、`send`/`recv` 在未连接句柄上得 `10057`、关一次成功再关得 `10038`、`inet_addr`/`inet_ntoa` 与动态 `GetProcAddress` 路径仍通过。
+**数据通路没有在实机上验证过**：QEMU 这轮是 `-net none`，没有网卡就没有握手可看；能证的是"API 接上了引擎、失败码说得准确"，不能证"字节真的走通了"。那需要一台有 e1000/virtio 的机器把 `net_tcp` 的握手日志打出来。
+
+## 23. 版本矩阵与兼容模式
+
+这一块不是"多支持几个 API"，是回答一个问题：这份清单上的程序，能不能在这台机器上跑起来，跑不起来的那部分系统有没有说实话。
+
+**`pe_probe` / `pe_describe`（`kernel/pe.c`）**：在正式加载前先把镜像读一遍头，得出机型、魔数、子系统版本、是不是 DLL、入口 RVA。`pe_describe` 把结果写成一句人话，例如：
+
+* `PE32+ x86-64 console EXE, subsystem 6.1 (Windows 7)`
+* `PE32 i386 console EXE, subsystem 6.1 (Windows 7)`
+* `DOS MZ executable (16-bit real mode)`（只有 MZ 头、没有 `PE\0\0` 签名）
+
+`pe_load` 的拒绝日志统一带这行描述，所以串口里看到的是"被拒的是什么"，不只是"被拒了"。
+
+**清单逐条对应的处理**：
+
+| 清单项 | 当前状态 |
+| --- | --- |
+| Windows 11 / 10 / 8.1 / 8（64 位） | 可执行：`PE32+` + `AMD64`，这层默认就是 Win11（10.0 / build 22631） |
+| Windows 7 / Vista（64 位） | 可执行；旧程序按 `GetVersion` 分支时用兼容模式把版本报成 6.1 / 6.0 |
+| Windows 11 … Vista（32 位） | 识别 + 精确拒绝（`PE_E32`），说明"32 位需要 WOW 执行器，没建" |
+| Windows XP / 2000 / NT4 / NT3.51 的 32 位 | 同上：识别 + 拒绝；版本号本身可以用兼容模式报成 5.1 / 5.0 / 4.0 / 3.51 |
+| 16 位 `.COM` | 识别为 DOS 实模式，按"不是 PE"拒绝 |
+| `.dll` 从磁盘加载 | 只认内置 5 个（`kernel32` / `user32` / `gdi32` / `advapi32` / `ws2_32`）；`LoadLibraryA` 对别的名字打印一句"磁盘 DLL 加载没实现"并返回 `ERROR_MOD_NOT_FOUND` |
+
+32 位不是"暂时没空做"，是差一整套执行器：长模式里跑 32 位代码要有兼容代码段（`CS.L=0`、`D=1`）、`iret` 下沉到 32 位栈、stdcall/cdecl 的栈传参与被调者清栈、以及用 `int 0x80` 而不是 `SYSCALL` 进内核（32 位代码下 `SYSCALL` 的 `RCX`/`R11` 语义也不一样）。少任何一样，跑起来的都不是 32 位程序。所以这里的选择是：**认得出来、拒绝得清楚**，而不是拿 64 位路径去糊一个"看起来能跑"。
+
+**兼容模式（注册表两个值）**：`HKLM\Software\Novus\Compat`
+
+* `WinVersion`（`REG_SZ`）：`"10.0"` / `"6.1"` / `"5.1"` / `"4.0"` / `"3.51"`
+* `WinBuild`（`REG_DWORD`）：例如 `7601`（Win7 SP1）、`2600`（XP）
+
+`GetVersion` 按 NT 的打包方式返回（低字主版本、高字次版本），`GetVersionExA` 按 `OSVERSIONINFOA` 的四个 DWORD 填（主 4、次 8、build 12、platform 16、CSD 20，总 148 字节）；两处读同一份值，所以同一台机器上不会出现"一个函数说 6.1、另一个说 10.0"。`IsWow64Process` 报 FALSE（这层只跑 64 位镜像，没有 WOW 可言），`GetCurrentProcess` 返回 `-1` 这个进程伪句柄。
+
+**这一块抓到的两个真 bug**：
+
+1. `OSVERSIONINFOA` 的四个字段按 2 字节写：主版本写在 4，次版本写在 6——6 是主版本的高字节。于是调用者读到的次版本是 build 的低字节、build 读到 platform、platform 读到 0。改成按 4 字节各占一个 DWORD。
+2. `RegSetValueExA` 的第二参数是**值名**，不是子键（子键由已经打开的 key 句柄携带）。原实现按 `RegQueryValueExA` 的样子把 `R8`（保留字段）当值名读，写进去的名字是空串，于是"写成功"但谁都查不到。样例因此改成先 `RegOpenKeyExA` 再把句柄传给 `RegSetValueExA`。
+
+**32 位样例怎么来的**：这台机器的 mingw 没有 32 位目标（`gcc -m32` 静默返回 1，`C:\msys64\mingw32` 是空壳），所以 `tools/mkpe32.py` 按字节写出两张镜像：`hello32.exe`（PE32、`0x014C`、子系统 6.01、一个 `.text` 里 `jmp $`）和 `dosdemo.com`（16 位实模式裸代码）。它们不是"假装跑得起来"的道具，正是要被拒绝的输入。
+
+**验证（`/tmp/serial-t42.log`）**：
+
+* `[PE] hello32.exe: rejected (0xFFFFFFFFFFFFFFF9) PE32 i386 console EXE, subsystem 6.1 (Windows 7) - 32-bit needs the WOW executor, not built`
+* `[PE] dosdemo.com: rejected (0xFFFFFFFFFFFFFFFF) not a PE image`
+* `verdemo.exe` 全部通过：默认 `10.0 build 22631 platform 2 GetVersion=0xa`；改成 `6.1` 后 `6.1 build 22631 GetVersion=0x10006`；改成 `5.1` + build 2600 后 `5.1 build 2600 GetVersion=0x10005`；恢复默认后又回到 `10.0 / 22631`；`IsWow64Process = 0`；最后 `[VER] PASS`。
+* 同一轮里 `[PE] selftest PASS`：合成镜像（裸 MZ 头、i386 PE）也在自测里被拒过一遍。
+
+**仍然没做到的**（照旧照实写）：
+
+* 32 位执行器（WOW）：没有。
+* 从磁盘加载真实 DLL、导出表解析、跨模块 IAT 绑定：没有。
+* 16 位 NE/LE 与 `.COM` 的执行：没有；`.COM` 只被识别成"不是 PE"。
+* `GetVersionExW`、`VerifyVersionInfo`、manifest 里的 `<compatibility>` 段：没有；兼容模式走的是注册表这两个值。
+

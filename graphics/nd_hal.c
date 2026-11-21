@@ -35,6 +35,7 @@
 #include "kernel.h"
 #include "mm.h"
 #include "cpu.h"
+#include "fbcon.h"
 #include "nd.h"
 #include <stddef.h>
 
@@ -90,6 +91,41 @@ static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
   if (size == 0u) {
     size = 1u;
   }
+  /* Say what the decision was made from, every time: the choice between the
+   * identity window and a second mapping is the difference between a path
+   * that draws on this machine and one that has never been exercised, and
+   * the log should not leave it to be inferred from which line appears. */
+  kputs("[ND] map: phys=");
+  kputs_hex(phys);
+  kputs(" size=");
+  kputs_hex(size);
+  kputs(" ram_top=");
+  kputs_hex(mm_ram_top());
+  kputs("\n");
+  /* The framebuffer is inside the identity window: mm_init() already
+   * described these pages, and marked the scanout range uncacheable when it
+   * did. Use that address instead of building a second mapping - it is the
+   * one the boot text console draws through, so it is known to work on the
+   * hardware before the desktop ever paints. The devmap below is for a
+   * framebuffer above ram_top (a card's VRAM aperture), which no identity
+   * page covers. */
+  /* The text console, when it started, is already drawing on this exact
+   * scanout through a raw pointer - the boot log on the screen is the
+   * proof. Take that pointer when it is the same framebuffer: no second
+   * mapping, no cache-policy guesswork, and the address is one that has
+   * demonstrably worked on this machine. */
+  {
+    void *console_fb = fbcon_framebuffer();
+
+    if (console_fb != 0 && (UINT64)(UINTN)console_fb == phys) {
+      kputs("[ND] scanout taken from the text console\n");
+      return console_fb;
+    }
+  }
+  if (phys != 0u && size <= mm_ram_top() && phys <= mm_ram_top() - size) {
+    kputs("[ND] framebuffer inside the identity map, used as it stands\n");
+    return (void *)(UINTN)phys;
+  }
   /* Write-combining, not uncacheable. The scanout is written far more than
    * it is read, and on a discrete card every pixel store is a PCIe
    * transaction into the VRAM aperture: UC means one transaction per
@@ -111,7 +147,13 @@ static nd_rect_t g_cursor_damage;
 
 static void present_probe(void);
 
-/* The pointer shape: X = black outline, W = white body, . = transparent. */
+/* The pointer shape: X = black outline, W = white body, . = transparent.
+ *
+ * The tail is a straight vertical bar (columns 5..8) that hangs off the
+ * bottom edge of the head, exactly like the system pointer it imitates. An
+ * earlier version drifted the tail one column right on every row below the
+ * head, which read as a bent, frayed needle on a 1920x1080 panel - the tip
+ * landed on the last row with a single black pixel and no fill. */
 static const char *const g_cursor_shape[ND_CURSOR_H] = {
     "X...........",
     "XX..........",
@@ -124,15 +166,15 @@ static const char *const g_cursor_shape[ND_CURSOR_H] = {
     "XWWWWWWWX...",
     "XWWWWWWWWX..",
     "XWWWWWWWWWX.",
-    "XWWWWWWXXXXX",
+    "XWWWWWWXXXX.",
     "XWWWXWWX....",
     "XWWX.XWWX...",
     "XWX..XWWX...",
-    "XX....XWWX..",
-    "X......XWWX.",
-    "........XWWX",
-    ".........XWX",
-    "..........X.",
+    "XX...XWWX...",
+    "X....XWWX...",
+    ".....XWWX...",
+    "......XWX...",
+    "............",
 };
 
 /* ---- boot stage ------------------------------------------------------- */
@@ -368,6 +410,11 @@ int nd_init(void) {
       return 0;
     }
     g_screen.px = (UINT32 *)fb;
+    kputs("[ND] framebuffer mapped at ");
+    kputs_hex((UINT64)(UINTN)fb);
+    kputs(", ");
+    kputs_hex(g_disp.fb_size);
+    kputs(" bytes\n");
     cpu_wbinvd(); /* drop WB data the boot splash wrote through the identity map */
   }
   g_screen.w = (INT32)g_disp.width;
@@ -464,9 +511,28 @@ int nd_init(void) {
    * phase presents at all. */
   present_probe();
 
+  /* Read one pixel from each end of both surfaces before anything is
+   * copied. A fault inside a pixel copy reports an address and nothing
+   * else; one probe per surface end turns that address into "the canvas is
+   * not mapped" or "the scanout is not mapped" without a second boot. */
+  {
+    nd_surface_t *cv = nd_canvas();
+
+    if (cv != 0 && cv->px != 0 && cv->w > 0 && cv->h > 0) {
+      kputs("[ND] probe canvas first=");
+      kputs_hex((UINT64)cv->px[0]);
+      kputs(" last=");
+      kputs_hex((UINT64)cv->px[(UINT32)(cv->h - 1) * cv->stride +
+                              (UINT32)(cv->w - 1)]);
+      kputs("\n");
+    }
+    kputs("[ND] probe scanout first=");
+    kputs_hex((UINT64)*(volatile UINT32 *)g_screen.px);
+    kputs("\n");
+  }
+
   kputs("[ND] compositor: ");
-  kputs(g_frame_ok ? "off-screen buffer" : "direct to framebuffer");
-  kputs(", vsync ");
+  kputs(g_frame_ok ? "off-screen buffer" : "direct to framebuffer");  kputs(", vsync ");
   kputs(g_retrace == 1u ? "available\n" : "unavailable\n");
 
   if (nd_boot_splash_active()) {
@@ -474,8 +540,21 @@ int nd_init(void) {
      * desktop has a finished first frame. */
     kputs("[ND] boot splash kept until the desktop presents\n");
   } else {
+    /* The first full-screen paint of the session: clear the off-screen
+     * canvas, then copy it to the panel. Both halves walk the whole frame
+     * (8 MiB at 1920x1080), and one of them is the first code in the boot
+     * to touch the framebuffer as a drawing surface - so each half says
+     * when it starts and when it ends. A machine that goes quiet inside
+     * this bracket is stuck writing pixels, not stuck in a driver. */
+    kputs("[ND] clearing canvas ");
+    kputs_hex((UINT64)g_screen.w);
+    kputs("x");
+    kputs_hex((UINT64)g_screen.h);
+    kputs("\n");
     nd_clear(nd_canvas(), ND_RGB(0x10, 0x14, 0x1C));
+    kputs("[ND] canvas cleared, presenting\n");
     nd_present(nd_rect(0, 0, g_screen.w, g_screen.h));
+    kputs("[ND] first frame presented\n");
   }
   return 1;
 }
@@ -512,11 +591,37 @@ static void surface_copy(nd_surface_t *dst, const nd_surface_t *src,
   INT32  y;
   UINT64 bytes = (UINT64)r.w * 4u;
   int    swap = (surface_swapped(dst) != surface_swapped(src));
+  /* The first two copies of a boot say where they read and where they
+   * write, and then every 128th row: a fault inside the copy has no
+   * meaningful RIP, only a faulting address, and this is the only way to
+   * tell which side of the copy it came from. */
+  static UINT32 copies;
+  int    noisy = (copies < 2u);
 
+  if (noisy) {
+    kputs("[ND] copy ");
+    kputs_hex((UINT64)r.w);
+    kputs("x");
+    kputs_hex((UINT64)r.h);
+    kputs(" src=");
+    kputs_hex((UINT64)(UINTN)src->px);
+    kputs(" dst=");
+    kputs_hex((UINT64)(UINTN)dst->px);
+    kputs(swap ? " swap\n" : " direct\n");
+  }
   for (y = 0; y < r.h; y++) {
     const UINT32 *s = src->px + (UINT32)(r.y + y) * src->stride + (UINT32)r.x;
     UINT32       *d = dst->px + (UINT32)(r.y + y) * dst->stride + (UINT32)r.x;
 
+    if (noisy && (y % 128) == 0) {
+      kputs("[ND] copy row ");
+      kputs_hex((UINT64)y);
+      kputs(" read 0x");
+      kputs_hex((UINT64)(UINTN)s);
+      kputs(" write 0x");
+      kputs_hex((UINT64)(UINTN)d);
+      kputs("\n");
+    }
     if (!swap) {
       memcpy(d, s, bytes);
     } else {
@@ -526,6 +631,7 @@ static void surface_copy(nd_surface_t *dst, const nd_surface_t *src,
       }
     }
   }
+  copies++;
 }
 
 static void present_probe(void) {
@@ -649,6 +755,7 @@ void nd_present(nd_rect_t r) {
   if (!g_screen_ready || g_screen.px == 0) {
     return;
   }
+  kputs("[ND] present entered\n");
   area = nd_rect_intersect(r, nd_rect(0, 0, g_screen.w, g_screen.h));
   if (nd_rect_empty(area)) {
     return;

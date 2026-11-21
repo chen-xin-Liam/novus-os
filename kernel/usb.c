@@ -20,6 +20,8 @@
 #include "blkdev.h"
 #include "shared_mem.h"
 #include "nd_input.h"
+#include "nd.h"
+#include "hid.h"
 #include <stddef.h>
 
 #define USB_MAX_PORTS   8
@@ -131,8 +133,12 @@ typedef struct usb_dev {
   blkdev_t dev;
   char     name[8];
 
-  /* HID interrupt endpoint + boot-protocol report-decode state */
+  /* HID interrupt endpoint + report-decode state */
   UINT8   hid_kind;   /* USB_HID_KEYBOARD / USB_HID_MOUSE */
+  UINT8   hid_subclass; /* bInterfaceSubClass: 1 means boot protocol */
+  UINT8   hid_generic;  /* 1 when the layout came from the report descriptor */
+  UINT8   hid_last_len; /* bytes the last interrupt report carried */
+  hid_layout_t hid_layout;
   trb_t  *hid_in;
   UINT64  hid_in_phys;
   UINT32  hid_in_idx;
@@ -142,7 +148,7 @@ typedef struct usb_dev {
   UINT16  hid_in_mps;
   UINT8  *hid_buf;     /* dedicated DMA staging buffer (not hc->data) */
   UINT64  hid_buf_phys;
-  UINT8   hid_report[8];
+  UINT8   hid_report[16];
   UINT8   hid_prev[6];
   UINT8   hid_prev_buttons;
   UINT8   hid_pending; /* 1 while an interrupt transfer is outstanding */
@@ -500,13 +506,17 @@ static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
       if (cls == 0x08u) {
         ms_if = 1;
       } else if (cls == 0x03u) {
-        /* HID: remember the interface and its boot subclass. Boot-protocol
-         * keyboards/mice (subclass 1/2) use a fixed report layout, so we can
-         * skip the HID report descriptor entirely. */
+        /* HID. The interface descriptor's bytes are: number, alternate,
+         * endpoint count, class, SUBclass, PROtocol. The boot subclass (1)
+         * is what makes Set_Protocol meaningful; the protocol byte is what
+         * says keyboard (1) or mouse (2). Reading the subclass as if it were
+         * the protocol is how every boot mouse used to be filed as a
+         * keyboard, which is why only the keyboard ever worked. */
         u->iface = cfg[i + 2u];
-        if (cfg[i + 6u] == 0x01u) {
+        u->hid_subclass = cfg[i + 6u];
+        if (cfg[i + 7u] == 0x01u) {
           u->hid_kind = USB_HID_KEYBOARD;
-        } else if (cfg[i + 6u] == 0x02u) {
+        } else if (cfg[i + 7u] == 0x02u) {
           u->hid_kind = USB_HID_MOUSE;
         } else {
           u->hid_kind = 0u;
@@ -540,7 +550,11 @@ static int parse_config(usb_t *u, const UINT8 *cfg, UINT32 len) {
     u->kind = USB_KIND_STORAGE;
     return 0;
   }
-  if (hid_if && u->hid_in_num != 0u && u->hid_kind != 0u) {
+  if (hid_if && u->hid_in_num != 0u) {
+    /* The interface is HID even when its protocol byte is 0 (no boot
+     * protocol). The report descriptor, read in attach_device, is what
+     * decides whether it is a pointer - a device must not be dropped just
+     * because it does not advertise the legacy layout. */
     u->kind = USB_KIND_HID;
     return 0;
   }
@@ -860,7 +874,14 @@ static int port_reset(xhci_t *hc, UINT32 port, UINT32 *speed_out) {
   if ((sc & 1u) == 0u) {
     return -1;
   }
-  uwr(hc->op, off, (sc & ~0x00FE0000u) | (1u << 9) | (1u << 4));
+  /* Port Power (bit 9) is write-one-to-clear whenever the controller
+   * implements port power control, which every Intel PCH does. Writing the
+   * bit back as read therefore *removes* power from every port that the
+   * firmware had already powered - on a laptop that silently disconnected
+   * the mouse (and every other USB device) before enumeration began. The
+   * bit is left untouched here: firmware powers the ports, and a port that
+   * reads as unpowered is simply not ours to reset. */
+  uwr(hc->op, off, (sc & ~(0x00FE0000u | (1u << 9))) | (1u << 4));
   for (i = 0; i < USB_TIMEOUT; i++) {
     sc = urd(hc->op, off);
     if ((sc & (1u << 21)) != 0u) {
@@ -870,7 +891,7 @@ static int port_reset(xhci_t *hc, UINT32 port, UINT32 *speed_out) {
   sc = urd(hc->op, off);
   *speed_out = (sc >> 10) & 0xFu;
   /* Clear every change bit, keep the port enabled. */
-  uwr(hc->op, off, (sc & ~0x00FE0000u) | 0x00FE0000u);
+  uwr(hc->op, off, (sc & ~(0x00FE0000u | (1u << 9))) | 0x00FE0000u);
   return ((sc & 1u) != 0u) ? 0 : -1;
 }
 
@@ -930,7 +951,10 @@ static UINT32 hid_key(UINT8 usage, UINT8 mods, UINT8 caps) {
 }
 
 /* Set_Protocol = 0 selects the boot protocol, giving the fixed 8-byte keyboard
- * / 3-to-4-byte mouse reports without parsing the HID report descriptor. */
+ * / 3-to-4-byte mouse reports without parsing the HID report descriptor. Only
+ * interfaces that declare the boot subclass (1) have to accept it; asking a
+ * vendor-specific HID interface to switch protocols is answered with a stall,
+ * and a stall here used to abort the whole device. */
 static int hid_set_protocol(usb_t *u) {
   UINT8 setup[8];
 
@@ -940,6 +964,57 @@ static int hid_set_protocol(usb_t *u) {
   setup[2] = 0x00; /* 0 = boot protocol */
   setup[4] = u->iface;
   return control_xfer(u, setup, NULL, 0, 0);
+}
+
+/* Ask the device for its own report descriptor and build a layout from it.
+ * This is the part that adapts to different mice: a device that reports
+ * extra buttons, a wheel, or absolute coordinates describes all of that
+ * itself, and the layout comes out of the descriptor instead of a guess. */
+static int hid_read_descriptor(usb_t *u) {
+  UINT8 setup[8];
+  int   rc;
+  int   parsed;
+
+  memset(setup, 0, sizeof(setup));
+  setup[0] = 0x81; /* device-to-host, standard, interface */
+  setup[1] = 0x06; /* GET_DESCRIPTOR */
+  setup[2] = 0x00;
+  setup[3] = 0x22; /* report descriptor */
+  setup[4] = u->iface;
+  setup[6] = 0xFF; /* wLength 255: descriptors larger than this are rare */
+  setup[7] = 0x00;
+  memset(u->hc->data, 0, 256);
+  rc = control_xfer(u, setup, u->hc->data, 255, 1);
+  if (rc != 0) {
+    kputs("[USB] HID report descriptor read failed\n");
+    return -1;
+  }
+  parsed = hid_parse_report(u->hc->data, 255, &u->hid_layout);
+  if (parsed == 1) {
+    u->hid_kind = USB_HID_MOUSE;
+    u->hid_generic = 1;
+    kputs("[USB] HID pointer: ");
+    kputs_hex(u->hid_layout.bits);
+    kputs(" bits, ");
+    kputs((u->hid_layout.absolute != 0u) ? "absolute" : "relative");
+    kputs(", buttons ");
+    kputs_hex(u->hid_layout.btn_count);
+    kputs("\n");
+    return 0;
+  }
+  if (u->hid_layout.app_page == 0x01u &&
+      u->hid_layout.app_usage == 0x06u) {
+    u->hid_kind = USB_HID_KEYBOARD;
+    u->hid_generic = 0;
+    kputs("[USB] HID keyboard application\n");
+    return 0;
+  }
+  kputs("[USB] HID layout not understood: usage page ");
+  kputs_hex(u->hid_layout.app_page);
+  kputs(" usage ");
+  kputs_hex(u->hid_layout.app_usage);
+  kputs("\n");
+  return -1;
 }
 
 /* Configure the HID interrupt IN endpoint context and reset its ring. */
@@ -964,6 +1039,19 @@ static int hid_configure(usb_t *u) {
                     (UINT32)(u->hc->in_ctx_phys >> 32), 0, u->slot, NULL);
 }
 
+/* How many bytes to ask for on the interrupt endpoint: the generic layout
+ * knows its own report length, the boot layouts are fixed by the HID spec. */
+static UINT16 hid_report_len(const usb_t *u) {
+  if (u->hid_generic != 0u) {
+    UINT32 bytes = hid_report_bytes(&u->hid_layout);
+
+    if (bytes >= 1u && bytes <= sizeof(u->hid_report)) {
+      return (UINT16)bytes;
+    }
+  }
+  return (u->hid_kind == USB_HID_KEYBOARD) ? 8u : 4u;
+}
+
 /* Submit one interrupt IN transfer and leave it outstanding; the device
  * answers when a key is pressed or the mouse moves. usb_hid_poll re-arms a
  * fresh one after each completion. */
@@ -973,7 +1061,7 @@ static int hid_intr_submit(usb_t *u) {
   UINT32 *idx = &u->hid_in_idx;
   UINT8 *cycle = &u->hid_in_cycle;
   UINT64 addr = u->hid_buf_phys;
-  UINT16 len = (u->hid_kind == USB_HID_KEYBOARD) ? 8u : 4u;
+  UINT16 len = hid_report_len(u);
 
   if (*idx >= USB_RING_TRBS - 1u) {
     ring_link(ring, phys, *cycle);
@@ -1044,9 +1132,53 @@ static void hid_decode_keyboard(usb_t *u) {
 
 static void hid_decode_mouse(usb_t *u) {
   const UINT8 *rep = u->hid_report;
-  UINT8 buttons = (UINT8)(rep[0] & 0x07u);
-  INT32 dx = (INT32)(INT8)rep[1];
-  INT32 dy = (INT32)(INT8)rep[2];
+  UINT8 buttons;
+  INT32 dx = 0;
+  INT32 dy = 0;
+  INT32 wheel = 0;
+
+  if (u->hid_generic != 0u) {
+    /* Descriptor-driven: the field positions, widths and the relative /
+     * absolute question all came from the device. */
+    if (hid_decode_pointer(&u->hid_layout, rep, u->hid_last_len, &dx, &dy,
+                           &wheel, &buttons) == 0) {
+      return;
+    }
+    u->hid_prev_buttons = buttons;
+    if (u->hid_layout.absolute != 0u && u->hid_layout.x_range != 0u &&
+        u->hid_layout.y_range != 0u) {
+      /* An absolute pointer (touchscreen, drawing tablet) reports a
+       * position, not a delta; turn it into the same relative feed by
+       * mapping through the current cursor position. */
+      INT32 mx = 0;
+      INT32 my = 0;
+      const nd_display_t *d = nd_display();
+      INT32 w = (d != NULL && d->available) ? (INT32)d->width : 1024;
+      INT32 h = (d != NULL && d->available) ? (INT32)d->height : 768;
+      INT32 tx = (INT32)(((UINT64)(UINT32)(dx - u->hid_layout.x_min) *
+                          (UINT64)(w - 1)) / u->hid_layout.x_range);
+      INT32 ty = (INT32)(((UINT64)(UINT32)(dy - u->hid_layout.y_min) *
+                          (UINT64)(h - 1)) / u->hid_layout.y_range);
+
+      nd_input_mouse(&mx, &my, NULL);
+      nd_input_feed_mouse(tx - mx, ty - my, buttons);
+      return;
+    }
+    nd_input_feed_mouse(dx, dy, buttons);
+    if (wheel != 0) {
+      nd_event_t ev;
+
+      memset(&ev, 0, sizeof(ev));
+      ev.type = ND_EV_WHEEL;
+      ev.dy = (INT16)wheel;
+      nd_input_push(&ev);
+    }
+    return;
+  }
+
+  buttons = (UINT8)(rep[0] & 0x07u);
+  dx = (INT32)(INT8)rep[1];
+  dy = (INT32)(INT8)rep[2];
 
   /* Movement and button edges go through the shared feed path; a wheel
    * delta (byte 3, present on wheel mice) is a separate wheel event. */
@@ -1098,13 +1230,14 @@ void usb_hid_poll(void) {
       }
     }
     if (got) {
-      UINT16 len = (u->hid_kind == USB_HID_KEYBOARD) ? 8u : 4u;
+      UINT16 len = hid_report_len(u);
       UINT16 done = (UINT16)(len - (UINT16)(resid & 0xFFFFu));
 
       if (code == USB_CC_SUCCESS || code == USB_CC_SHORT) {
-        if (done > 8u) { done = 8u; }
+        if (done > sizeof(u->hid_report)) { done = sizeof(u->hid_report); }
         memset(u->hid_report, 0, sizeof(u->hid_report));
         memcpy(u->hid_report, u->hid_buf, done);
+        u->hid_last_len = (UINT8)done;
         if (u->hid_kind == USB_HID_KEYBOARD) {
           hid_decode_keyboard(u);
         } else {
@@ -1175,9 +1308,18 @@ static int attach_device(usb_t *u, UINT32 port, UINT32 speed) {
   }
 
   if (u->kind == USB_KIND_HID) {
-    rc = hid_set_protocol(u);
-    if (rc != 0) {
+    /* The descriptor goes first: it is the only source that says whether
+     * this interface is a pointer, and what its reports look like. */
+    (void)hid_read_descriptor(u);
+    if (u->hid_kind == 0u) {
+      kputs("[USB] HID interface ignored (no pointer or keyboard)\n");
       return -1;
+    }
+    if (u->hid_subclass == 1u) {
+      /* Boot-capable: the legacy fixed layout is the smaller ask, and the
+       * generic layout above is what decodes the reports either way. A
+       * device that stalls the request still works through its descriptor. */
+      (void)hid_set_protocol(u);
     }
     rc = hid_configure(u);
     if (rc != 0) {
@@ -1324,6 +1466,11 @@ int usb_init(void) {
     *(UINT32 *)((UINT8 *)hc->erst + 8) = USB_RING_TRBS;
 
     controller_start(hc);
+    kputs("[USB] xHCI ports=");
+    kputs_hex(hc->max_ports);
+    kputs(" slots=");
+    kputs_hex(hc->max_slots);
+    kputs("\n");
 
     {
       UINT32 port;
@@ -1338,6 +1485,11 @@ int usb_init(void) {
         if (port_reset(hc, port, &speed) != 0) {
           continue;
         }
+        kputs("[USB] port ");
+        kputs_hex(port);
+        kputs(" connected, speed=");
+        kputs_hex(speed);
+        kputs("\n");
         u = &g_dev[g_ndev];
         memset(u, 0, sizeof(*u));
         u->hc = hc;

@@ -19,6 +19,26 @@ pub struct PreprocessedSource {
 }
 
 impl PreprocessedSource {
+    /// Wrap text that is already preprocessed (a caller holding a string
+    /// rather than a file). One location per byte, with the line and column
+    /// the byte sits on, so diagnostics still point at the right place.
+    pub fn from_text(text: &str, file: impl Into<std::path::PathBuf>) -> Self {
+        let file = file.into();
+        let mut locations = Vec::with_capacity(text.len() + 1);
+        let mut line = 1usize;
+        let mut column = 1usize;
+        for byte in text.bytes() {
+            locations.push(SourceLocation::new(file.clone(), line, column));
+            if byte == b'\n' {
+                line += 1;
+                column = 1;
+            } else {
+                column += 1;
+            }
+        }
+        Self { text: text.to_owned(), locations }
+    }
+
     pub fn location_at(&self, byte_offset: usize) -> SourceLocation {
         self.locations
             .get(byte_offset)

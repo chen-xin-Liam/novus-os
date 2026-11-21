@@ -1141,6 +1141,16 @@ static void trap_exception(trap_frame_t *f) {
   kputs_hex(f->cs);
   kputs(" rsp=");
   kputs_hex(f->rsp);
+  if (f->vector == 14u) {
+    /* Which address faulted, not only where the instruction was: the error
+     * code says read or write, CR2 says what was touched. A fault inside a
+     * pixel copy is meaningless without it. */
+    UINT64 cr2;
+
+    __asm__ volatile("mov %%cr2, %0" : "=r"(cr2));
+    kputs(" cr2=");
+    kputs_hex(cr2);
+  }
   kputs("\n");
 
   if ((f->cs & 3u) == 3u) {

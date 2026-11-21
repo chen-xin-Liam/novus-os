@@ -22,6 +22,7 @@
 #include "nvus_paths.h"
 #include "pmm.h"
 #include "rtc.h"
+#include "net.h"
 #include "../fs/vfs.h"
 #include "../fs/vfs_mount.h"
 
@@ -113,7 +114,9 @@ enum {
   WIN32_API_HEAP_ALLOC,
   WIN32_API_HEAP_FREE,
   WIN32_API_GET_SYSTEM_TIME,
-  WIN32_API_GET_LOCAL_TIME,
+  /* GetLocalTime shares this id: the layer has no time zone, so the two
+   * calls answer the same thing and the table gives both names to the one
+   * handler. A separate id for it would be an id nothing can ever reach. */
   WIN32_API_QUERY_PERFORMANCE_COUNTER,
   WIN32_API_QUERY_PERFORMANCE_FREQUENCY,
   WIN32_API_GET_CURRENT_PROCESS_ID,
@@ -265,6 +268,22 @@ enum {
   /* Console text color, used by self-hosted C++ programs that port
    * SetConsoleTextAttribute/FOREGROUND_* style output. */
   WIN32_API_SET_CONSOLE_TEXT_ATTR,
+  /* Fifteenth block: resources. The image is mapped, so the tree in .rsrc
+   * can be walked from here. */
+  WIN32_API_FIND_RESOURCE,
+  WIN32_API_LOAD_RESOURCE,
+  WIN32_API_LOCK_RESOURCE,
+  WIN32_API_SIZE_OF_RESOURCE,
+  WIN32_API_LOAD_STRING,
+  /* Sixteenth block: the version the layer reports. Installers and old
+   * programs branch on this, and "run as Windows 7 / XP" is a compatibility
+   * mode a registry value switches. */
+  WIN32_API_GET_VERSION,
+  WIN32_API_GET_VERSION_EX,
+  WIN32_API_IS_WOW64_PROCESS,
+  /* The version calls pair with this one: IsWow64Process takes a process
+   * handle, and the pseudo handle for "this process" is what programs pass. */
+  WIN32_API_GET_CURRENT_PROCESS,
 };
 
 typedef struct {
@@ -381,6 +400,10 @@ static const win32_api_t g_api[] = {
     {"kernel32.dll", "FindClose", WIN32_API_FIND_CLOSE},
     {"kernel32.dll", "LoadLibraryA", WIN32_API_LOAD_LIBRARY},
     {"kernel32.dll", "GetProcAddress", WIN32_API_GET_PROC_ADDRESS},
+    {"kernel32.dll", "GetVersion", WIN32_API_GET_VERSION},
+    {"kernel32.dll", "GetVersionExA", WIN32_API_GET_VERSION_EX},
+    {"kernel32.dll", "IsWow64Process", WIN32_API_IS_WOW64_PROCESS},
+    {"kernel32.dll", "GetCurrentProcess", WIN32_API_GET_CURRENT_PROCESS},
     {"kernel32.dll", "FreeLibrary", WIN32_API_FREE_LIBRARY},
     {"user32.dll", "MoveWindow", WIN32_API_MOVE_WINDOW},
     {"user32.dll", "SetFocus", WIN32_API_SET_FOCUS},
@@ -418,6 +441,11 @@ static const win32_api_t g_api[] = {
     {"user32.dll", "DrawMenuBar", WIN32_API_DRAW_MENU_BAR},
     {"user32.dll", "TrackPopupMenu", WIN32_API_TRACK_POPUP_MENU},
     {"kernel32.dll", "SetConsoleTextAttribute", WIN32_API_SET_CONSOLE_TEXT_ATTR},
+    {"kernel32.dll", "FindResourceA", WIN32_API_FIND_RESOURCE},
+    {"kernel32.dll", "LoadResource", WIN32_API_LOAD_RESOURCE},
+    {"kernel32.dll", "LockResource", WIN32_API_LOCK_RESOURCE},
+    {"kernel32.dll", "SizeofResource", WIN32_API_SIZE_OF_RESOURCE},
+    {"kernel32.dll", "LoadStringA", WIN32_API_LOAD_STRING},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -1052,6 +1080,10 @@ static void api_reg_set(trap_frame_t *f) {
   UINT64  data_va = 0;
   UINT64  data_len = 0;
 
+  /* RegSetValueExA(hkey, value name, reserved, type, data, size): the second
+   * argument names the value, not a subkey - the key handle already carries
+   * the path, which is why a program opens it with RegOpenKeyExA first.
+   * Reserved (R8) is unused. */
   if (t == NULL || key_path(t->cr3, f->rdi, 0, path, sizeof(path)) != 0 ||
       read_user_str(t->cr3, f->rdx, name, sizeof(name)) != 0 ||
       stack_arg(f, t, 5u, &data_va) != 0 ||
@@ -1419,6 +1451,13 @@ static void api_set_filter(trap_frame_t *f) {
 #define TPM_VCENTERALIGN 0x0010u
 #define TPM_BOTTOMALIGN  0x0020u
 #define TPM_RETURNCMD    0x0100u
+/* Resources. The loader does not parse the .rsrc section, but the image is
+ * mapped at a known base, so the Win32 side can walk the resource directory
+ * itself - the same tree Windows exposes through FindResource. */
+#define WIN32_RES_HANDLE_BASE 0x25000000u
+#define WIN32_RES_MAX         8u
+#define RT_STRING             6u
+#define RT_RCDATA             10u
 
 #define WIN32_ERROR_INVALID_HANDLE 6u
 #define WIN32_ERROR_INVALID_PARAM  87u
@@ -1474,6 +1513,8 @@ typedef struct {
   UINT8  kind;     /* WIN32_CHILD_STATIC / _BUTTON / _EDIT */
   UINT8  pressed;  /* button: the pointer is down inside it */
   UINT8  caret;    /* edit: draw the insertion bar */
+  UINT8  pad0;
+  UINT32 ins;      /* edit: insertion point, measured in bytes */
   INT32  x, y, w, h;
   char   text[WIN32_CHILD_TEXT_MAX];
 } win32_child_t;
@@ -1494,6 +1535,15 @@ typedef struct {
   win32_mitem_t item[WIN32_GUI_MAX_MENU_ITEMS];
 } win32_menu_t;
 
+/* One resolved resource: the address the program may read and its size. A
+ * Windows HRSRC is opaque, so the handle is an index into this table. */
+typedef struct {
+  UINT8  used;
+  UINT32 h;
+  UINT64 va;
+  UINT32 size;
+} win32_res_t;
+
 typedef struct {
   UINT8       used;
   UINT64      pid;
@@ -1503,6 +1553,7 @@ typedef struct {
   win32_wnd_t wnd[WIN32_GUI_MAX_WINDOWS];
   win32_child_t kid[WIN32_GUI_MAX_CHILDREN];
   win32_menu_t  menu[WIN32_GUI_MAX_MENUS];
+  win32_res_t   res[WIN32_RES_MAX];
   UINT32      focus_child; /* the control that owns typing, 0 = the window */
   win32_msg_t q[WIN32_GUI_MSGQ];
   UINT32      qh, qn;
@@ -1744,6 +1795,8 @@ static int  gui_menu_click(task_t *t, win32_gui_t *gu, win32_wnd_t *w, INT32 x,
                            INT32 y, int down);
 static int  gui_ctx_click(win32_gui_t *gu, win32_wnd_t *w, INT32 x, INT32 y,
                           int down);
+static win32_child_t *gui_focus_cycle(win32_gui_t *gu, UINT32 parent,
+                                      UINT32 cur, INT32 dir);
 /* Translate one delivered message into a queued WM_* message. */
 static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
   ipc_msg_t m = *msg;
@@ -1767,12 +1820,34 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
       kputs("[WIN32] key for an unknown window ");
       kputs_hex(win);
       kputs("\n");
+    } else if (m.hdr.type == NWM_EV_MOUSE) {
+      kputs("[WIN32] mouse for an unknown window ");
+      kputs_hex(win);
+      kputs("\n");
     }
     return;
   }
   /* The message box is the layer's own window, so it takes its events here:
    * a click on one of its buttons settles the result and there is no
    * procedure to call. */
+  if (m.hdr.type == NWM_EV_MOUSE) {
+    nwm_ev_mouse_t mm;
+
+    if (m.hdr.len >= sizeof(mm)) {
+      memcpy(&mm, m.payload, sizeof(mm));
+      kputs("[WIN32] mouse win=");
+      kputs_hex(win);
+      kputs(" hwnd=");
+      kputs_hex(hwnd);
+      kputs(" type=");
+      kputs_hex(mm.type);
+      kputs(" at ");
+      kputs_hex((UINT64)(UINT32)mm.x);
+      kputs(",");
+      kputs_hex((UINT64)(UINT32)mm.y);
+      kputs("\n");
+    }
+  }
   if (gu->msgbox_hwnd != 0u && hwnd == gu->msgbox_hwnd) {
     (void)msgbox_event(t, gu, hwnd, &m);
     return;
@@ -1813,18 +1888,101 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
 
         if (ec != NULL && ec->kind == WIN32_CHILD_EDIT && ec->parent == hwnd) {
           UINT32 n = 0;
+          UINT8  handled = 1u;
 
           while (n + 1u < WIN32_CHILD_TEXT_MAX && ec->text[n] != '\0') {
             n++;
           }
-          if (k.key < ND_KEY_BASE && (k.key == 8u || k.key == 0x7Fu)) {
-            if (n > 0u) {
-              ec->text[n - 1u] = '\0';
+          /* Keep the insertion point inside the string at all times: the
+           * buffer can be replaced under it by SetWindowTextA. */
+          if (ec->ins > n) {
+            ec->ins = n;
+          }
+          if (k.key == ND_KEY_LEFT) {
+            if (ec->ins > 0u) {
+              ec->ins--;
+            }
+          } else if (k.key == ND_KEY_RIGHT) {
+            if (ec->ins < n) {
+              ec->ins++;
+            }
+          } else if (k.key == ND_KEY_HOME) {
+            ec->ins = 0u;
+          } else if (k.key == ND_KEY_END) {
+            ec->ins = n;
+          } else if (k.key == ND_KEY_DELETE) {
+            if (ec->ins < n) {
+              UINT32 j;
+
+              for (j = ec->ins; j + 1u < WIN32_CHILD_TEXT_MAX; j++) {
+                ec->text[j] = ec->text[j + 1u];
+                if (ec->text[j] == '\0') {
+                  break;
+                }
+              }
+            }
+          } else if (k.key == 8u || k.key == 0x7Fu || k.key == ND_KEY_BACK) {
+            if (ec->ins > 0u) {
+              UINT32 j;
+
+              for (j = ec->ins - 1u; j + 1u < WIN32_CHILD_TEXT_MAX; j++) {
+                ec->text[j] = ec->text[j + 1u];
+                if (ec->text[j] == '\0') {
+                  break;
+                }
+              }
+              ec->ins--;
             }
           } else if (k.key >= 0x20u && k.key < 0x7Fu &&
                      n + 1u < WIN32_CHILD_TEXT_MAX) {
-            ec->text[n] = (char)k.key;
+            UINT32 j;
+
+            /* Insert at the caret, not at the end: the caret moved with the
+             * arrow keys above and typing has to land where it points. */
+            for (j = n; j > ec->ins; j--) {
+              ec->text[j] = ec->text[j - 1u];
+            }
+            ec->text[ec->ins] = (char)k.key;
             ec->text[n + 1u] = '\0';
+            ec->ins++;
+          } else if (k.key == ND_KEY_TAB) {
+            handled = 0u; /* focus moves outside this control */
+          } else {
+            handled = 0u;
+          }
+          {
+            win32_wnd_t *pw = gui_window(gu, hwnd);
+
+            if (pw != NULL) {
+              pw->dirty = 1u;
+            }
+          }
+          if (handled != 0u) {
+            break; /* the control swallowed the key; the parent's proc does not see it */
+          }
+        }
+      }
+      /* Tab moves focus to the next control the way Windows does it: the
+       * key is not text, the parent never sees it as a character, and Shift
+       * walks the tab order backwards. */
+      if (k.key == ND_KEY_TAB) {
+        win32_child_t *old = gui_child(gu, gu->focus_child);
+        win32_child_t *nw = gui_focus_cycle(gu, hwnd, gu->focus_child,
+                                            (k.mods & ND_MOD_SHIFT) ? -1 : 1);
+
+        if (nw != NULL) {
+          UINT32 l = 0u;
+
+          if (old != NULL && old != nw) {
+            old->caret = 0u;
+          }
+          gu->focus_child = nw->hwnd;
+          if (nw->kind == WIN32_CHILD_EDIT) {
+            nw->caret = 1u;
+            while (l + 1u < WIN32_CHILD_TEXT_MAX && nw->text[l] != '\0') {
+              l++;
+            }
+            nw->ins = l;
           }
           {
             win32_wnd_t *pw = gui_window(gu, hwnd);
@@ -1834,6 +1992,7 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
             }
           }
         }
+        break;
       }
       if (k.key >= ND_KEY_BASE) {
         UINT32 vk = vk_for_special(k.key - ND_KEY_BASE);
@@ -1947,8 +2106,32 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
           hit->pressed = 1u;
         }
         if (hit != NULL && hit->kind == WIN32_CHILD_EDIT) {
+          UINT32 n = 0u;
+          UINT32 i = 0u;
+          INT32  rel;
+
+          if (gu->focus_child != hit->hwnd) {
+            win32_child_t *old = gui_child(gu, gu->focus_child);
+
+            if (old != NULL) {
+              old->caret = 0u;
+            }
+          }
           gu->focus_child = hit->hwnd;
           hit->caret = 1u;
+          /* Put the insertion point where the pointer landed: walk the
+           * prefix widths until the click x falls inside the next glyph. */
+          while (n + 1u < WIN32_CHILD_TEXT_MAX && hit->text[n] != '\0') {
+            n++;
+          }
+          rel = mm.x - (hit->x + 5);
+          hit->ins = n;
+          for (i = 0u; i <= n; i++) {
+            if (measure_text(hit->text, i, 0) > rel) {
+              hit->ins = i;
+              break;
+            }
+          }
         } else if (hit == NULL && gu->focus_child != 0u) {
           win32_child_t *old = gui_child(gu, gu->focus_child);
 
@@ -2605,9 +2788,14 @@ static void gui_child_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w,
       gu->ntext++;
     }
     if (c->caret) {
-      /* The insertion bar sits after the text, which is where a real edit
-       * control keeps it while the pointer is at the end. */
-      tw = (len > 0u) ? measure_text(c->text, len, 0) : 0;
+      /* The insertion bar sits at the insertion point, not always after the
+       * text: arrow keys and clicks move it, and typing inserts there. */
+      UINT32 at = c->ins;
+
+      if (at > len) {
+        at = len;
+      }
+      tw = (at > 0u) ? measure_text(c->text, at, 0) : 0;
       (void)nwm_owner_shape(t->pid, w->win, NWM_OP_VLINE,
                             (INT16)(c->x + 5 + tw), (INT16)(c->y + 3), 1,
                             (INT16)(c->h - 6), 0x303030u);
@@ -2628,6 +2816,42 @@ static void gui_children_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
       gui_child_draw(t, gu, w, &gu->kid[i]);
     }
   }
+}
+
+/* Tab order: the focusable controls of one window, in creation order, which
+ * is the order Windows walks them. `cur` is the control that has focus now
+ * (0 when the window itself does), `dir` is +1 forward and -1 backward. */
+static win32_child_t *gui_focus_cycle(win32_gui_t *gu, UINT32 parent,
+                                      UINT32 cur, INT32 dir) {
+  UINT32 slot[WIN32_GUI_MAX_CHILDREN];
+  UINT32 n = 0u;
+  INT32  cur_idx = -1;
+  UINT32 i;
+  INT32  pick;
+
+  for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+    win32_child_t *c = &gu->kid[i];
+
+    if (!c->used || c->parent != parent) {
+      continue;
+    }
+    if (c->kind != WIN32_CHILD_BUTTON && c->kind != WIN32_CHILD_EDIT) {
+      continue;
+    }
+    if (c->hwnd == cur) {
+      cur_idx = (INT32)n;
+    }
+    slot[n++] = i;
+  }
+  if (n == 0u) {
+    return NULL;
+  }
+  if (cur_idx < 0) {
+    pick = (dir > 0) ? 0 : (INT32)n - 1;
+  } else {
+    pick = (INT32)(((UINT32)(cur_idx + dir) + n) % n);
+  }
+  return &gu->kid[slot[pick]];
 }
 
 /* The control under a client-area point, if any. Later controls win, which
@@ -3221,6 +3445,316 @@ static void api_track_popup_menu(trap_frame_t *f) {
   }
 }
 
+/* ---- resources in the loaded image ------------------------------------ */
+
+static int res_u16(task_t *t, UINT64 va, UINT16 *v) {
+  UINT16 x = 0;
+
+  if (user_copy(t->cr3, va, &x, 2u, 0) != 0) {
+    return -1;
+  }
+  *v = x;
+  return 0;
+}
+
+static int res_u32(task_t *t, UINT64 va, UINT32 *v) {
+  UINT32 x = 0;
+
+  if (user_copy(t->cr3, va, &x, 4u, 0) != 0) {
+    return -1;
+  }
+  *v = x;
+  return 0;
+}
+
+/* One level of the resource tree: the offset of the first entry whose integer
+ * id matches, or 0 when there is none. Every offset in the tree is measured
+ * from the start of the resource directory itself, so this function keeps
+ * working in offsets instead of addresses: adding the node's own RVA to a
+ * child offset is what sent the second lookup into the middle of the string
+ * table. Entries with the high bit set are named, and a program that asks by
+ * MAKEINTRESOURCE cannot reach them anyway, so they are skipped. */
+static UINT32 res_dir_find(task_t *t, UINT64 base, UINT32 res_rva,
+                           UINT32 dir_off, UINT32 id) {
+  UINT16 named = 0;
+  UINT16 ids = 0;
+  UINT32 total;
+  UINT32 i;
+  UINT64 dir = base + (UINT64)res_rva + (UINT64)dir_off;
+
+  if (res_u16(t, dir + 12u, &named) != 0 || res_u16(t, dir + 14u, &ids) != 0) {
+    return 0u;
+  }
+  total = (UINT32)named + (UINT32)ids;
+  for (i = 0; i < total; i++) {
+    UINT32 name = 0;
+    UINT32 off = 0;
+
+    if (res_u32(t, dir + 16u + (UINT64)i * 8u, &name) != 0 ||
+        res_u32(t, dir + 20u + (UINT64)i * 8u, &off) != 0) {
+      return 0u;
+    }
+    if ((name & 0x80000000u) != 0u) {
+      continue; /* a named entry: not reachable by integer id */
+    }
+    if (name == id) {
+      return off & 0x7FFFFFFFu;
+    }
+  }
+  return 0u;
+}
+
+/* Walk type -> name -> first language and return the bytes. */
+static int pe_find_resource(task_t *t, UINT64 base, UINT32 type, UINT32 name,
+                            UINT64 *out_va, UINT32 *out_size) {
+  UINT32 lfanew = 0;
+  UINT32 res_rva = 0;
+  UINT32 res_size = 0;
+  UINT64 opt;
+  UINT32 dir1;
+  UINT32 dir2;
+  UINT64 node;
+  UINT32 off = 0;
+  UINT32 data_rva = 0;
+  UINT32 data_size = 0;
+
+  if (base == 0u || res_u32(t, base + 0x3Cu, &lfanew) != 0) {
+    return -1;
+  }
+  opt = base + (UINT64)lfanew + 24u;
+  /* Optional header: data directory 2 is the resource table, and the
+   * directory starts at +112 in a PE32+ optional header. */
+  if (res_u32(t, opt + 112u + 2u * 8u, &res_rva) != 0 ||
+      res_u32(t, opt + 112u + 2u * 8u + 4u, &res_size) != 0) {
+    return -1;
+  }
+  if (res_rva == 0u || res_size == 0u) {
+    kputs("[WIN32] res: no resource directory (lfanew=");
+    kputs_hex((UINT64)lfanew);
+    kputs(" rva=");
+    kputs_hex((UINT64)res_rva);
+    kputs(")\n");
+    return -1; /* no resource section in this image */
+  }
+  dir1 = res_dir_find(t, base, res_rva, 0u, type);
+  if (dir1 == 0u) {
+    kputs("[WIN32] res: no type ");
+    kputs_hex((UINT64)type);
+    kputs(" under rva ");
+    kputs_hex((UINT64)res_rva);
+    kputs(" base ");
+    kputs_hex(base);
+    kputs("\n");
+    return -1;
+  }
+  dir2 = res_dir_find(t, base, res_rva, dir1, name);
+  if (dir2 == 0u) {
+    kputs("[WIN32] res: no id ");
+    kputs_hex((UINT64)name);
+    kputs(" under ");
+    kputs_hex((UINT64)dir1);
+    kputs("\n");
+    return -1;
+  }
+  /* Third level is the language; take the first one, which is what Windows
+   * does when the program does not ask for one. */
+  node = base + (UINT64)res_rva + (UINT64)dir2;
+  {
+    UINT16 langs = 0;
+
+    if (res_u16(t, node + 14u, &langs) != 0 || langs == 0u ||
+        res_u32(t, node + 20u, &off) != 0) {
+      return -1;
+    }
+  }
+  {
+    UINT64 data_entry = base + (UINT64)res_rva + (UINT64)(off & 0x7FFFFFFFu);
+
+    if (res_u32(t, data_entry, &data_rva) != 0 ||
+        res_u32(t, data_entry + 4u, &data_size) != 0) {
+      return -1;
+    }
+  }
+  *out_va = base + (UINT64)data_rva;
+  *out_size = data_size;
+  return 0;
+}
+
+/* UTF-16LE to UTF-8, the encoding every string this layer draws uses. */
+static UINT32 res_utf16_to_utf8(const UINT8 *src, UINT16 units, char *out,
+                                UINT32 cap) {
+  UINT32 n = 0;
+  UINT16 i;
+
+  for (i = 0; i < units && n + 4u < cap; i++) {
+    UINT32 cp = (UINT32)src[i * 2u] | ((UINT32)src[i * 2u + 1u] << 8);
+
+    if (cp == 0u) {
+      break;
+    }
+    if (cp < 0x80u) {
+      out[n++] = (char)cp;
+    } else if (cp < 0x800u) {
+      out[n++] = (char)(0xC0u | (cp >> 6));
+      out[n++] = (char)(0x80u | (cp & 0x3Fu));
+    } else {
+      out[n++] = (char)(0xE0u | (cp >> 12));
+      out[n++] = (char)(0x80u | ((cp >> 6) & 0x3Fu));
+      out[n++] = (char)(0x80u | (cp & 0x3Fu));
+    }
+  }
+  out[n] = '\0';
+  return n;
+}
+
+static void api_find_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 1) : NULL;
+  UINT64       base = (t != NULL) ? t->win32_image_base : 0u;
+  UINT64       va = 0u;
+  UINT32       size = 0u;
+  UINT32       i;
+
+  /* MAKEINTRESOURCE(n) is the number itself, so anything above the id range
+   * is a real string name; those are the named entries this layer does not
+   * index yet, and the honest answer is "not found". */
+  if (gu == NULL || f->rdx >= 0x10000u || f->r8 >= 0x10000u) {
+    f->rax = 0u;
+    return;
+  }
+  if (pe_find_resource(t, base, (UINT32)f->r8, (UINT32)f->rdx, &va, &size) !=
+      0) {
+    kputs("[WIN32] findresource: type=");
+    kputs_hex((UINT64)(UINT32)f->r8);
+    kputs(" id=");
+    kputs_hex((UINT64)(UINT32)f->rdx);
+    kputs(" not in the image\n");
+    f->rax = 0u;
+    return;
+  }
+  for (i = 0; i < WIN32_RES_MAX; i++) {
+    if (gu->res[i].used && gu->res[i].va == va) {
+      f->rax = (UINT64)gu->res[i].h;
+      return;
+    }
+  }
+  for (i = 0; i < WIN32_RES_MAX; i++) {
+    if (!gu->res[i].used) {
+      gu->res[i].used = 1u;
+      gu->res[i].h = WIN32_RES_HANDLE_BASE | i;
+      gu->res[i].va = va;
+      gu->res[i].size = size;
+      f->rax = (UINT64)gu->res[i].h;
+      return;
+    }
+  }
+  f->rax = 0u; /* the table is full */
+}
+
+static win32_res_t *win32_res(win32_gui_t *gu, UINT32 h) {
+  UINT32 i;
+
+  if (gu == NULL || (h & 0xFF000000u) != WIN32_RES_HANDLE_BASE) {
+    return NULL;
+  }
+  i = h & 0xFFu;
+  if (i >= WIN32_RES_MAX || !gu->res[i].used) {
+    return NULL;
+  }
+  return &gu->res[i];
+}
+
+static void api_load_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_res_t *r = win32_res(gu, (UINT32)f->rdx);
+
+  /* LoadResource hands back a handle to the same bytes; the image is already
+   * mapped, so there is nothing to load. */
+  f->rax = (r != NULL) ? (UINT64)r->h : 0u;
+}
+
+static void api_lock_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  /* LockResource takes the resource handle as its only argument, so it is in
+   * RDI. Reading the second argument slot got whatever the caller happened to
+   * leave there and handed the program a null pointer. */
+  win32_res_t *r = win32_res(gu, (UINT32)f->rdi);
+
+  f->rax = (r != NULL) ? r->va : 0u;
+}
+
+static void api_size_of_resource(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_res_t *r = win32_res(gu, (UINT32)f->rdx);
+
+  f->rax = (r != NULL) ? (UINT64)r->size : 0u;
+}
+
+/* LoadStringA: a string table block holds 16 entries, each a WORD length
+ * followed by that many UTF-16 code units. The block is named by its
+ * 1-based number, which is id/16 + 1. */
+static void api_load_string(trap_frame_t *f) {
+  task_t      *t = sched_current();
+  UINT64       base = (t != NULL) ? t->win32_image_base : 0u;
+  UINT32       id = (UINT32)f->rdx;
+  UINT64       va = 0u;
+  UINT32       size = 0u;
+  UINT32       block = id / 16u + 1u;
+  UINT32       index = id % 16u;
+  UINT32       i;
+  UINT64       p;
+  UINT32       end;
+  UINT16       len = 0;
+  UINT8        raw[2u * 255u];
+  char        *dst = (char *)(UINTN)f->r8;
+  UINT32       cap = (UINT32)f->r9;
+
+  if (t == NULL || f->r8 == 0u || cap == 0u ||
+      pe_find_resource(t, base, RT_STRING, block, &va, &size) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  p = va;
+  end = size;
+  for (i = 0; i < index; i++) {
+    if (res_u16(t, p, &len) != 0 || (UINT32)len * 2u + 2u > end) {
+      f->rax = 0u;
+      return;
+    }
+    p += 2u + (UINT64)len * 2u;
+    end -= 2u + (UINT32)len * 2u;
+  }
+  if (res_u16(t, p, &len) != 0 || len == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  if (len > 255u) {
+    len = 255u;
+  }
+  if ((UINT32)len * 2u > end || user_copy(t->cr3, p + 2u, raw,
+                                          (UINT64)len * 2u, 0) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  {
+    char tmp[2u * 255u + 4u];
+    UINT32 n = res_utf16_to_utf8(raw, len, tmp, sizeof(tmp));
+
+    if (n + 1u > cap) {
+      n = cap - 1u;
+    }
+    if (user_copy(t->cr3, f->r8, tmp, n, 1) != 0) {
+      f->rax = 0u;
+      return;
+    }
+    (void)dst;
+    f->rax = (UINT64)n;
+  }
+}
+
 /* ---- MessageBoxA: a modal box the layer owns --------------------------- */
 
 /* The box is not a program window: it has no class and no procedure, so the
@@ -3239,14 +3773,29 @@ static void msgbox_paint(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
 }
 
 /* Buttons in a box are numbered 1..n; the answer a click carries depends on
- * the button set the program asked for, exactly as Windows maps them. */
+ * the button set the program asked for, exactly as Windows maps them. The
+ * position is counted over the box's own buttons, because the child slots are
+ * shared with the window's own controls and a global slot number says nothing
+ * about which button it is. */
 static UINT32 msgbox_button_id(win32_gui_t *gu, win32_child_t *c) {
-  UINT32 id = (UINT32)(c->hwnd & 0xFFu) + 1u;
+  UINT32 pos = 0u;
+  UINT32 i;
 
-  if (gu->msgbox_type == WIN32_MB_YESNO) {
-    return (id == 1u) ? WIN32_IDYES : WIN32_IDNO;
+  for (i = 0; i < WIN32_GUI_MAX_CHILDREN; i++) {
+    win32_child_t *k = &gu->kid[i];
+
+    if (!k->used || k->parent != c->parent || k->kind != WIN32_CHILD_BUTTON) {
+      continue;
+    }
+    if (k == c) {
+      break;
+    }
+    pos++;
   }
-  return (id == 1u) ? WIN32_IDOK : WIN32_IDCANCEL;
+  if (gu->msgbox_type == WIN32_MB_YESNO) {
+    return (pos == 0u) ? WIN32_IDYES : WIN32_IDNO;
+  }
+  return (pos == 0u) ? WIN32_IDOK : WIN32_IDCANCEL;
 }
 
 static int msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
@@ -3254,6 +3803,31 @@ static int msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
   win32_wnd_t *w = gui_window(gu, hwnd);
 
   if (w == NULL) {
+    kputs("[WIN32] msgbox: event for a window it no longer knows\n");
+    return 0;
+  }
+  if (m->hdr.type == NWM_EV_KEY) {
+    /* Enter and Escape settle a message box the way they do on Windows: a
+     * box is meant to be answerable without aiming at a button. */
+    nwm_ev_key_t k;
+
+    if (m->hdr.len < sizeof(k)) {
+      return 0;
+    }
+    memcpy(&k, m->payload, sizeof(k));
+    kputs("[WIN32] msgbox: key=");
+    kputs_hex(k.key);
+    kputs("\n");
+    if (k.key == ND_KEY_ENTER || k.key == '\r' || k.key == '\n') {
+      gu->msgbox_result = (gu->msgbox_type == WIN32_MB_YESNO) ? WIN32_IDYES
+                                                             : WIN32_IDOK;
+    } else if (k.key == ND_KEY_ESC || k.key == 0x1Bu) {
+      gu->msgbox_result = WIN32_IDCANCEL;
+    }
+    if (gu->msgbox_result != 0u) {
+      (void)t;
+      msgbox_paint(t, gu, w);
+    }
     return 0;
   }
   if (m->hdr.type == NWM_EV_CLOSE) {
@@ -3274,6 +3848,15 @@ static int msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
 
     memcpy(&mm, m->payload, sizeof(mm));
     hit = gui_child_hit(gu, hwnd, mm.x, mm.y);
+    kputs("[WIN32] msgbox: mouse type=");
+    kputs_hex(mm.type);
+    kputs(" at ");
+    kputs_hex((UINT64)(UINT32)mm.x);
+    kputs(",");
+    kputs_hex((UINT64)(UINT32)mm.y);
+    kputs(" hit=");
+    kputs_hex(hit != NULL ? hit->hwnd : 0u);
+    kputs("\n");
     if (mm.type == ND_EV_MOUSE_DOWN) {
       if (hit != NULL && hit->kind == WIN32_CHILD_BUTTON) {
         hit->pressed = 1u;
@@ -3392,6 +3975,13 @@ static void api_message_box(trap_frame_t *f) {
     f->rax = 0u;
     return;
   }
+  /* A box is modal: the caller sits inside this call, so this is the only
+   * place that can drain the compositor events the box needs. Without the
+   * pump here a click on OK was delivered to the inbox and then sat there
+   * until the box was gone, which looks exactly like "the mouse does not
+   * work in a message box". */
+  gui_pump(t, gu);
+  gui_timers(gu);
   if (gu->msgbox_hwnd == 0u && gu->msgbox_result == 0u) {
     char     text[WIN32_MSGBOX_MAX_LINES * WIN32_CHILD_TEXT_MAX];
     char     caption[NWM_TITLE_MAX];
@@ -3512,6 +4102,16 @@ static void api_message_box(trap_frame_t *f) {
     kputs_hex(gu->msgbox_hwnd);
     kputs(" buttons=");
     kputs_hex(nbtn);
+    kputs(" rect=");
+    kputs_hex((UINT64)(UINT32)bx);
+    kputs(",");
+    kputs_hex((UINT64)(UINT32)by);
+    kputs(" size=");
+    kputs_hex((UINT64)(UINT32)cw);
+    kputs(",");
+    kputs_hex((UINT64)(UINT32)ch);
+    kputs(" win=");
+    kputs_hex(win);
     kputs("\n");
     msgbox_paint(t, gu, gui_window(gu, gu->msgbox_hwnd));
   }
@@ -4046,6 +4646,12 @@ static void api_set_window_text(trap_frame_t *f) {
       return;
     }
     copy_text(k->text, sizeof(k->text), ctext);
+    /* An edit keeps its insertion point inside the new string; Windows puts
+     * the caret at the end when the text is replaced wholesale. */
+    k->ins = 0u;
+    while (k->ins + 1u < WIN32_CHILD_TEXT_MAX && k->text[k->ins] != '\0') {
+      k->ins++;
+    }
     {
       win32_wnd_t *pw = gui_window(gu, k->parent);
 
@@ -4149,18 +4755,48 @@ static void api_get_focus(trap_frame_t *f) {
 
 /* ---- ws2_32: the socket surface ---------------------------------------- */
 
-/* The honest shape of this block: the kernel already owns a TCP engine
- * (net_tcp.c), a resolver (net_dns.c) and DHCP, but that engine is one
- * connection with no descriptor layer over it, so ws2_32 cannot hand a
- * program a socket yet. What this block makes real is the part that needs
- * no connection - the version handshake a program refuses to run without,
- * the address conversions, and error reporting - and every transport call
- * answers WSAENETDOWN with the failure value Windows documents, so a
- * program takes its error path instead of holding a socket that cannot
- * carry a byte. Wiring the descriptors onto net_tcp_* is the next block. */
+/* The kernel owns a TCP engine (net_tcp.c) with a resolver (net_dns.c) and
+ * DHCP behind it, but that engine is *one* connection with no descriptor
+ * layer over it. This block adds the descriptor layer: a socket handle is a
+ * slot in a small table, connect drives net_tcp_open and waits for the
+ * handshake, send goes through net_tcp_send, recv drains the engine's
+ * receive buffer, closesocket frees the engine.
+ *
+ * The honest boundary is the engine's, not the API's: only one socket can
+ * be connected at a time, so a second live connect answers WSAENOBUFS
+ * instead of pretending a connection exists. bind/listen/accept and
+ * select/ioctlsocket need a listening path the engine does not have, so
+ * they answer WSAEOPNOTSUPP; a program takes its error path, and the
+ * document says so. */
+#define WIN32_SOCK_BASE    0x26000000u
+#define WIN32_MAX_SOCKETS  4u
+
 #define WSAENETDOWN       10050u
 #define WSAENOTSOCK       10038u
 #define WSAHOST_NOT_FOUND 11001u
+#define WSAEWOULDBLOCK    10035u
+#define WSAENOTCONN       10057u
+#define WSAETIMEDOUT      10060u
+#define WSAEAFNOSUPPORT   10047u
+#define WSAEPROTOTYPE     10041u
+#define WSAEOPNOTSUPP     10045u
+#define WSAENOBUFS        10055u
+#define WSAEISCONN        10056u
+#define WSAEINVAL         10022u
+
+/* AF_INET is 2, SOCK_STREAM is 1 on Windows. */
+#define WSA_AF_INET   2u
+#define WSA_SOCK_STREAM 1u
+
+typedef struct {
+  UINT8  used;
+  UINT8  connected;
+  UINT64 owner; /* the pid the socket was handed to */
+  UINT32 ip;    /* host order */
+  UINT16 port;
+} win32_sock_t;
+
+static win32_sock_t g_sock[WIN32_MAX_SOCKETS];
 
 /* WSADATA is 2 + 2 + 257 + 129 + 2 + 2 + 8 = 402 bytes; the padding to the
  * vendor pointer rounds the struct to 408 on x64. */
@@ -4197,8 +4833,11 @@ static void api_wsa_startup(trap_frame_t *f) {
   memcpy(d + 0, &ver, 2);   /* wVersion */
   memcpy(d + 2, &high, 2);  /* wHighVersion */
   copy_text((char *)d + 4, 257, "Novus ws2_32");
-  copy_text((char *)d + 261, 129, "socket layer not wired");
-  /* iMaxSockets 0 and iMaxUdpDg 0 are the truth: no transport is open. */
+  copy_text((char *)d + 261, 129, "one TCP connection, no listening");
+  /* iMaxSockets 1 is the truth: the engine behind the descriptor table is a
+   * single connection, so a program that asks for more learns it here. */
+  d[390] = 1;
+  d[391] = 0;
   if (f->rdx != 0u && user_copy(t->cr3, f->rdx, d, sizeof(d), 1) != 0) {
     f->rax = WSAENETDOWN;
     return;
@@ -4230,18 +4869,247 @@ static void api_socket_fail(trap_frame_t *f, UINT32 code, UINT64 value) {
   f->rax = value;
 }
 
-static void api_socket(trap_frame_t *f) {
-  api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+/* A socket handle is the base ORed with its slot, so a stale handle from a
+ * neighbour process cannot name a live slot without passing the owner check. */
+static win32_sock_t *sock_get(task_t *t, UINT64 h) {
+  UINT32 i;
+
+  if (t == NULL || (h & 0xFFFFFF00u) != WIN32_SOCK_BASE || h == (UINT64)-1) {
+    return NULL;
+  }
+  i = (UINT32)(h & 0xFFu);
+  if (i >= WIN32_MAX_SOCKETS || !g_sock[i].used ||
+      g_sock[i].owner != t->pid) {
+    return NULL;
+  }
+  return &g_sock[i];
 }
 
-static void api_socket_call(trap_frame_t *f) {
-  api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+static UINT16 be16(UINT16 v) { return (UINT16)((v >> 8) | (v << 8)); }
+
+static UINT32 be32(UINT32 v) {
+  return ((v & 0xFFu) << 24) | ((v & 0xFF00u) << 8) |
+         ((v >> 8) & 0xFF00u) | ((v >> 24) & 0xFFu);
+}
+
+/* socket(af, type, proto). AF_INET + SOCK_STREAM is the one family the
+ * engine speaks; anything else is refused with the code Windows uses, so a
+ * program does not get a handle it cannot use. */
+static void api_socket(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT32  i;
+
+  if (t == NULL) {
+    api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+    return;
+  }
+  if ((UINT32)f->rdi != WSA_AF_INET) {
+    api_socket_fail(f, WSAEAFNOSUPPORT, (UINT64)-1);
+    return;
+  }
+  if ((UINT32)f->rdx != WSA_SOCK_STREAM) {
+    api_socket_fail(f, WSAEPROTOTYPE, (UINT64)-1);
+    return;
+  }
+  for (i = 0; i < WIN32_MAX_SOCKETS; i++) {
+    if (!g_sock[i].used) {
+      g_sock[i].used = 1u;
+      g_sock[i].connected = 0u;
+      g_sock[i].owner = t->pid;
+      g_sock[i].ip = 0u;
+      g_sock[i].port = 0u;
+      t->win32_last_error = 0u;
+      f->rax = (UINT64)(WIN32_SOCK_BASE | i);
+      return;
+    }
+  }
+  api_socket_fail(f, WSAENOBUFS, (UINT64)-1);
+}
+
+/* connect(s, name, namelen): sockaddr_in is 16 bytes, port and address in
+ * network order. The engine reports "no link" by refusing to open, which is
+ * the only honest answer while no device is up; a handshake that never
+ * completes is a timeout. */
+static void api_connect(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+  UINT8         sa[16];
+  UINT32        i;
+  int           rc;
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (f->r8 < 16u || user_copy(t->cr3, f->rdx, sa, sizeof(sa), 0) != 0) {
+    api_socket_fail(f, WSAEINVAL, (UINT64)-1);
+    return;
+  }
+  {
+    UINT16 fam;
+    UINT16 port;
+    UINT32 addr;
+
+    memcpy(&fam, sa, 2);
+    memcpy(&port, sa + 2, 2);
+    memcpy(&addr, sa + 4, 4);
+    if (fam != WSA_AF_INET) {
+      api_socket_fail(f, WSAEAFNOSUPPORT, (UINT64)-1);
+      return;
+    }
+    port = be16(port);
+    addr = be32(addr);
+    if (s->connected != 0u) {
+      api_socket_fail(f, WSAEISCONN, (UINT64)-1);
+      return;
+    }
+    /* One engine, one connection: a second live socket is refused rather
+     * than handed a share of a connection it would corrupt. */
+    for (i = 0; i < WIN32_MAX_SOCKETS; i++) {
+      if (g_sock[i].used && g_sock[i].connected != 0u && &g_sock[i] != s) {
+        api_socket_fail(f, WSAENOBUFS, (UINT64)-1);
+        return;
+      }
+    }
+    rc = net_tcp_open(addr, port, 0, 0);
+    if (rc != 0) {
+      api_socket_fail(f, WSAENETDOWN, (UINT64)-1);
+      return;
+    }
+    s->ip = addr;
+    s->port = port;
+    /* Bounded wait: the engine ticks from the scheduler, so parking the
+     * caller lets the handshake progress. 80 x 50 ms is the same budget the
+     * engine gives its own retries. */
+    for (i = 0; i < 80u; i++) {
+      if (net_tcp_phase() == NET_TCP_OPEN) {
+        break;
+      }
+      if (net_tcp_phase() == NET_TCP_FAIL || net_tcp_phase() == NET_TCP_IDLE) {
+        break;
+      }
+      sched_park(WIN32_SLEEP_PORT, 5);
+    }
+    if (net_tcp_phase() == NET_TCP_OPEN) {
+      s->connected = 1u;
+      t->win32_last_error = 0u;
+      f->rax = 0u;
+      return;
+    }
+    net_tcp_close();
+    s->connected = 0u;
+    api_socket_fail(f, WSAETIMEDOUT, (UINT64)-1);
+  }
+}
+
+/* send(s, buf, len, flags): the engine segments internally, but the user
+ * buffer is copied in windows so a long write never needs a kernel buffer
+ * of the caller's size. */
+static void api_send(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+  UINT8         chunk[256];
+  UINT64        off = 0u;
+  UINT32        len = (UINT32)f->r8;
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (s->connected == 0u) {
+    api_socket_fail(f, WSAENOTCONN, (UINT64)-1);
+    return;
+  }
+  if ((UINT32)f->r9 != 0u) {
+    api_socket_fail(f, WSAEOPNOTSUPP, (UINT64)-1);
+    return;
+  }
+  while (off < (UINT64)len) {
+    UINT32 take = len - (UINT32)off;
+
+    if (take > sizeof(chunk)) {
+      take = (UINT32)sizeof(chunk);
+    }
+    if (user_copy(t->cr3, f->rdx + off, chunk, take, 0) != 0) {
+      api_socket_fail(f, WSAEINVAL, (UINT64)-1);
+      return;
+    }
+    if (net_tcp_send(chunk, take) != 0) {
+      s->connected = 0u;
+      api_socket_fail(f, WSAENOTCONN, (UINT64)-1);
+      return;
+    }
+    off += take;
+  }
+  t->win32_last_error = 0u;
+  f->rax = (UINT64)len;
+}
+
+/* recv(s, buf, len, flags): blocking is reported the way a non-blocking
+ * socket reports it, because the layer cannot sleep a task inside a syscall
+ * that is already parked. A caller that wants to wait loops on WSAEWOULDBLOCK,
+ * which is what a Winsock program with FIONBIO already does. */
+static void api_recv(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+  UINT32        avail;
+  UINT32        n;
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (s->connected == 0u) {
+    api_socket_fail(f, WSAENOTCONN, (UINT64)-1);
+    return;
+  }
+  avail = net_tcp_rx_len();
+  if (avail == 0u) {
+    if (net_tcp_phase() == NET_TCP_CLOSED || net_tcp_phase() == NET_TCP_FAIL) {
+      t->win32_last_error = 0u;
+      f->rax = 0u; /* orderly shutdown: zero bytes, like Windows */
+      return;
+    }
+    api_socket_fail(f, WSAEWOULDBLOCK, (UINT64)-1);
+    return;
+  }
+  n = (UINT32)f->r8;
+  if (n > avail) {
+    n = avail;
+  }
+  if (n > 256u) {
+    n = 256u;
+  }
+  if (user_copy(t->cr3, f->rdx, (void *)net_tcp_rx_data(), n, 1) != 0) {
+    api_socket_fail(f, WSAEINVAL, (UINT64)-1);
+    return;
+  }
+  net_tcp_consume(n);
+  t->win32_last_error = 0u;
+  f->rax = (UINT64)n;
 }
 
 static void api_closesocket(trap_frame_t *f) {
-  /* No socket was ever handed out, so every argument is "not a socket",
-   * including the value Windows spells INVALID_SOCKET. */
-  api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+  task_t       *t = sched_current();
+  win32_sock_t *s = sock_get(t, f->rdi);
+
+  if (s == NULL) {
+    api_socket_fail(f, WSAENOTSOCK, (UINT64)-1);
+    return;
+  }
+  if (s->connected != 0u) {
+    net_tcp_close();
+    s->connected = 0u;
+  }
+  s->used = 0u;
+  s->owner = 0u;
+  t->win32_last_error = 0u;
+  f->rax = 0u;
+}
+
+/* The calls the engine cannot honestly serve yet. */
+static void api_socket_unsupported(trap_frame_t *f) {
+  api_socket_fail(f, WSAEOPNOTSUPP, (UINT64)-1);
 }
 
 static void api_gethostbyname(trap_frame_t *f) {
@@ -4259,8 +5127,151 @@ static void api_freeaddrinfo(trap_frame_t *f) {
   f->rax = 0u;
 }
 
-/* GetDlgItem(parent, id): a program names its controls by the id it passed
- * to CreateWindowExA, and this layer hands out the index as the id, so the
+/* ---- the version the layer reports ------------------------------------- */
+
+/* Installers and older programs branch on the Windows version they are told
+ * they are running on. The default is the generation this layer behaves
+ * like; a compatibility mode is a pair of registry values under
+ * HKLM\Software\Novus\Compat:
+ *   WinVersion  SZ     "6.1"  (Windows 7), "5.1" (XP), "5.0" (2000), "4.0"
+ *   WinBuild    DWORD  7601
+ * Reading them here means a program sets the mode with RegSetValueExA, the
+ * same way a user sets a compatibility tab on Windows. */
+#define WIN32_COMPAT_KEY "HKLM\\Software\\Novus\\Compat"
+#define WIN32_DEFAULT_MAJOR 10u
+#define WIN32_DEFAULT_MINOR 0u
+#define WIN32_DEFAULT_BUILD 22631u
+
+static void compat_version(UINT32 *maj, UINT32 *min, UINT32 *build) {
+  win32_reg_entry_t *e;
+
+  *maj = WIN32_DEFAULT_MAJOR;
+  *min = WIN32_DEFAULT_MINOR;
+  *build = WIN32_DEFAULT_BUILD;
+  e = reg_find(WIN32_COMPAT_KEY, "WinVersion");
+  if (e != 0 && e->type == WIN32_REG_SZ && e->len >= 3u) {
+    UINT32 m = 0u;
+    UINT32 n = 0u;
+    UINT32 i = 0u;
+
+    while (i < e->len && e->data[i] >= '0' && e->data[i] <= '9') {
+      m = m * 10u + (UINT32)(e->data[i] - '0');
+      i++;
+    }
+    if (i < e->len && e->data[i] == '.') {
+      i++;
+      while (i < e->len && e->data[i] >= '0' && e->data[i] <= '9') {
+        n = n * 10u + (UINT32)(e->data[i] - '0');
+        i++;
+      }
+      *maj = m;
+      *min = n;
+    }
+  }
+  e = reg_find(WIN32_COMPAT_KEY, "WinBuild");
+  if (e != 0 && e->type == WIN32_REG_DWORD && e->len >= 4u) {
+    *build = (UINT32)e->data[0] | ((UINT32)e->data[1] << 8) |
+             ((UINT32)e->data[2] << 16) | ((UINT32)e->data[3] << 24);
+  }
+}
+
+/* OSVERSIONINFOA: 4 + 4 + 4 + 4 + 4 + 128 = 148 bytes. */
+#define WIN32_OSVERSIONINFO_LEN 148u
+
+/* GetVersion packs the Windows way for NT: major in the low word, minor in
+ * the high word (the build number has its own call). Programs that compare
+ * words rather than call GetVersionExA get the same answer. */
+static void api_get_version(trap_frame_t *f) {
+  UINT32 maj, min, build;
+
+  compat_version(&maj, &min, &build);
+  (void)build;
+  f->rax = (UINT64)(UINT32)((maj & 0xFFFFu) | ((min & 0xFFFFu) << 16));
+}
+
+static void api_get_version_ex(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT8   vi[WIN32_OSVERSIONINFO_LEN];
+  UINT32  want;
+  UINT32  size;
+  UINT32  maj, min, build;
+
+  if (t == 0) {
+    f->rax = 0u;
+    return;
+  }
+  if (user_copy(t->cr3, f->rdi, vi, 4u, 0) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  want = (UINT32)vi[0] | ((UINT32)vi[1] << 8) | ((UINT32)vi[2] << 16) |
+         ((UINT32)vi[3] << 24);
+  /* Windows refuses a struct smaller than the fields it has to fill, so a
+   * caller that passed nothing useful gets zero and no garbage written. */
+  if (want < 20u) {
+    f->rax = 0u;
+    return;
+  }
+  /* A program asking for more than plain OSVERSIONINFOA (the EX struct) gets
+   * the same leading fields and its own size echoed back. Its destination
+   * only ever has sizeof here, because everything past platform id is zero. */
+  size = (want > WIN32_OSVERSIONINFO_LEN) ? WIN32_OSVERSIONINFO_LEN : want;
+  memset(vi, 0, sizeof(vi));
+  compat_version(&maj, &min, &build);
+  vi[0] = (UINT8)(want & 0xFFu);
+  vi[1] = (UINT8)((want >> 8) & 0xFFu);
+  vi[2] = (UINT8)((want >> 16) & 0xFFu);
+  vi[3] = (UINT8)((want >> 24) & 0xFFu);
+  /* The four fields are DWORDs: major at 4, minor at 8, build at 12,
+   * platform at 16, then the CSD string. Writing them as words put the build
+   * number into the minor field and the platform id into the build field,
+   * which every caller reads. */
+  vi[4] = (UINT8)(maj & 0xFFu);
+  vi[5] = (UINT8)((maj >> 8) & 0xFFu);
+  vi[6] = (UINT8)((maj >> 16) & 0xFFu);
+  vi[7] = (UINT8)((maj >> 24) & 0xFFu);
+  vi[8] = (UINT8)(min & 0xFFu);
+  vi[9] = (UINT8)((min >> 8) & 0xFFu);
+  vi[10] = (UINT8)((min >> 16) & 0xFFu);
+  vi[11] = (UINT8)((min >> 24) & 0xFFu);
+  vi[12] = (UINT8)(build & 0xFFu);
+  vi[13] = (UINT8)((build >> 8) & 0xFFu);
+  vi[14] = (UINT8)((build >> 16) & 0xFFu);
+  vi[15] = (UINT8)((build >> 24) & 0xFFu);
+  vi[16] = 2u; /* VER_PLATFORM_WIN32_NT */
+  if (user_copy(t->cr3, f->rdi, vi, size, 1) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = 1u;
+}
+
+/* IsWow64Process: false. The layer runs 64-bit images only, so a program is
+ * not a 32-bit one under a 64-bit Windows - there is no WOW to report. */
+static void api_is_wow64(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT32  zero = 0u;
+
+  /* Second argument, so RDX: the thunk moved RDI to RCX for arg one. */
+  if (t == 0 || f->rdx == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  if (user_copy(t->cr3, f->rdx, &zero, 4u, 1) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  f->rax = 1u;
+}
+
+/* GetCurrentProcess: the pseudo handle Windows hands out for the process
+ * itself, -1. It is not a real handle the layer owns, and no API here
+ * dereferences it. */
+static void api_get_current_process(trap_frame_t *f) {
+  f->rax = ~(UINT64)0u;
+}
+
+/* GetDlgItem(parent, id): a program names its controls by the id it passed * to CreateWindowExA, and this layer hands out the index as the id, so the
  * lookup is the index. */
 static void api_get_dlg_item(trap_frame_t *f) {
   task_t      *t = sched_current();
@@ -5480,6 +6491,14 @@ static void api_load_library(trap_frame_t *f) {
       return;
     }
   }
+  /* A real .dll on disk would need the PE loader to hand back a module with
+   * its exports resolved. The loader maps one image per process today, so
+   * this says what happened and which DLLs do exist, instead of leaving a
+   * program to guess why its GetProcAddress loop never finds anything. */
+  kputs("[WIN32] LoadLibraryA(");
+  kputs(name);
+  kputs("): on-disk DLL loading is not implemented; only ");
+  kputs("kernel32/user32/gdi32/advapi32/ws2_32 are built in\n");
   t->win32_last_error = 126u; /* ERROR_MOD_NOT_FOUND */
   f->rax = 0u;
 }
@@ -6068,6 +7087,18 @@ void win32_syscall(trap_frame_t *f) {
   case WIN32_API_GET_PROC_ADDRESS:
     api_get_proc_address(f);
     return;
+  case WIN32_API_GET_VERSION:
+    api_get_version(f);
+    return;
+  case WIN32_API_GET_VERSION_EX:
+    api_get_version_ex(f);
+    return;
+  case WIN32_API_IS_WOW64_PROCESS:
+    api_is_wow64(f);
+    return;
+  case WIN32_API_GET_CURRENT_PROCESS:
+    api_get_current_process(f);
+    return;
   case WIN32_API_FREE_LIBRARY:
     api_free_library(f);
     return;
@@ -6096,14 +7127,20 @@ void win32_syscall(trap_frame_t *f) {
     api_socket(f);
     return;
   case WIN32_API_CONNECT:
+    api_connect(f);
+    return;
   case WIN32_API_SEND:
+    api_send(f);
+    return;
   case WIN32_API_RECV:
+    api_recv(f);
+    return;
   case WIN32_API_BIND:
   case WIN32_API_LISTEN:
   case WIN32_API_ACCEPT:
   case WIN32_API_SELECT:
   case WIN32_API_IOCTLSOCKET:
-    api_socket_call(f);
+    api_socket_unsupported(f);
     return;
   case WIN32_API_CLOSESOCKET:
     api_closesocket(f);
@@ -6156,6 +7193,21 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_SET_CONSOLE_TEXT_ATTR:
     api_set_console_text_attr(f);
+    return;
+  case WIN32_API_FIND_RESOURCE:
+    api_find_resource(f);
+    return;
+  case WIN32_API_LOAD_RESOURCE:
+    api_load_resource(f);
+    return;
+  case WIN32_API_LOCK_RESOURCE:
+    api_lock_resource(f);
+    return;
+  case WIN32_API_SIZE_OF_RESOURCE:
+    api_size_of_resource(f);
+    return;
+  case WIN32_API_LOAD_STRING:
+    api_load_string(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;

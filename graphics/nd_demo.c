@@ -24,6 +24,7 @@
 #include "apps.h"
 #include "session.h"
 #include "nd_lang.h"
+#include "fbcon.h"
 #include "sched.h"
 #include "nwm.h"
 #include "power.h"
@@ -1407,7 +1408,10 @@ void nd_demo_init(void) {
   g_lang_seen = nd_lang_version();
 
   /* One present for the whole desktop: the boot splash is replaced by a
-   * finished picture, never by a half-built one. */
+   * finished picture, never by a half-built one. The text console that
+   * stood in for it on a machine without a splash gives the screen up in
+   * the same instant. */
+  fbcon_end();
   nd_boot_splash_end();
   nd_present(nd_rect(0, 0, screen->w, screen->h));
   kputs("[ND] demo desktop painted\n");

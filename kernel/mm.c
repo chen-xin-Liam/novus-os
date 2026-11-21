@@ -43,6 +43,46 @@
 #define MM_PTE_ADDR4K_MASK 0x000FFFFFFFFFF000ULL
 #define MM_PTE_ADDR2M_MASK 0x000FFFFFFFE00000ULL
 
+/* The PAT layout this kernel needs: entries 0 WB, 1 WT, 2 UC, 3 UC-, 4 WC,
+ * 5 WT, 6 UC, 7 UC-. The reset value of IA32_PAT (0x0007040600070406) has
+ * entry 4 as WB, which is the one bit that matters here: MM_PTE_PAT on a
+ * leaf selects entry 4, so leaving the reset value in place makes every
+ * "write-combining" framebuffer mapping write-back instead - the pixels
+ * land in cache and the panel never sees them. Firmware that programs PAT
+ * at all programs it as the reset value, so the fix has to be explicit
+ * rather than conditional on the MSR differing from a default. */
+#define IA32_PAT_MSR      0x00000277u
+#define IA32_PAT_WC_PA4   0x0007040100070406ULL /* PA4 = 01: WC */
+#define CR4_PAT           0x0000000000100000ULL
+#define CR4_LA57          0x0000000000001000ULL
+
+/* 0 until CPUID says this CPU has PAT and CR4/IA32_PAT have taken the write.
+ * The PTE PAT bit is a reserved bit on a CPU without PAT, so "no PAT" has to
+ * mean "never set that bit", not "set it and hope": a write-combining request
+ * degrades to uncached instead of faulting. */
+static int g_pat_ok;
+
+/* The end of the identity-mapped window, as handed to mm_init(). Anything
+ * below this is reachable as a raw physical address, with whatever cache
+ * policy mm_init gave it; anything above it needs mm_map_phys(). */
+static UINT64 g_ram_top;
+
+UINT64 mm_ram_top(void) { return g_ram_top; }
+
+static int mm_cpu_has_pat(void) {
+  UINT32 a, b, c, d;
+  UINT32 leaf = 1u;
+
+  __asm__ volatile("cpuid"
+                   : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
+                   : "a"(leaf)
+                   : "memory");
+  /* SDM CPUID.01H:EDX[16] = PAT (page attribute table). */
+  return ((d & (1u << 16)) != 0u) ? 1 : 0;
+}
+
+int mm_pat_available(void) { return g_pat_ok; }
+
 /* One page table / directory: 512 entries x 8 bytes = one 4 KiB page. */
 typedef struct {
   UINT64 e[512];
@@ -133,36 +173,148 @@ static void mm_fill_pd_2m(mm_table_t *pd, UINT64 phys_base) {
   }
 }
 
-void mm_init(UINT64 ram_top_bytes) {
-  UINT64 pml4_phys, pdpt_phys;
+void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size) {
+  UINT64 pml4_phys, pdpt_phys, cr4;
   mm_table_t *pml4, *pdpt;
   UINT32 i;
+  UINT64 fb_bits;
+
+  g_ram_top = ram_top_bytes;
+  /* 5-level paging: our tables are 4-level, so loading one of them while
+   * CR4.LA57 is set makes every walk interpret a PML5 whose entries we do
+   * not own - the first instruction after the CR3 write faults. There is
+   * no cheap recovery (the CR3 format itself differs), so say so out loud
+   * and keep the firmware tables instead of dying silently. */
+  __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
+  if ((cr4 & CR4_LA57) != 0u) {
+    kputs("[MM] FATAL: 5-level paging is active (CR4.LA57 set); the kernel's "
+          "4-level tables cannot be loaded, keeping the firmware tables\n");
+    return;
+  }
 
   /* Before any table is built: the PTE PAT bit is only legal once CR4.PAT
    * is set, and it only means "write-combining" when IA32_PAT entry 4 says
    * so. */
   mm_enable_pat();
 
+  /* Framebuffer cache bits: PAT entry 4 when we have it, PCD otherwise.
+   * A framebuffer mapped write-back never reaches the panel. */
+  fb_bits = (g_pat_ok != 0) ? MM_PTE_PAT : MM_PTE_PCD;
+
+  kputs("[MM] building page tables\n");
+
   pml4 = mm_table_new(&pml4_phys);
   if (pml4 == 0) {
     return;
   }
 
-  /* PML4[0]: identity map of the low 4 GiB = 4 PDPT slices, each backed
-   * by one PD of 512 x 2 MiB entries. */
+  /* PML4[0]: identity map of the whole of physical RAM, [0, ram_top).
+   *
+   * This used to stop at 4 GiB, on the theory that the kernel image and its
+   * stack live low and everything else reaches memory through the physmap
+   * window. That theory is wrong on a machine with enough RAM: the boot
+   * stage allocates the kernel stack, the GDT/TSS and the IDT through the
+   * PMM, and the PMM hands out the first conventional pages it finds - which
+   * on this laptop is 0x2B62E5040, 11.6 GiB up. Every pointer in the handoff
+   * block is a raw physical address, so the moment CR3 flips to tables that
+   * only describe the low 4 GiB, the first return address read off that
+   * stack is unmapped: #PF, and the IDT that would catch it is unmapped too,
+   * so it double-faults into a triple fault and the machine stops dead -
+   * with the console it was drawing through now mapped, which is how this
+   * finally became visible.
+   *
+   * Identity-mapping RAM to ram_top costs one PD (4 KiB) per GiB and removes
+   * the whole class of "the boot stage put something high". */
   pdpt = mm_table_new(&pdpt_phys);
   if (pdpt == 0) {
     return;
   }
   pml4->e[0] = MM_PTE_PRESENT | MM_PTE_WRITE | (pdpt_phys & MM_PTE_ADDR4K_MASK);
-  for (i = 0; i < 4; i++) {
-    UINT64 pd_phys;
-    mm_table_t *pd = mm_table_new(&pd_phys);
-    if (pd == 0) {
-      return;
+  {
+    UINT64 n_pd = (ram_top_bytes + 0x3FFFFFFFULL) >> 30; /* ceil to 1 GiB */
+
+    if (n_pd == 0u) {
+      n_pd = 1u; /* even an empty map has to describe something */
     }
-    pdpt->e[i] = MM_PTE_PRESENT | MM_PTE_WRITE | (pd_phys & MM_PTE_ADDR4K_MASK);
-    mm_fill_pd_2m(pd, (UINT64)i << 30);
+    if (n_pd > 512u) {
+      kputs("[MM] identity map clamped to 512 GiB (ram_top=");
+      kputs_hex(ram_top_bytes);
+      kputs(")\n");
+      n_pd = 512u;
+    }
+    for (i = 0; (UINT64)i < n_pd; i++) {
+      UINT64 pd_phys;
+      mm_table_t *pd = mm_table_new(&pd_phys);
+      if (pd == 0) {
+        return;
+      }
+      pdpt->e[i] = MM_PTE_PRESENT | MM_PTE_WRITE | (pd_phys & MM_PTE_ADDR4K_MASK);
+      mm_fill_pd_2m(pd, (UINT64)i << 30);
+    }
+    kputs("[MM] identity map ");
+    kputs_hex(ram_top_bytes);
+    kputs(" bytes, ");
+    kputs_hex(n_pd);
+    kputs(" x 1 GiB\n");
+  }
+
+  /* Then take the captured scanout out of that range and mark it uncached.
+   *
+   * The identity map above describes RAM, and mm_fill_pd_2m marks every one
+   * of those pages write-back. A framebuffer is MMIO: left write-back its
+   * pixels sit in cache and the panel never sees them, which is the same
+   * black screen by a different route. The boot text console (fbcon) draws
+   * through the framebuffer's physical address, so this also keeps it alive
+   * across the CR3 switch instead of pausing inside mm_init - the pause is
+   * what made the earlier failure silent. */
+  /* Say what the framebuffer override was asked for, not only what it did:
+   * a machine whose display is described differently by its GOP (a mirrored
+   * panel, a different mode) turns a "0 bytes" result into a question with
+   * no answer, and this line is the other half of it. */
+  kputs("[MM] framebuffer request ");
+  kputs_hex(fb_phys);
+  kputs(", ");
+  kputs_hex(fb_size);
+  kputs(" bytes\n");
+  if (fb_size != 0u) {
+    UINT64 p_start = fb_phys & ~0x1FFFFFULL;
+    UINT64 p_end = (fb_phys + fb_size + 0x1FFFFFULL) & ~0x1FFFFFULL;
+    UINT64 p;
+    UINT64 pages = 0;
+
+    kputs("[MM] framebuffer pages ");
+    kputs_hex(p_start);
+    kputs("..");
+    kputs_hex(p_end);
+    kputs("\n");
+
+    for (p = p_start; p < p_end; p += 0x200000ULL) {
+      UINT32 sl = (UINT32)((p >> 30) & 0x1FFu);
+      mm_table_t *pd;
+      if ((pdpt->e[sl] & MM_PTE_PRESENT) != 0u) {
+        pd = (mm_table_t *)(UINTN)(pdpt->e[sl] & MM_PTE_ADDR4K_MASK);
+      } else {
+        UINT64 pd_phys2;
+        pd = mm_table_new(&pd_phys2);
+        if (pd == 0) {
+          break;
+        }
+        pdpt->e[sl] = MM_PTE_PRESENT | MM_PTE_WRITE |
+                      (pd_phys2 & MM_PTE_ADDR4K_MASK);
+      }
+      pd->e[(p >> 21) & 0x1FFu] = MM_PTE_PRESENT | MM_PTE_WRITE | MM_PTE_HUGE |
+                                  (p & MM_PTE_ADDR2M_MASK) | fb_bits;
+      pages++;
+    }
+    kputs("[MM] framebuffer at ");
+    kputs_hex(fb_phys);
+    kputs(" marked uncached over ");
+    kputs_hex(pages << 21);
+    kputs(" bytes, cache-");
+    kputs((g_pat_ok != 0) ? "write-combining\n" : "disabled\n");
+    if (pages == 0u) {
+      kputs("[MM] WARN: the framebuffer override mapped nothing\n");
+    }
   }
 
   /* PML4[256]: direct physical map of [0, ram_top). One PD per 1 GiB
@@ -176,6 +328,14 @@ void mm_init(UINT64 ram_top_bytes) {
   {
     UINT64 n_pd = (ram_top_bytes + 0x3FFFFFFFULL) >> 30; /* ceil to 1 GiB */
     UINT64 gi;
+    if (n_pd > 512u) {
+      /* One PDPT holds 512 GiB; beyond that the raw array write below
+       * would overwrite whatever follows it in the heap. */
+      kputs("[MM] physmap clamped to 512 GiB (ram_top=");
+      kputs_hex(ram_top_bytes);
+      kputs(")\n");
+      n_pd = 512u;
+    }
     for (gi = 0; gi < n_pd; gi++) {
       UINT64 pd_phys;
       mm_table_t *pd = mm_table_new(&pd_phys);
@@ -185,6 +345,11 @@ void mm_init(UINT64 ram_top_bytes) {
       pdpt->e[gi] = MM_PTE_PRESENT | MM_PTE_WRITE | (pd_phys & MM_PTE_ADDR4K_MASK);
       mm_fill_pd_2m(pd, gi << 30);
     }
+    kputs("[MM] physmap ");
+    kputs_hex(ram_top_bytes);
+    kputs(" bytes, ");
+    kputs_hex(n_pd);
+    kputs(" x 1 GiB\n");
   }
 
   /* Switch CR3. The new tables identity-map the full low 4 GiB, so this
@@ -198,6 +363,9 @@ void mm_init(UINT64 ram_top_bytes) {
   for (i = 0; i < MM_HEAP_SIZE / (2 * 1024 * 1024); i++) {
     g_heap_pd.e[i] = (UINT64)(UINTN)&g_heap_pt[i] | MM_PTE_PRESENT | MM_PTE_WRITE;
   }
+  kputs("[MM] switching CR3 to ");
+  kputs_hex(pml4_phys);
+  kputs("\n");
   mm_write_cr3(pml4_phys);
   mm_capture_kernel_cr3();
 
@@ -328,34 +496,9 @@ static mm_table_t *mm_dev_pd(UINT64 va) {
   return pd;
 }
 
-/* The standard PAT layout: entries 0 WB, 1 WT, 2 UC-, 3 UC, 4 WC, 5 WT,
- * 6 UC-, 7 UC. Firmware is supposed to program it at reset, but a
- * bootloader that never touched IA32_PAT leaves it as the reset value on
- * most parts and as something else on a few; writing it explicitly is the
- * only way a WC mapping can be trusted. */
-#define IA32_PAT_MSR      0x00000277u
-#define IA32_PAT_DEFAULT  0x0007040600070406ULL
-#define CR4_PAT           0x0000000000100000ULL
-
-/* 0 until CPUID says this CPU has PAT and CR4/IA32_PAT have taken the write.
- * The PTE PAT bit is a reserved bit on a CPU without PAT, so "no PAT" has to
- * mean "never set that bit", not "set it and hope": a write-combining request
- * degrades to uncached instead of faulting. */
-static int g_pat_ok;
-
-static int mm_cpu_has_pat(void) {
-  UINT32 a, b, c, d;
-  UINT32 leaf = 1u;
-
-  __asm__ volatile("cpuid"
-                   : "=a"(a), "=b"(b), "=c"(c), "=d"(d)
-                   : "a"(leaf)
-                   : "memory");
-  /* SDM CPUID.01H:EDX[16] = PAT (page attribute table). */
-  return ((d & (1u << 16)) != 0u) ? 1 : 0;
-}
-
-int mm_pat_available(void) { return g_pat_ok; }
+/* PAT/CR4 constants, the PAT-availability flag and its CPUID probe live
+ * above mm_init(): mm_init() reads g_pat_ok to pick framebuffer cache bits,
+ * so they cannot be declared after it. */
 
 void mm_enable_pat(void) {
   UINT64 cr4;
@@ -366,22 +509,26 @@ void mm_enable_pat(void) {
     return;
   }
   __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
+  kputs("[MM] PAT: CPUID reports it, CR4=");
+  kputs_hex(cr4);
+  kputs("\n");
   if ((cr4 & CR4_PAT) == 0u) {
-    /* The write is deliberately not attempted. It is legal on every real
-     * CPU with PAT, but this kernel runs it before idt_init(), so a refused
-     * write has no #GP handler to recover in: the machine would simply stop.
-     * Firmware that never set CR4.PAT costs us the PTE route only, and
-     * mm_mtrr_wc_cover() below gets write-combining from an MTRR instead. */
-    kputs("[MM] firmware left CR4.PAT clear: page-attribute write-combining off, "
+    /* Leave CR4 alone. Setting PAT from here is legal on paper but hung the
+     * firmware's own page tables on the reference VM, and firmware that
+     * leaves CR4.PAT clear is firmware that also leaves the PAT MSR at reset,
+     * so the PTE route buys nothing on such a machine that an MTRR range
+     * does not: mm_mtrr_wc_cover() below turns the framebuffer into a WC
+     * range instead. The machines that matter - laptops whose firmware does
+     * set CR4.PAT - take the PTE route with IA32_PAT entry 4 = WC below. */
+    kputs("[MM] firmware left CR4.PAT clear: PTE write-combining off, "
           "using an MTRR WC range instead\n");
     return;
   }
-  if (msr_read(IA32_PAT_MSR) != IA32_PAT_DEFAULT) {
-    msr_write(IA32_PAT_MSR, IA32_PAT_DEFAULT);
+  if (msr_read(IA32_PAT_MSR) != IA32_PAT_WC_PA4) {
+    msr_write(IA32_PAT_MSR, IA32_PAT_WC_PA4);
   }
   g_pat_ok = 1;
-  kputs("[MM] PAT enabled: CR4.PAT set, IA32_PAT has the standard layout, "
-        "write-combining maps are real\n");
+  kputs("[MM] PAT enabled: CR4.PAT set, IA32_PAT entry 4 = write-combining\n");
 }/* ---- write-combining without PAT: an MTRR WC range -----------------------
  *
  * Memory type is the intersection of the MTRR type and the page attributes.
@@ -494,7 +641,13 @@ static int mm_mtrr_wc_cover(UINT64 lo, UINT64 hi) {
 void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags) {
   UINT64 base = g_devmap_next;
   UINT64 cur = base;
-  UINT32 n = (UINT32)(((size + 0x1FFFFFu) >> 21) & 0xFFFFFFFFu);
+  /* Pages are counted from the 2 MiB boundary the range is rounded down to,
+   * not from `phys`: a framebuffer that starts 512 KiB into a 2 MiB page
+   * needs the whole of that page plus enough pages for the rest, so the
+   * offset has to be added before the division or the tail of the scanout
+   * lands outside the mapping. */
+  UINT64 off = phys & 0x1FFFFFULL;
+  UINT32 n = (UINT32)(((off + size + 0x1FFFFFULL) >> 21) & 0xFFFFFFFFu);
   UINT32 i;
   UINT32 cache_bits = 0u;
 

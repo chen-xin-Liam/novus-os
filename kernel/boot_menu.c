@@ -7,7 +7,7 @@
  *   1. Novus 桌面        (default)  - the full desktop environment
  *   2. 仅命令行 (No Desktop)        - boot straight into the shell (nsh)
  *
- * A five-second countdown selects the default (desktop) when nobody presses a
+ * A two-second countdown selects the default (desktop) when nobody presses a
  * key; Up/Down move the highlight and Enter (or Escape) confirms the current
  * selection. The keyboard arrives over USB HID, which is why the menu is run
  * after net_init() has enumerated the controller.
@@ -24,6 +24,7 @@
 #include "nd_input.h"
 #include "sched.h"
 #include "msr.h"
+#include "fbcon.h"
 
 #ifndef CONFIG_NOVUS_DISPLAY
 /* Without a display the menu cannot be shown; fall straight through to the
@@ -35,14 +36,20 @@ void boot_menu_finish(void) {}
 int g_boot_no_desktop = 0;
 
 /* The tick is calibrated to 10 ms (sched_init -> lapic_timer_calibrate), so
- * 500 ticks is a ~5 s countdown. Kept in ticks rather than milliseconds so
- * the countdown and the timeout share one clock and stay consistent. */
-#define BOOT_MENU_TIMEOUT_TICKS 500u
+ * 200 ticks is a ~2 s countdown. Kept in ticks rather than milliseconds so
+ * the countdown and the timeout share one clock and stay consistent.
+ *
+ * A five second countdown used to sit between the last init step and the
+ * first desktop frame; on hardware that boots in a couple of seconds the
+ * menu was the longest part of the wait. Two seconds still shows the menu
+ * long enough to pick the shell instead of the desktop, and anything
+ * longer is pure latency on every unattended boot. */
+#define BOOT_MENU_TIMEOUT_TICKS 200u
 #define BOOT_MENU_OPTION_COUNT 2u
 /* Ignore key events for this many ticks (~200 ms) after the input IRQs are
  * enabled, so a synthetic/initial HID report cannot auto-confirm the menu
- * before the user has actually seen it. The 5 s countdown still runs. */
-#define BOOT_MENU_INPUT_GRACE_TICKS 50u
+ * before the user has actually seen it. The countdown still runs. */
+#define BOOT_MENU_INPUT_GRACE_TICKS 20u
 
 /* Dark gradient backdrop, matching the boot splash palette. */
 #define MENU_BG_TOP    0x0A0F17u
@@ -200,6 +207,11 @@ void boot_menu_select(void) {
   nd_input_init();
   kputs("[BOOT] menu: input armed, enabling interrupts\n");
   cpu_sti(); /* safe: see the comment above this function */
+
+  /* The menu owns the screen from here: the frame the text console was
+   * drawing on is about to be covered by the backdrop, and a log line
+   * painted after that would sit on top of the menu. */
+  fbcon_end();
 
   /* Paint the initial frame immediately so the menu is visible at once. */
   boot_menu_paint(s, sel, BOOT_MENU_TIMEOUT_TICKS / 100u);

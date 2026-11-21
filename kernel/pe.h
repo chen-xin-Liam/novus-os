@@ -23,6 +23,36 @@
 #define PE_EIMPORT  -5
 #define PE_ERELOC   -6
 #define PE_ETLS     -7
+/* A well-formed 32-bit image. The loader understands only PE32+ today; the
+ * compatibility executor a PE32 needs is a separate subsystem, so this is its
+ * own code instead of a generic format error. */
+#define PE_E32      -8
+
+/* What an image is, independent of whether this layer can run it. The probe
+ * reads the DOS/NT headers only, so it answers for PE32, PE32+, x86, x86-64
+ * and ARM64 alike - which is what a "will this run here" report needs. */
+typedef struct {
+  UINT16 machine;      /* 0x14C i386, 0x8664 x86-64, 0xAA64 arm64 */
+  UINT16 magic;        /* 0x10B PE32, 0x20B PE32+ */
+  UINT16 subsystem;    /* 2 GUI, 3 console */
+  UINT16 os_major;     /* optional header OS version */
+  UINT16 os_minor;
+  UINT16 sub_major;    /* subsystem version: the Windows generation it targets */
+  UINT16 sub_minor;
+  UINT8  is_dll;
+  UINT8  bits;         /* 32 or 64 */
+  UINT32 entry_rva;
+  UINT64 image_base;
+} pe_probe_t;
+
+/* Fill `out` from the image. Returns 0, or PE_ENOTPE / PE_EFORMAT. */
+int pe_probe(const UINT8 *img, UINT32 size, pe_probe_t *out);
+
+/* One line naming the image and the Windows generation its subsystem version
+ * targets ("PE32+ x86-64 console EXE, subsystem 6.1 (Windows 7)"). Returns
+ * 0, or PE_ENOTPE. A 16-bit DOS image gets "DOS MZ executable (16-bit)".
+ */
+int pe_describe(const UINT8 *img, UINT32 size, char *out, UINT32 cap);
 
 /* Validate `img` and start it as a Win32 compatibility process. Returns 0
  * on success, or one of the PE_E* codes. */
