@@ -311,6 +311,11 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   nd_boot_stage(90, "映射内存");
   nd_boot_stage(91, "初始化堆");
 #endif
+  /* Stage beacons. The boot log is the only instrument a machine without a
+   * serial port gives us, so every coarse phase leaves one line: when a
+   * boot stops, the last beacon names the call it stopped in instead of
+   * leaving it to be guessed from the surrounding driver chatter. */
+  kputs("[BOOT] display bound\n");
 
   power_init(mmap_addr, map_size, desc_size);
   (void)ahci_init();
@@ -321,6 +326,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * machine's default disk) is gone from the firmware block-device list
    * after ExitBootServices, so drive it natively. */
   (void)ide_init();
+  kputs("[BOOT] power and storage probed\n");
   /* Storage power: arm the idle timer explicitly instead of trusting the
    * static initialiser in blkdev.c - the kernel's .data is laid out behind
    * the boot-stage handoff block, so a default that lives there is not
@@ -337,11 +343,13 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * stack has not started yet. */
   devtab_init(mmap_addr, map_size, desc_size);
   nd_boot_stage(93, "检测设备");
+  kputs("[BOOT] device table built\n");
 
 #if CONFIG_NOVUS_DISPLAY
   /* Both need the heap; neither needs the scheduler. */
   nd_boot_stage(95, "初始化显示");
   nd_selftest();
+  kputs("[BOOT] display selftest done\n");
 #endif
 
   /* M6: the IPC layer every task inbox comes from. It has to be up
@@ -350,6 +358,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 #if CONFIG_NOVUS_IPC
   ipc_init();
   ipc_selftest();
+  kputs("[BOOT] ipc ready\n");
 #endif
 
   /* M2: NovusFS on the ramdisk. It runs here because the filesystem
@@ -380,6 +389,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   if (ext4_selftest() != 0) {
     kputs("[WARN] ext4 selftest failed, continuing degraded\n");
   }
+  kputs("[BOOT] filesystem selftests done\n");
 
   /* M3: report what the boot stage found. The verification itself had to
    * happen before ExitBootServices - only the boot stage can still read
@@ -459,6 +469,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * This runs before lang_init / win32_init / session_init, so every
    * consumer of a canonical path sees the finished VFS. */
   (void)mountcfg_apply();
+  kputs("[BOOT] mounts applied\n");
 
   /* M3: the symbol table modules resolve against. A module that binds to
    * a symbol the kernel does not export is a link error, not a runtime
@@ -654,6 +665,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
          * manager sees the adapter, and the boot menu can read arrow keys. */
         (void)net_init();
         devtab_refresh();
+        kputs("[BOOT] session and network ready\n");
 
         if (install_mode) {
           nd_boot_stage(99, "绘制桌面");

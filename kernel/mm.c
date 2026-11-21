@@ -259,6 +259,15 @@ void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size) {
    * through the framebuffer's physical address, so this also keeps it alive
    * across the CR3 switch instead of pausing inside mm_init - the pause is
    * what made the earlier failure silent. */
+  /* Say what the framebuffer override was asked for, not only what it did:
+   * a machine whose display is described differently by its GOP (a mirrored
+   * panel, a different mode) turns a "0 bytes" result into a question with
+   * no answer, and this line is the other half of it. */
+  kputs("[MM] framebuffer request ");
+  kputs_hex(fb_phys);
+  kputs(", ");
+  kputs_hex(fb_size);
+  kputs(" bytes\n");
   if (fb_size != 0u) {
     UINT64 p_start = fb_phys & ~0x1FFFFFULL;
     UINT64 p_end = (fb_phys + fb_size + 0x1FFFFFULL) & ~0x1FFFFFULL;
@@ -289,6 +298,9 @@ void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size) {
     kputs_hex(pages << 21);
     kputs(" bytes, cache-");
     kputs((g_pat_ok != 0) ? "write-combining\n" : "disabled\n");
+    if (pages == 0u) {
+      kputs("[MM] WARN: the framebuffer override mapped nothing\n");
+    }
   }
 
   /* PML4[256]: direct physical map of [0, ram_top). One PD per 1 GiB
