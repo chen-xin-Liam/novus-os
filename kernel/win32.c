@@ -1444,13 +1444,6 @@ static void api_set_filter(trap_frame_t *f) {
 #define MF_DISABLED  0x00000002u
 #define MF_GRAYED    0x00000001u
 
-/* TrackPopupMenu flags. Unsupported flags are ignored rather than causing a
- * fake failure, so a ported program can still display its context menu. */
-#define TPM_CENTERALIGN  0x0004u
-#define TPM_RIGHTALIGN   0x0008u
-#define TPM_VCENTERALIGN 0x0010u
-#define TPM_BOTTOMALIGN  0x0020u
-#define TPM_RETURNCMD    0x0100u
 /* Resources. The loader does not parse the .rsrc section, but the image is
  * mapped at a known base, so the Win32 side can walk the resource directory
  * itself - the same tree Windows exposes through FindResource. */
@@ -1458,6 +1451,13 @@ static void api_set_filter(trap_frame_t *f) {
 #define WIN32_RES_MAX         8u
 #define RT_STRING             6u
 #define RT_RCDATA             10u
+/* TrackPopupMenu flags. Unsupported flags are ignored rather than causing a
+ * fake failure, so a ported program can still display its context menu. */
+#define TPM_CENTERALIGN  0x0004u
+#define TPM_RIGHTALIGN   0x0008u
+#define TPM_VCENTERALIGN 0x0010u
+#define TPM_BOTTOMALIGN  0x0020u
+#define TPM_RETURNCMD    0x0100u
 
 #define WIN32_ERROR_INVALID_HANDLE 6u
 #define WIN32_ERROR_INVALID_PARAM  87u
@@ -1793,10 +1793,10 @@ static int  msgbox_event(task_t *t, win32_gui_t *gu, UINT32 hwnd,
                          const ipc_msg_t *m);
 static int  gui_menu_click(task_t *t, win32_gui_t *gu, win32_wnd_t *w, INT32 x,
                            INT32 y, int down);
-static int  gui_ctx_click(win32_gui_t *gu, win32_wnd_t *w, INT32 x, INT32 y,
-                          int down);
 static win32_child_t *gui_focus_cycle(win32_gui_t *gu, UINT32 parent,
                                       UINT32 cur, INT32 dir);
+static int  gui_ctx_click(win32_gui_t *gu, win32_wnd_t *w, INT32 x, INT32 y,
+                          int down);
 /* Translate one delivered message into a queued WM_* message. */
 static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
   ipc_msg_t m = *msg;

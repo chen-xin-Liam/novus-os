@@ -16,7 +16,6 @@
 //! data and anything beyond kernel32's three functions.
 
 use crate::nucgen::{CodeSections, SegmentKind, RELOC_PC32};
-use crate::platform::{IMP_EXIT_PROCESS, IMP_GET_STD_HANDLE, IMP_WRITE_FILE};
 use anyhow::{bail, Result};
 use std::collections::HashMap;
 
@@ -29,7 +28,10 @@ const SUBSYSTEM_CONSOLE: u16 = 3;
 const MAGIC_PE32_PLUS: u16 = 0x20B;
 const OPTIONAL_SIZE: u16 = 0xF0;
 
-const IMPORTS: [&str; 3] = ["GetStdHandle", "WriteFile", "ExitProcess"];
+/// The kernel32 functions a Win64 image may import, by the name the code
+/// generator calls them. The table order fixes the IAT slot order, and the
+/// relocation pass resolves an import symbol to its own slot.
+const SUPPORTED_IMPORTS: [&str; 3] = ["GetStdHandle", "WriteFile", "ExitProcess"];
 
 struct Section {
     name: &'static str,
@@ -41,12 +43,17 @@ struct Section {
     characteristics: u32,
 }
 
-pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
+pub fn generate(sections: &CodeSections, imports: &[String]) -> Result<Vec<u8>> {
     if sections.text.is_empty() {
         bail!("PE32+ image requires a non-empty TEXT segment");
     }
     if sections.entry_point as usize >= sections.text.len() {
         bail!("entry_point is outside TEXT");
+    }
+    for name in imports {
+        if !SUPPORTED_IMPORTS.iter().any(|known| known == name) {
+            bail!("Win64 image needs unknown kernel32 import {name}");
+        }
     }
 
     // ---- .idata ------------------------------------------------------
@@ -55,11 +62,11 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     // why the table is built after the RVAs are known: build it once with
     // placeholder zeros, measure it, then place it.
     let mut idata = vec![0u8; 40];
-    idata.extend_from_slice(&vec![0u8; (IMPORTS.len() + 1) * 8]); // ILT
+    idata.extend_from_slice(&vec![0u8; (imports.len() + 1) * 8]); // ILT
     let iat_offset = idata.len() as u64;
-    idata.extend_from_slice(&vec![0u8; (IMPORTS.len() + 1) * 8]); // IAT
+    idata.extend_from_slice(&vec![0u8; (imports.len() + 1) * 8]); // IAT
     let mut hint_offsets = Vec::new();
-    for name in IMPORTS {
+    for name in imports {
         hint_offsets.push(idata.len() as u64);
         idata.extend_from_slice(&0u16.to_le_bytes()); // hint
         idata.extend_from_slice(name.as_bytes());
@@ -113,7 +120,7 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     // ---- fill .idata now that the RVAs exist --------------------------
     let ilt_rva = idata_rva + 40;
     let iat_rva = idata_rva + iat_offset;
-    for (index, _) in IMPORTS.iter().enumerate() {
+    for (index, _) in imports.iter().enumerate() {
         let slot = (40 + index * 8) as usize; // ILT entry, by file offset
         put64(&mut idata, slot, idata_rva + hint_offsets[index]);
         let slot = (iat_offset as usize) + index * 8; // IAT entry
@@ -126,9 +133,9 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     // ---- image -------------------------------------------------------
     let mut image = vec![0u8; offset as usize];
     image[0..2].copy_from_slice(b"MZ");
-    put32(&mut image, 0x3C, 0x40); // e_lfanew
-    image[0x40..0x44].copy_from_slice(b"PE\0\0");
-    let coff = 0x44;
+    put32(&mut image, 0x3C, 0x80); // e_lfanew: the usual 0x80-byte DOS stub
+    image[0x80..0x84].copy_from_slice(b"PE\0\0");
+    let coff = 0x84;
     put16(&mut image, coff, MACHINE_AMD64);
     put16(&mut image, coff + 2, layout.len() as u16);
     put32(&mut image, coff + 4, 0); // timestamp: reproducible output
@@ -173,7 +180,7 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     put32(&mut image, opt + 108, 16); // NumberOfRvaAndSizes
     let directories = opt + 112;
     put32(&mut image, directories + 8, idata_rva as u32); // import table
-    put32(&mut image, directories + 12, (40 + ((IMPORTS.len() as u64 + 1) * 8) * 2) as u32);
+    put32(&mut image, directories + 12, (40 + ((imports.len() as u64 + 1) * 8) * 2) as u32);
 
     // ---- section table ------------------------------------------------
     let table = opt + OPTIONAL_SIZE as usize;
@@ -215,10 +222,10 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
             .ok_or_else(|| anyhow::anyhow!("symbol {} has no section", symbol.name))?;
         addresses.insert(symbol.name.clone(), IMAGE_BASE + section.rva + symbol.value);
     }
-    // The import slots the stubs call through.
-    let import_slots = [(IMP_GET_STD_HANDLE, 0usize), (IMP_WRITE_FILE, 1), (IMP_EXIT_PROCESS, 2)];
-    for (symbol, index) in import_slots {
-        addresses.insert(symbol.to_string(), IMAGE_BASE + iat_rva + index as u64 * 8);
+    // Each imported name resolves to its own IAT slot, which is what a call
+    // through the import table addresses.
+    for (index, name) in imports.iter().enumerate() {
+        addresses.insert(name.clone(), IMAGE_BASE + iat_rva + index as u64 * 8);
     }
 
     for relocation in &sections.relocations {

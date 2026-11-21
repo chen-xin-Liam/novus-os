@@ -30,6 +30,7 @@
 #include "power.h"
 #include "install.h"
 #include "nd_icon.h"
+#include "nd_oemlogo.h"
 #include "net.h"
 
 #if CONFIG_NOVUS_GUI
@@ -472,6 +473,8 @@ static ng_widget_t *g_win_widgets;
 static ng_widget_t *g_start_menu;
 static ng_widget_t *g_quick;
 static ng_widget_t *g_menu;
+static UINT32       g_menu_win;       /* window the title-bar menu acts on */
+static ng_widget_t *g_menu_shell_win; /* shell demo window, not a WM one */
 static ng_widget_t *g_clock_label;
 static ng_widget_t *g_date_label;
 static ng_widget_t *g_run_dot[6];
@@ -486,6 +489,51 @@ static char         g_search[48];
  * clears it. Names, not table indices - the installer moved the table. */
 static const char *const g_app_names[6] = {"fileman", "taskman", "settings",
                                            "netman", "nsh", "devmgmt"};
+
+/* The dock is one unit: 1 + 2 taskbar buttons + 6 apps + 6 run dots + 2
+ * tray icons + 2 clock rows = 19, with room for the dock to grow. */
+#define ND_DOCK_MAX 24
+
+/* Shell geometry. The pill, the quick-settings card and the context-menu
+ * hit regions all read these, so a change moves the drawing and the hit
+ * test together. The old literals (660, H - 66, tx + 660 - 220) were
+ * duplicated in three places and drifted from the widgets they described. */
+#define ND_DOCK_W       660
+#define ND_DOCK_H       56
+#define ND_DOCK_GAP     10   /* gap between the pill and the bottom edge */
+#define ND_TRAY_W       220  /* net + volume + clock cluster, right aligned */
+#define ND_QUICK_W      340
+#define ND_QUICK_H      352
+#define ND_QUICK_GAP    8    /* gap between the card and the pill */
+#define ND_QUICK_BTN_Y  310
+#define ND_QUICK_BTN_W  92
+#define ND_QUICK_BTN_H  32
+#define ND_QUICK_POWER  32   /* the round power icon shares the button row */
+
+static nd_rect_t quick_power_rect(INT32 qx, INT32 qy) {
+  return nd_rect(qx + ND_QUICK_W - 68, qy + ND_QUICK_BTN_Y,
+                 ND_QUICK_POWER, ND_QUICK_POWER);
+}
+
+static ng_widget_t *g_dock[ND_DOCK_MAX];
+static nd_rect_t   g_dock_base[ND_DOCK_MAX];
+static INT32       g_dock_n;
+/* Everything that belongs to the dock: the floating pill, six app icons,
+ * their running dots, the start and search buttons, the network and volume
+ * glyphs, and the two clock rows. They are built as siblings of the desktop
+ * root with absolute rectangles (that is how the shell lays out), so moving
+ * the dock means moving all of them by the same offset - which is exactly
+ * what the boot slide-in and the shutdown slide-out do. The positions are
+ * remembered as built, so a shift is always relative to the resting place
+ * and never accumulates drift across frames. */
+static void dock_add(ng_widget_t *w) {
+  if (w == 0 || g_dock_n >= ND_DOCK_MAX) {
+    return;
+  }
+  g_dock[g_dock_n] = w;
+  g_dock_base[g_dock_n] = w->rect;
+  g_dock_n++;
+}
 
 /* The RTC is optional: without one the taskbar just keeps the placeholder. */
 static void clock_refresh(void) {
@@ -898,7 +946,20 @@ static void on_paper11(ng_ctx_t *c, ng_widget_t *w) { (void)c; (void)w; nwm_wall
 static void on_shutdown(ng_ctx_t *c, ng_widget_t *w) {
   (void)c;
   (void)w;
+  /* The shell's windows fade out together, then the dock drops away, then
+   * the wallpaper goes to black, and only then does the platform get the
+   * S5 request: a shut down that shows what is happening instead of
+   * cutting the picture the moment the user clicks.
+   *
+   * The animation is not played here. This callback runs inside the shell's
+   * own event dispatch, i.e. while a frame is being composed, and painting a
+   * whole frame from there re-enters the renderer and wedges it. So all this
+   * does is leave the request; the WM tick plays it out and powers off. */
+#if CONFIG_NOVUS_WM
+  nwm_request_shutdown();
+#else
   power_off();
+#endif
 }
 
 static void on_reboot(ng_ctx_t *c, ng_widget_t *w) {
@@ -928,7 +989,12 @@ enum {
   CM_REBOOT,
   CM_SHUTDOWN,
   CM_CLOSE_MENU,
-  CM_ABOUT
+  CM_ABOUT,
+  CM_WIN_RESTORE,
+  CM_WIN_MIN,
+  CM_WIN_MAX,
+  CM_WIN_CLOSE,
+  CM_WIN_CLOSE_SHELL
 };
 
 static void on_menu_select(ng_ctx_t *c, ng_widget_t *w, INT32 value) {
@@ -962,6 +1028,15 @@ static void on_menu_select(ng_ctx_t *c, ng_widget_t *w, INT32 value) {
   case CM_SHUTDOWN: on_shutdown(0, 0); break;
   case CM_CLOSE_MENU: overlays_close(); break;
   case CM_ABOUT: on_about(0, 0); break;
+  case CM_WIN_RESTORE: nwm_window_command(g_menu_win, 0u); break;
+  case CM_WIN_MIN: nwm_window_command(g_menu_win, 1u); break;
+  case CM_WIN_MAX: nwm_window_command(g_menu_win, 2u); break;
+  case CM_WIN_CLOSE: nwm_window_command(g_menu_win, 3u); break;
+  case CM_WIN_CLOSE_SHELL:
+    if (g_menu_shell_win != 0) {
+      ng_show(g_menu_shell_win, 0);
+    }
+    break;
   default: break;
   }
 }
@@ -976,6 +1051,27 @@ static void menu_entries(const char **labels, INT32 *ids, UINT8 *flags,
     ids[i] = values[i];
     flags[i] = bits[i];
   }
+}
+
+/* The shell's own demo windows live in the widget tree, not in the WM, so
+ * their captions need the same right-click handling. The widgets window is
+ * created later and therefore sits above the demo on a tie. */
+static ng_widget_t *shell_window_at(INT32 x, INT32 y) {
+  ng_widget_t *cand[2];
+  UINT32 i;
+
+  cand[0] = g_win_widgets;
+  cand[1] = g_win_demo;
+  for (i = 0; i < 2u; i++) {
+    ng_widget_t *win = cand[i];
+
+    if (win != 0 && (win->flags & NG_WF_VISIBLE) != 0u &&
+        y >= win->abs.y && y < win->abs.y + NG_TITLE_H &&
+        x >= win->abs.x && x < win->abs.x + win->abs.w) {
+      return win;
+    }
+  }
+  return 0;
 }
 
 static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
@@ -1001,6 +1097,9 @@ static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
   static const char *tray_text[] = {"快速设置", "音量", "网络", "刷新桌面"};
   static const INT32 tray_ids[] = {CM_QUICK, CM_VOLUME, CM_NET, CM_REFRESH};
   static const UINT8 tray_flags[] = {0, 0, 0, 0};
+  static const char *shell_win_text[] = {"关闭窗口"};
+  static const INT32 shell_win_ids[] = {CM_WIN_CLOSE_SHELL};
+  static const UINT8 shell_win_flags[] = {NG_MENU_DANGER};
   const char *labels[NG_MENU_MAX];
   INT32 ids[NG_MENU_MAX];
   UINT8 flags[NG_MENU_MAX];
@@ -1024,6 +1123,11 @@ static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
              (g_quick->flags & NG_WF_VISIBLE) != 0u &&
              nd_rect_contains(g_quick->abs, c->mouse_x, c->mouse_y)) {
     texts = quick_text; values = quick_ids; bits = quick_flags; count = 6u;
+  } else if ((g_menu_shell_win = shell_window_at(c->mouse_x,
+                                                 c->mouse_y)) != 0) {
+    ng_raise(g_menu_shell_win);
+    texts = shell_win_text; values = shell_win_ids;
+    bits = shell_win_flags; count = 1u;
   } else {
     s = nd_screen();
     if (s == 0) {
@@ -1031,14 +1135,14 @@ static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
     }
     W = s->w;
     H = s->h;
-    tx = (W - 660) / 2;
-    if (c->mouse_y >= H - 66) {
+    tx = (W - ND_DOCK_W) / 2;
+    if (c->mouse_y >= H - ND_DOCK_H - ND_DOCK_GAP) {
       if (c->mouse_x <= tx + 100) {
         texts = task_text; values = task_ids; bits = task_flags; count = 3u;
       } else if (c->mouse_x >= tx + 116 &&
                  c->mouse_x <= tx + 116 + 6 * 46) {
         texts = task_text; values = task_ids; bits = task_flags; count = 3u;
-      } else if (c->mouse_x >= tx + 660 - 220) {
+      } else if (c->mouse_x >= tx + ND_DOCK_W - ND_TRAY_W) {
         texts = tray_text; values = tray_ids; bits = tray_flags; count = 4u;
       } else {
         texts = task_text; values = task_ids; bits = task_flags; count = 3u;
@@ -1056,6 +1160,34 @@ static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
   }
 }
 
+void nd_shell_window_menu(INT32 x, INT32 y, UINT32 win_id, UINT8 state) {
+  static const char *normal_text[] = {"最大化", "最小化", "", "关闭"};
+  static const INT32 normal_ids[] = {CM_WIN_MAX, CM_WIN_MIN, 0, CM_WIN_CLOSE};
+  static const UINT8 normal_flags[] = {0, 0, NG_MENU_SEPARATOR, NG_MENU_DANGER};
+  static const char *max_text[] = {"还原", "最小化", "", "关闭"};
+  static const INT32 max_ids[] = {CM_WIN_RESTORE, CM_WIN_MIN, 0, CM_WIN_CLOSE};
+  static const UINT8 max_flags[] = {0, 0, NG_MENU_SEPARATOR, NG_MENU_DANGER};
+  nd_surface_t *s;
+
+  if (g_menu == 0) {
+    return;
+  }
+  g_menu_win = win_id;
+  if (state == 2u) {
+    ng_menu_items(g_menu, max_text, max_ids, max_flags, 4u);
+  } else {
+    ng_menu_items(g_menu, normal_text, normal_ids, normal_flags, 4u);
+  }
+  s = nd_screen();
+  ng_menu_open(g_menu, x, y, s != 0 ? s->w : 1280, s != 0 ? s->h : 720);
+}
+
+void nd_shell_menu_close(void) {
+  if (g_menu != 0) {
+    ng_menu_close(g_menu);
+  }
+}
+
 static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_widget_t *win;
   static const char *items[5] = {"创建进程", "映射页面", "检查 NX 保护",
@@ -1063,14 +1195,14 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   static ng_tnode_t nodes[7];
   INT32 W = screen->w;
   INT32 H = screen->h;
-  INT32 tw = 660;
-  INT32 th = 56;
+  INT32 tw = ND_DOCK_W;
+  INT32 th = ND_DOCK_H;
   INT32 tx = (W - tw) / 2;
-  INT32 ty = H - th - 10;
+  INT32 ty = H - th - ND_DOCK_GAP;
   INT32 mx = tx;
   INT32 my = ty - 8 - 560;
-  INT32 qx = tx + tw - 340;
-  INT32 qy = ty - 8 - 352;
+  INT32 qx = tx + tw - ND_QUICK_W;
+  INT32 qy = ty - ND_QUICK_GAP - ND_QUICK_H;
   INT32 i;
 
   if (my < 8) {
@@ -1079,6 +1211,10 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   if (qy < 8) {
     qy = 8;
   }
+  /* A rebuild (theme switch) starts a new dock: the old pointers are dead
+   * and the resting positions are re-recorded below. */
+  g_dock_n = 0;
+  memset(g_dock, 0, sizeof(g_dock));
 
   /* Window 1: renderer + settings. Hidden until the start menu opens it. */
   win = ng_create(ctx->root, NG_WINDOW, 40, 44, 520, 340);
@@ -1239,8 +1375,8 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   }
 
   /* Quick settings: theme, accent, wallpaper, network, power. */
-  g_quick = ng_panel(ng_create(ctx->root, NG_PANEL, qx, qy, 340, 352),
-                     ctx->theme.win_bg);
+  g_quick = ng_panel(ng_create(ctx->root, NG_PANEL, qx, qy, ND_QUICK_W,
+                              ND_QUICK_H), ctx->theme.win_bg);
   ng_panel_frame(g_quick, 1);
   ng_set_overlay(g_quick, 1);
   ng_label(ng_create(g_quick, NG_LABEL, 20, 16, 240, 20), "快速设置",
@@ -1290,13 +1426,21 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   }
   g_status_label = ng_label(ng_create(g_quick, NG_LABEL, 20, 286, 300, 16),
                             g_status_text, ctx->theme.text_dim, 1);
-  ng_button(ng_create(g_quick, NG_BUTTON, 20, 310, 92, 32), "重启", on_reboot);
-  ng_button(ng_create(g_quick, NG_BUTTON, 120, 310, 92, 32), "关机",
-            on_shutdown);
-  ng_icon_image(
-      ng_icon(ng_create(g_quick, NG_ICON, 272, 306, 36, 36), NG_ICON_POWER, 20,
-              on_shutdown),
-      nd_icon_get("power", 18));
+  ng_button(ng_create(g_quick, NG_BUTTON, 20, ND_QUICK_BTN_Y, ND_QUICK_BTN_W,
+                      ND_QUICK_BTN_H), "重启", on_reboot);
+  ng_button(ng_create(g_quick, NG_BUTTON, 120, ND_QUICK_BTN_Y, ND_QUICK_BTN_W,
+                      ND_QUICK_BTN_H), "关机", on_shutdown);
+  {
+    /* Same rectangle for the drawing and for anything that later asks
+     * where the power target is: the icon no longer sits 4 px above the
+     * button row it belongs to. */
+    nd_rect_t pr = quick_power_rect(qx, qy);
+
+    ng_icon_image(
+        ng_icon(ng_create(g_quick, NG_ICON, pr.x - qx, pr.y - qy, pr.w, pr.h),
+                NG_ICON_POWER, 20, on_shutdown),
+        nd_icon_get("power", 18));
+  }
 
   /* Taskbar: one floating pill. Centre apps, clock and quick settings on
    * the right, search on the left. Running dots sit under their app. */
@@ -1305,15 +1449,18 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
                                 ctx->theme.win_bg);
 
     ng_panel_frame(bar, 1);
+    dock_add(bar);
     {
       ng_widget_t *ic;
 
       ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + 8, ty + 6, 44, 44),
                    NG_ICON_START, 24, on_start);
       ng_icon_image(ic, nd_icon_get("start", 24));
+      dock_add(ic);
       ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + 56, ty + 6, 44, 44),
                    NG_ICON_SEARCH, 20, on_start);
       ng_icon_image(ic, nd_icon_get("search", 20));
+      dock_add(ic);
     }
 
     {
@@ -1332,11 +1479,13 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
             kinds[i], 24, acts[i]);
 
         ng_icon_image(ic, nd_icon_get(icon_names[i], 24));
+        dock_add(ic);
         if (i < 6) {
           g_run_dot[i] = ng_panel(
               ng_create(ctx->root, NG_PANEL, tx + 116 + i * 46 + 14, ty + th - 7,
                         16, 3),
               nd_theme_accent());
+          dock_add(g_run_dot[i]);
         }
       }
     }
@@ -1353,6 +1502,8 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
       g_vol_icon_w = ng_icon(
           ng_create(ctx->root, NG_ICON, tx + tw - 156, ty + 10, 36, 36),
           NG_ICON_VOLUME, 20, on_volume);
+      dock_add(g_net_icon_w);
+      dock_add(g_vol_icon_w);
     }
     /* Time over date, both at the same small size and right aligned, so
      * the pair reads as one block the way Windows 11 draws it. */
@@ -1364,6 +1515,8 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
         ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 31, 96, 18), g_date,
         ctx->theme.text_dim, 1);
     g_date_label->u.label.align = 2;
+    dock_add(g_clock_label);
+    dock_add(g_date_label);
   }
 
   g_menu = ng_menu(ctx->root, on_menu_context, on_menu_select);
@@ -1377,18 +1530,194 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   ng_show(g_quick, 0);
 }
 
+/* ---- dock, and the two transitions ------------------------------------ */
+
+INT32 nd_dock_span(void) {
+  nd_surface_t *s = nd_canvas();
+  INT32         top = 0x7FFFFFFF;
+  INT32         i;
+  INT32         h;
+
+  if (g_dock_n == 0) {
+    return 0;
+  }
+  if (s == 0) {
+    s = nd_screen();
+  }
+  h = (s != 0) ? s->h : 768;
+  for (i = 0; i < g_dock_n; i++) {
+    if (g_dock_base[i].y < top) {
+      top = g_dock_base[i].y;
+    }
+  }
+  /* Enough to clear the bottom edge and the pill's shadow ring. */
+  return (h - top) + 24;
+}
+
+void nd_dock_shift(INT32 dy) {
+  nd_rect_t band = nd_rect(0, 0, 0, 0);
+  INT32     i;
+
+  if (g_dock_n == 0) {
+    return;
+  }
+  for (i = 0; i < g_dock_n; i++) {
+    nd_rect_t was = g_dock[i]->abs;
+
+    g_dock[i]->rect.y = g_dock_base[i].y + dy;
+    band = nd_rect_union(band, was);
+    band = nd_rect_union(band, nd_rect(g_dock_base[i].x,
+                                       g_dock_base[i].y + dy,
+                                       g_dock_base[i].w, g_dock_base[i].h));
+  }
+  ng_layout();
+  /* The pill's shadow ring reaches outside its rectangle; without it the
+   * old position would leave a faint halo behind the moving dock. */
+  band = nd_rect(band.x - 20, band.y - 20, band.w + 40, band.h + 40);
+  ng_damage(band);
+}
+
+void nd_shell_close_overlays(void) {
+  if (g_start_menu != 0) {
+    ng_show(g_start_menu, 0);
+  }
+  if (g_quick != 0) {
+    ng_show(g_quick, 0);
+  }
+  /* The shutdown owns the screen from here: a context menu left open
+   * would be composited above the fade, and a hovered or pressed tray
+   * widget (network, volume) would carry its highlight into the first
+   * frame. Drop both, then rerender. */
+  nd_shell_menu_close();
+  ng_pointer_reset();
+}
+
+/* One sleep for both transitions. The scheduler tick is 10 ms, which is
+ * the resolution the animations are authored at; a machine whose timer
+ * has not started yet falls out through the guard instead of hanging. */
+void nd_wait_ms(UINT32 ms) {
+  UINT64 target = sched_ticks() + ((UINT64)ms + 9u) / 10u;
+  UINT32 guard = 0;
+
+  while (sched_ticks() < target) {
+    if (guard++ > 40000000u) {
+      return;
+    }
+    __asm__ volatile("sti; hlt");
+  }
+}
+
+static UINT32 ease_out(UINT32 p) {
+  /* Ease-out cubic on a 0..1000 scale: fast first, settling at the end -
+   * the same curve windows use when they open. */
+  UINT32 q = 1000u - p;
+
+  return 1000u - (q * q * q) / 1000000u;
+}
+
+void nd_boot_transition(void) {
+  nd_surface_t *canvas = nd_canvas();
+  nd_surface_t *screen = nd_screen();
+  nd_rect_t     full;
+  nd_rect_t     logo;
+  INT32         span;
+  INT32         i;
+  int           has_logo;
+  /* The two phases share one black veil. The logo fades out over the first
+   * ten frames while the desktop comes up underneath it; the dock rises
+   * over the next twelve. Because the veil never returns to opaque between
+   * the phases, the hand-over is a crossfade instead of a cut to black and
+   * back. 20/24 ms steps keep the whole move under half a second. */
+  const INT32   out_frames = 10;
+  const INT32   in_frames = 12;
+  const INT32   total_frames = out_frames + in_frames;
+
+  if (canvas == 0 || screen == 0) {
+    return;
+  }
+  full = nd_rect(0, 0, canvas->w, canvas->h);
+  span = nd_dock_span();
+  has_logo = nd_boot_logo_rect(&logo);
+
+  /* Phase one: the finished desktop is already on the canvas - nd_demo_init()
+   * composed it before calling here - so paint it first, cover it with the
+   * veil, then draw the splash logo above the veil. The logo lifts the last
+   * 32 px and dissolves while the veil thins just enough to reveal the
+   * scene forming underneath. */
+  nd_dock_shift(span);
+  for (i = 0; i <= out_frames; i++) {
+    UINT32 p = ((UINT32)i * 1000u) / (UINT32)out_frames;
+    UINT32 fade = ease_out(p);
+    INT32  lift = -((i * 32) / out_frames);
+    UINT8  veil = (UINT8)(255u - ((255u * (UINT32)i) /
+                                  (UINT32)total_frames));
+    UINT64 t0 = nd_tsc();
+
+    nd_surface_reset_clip(canvas);
+    nd_demo_paint(full);
+    nd_blend_rect(canvas, full, ND_RGB(0, 0, 0), veil);
+    /* The logo sits above the veil: at frame zero the desktop is fully
+     * covered and the splash looks exactly as it did before the handover. */
+    if (has_logo) {
+      nd_oem_logo_draw(canvas,
+                       nd_rect(logo.x, logo.y + lift, logo.w, logo.h),
+                       (UINT8)(255u - fade));
+    }
+    nd_present(full);
+    nd_frame_timing("frame-out", t0, nd_tsc(),
+                    (UINT32)full.w, (UINT32)full.h);
+    nd_wait_ms(20);
+  }
+
+  /* Phase two: no more logo, just the dock rising into place while the same
+   * veil finishes opening. The last frame is painted with veil = 0, so the
+   * final nd_present() below is a no-op rather than a visible snap. */
+  for (i = 1; i <= in_frames; i++) {
+    UINT32 p = ease_out(((UINT32)i * 1000u) / (UINT32)in_frames);
+    INT32  dy = span - (INT32)(((UINT64)span * p) / 1000u);
+    UINT8  veil = (UINT8)(255u - ((255u * (UINT32)(out_frames + i)) /
+                                  (UINT32)total_frames));
+    UINT64 t0 = nd_tsc();
+
+    nd_dock_shift(dy);
+    nd_demo_paint(full);
+    nd_blend_rect(canvas, full, ND_RGB(0, 0, 0), veil);
+    nd_present(full);
+    nd_frame_timing("frame-in", t0, nd_tsc(),
+                    (UINT32)full.w, (UINT32)full.h);
+    nd_wait_ms(24);
+  }
+  {
+    UINT64 t0 = nd_tsc();
+
+    nd_dock_shift(0);
+    nd_demo_paint(full);
+    nd_present(full);
+    nd_frame_timing("frame-final", t0, nd_tsc(),
+                    (UINT32)full.w, (UINT32)full.h);
+  }
+}
+
 void nd_demo_init(void) {
   nd_surface_t *screen = nd_screen();
   nd_surface_t *frame = nd_canvas();
   ng_ctx_t     *ctx;
 
+  novus_timeline("demo init start");
   g_demo_ready = 0;
   if (screen == 0) {
     return;
   }
   /* Decode the wallpaper for this screen size before the first frame; a
-   * failure just leaves the gradient in place. */
-  nd_wallpaper_init(screen->w, screen->h);
+   * failure just leaves the gradient in place. Timed once so a slow JPEG
+   * is not mistaken for a slow framebuffer present. */
+  {
+    UINT64 t0 = nd_tsc();
+
+    nd_wallpaper_init(screen->w, screen->h);
+    nd_frame_timing("wallpaper-init", t0, nd_tsc(),
+                    (UINT32)screen->w, (UINT32)screen->h);
+  }
   nd_input_init();
   /* The desktop is composed into the off-screen buffer, not painted onto
    * the glass: the boot splash stays visible until the first frame is
@@ -1412,9 +1741,28 @@ void nd_demo_init(void) {
    * stood in for it on a machine without a splash gives the screen up in
    * the same instant. */
   fbcon_end();
+  /* Hand over from the splash with motion rather than with a cut: the
+   * machine's logo lifts out of the frame while the dock rises and the
+   * desktop comes up. Runs before nd_boot_splash_end() so the splash still
+   * reports the logo rectangle it drew. */
+  nd_boot_transition();
   nd_boot_splash_end();
   nd_present(nd_rect(0, 0, screen->w, screen->h));
   kputs("[ND] demo desktop painted\n");
+  {
+    nd_frame_stats_t st;
+
+    nd_frame_stats(&st);
+    kputs("[NDF] totals frames=");
+    kputs_hex(st.frames);
+    kputs(" cycles=");
+    kputs_hex(st.cycles);
+    kputs(" pixels=");
+    kputs_hex(st.pixels);
+    kputs(" max_cycles=");
+    kputs_hex(st.max_cycles);
+    kputs("\n");
+  }
 }
 
 /* Rebuild the shell after a light/dark or accent change. Client windows
@@ -1453,6 +1801,11 @@ void nd_demo_theme_sync(void) {
   nd_ime_init();
   build_desktop(canvas, ctx);
   ng_render_all();
+  /* ng_init() cleared the damage list, and ng_render_all() only drew into
+   * the compositor buffer. Without this the new theme (and every dock
+   * icon rebuilt from it) would stay off the glass until something else
+   * happened to be damaged. */
+  ng_damage(nd_rect(0, 0, canvas->w, canvas->h));
   g_theme_seen = nd_theme_version();
   g_lang_seen = nd_lang_version();
   kputs("[ND] theme applied: ");
@@ -1504,6 +1857,14 @@ void nd_demo_tick(void) {
   nd_rect_t  cd;
   int        have = 0;
   nd_event_t ev;
+  static int timeline_logged;
+  static UINT32 frame_seq;
+  UINT64 t0;
+
+  if (!timeline_logged) {
+    timeline_logged = 1;
+    novus_timeline("demo tick start");
+  }
 
   if (!g_demo_ready) {
     return;
@@ -1525,8 +1886,17 @@ void nd_demo_tick(void) {
   if (have) {
     d = nd_rect_intersect(d, nd_rect(0, 0, nd_canvas()->w, nd_canvas()->h));
     if (!nd_rect_empty(d)) {
+      t0 = nd_tsc();
       nd_demo_paint(d);
       nd_present(d);
+      frame_seq++;
+      /* One line per steady-state frame is too much serial traffic; the
+       * running counters in nd_present() cover the rest. Large repaints and
+       * every 60th frame are enough to see a regression. */
+      if (d.w * d.h >= 0x100000 || (frame_seq % 60u) == 0u) {
+        nd_frame_timing("tick", t0, nd_tsc(),
+                        (UINT32)d.w, (UINT32)d.h);
+      }
     }
   }
 }

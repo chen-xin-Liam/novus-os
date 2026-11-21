@@ -16,8 +16,8 @@ const FLAG_TEXT: u32 = 0x0D;
 const FLAG_DATA: u32 = 0x0B;
 const FLAG_RODATA: u32 = 0x09;
 const FLAG_BSS: u32 = 0x0B;
-const RELOC_32: u32 = 1;
-const RELOC_PC32: u32 = 2;
+pub(crate) const RELOC_32: u32 = 1;
+pub(crate) const RELOC_PC32: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SegmentKind {

@@ -109,6 +109,11 @@ int vm_space_create(vm_space_t *out) {
     pml4[0] = pdpt_new | (pml4[0] & PTE_FLAGS);
     pdpt = table(pdpt_new);
 
+    /* Clone the low 4 GiB PDs so user mappings can split them freely.
+     * Slices above 4 GiB, now part of the kernel identity map as well, are
+     * left shared here: vm_user_map() clones a PD on first write when it is
+     * not owned (table_own), and cloning one 4 KiB PD per GiB for every
+     * process would cost more than the COW it replaces. */
     for (i = 0; i < 4u; i++) {
       UINT64  pd_old, pd_new;
 

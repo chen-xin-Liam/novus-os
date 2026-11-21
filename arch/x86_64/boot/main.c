@@ -15,6 +15,7 @@
 #include "bootio.h"
 #include "stage3.h"
 #include "nd.h"
+#include "nd_oemlogo.h"
 
 /* A-core switch (README 2.2 step 7): 1 = skip the boot self-check
  * output. The Makefile passes -DCONFIG_NOVUS_A_CORE_DISABLE=0/1. */
@@ -35,6 +36,99 @@
 
 static EFI_SIMPLE_TEXT_OUTPUT_PROTOCOL *g_con = 0;
 static int g_quiet;
+
+static void boot_serial_write(const CHAR16 *s);
+
+/* Firmware Stall, kept for the splash intro: it is the only sub-tick sleep
+ * that exists before the kernel arms its LAPIC timer. */
+static EFI_BOOT_SERVICES *g_bs = 0;
+
+static UINT64 g_timeline_start;
+static UINT64 g_timeline_khz;
+
+static UINT64 timeline_rdtsc(void) {
+  UINT32 lo = 0;
+  UINT32 hi = 0;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((UINT64)hi << 32) | (UINT64)lo;
+}
+
+static UINT64 timeline_ms(void) {
+  UINT32 a = 0, b = 0, c = 0, d = 0;
+
+  if (g_timeline_start == 0u) {
+    g_timeline_start = timeline_rdtsc();
+    cpuid(0u, 0u, &a, &b, &c, &d);
+    if (a >= 0x15u) {
+      UINT32 ea = 0, eb = 0, ec = 0;
+      cpuid(0x15u, 0u, &ea, &eb, &ec, &d);
+      if (ea != 0u && eb != 0u && ec != 0u) {
+        g_timeline_khz = ((UINT64)eb * (UINT64)ec) /
+                         ((UINT64)ea * 1000u);
+      }
+    }
+    if (g_timeline_khz == 0u && a >= 0x16u) {
+      UINT32 mhz = 0;
+      cpuid(0x16u, 0u, &mhz, &b, &c, &d);
+      g_timeline_khz = (UINT64)mhz * 1000u;
+    }
+  }
+  if (g_timeline_khz == 0u) {
+    return 0u;
+  }
+  {
+    UINT64 now = timeline_rdtsc();
+    return now >= g_timeline_start
+               ? (now - g_timeline_start) / g_timeline_khz
+               : 0u;
+  }
+}
+
+static void boot_serial_write(const CHAR16 *s);
+
+static void boot_timeline(const char *stage) {
+  CHAR16 buf[96];
+  UINTN i = 0;
+  UINTN n;
+  UINT64 ms = timeline_ms();
+  CHAR16 rev[20];
+
+  buf[i++] = L'[';
+  buf[i++] = L'T';
+  buf[i++] = L']';
+  buf[i++] = L' ';
+  buf[i++] = L'+';
+  n = 0;
+  do {
+    rev[n++] = (CHAR16)(L'0' + (CHAR16)(ms % 10u));
+    ms /= 10u;
+  } while (ms != 0u && n < 20u);
+  while (n > 0u) {
+    buf[i++] = rev[--n];
+  }
+  buf[i++] = L'm';
+  buf[i++] = L's';
+  buf[i++] = L' ';
+  if (stage != 0) {
+    while (*stage != '\0' && i + 2u < 96u) {
+      buf[i++] = (CHAR16)(UINT8)*stage++;
+    }
+  }
+  buf[i++] = L'\r';
+  buf[i++] = L'\n';
+  buf[i] = 0;
+
+  boot_serial_write(buf);
+  if (g_con != 0) {
+    g_con->OutputString(g_con, buf);
+  }
+}
+
+static void boot_stall_ms(UINT32 ms) {
+  if (g_bs != 0 && g_bs->Stall != 0) {
+    (void)g_bs->Stall((UINTN)ms * 1000u);
+  }
+}
 
 /* CPU and memory facts gathered by the boot self-check. Collection
  * always runs (even with the A-core switch on, cpuid just stops
@@ -369,13 +463,33 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
   g_con = SystemTable->ConOut;
   g_quiet = 0;
+  g_bs = bs;
   boot_serial_init();
+  boot_timeline("efi_main start");
+
+  /* The one picture worth keeping from the firmware: its own boot logo,
+   * which is on the scanout right now and which the ClearScreen below is
+   * about to erase. Capture it first, then draw our own screen around it -
+   * the owner of the machine sees the vendor mark they already recognise,
+   * from the first frame of the boot, on any hardware. */
+  if (nd_oem_logo_capture(SystemTable)) {
+    boot_puts(L"[BOOT] firmware boot logo captured: ");
+    boot_put_dec((UINT64)nd_oem_logo_width());
+    boot_puts(L"x");
+    boot_put_dec((UINT64)nd_oem_logo_height());
+    boot_puts(L"\r\n");
+  } else {
+    boot_puts(L"[BOOT] no firmware boot logo: ");
+    boot_put_ascii((const CHAR8 *)nd_oem_logo_reason(), 96);
+    boot_puts(L"; the splash draws its own mark\r\n");
+  }
 
   /* Publish the spec 2.3 shared memory block before anything else.
    * The A-core switch decides whether the self-check output happens;
    * the plain boolean maps to the frozen field convention inside
    * shared_mem_bootstage_init(). */
   shared_mem_bootstage_init(CONFIG_NOVUS_A_CORE_DISABLE ? 0 : 1);
+  boot_timeline("shared memory init");
 
   /* Disable the firmware watchdog timer. */
   bs->SetWatchdogTimer(0, 0, 0, 0);
@@ -390,16 +504,19 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* Which stage is running, before anything that could hang. The kernel
    * stamps its own version after ExitBootServices; this one proves the
    * firmware actually started the image that was just written. */
-  boot_puts(L"[BOOT] boot stage rev 37\r\n");
+  boot_puts(L"[BOOT] boot stage rev 42\r\n");
 
   /* M3: everything below this line may touch real disks, so the block
    * device table, the EFI system partition and the filesystem allocator
    * have to be live first. */
   stage3_init(ImageHandle, SystemTable);
+  boot_timeline("stage3 init");
 
   boot_check_cpu();
+  boot_timeline("cpu check");
 
   status = boot_check_memory(bs);
+  boot_timeline("memory check");
   if (EFI_ERROR(status)) {
     if (status != EFI_LOAD_ERROR) {
       boot_puts(L"[FATAL] Memory map retrieval failed. status=");
@@ -420,6 +537,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
    * operates on what they find; the payload reads come after the menu. */
   stage3_prepare();
   stage3_menu();
+  boot_timeline("stage3 menu done");
 
 #if CONFIG_NOVUS_DISPLAY
   /* M5: ask the firmware for the current Graphics Output mode while the
@@ -442,13 +560,19 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
       /* The text phase is over: the screen now shows the splash and the
        * rest of the boot log goes to COM1. */
       boot_quiet(1);
+      /* Opening move: the logo lifts and fades in, with the firmware's
+       * own Stall providing the frames. ~200 ms, before the payload reads
+       * start, so it never delays anything the user is waiting for. */
+      nd_boot_splash_intro(boot_stall_ms);
       nd_boot_stage(4, "正在启动");
-    } else if (d->fb_phys >= 0x100000000ULL) {
-      /* The numbers are the point here: the splash is skipped only when
-       * the scanout sits above the 4 GiB the boot stage can address, and
-       * on a laptop that is the difference between the splash and a text
-       * log. Print it where the firmware console can still show it. */
-      boot_puts(L"[BOOT] boot splash unavailable: framebuffer above 4 GiB, "
+    } else if (d->fb_phys != 0 && !d->fb_boot_usable) {
+      /* The numbers are the point here: the splash is skipped only when the
+       * boot stage could not map the scanout at all, and on a laptop that is
+       * the difference between the splash and a text log. Print it where the
+       * firmware console can still show it. */
+      boot_puts(L"[BOOT] boot splash unavailable: framebuffer at ");
+      boot_put_hex(d->fb_phys);
+      boot_puts(L" is not reachable from the boot page tables, "
                 L"kernel text console takes over\r\n");
     } else {
       boot_puts(L"[BOOT] boot splash unavailable, text console stays\r\n");
@@ -461,9 +585,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* The slow half of the boot stage: integrity check, modules, application,
    * wallpaper, live root and install template. */
   stage3_load();
+  boot_timeline("stage3 load done");
   nd_boot_stage(86, "进入内核");
 
   boot_puts(L"[BOOT] Exiting boot services, entering BSP kernel stage...\r\n");
+  boot_timeline("exit boot services");
 
   /* Cut every tie to the firmware before the final map is taken: the
    * live root range is published here, and any allocation after this

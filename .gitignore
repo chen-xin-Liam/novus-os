@@ -110,3 +110,23 @@ tools/updatesrv/*.key
 security/tls/*.key
 user/ssl/*.key
 scripts/__pycache__/
+
+# cargo's build directory is target/, but cppcc's per-target writers live in
+# user/cppcc/src/target/ and are source, so that one path is not ignored.
+!user/cppcc/src/target/
+
+# ------------------------------------------------------------------
+# Working drafts / session artefacts – not part of the repo
+# ------------------------------------------------------------------
+
+# cmsg-b*.txt: per-block commit messages produced while iterating a PR body.
+cmsg-b*.txt
+
+# pr-NN.md: draft PR descriptions still being written.
+pr-*.md
+
+# Local patches saved during debugging (e.g. novus-power.patch).
+*.patch
+
+# Runtime/test disk images that are several MiB and reproduceable with make.
+novus-2d-test.img

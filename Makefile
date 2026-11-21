@@ -77,6 +77,7 @@ E2E ?= 0
 # Source list is pinned for M2; extend it in later milestones.
 SRC := arch/x86_64/boot/main.c \
        arch/x86_64/boot/stage3.c \
+       arch/x86_64/boot/scanout.c \
        kernel/kmain.c \
        kernel/fbcon.c \
        kernel/vga.c \
@@ -120,6 +121,7 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_core.c \
        graphics/nd_hal.c \
        graphics/nd_boot.c \
+       graphics/nd_oemlogo.c \
        graphics/nd_input.c \
        graphics/nd_jpeg.c \
        graphics/nd_wallpaper.c \
@@ -547,7 +549,6 @@ out/win32/cpp98test.exe: $(CPP98_SRC) $(CPP98_INC)/novus_entry.cpp | out
 	    -Wl,--disable-auto-import -Wl,-e,novus_win32_main \
 	    -o $@ $(@D)/cpp98test.o $(@D)/cpp98test_entry.o -lkernel32
 
-$(WIN32_BLOB_H): $(WIN32_BINS) | build
 # resdemo.exe carries a .rsrc section: windres turns the .rc into a COFF
 # object and the linker puts it in the image, which is how a Windows program
 # gets its strings and menus out of itself.
@@ -583,10 +584,10 @@ $(WIN32_BLOB_H): $(WIN32_BINS) $(WIN32_GEN) | build
 	   xxd -i -n k_app_wsdemo_exe out/win32/wsdemo.exe; \
 	   xxd -i -n k_app_ctrldemo_exe out/win32/ctrldemo.exe; \
 	   xxd -i -n k_app_menudemo_exe out/win32/menudemo.exe; \
-	   xxd -i -n k_app_cpp98test_exe out/win32/cpp98test.exe; \
 	   xxd -i -n k_app_resdemo_exe out/win32/resdemo.exe; \
 	   xxd -i -n k_app_editdemo_exe out/win32/editdemo.exe; \
 	   xxd -i -n k_app_verdemo_exe out/win32/verdemo.exe; \
+	   xxd -i -n k_app_cpp98test_exe out/win32/cpp98test.exe; \
 	   xxd -i -n k_app_hello32_exe out/win32/hello32.exe; \
 	   xxd -i -n k_app_dosdemo_com out/win32/dosdemo.com; \
 	   echo '#endif'; } > $@

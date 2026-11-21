@@ -4,12 +4,23 @@
 #include "cpu.h"
 #include "irq.h"
 #include "kernel.h"
+#include "sched.h"
 #include <stddef.h>
 
 #define FADT_DSDT 40u
-#define FADT_PM1A_CNT 64u
-#define FADT_PM1B_CNT 68u
-#define FADT_PM1_CNT_LEN 89u
+/* Two layouts, and which one applies is decided by the FADT revision, not
+ * by a guess: ACPI 1.0 put PM1a_EVT_BLK at 0x38 and the *control* block at
+ * 0x40; ACPI 2.0 inserted the PM-profile and reserved fields and moved the
+ * pair to 0x40/0x48. Reading 0x48 off an ACPI 1.0 table reads reserved
+ * space (always zero), which is exactly why such a platform reported "no
+ * PM1a control register". The control block's SLP_TYP/SLP_EN pair always
+ * lives in the first 16 bits, so its width is 16 regardless of what the
+ * length byte says. */
+#define FADT_PM1A_CNT_REV1 64u
+#define FADT_PM1B_CNT_REV1 68u
+#define FADT_PM1A_CNT_REV2 72u
+#define FADT_PM1B_CNT_REV2 76u
+#define FADT_REVISION 8u
 #define FADT_FLAGS 112u
 #define FADT_RESET_REG 116u
 #define FADT_RESET_VALUE 128u
@@ -17,6 +28,7 @@
 #define FADT_X_PM1A_CNT 172u
 #define FADT_X_PM1B_CNT 184u
 #define FADT_RESET_REG_SUP (1u << 10)
+#define PM1_SCI_EN (1u << 0)
 #define PM1_SLP_TYP_MASK (7u << 10)
 #define PM1_SLP_EN (1u << 13)
 
@@ -252,8 +264,9 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   const acpi_table_t *dsdt;
   const UINT8 *raw;
   UINT64 dsdt_address;
-  UINT8 pm1_len;
+  UINT8 revision;
   UINT32 flags;
+  int via_gas = 0;
 
   power_ready = 0;
   reset_ready = 0;
@@ -261,27 +274,38 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   memset(&pm1b, 0, sizeof(pm1b));
   memset(&reset_reg, 0, sizeof(reset_reg));
   fadt = acpi_find_table(mmap, size, stride, "FACP");
-  if (fadt == NULL || fadt->length < FADT_PM1_CNT_LEN + 1u) {
+  if (fadt == NULL || fadt->length < FADT_PM1A_CNT_REV2 + 4u) {
     kputs("[POWER] ACPI FADT unavailable\n");
     return;
   }
   raw = (const UINT8 *)fadt;
-  pm1_len = raw[FADT_PM1_CNT_LEN];
+  revision = (fadt->length > FADT_REVISION) ? raw[FADT_REVISION] : 1u;
   /* Prefer extended GAS registers when the FADT supplies a usable PM1a
-   * entry. Otherwise decode the legacy I/O addresses; shutdown is not
-   * marked ready until the DSDT also supplies the _S5_ sleep types. */
+   * entry. Otherwise decode the legacy I/O addresses of the layout this
+   * table's revision uses; shutdown is not marked ready until the DSDT
+   * also supplies the _S5_ sleep types. */
   if (fadt->length >= FADT_X_PM1A_CNT + 12u &&
       gas_parse(raw + FADT_X_PM1A_CNT, &pm1a) && pm1a.width >= 16u) {
+    via_gas = 1;
     if (fadt->length >= FADT_X_PM1B_CNT + 12u) {
       (void)gas_parse(raw + FADT_X_PM1B_CNT, &pm1b);
     }
   } else {
-    if (!legacy_gas(read_le32(raw + FADT_PM1A_CNT), pm1_len * 8u, &pm1a)) {
-      kputs("[POWER] PM1a control register unavailable\n");
+    UINT32 a = (revision >= 2u) ? FADT_PM1A_CNT_REV2 : FADT_PM1A_CNT_REV1;
+    UINT32 b = (revision >= 2u) ? FADT_PM1B_CNT_REV2 : FADT_PM1B_CNT_REV1;
+
+    if (!legacy_gas(read_le32(raw + a), 16u, &pm1a)) {
+      kputs("[POWER] PM1a control register unavailable (FADT length ");
+      kputs_hex(fadt->length);
+      kputs(", revision ");
+      kputs_hex(revision);
+      kputs(", PM1a_CNT_BLK ");
+      kputs_hex(read_le32(raw + a));
+      kputs(")\n");
       return;
     }
-    if (fadt->length >= FADT_PM1B_CNT + 4u) {
-      (void)legacy_gas(read_le32(raw + FADT_PM1B_CNT), pm1_len * 8u, &pm1b);
+    if (fadt->length >= b + 4u) {
+      (void)legacy_gas(read_le32(raw + b), 16u, &pm1b);
     }
   }
   dsdt_address = (fadt->length >= FADT_X_DSDT + 8u)
@@ -292,11 +316,25 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   }
   dsdt = acpi_validate_table(dsdt_address, "DSDT");
   if (dsdt == NULL || !find_s5(dsdt, &slp_typ_a, &slp_typ_b)) {
-    kputs("[POWER] valid ACPI _S5_ sleep types unavailable\n");
+    kputs("[POWER] valid ACPI _S5_ sleep types unavailable");
+    if (dsdt != NULL) {
+      kputs(" (DSDT length ");
+      kputs_hex(dsdt->length);
+      kputs(")");
+    }
+    kputs("\n");
     return;
   }
   power_ready = 1;
-  kputs("[POWER] ACPI shutdown ready, PM1a=");
+  /* Everything a real-machine report needs is on this one line: which FADT
+   * was found (revision and length decide which layout is legal), which
+   * path supplied the control block, and the sleep types the DSDT's own
+   * _S5_ package claims. QEMU answers 0/0, HP firmware usually 4 or 5. */
+  kputs("[POWER] ACPI shutdown ready: FADT rev=");
+  kputs_hex(revision);
+  kputs(" len=");
+  kputs_hex(fadt->length);
+  kputs(via_gas ? " PM1a(GAS)=" : " PM1a(legacy)=");
   kputs_hex(pm1a.address);
   kputs(" S5=");
   kputs_hex(slp_typ_a);
@@ -324,7 +362,15 @@ static void power_halt(void) {
   }
 }
 
-void power_off(void) {
+/* `park` spins the disks down first. That is a pair of polling commands and
+ * takes as long as the drive needs, which is fine from a task but not from
+ * an interrupt context - the shell's compositor runs on the timer interrupt,
+ * and it is the shell that asks for the shutdown once its last frame is on
+ * the glass. So the interrupt-context caller uses the quick variant, which
+ * only writes the sleep type: everything the kernel cached has already been
+ * through NovusFS' write-ahead log, and a machine that drops power with a
+ * dirty page cache is worse than one that dims without the extra spin-down. */
+static void power_off_common(int park) {
   UINT16 value;
   UINT64 flags;
 
@@ -332,19 +378,38 @@ void power_off(void) {
     kputs("[POWER] shutdown unavailable: ACPI _S5_ not initialized\n");
     return;
   }
-  /* Cache contents have to reach the medium, and every platter should be
-   * at rest, before the platform drops power. Done with interrupts still
-   * enabled: the flush and the spin-down are polling commands and there
-   * is no reason to hold the machine with IRQs masked for them. */
-  (void)blkdev_standby_all();
+  if (park) {
+    /* Cache contents have to reach the medium, and every platter should be
+     * at rest, before the platform drops power. Done with interrupts still
+     * enabled: the flush and the spin-down are polling commands and there
+     * is no reason to hold the machine with IRQs masked for them. */
+    (void)blkdev_standby_all();
+    kputs("[POWER] block devices parked\n");
+  }
   /* Preserve unrelated PM1 control bits and mask interrupts while both
    * control registers are updated, since the SLP_TYP/SLP_EN pair requests
    * the platform transition. The CPU halts if firmware does not power off. */
   flags = irq_save();
   if (gas_read16(&pm1a, &value) == 0) {
+    if ((value & PM1_SCI_EN) == 0u) {
+      /* Legacy mode: the firmware never handed power management to an OS,
+       * and a PCH ignores the sleep-type write while SCI_EN is clear. Set
+       * it first - every ACPI operating system does this at boot - then
+       * ask for S5. */
+      kputs("[POWER] ACPI SCI_EN was clear; enabling it before S5\n");
+      (void)gas_write16(&pm1a, (UINT16)(value | PM1_SCI_EN));
+      io_wait();
+      io_wait();
+      (void)gas_read16(&pm1a, &value);
+    }
+    kputs("[POWER] S5 requested: SLP_TYP=");
+    kputs_hex(slp_typ_a);
+    kputs("\n");
     value = (UINT16)((value & ~(PM1_SLP_TYP_MASK | PM1_SLP_EN)) |
                      ((UINT16)slp_typ_a << 10) | PM1_SLP_EN);
     (void)gas_write16(&pm1a, value);
+  } else {
+    kputs("[POWER] PM1a control register is not readable; nothing to write\n");
   }
   if (pm1b.address != 0 && gas_read16(&pm1b, &value) == 0) {
     value = (UINT16)((value & ~(PM1_SLP_TYP_MASK | PM1_SLP_EN)) |
@@ -353,6 +418,70 @@ void power_off(void) {
   }
   irq_restore(flags);
   power_halt();
+}
+
+void power_off(void) { power_off_common(1); }
+
+/* Power off from an interrupt context: no disk polling, just the S5 write. */
+void power_off_now(void) { power_off_common(0); }
+
+/* ---- deferred shutdown ------------------------------------------------ */
+
+/* The compositor runs in the timer interrupt, so by the time it has put the
+ * last black frame on the glass it still cannot flush a write cache: a
+ * flush is a polling command and USB backends need a multi-step state
+ * machine. Instead the tick arms this state machine; the first task to
+ * enter a syscall runs the blocking tail with interrupts enabled, and the
+ * tick itself only acts as a one-second watchdog. States are volatile
+ * because the two halves run in different contexts. */
+#define POWER_SHUTDOWN_IDLE      0u
+#define POWER_SHUTDOWN_PENDING   1u
+#define POWER_SHUTDOWN_SERVICING 2u
+#define POWER_SHUTDOWN_TIMEOUT_TICKS 100u /* 100 Hz: one second */
+
+static volatile UINT32 g_shutdown_state = POWER_SHUTDOWN_IDLE;
+static volatile UINT64 g_shutdown_deadline;
+
+void power_off_deferred(void) {
+  if (g_shutdown_state != POWER_SHUTDOWN_IDLE) {
+    return; /* already armed or being serviced */
+  }
+  g_shutdown_deadline = sched_ticks() + POWER_SHUTDOWN_TIMEOUT_TICKS;
+  g_shutdown_state = POWER_SHUTDOWN_PENDING; /* publish after the deadline */
+  kputs("[POWER] shutdown queued for task context\n");
+}
+
+int power_shutdown_pending(void) {
+  return (g_shutdown_state == POWER_SHUTDOWN_PENDING) ? 1 : 0;
+}
+
+/* Runs from syscall_dispatch, i.e. from a ring-3 task with a ring-0 stack
+ * and interrupts on. Once SERVICING is published the tick's watchdog will
+ * not cut the flush short. Never returns: power_off_common() halts. */
+void power_shutdown_service(void) {
+  if (g_shutdown_state != POWER_SHUTDOWN_PENDING) {
+    return;
+  }
+  g_shutdown_state = POWER_SHUTDOWN_SERVICING;
+  kputs("[POWER] flushing and parking block devices\n");
+  kputs_hex((UINT64)blkdev_standby_all());
+  kputs(" disks at rest\n");
+  power_off_common(0);
+}
+
+/* Timer context. Do not touch a disk here: if no task made a syscall in
+ * time, fall back to the old immediate-S5 path rather than leaving the
+ * machine with a black screen forever. */
+void power_shutdown_tick(void) {
+  if (g_shutdown_state != POWER_SHUTDOWN_PENDING) {
+    return;
+  }
+  if (sched_ticks() < g_shutdown_deadline) {
+    return;
+  }
+  g_shutdown_state = POWER_SHUTDOWN_IDLE;
+  kputs("[POWER] shutdown service timed out; S5 without park\n");
+  power_off_common(0);
 }
 
 void power_reboot(void) {

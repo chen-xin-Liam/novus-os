@@ -401,6 +401,13 @@ void wal_abort(novusfs_fs_t *fs, UINT64 txid);
  * log is harmless. Returns the number of entries replayed. */
 UINT64 wal_recover(novusfs_fs_t *fs);
 
+/* Retire the whole ring WITHOUT replaying it: zero the region and reset
+ * both pointers, with the caller flushing the superblock afterwards. Use
+ * only at a Merkle build / image checkpoint, where every committed record
+ * has already been applied to the home blocks and replaying a stale record
+ * would revert later direct writes. */
+void wal_discard(novusfs_fs_t *fs);
+
 /* Walk the ring and verify every entry's magic + CRC-32. Returns the
  * number of valid entries; sets fs->wal_corrupt on the first failure. */
 UINT64 wal_verify(novusfs_fs_t *fs);

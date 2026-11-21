@@ -366,6 +366,19 @@ done:
 int novusfs_merkle_build(novusfs_fs_t *fs, UINT8 *out_root) {
   UINT8 root[NOVUSFS_MERKLE_ROOT_LEN];
 
+  /* A build is a checkpoint: from here the home blocks are the authoritative
+   * image and the log must not be replayed over them. Retire it first.
+   * wal_commit() has already applied every committed record to the home
+   * blocks; the records that remain can be STALE because write_direct()
+   * updates the same inodes/data later without logging them. Leaving them
+   * in the ring would make the next mount replay stale bytes, change the
+   * protected region behind this root's back, and report MISMATCH on an
+   * image this build has just declared good. The superblock flush at the
+   * end of merkle_rebuild() persists the zeroed pointers.
+   *
+   * The WAL region sits before merkle_start, outside the tree's leaf range,
+   * so clearing it does not change any byte this build hashes. */
+  wal_discard(fs);
   if (merkle_rebuild(fs, root, 1) != 0) {
     return -1;
   }

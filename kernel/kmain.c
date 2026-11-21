@@ -18,6 +18,7 @@
 #include "irq.h"
 #include "gdt.h"
 #include "idt.h"
+#include "cpu.h"
 #include "shared_mem.h"
 #include "pmm.h"
 #include "mm.h"
@@ -104,6 +105,72 @@ void kputs_hex(UINT64 v) {
     buf[2 + i] = digits[(v >> (60 - 4 * i)) & 0xF];
   }
   buf[18] = '\0';
+  kputs(buf);
+}
+
+static UINT64 g_timeline_start;
+static UINT64 g_timeline_khz;
+
+static UINT64 timeline_rdtsc(void) {
+  UINT32 lo = 0;
+  UINT32 hi = 0;
+  __asm__ volatile("rdtsc" : "=a"(lo), "=d"(hi));
+  return ((UINT64)hi << 32) | (UINT64)lo;
+}
+
+void novus_timeline(const char *stage) {
+  UINT32 a = 0, b = 0, c = 0, d = 0;
+  UINT64 ms;
+  char buf[32];
+  UINTN i = 0;
+  UINTN j;
+  char rev[20];
+
+  if (g_timeline_start == 0u) {
+    g_timeline_start = timeline_rdtsc();
+    cpuid(0u, 0u, &a, &b, &c, &d);
+    if (a >= 0x15u) {
+      UINT32 ea = 0, eb = 0, ec = 0;
+      cpuid(0x15u, 0u, &ea, &eb, &ec, &d);
+      if (ea != 0u && eb != 0u && ec != 0u) {
+        g_timeline_khz = ((UINT64)eb * (UINT64)ec) / ((UINT64)ea * 1000u);
+      }
+    }
+    if (g_timeline_khz == 0u && a >= 0x16u) {
+      UINT32 mhz = 0;
+      cpuid(0x16u, 0u, &mhz, &b, &c, &d);
+      g_timeline_khz = (UINT64)mhz * 1000u;
+    }
+  }
+
+  if (g_timeline_khz != 0u) {
+    UINT64 now = timeline_rdtsc();
+    ms = now >= g_timeline_start
+             ? (now - g_timeline_start) / g_timeline_khz
+             : 0u;
+  } else {
+    ms = sched_ticks() * 10u;
+  }
+
+  kputs("[T] +");
+  do {
+    rev[i++] = (char)('0' + (char)(ms % 10u));
+    ms /= 10u;
+  } while (ms != 0u && i < sizeof(rev));
+  j = 0;
+  while (i > 0u) {
+    buf[j++] = rev[--i];
+  }
+  buf[j++] = 'm';
+  buf[j++] = 's';
+  buf[j++] = ' ';
+  if (stage != 0) {
+    while (*stage != '\0' && j + 1u < sizeof(buf)) {
+      buf[j++] = *stage++;
+    }
+  }
+  buf[j++] = '\n';
+  buf[j] = '\0';
   kputs(buf);
 }
 
@@ -211,6 +278,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   shared_mem_kernel_init();
   serial_init();
   vga_init();
+  novus_timeline("kmain start");
 
   /* The boot stage hands over either with the splash on the glass or with
    * the firmware text still up, and the second case is the one that used to
@@ -228,7 +296,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* Which build this is, in the log itself. Every diagnosis so far has
    * started by guessing from a photo whether the running image was the one
    * just built; a timestamp ends that. */
-  kputs("[BOOT] kernel built " __DATE__ " " __TIME__ " rev 37\n");
+  kputs("[BOOT] kernel built " __DATE__ " " __TIME__ " rev 42\n");
 
   /* From here until sched_init() installed one, a fault was a triple fault:
    * no IDT meant the CPU reset, and a machine that reboots mid-boot looks
@@ -240,14 +308,16 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * until much later; interrupts stay masked until the boot menu. */
   gdt_init();
   idt_init();
+  novus_timeline("gdt idt init");
 
   /* The boot stage handed over with the splash on the glass. Keep it
    * active and keep advancing it: the user watches one progress bar from
    * the first payload read to the desktop, not a splash followed by a
    * black screen followed by a bar again.
    *
-   * Before mm_init() only a framebuffer in the low 4 GiB is reachable, so
-   * a high one simply leaves the splash to nd_init() below. */
+   * Before mm_init() only the firmware identity map is usable, so a
+   * framebuffer the firmware did not map simply leaves the splash to
+   * nd_init() below. */
 #if CONFIG_NOVUS_DISPLAY
   /* Boot-stage splash: drawn through the firmware's framebuffer mapping
    * before the kernel page tables exist. Brief; the kernel re-paints it onto
@@ -266,14 +336,16 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* PMM first: the page-table pages below are allocated through it. */
   pmm_init(mmap_addr, map_size, desc_size);
   pmm_selftest();
+  novus_timeline("pmm init");
 
-  /* Build the page tables and switch CR3 (identity low 4 GiB + physmap).
-   * The captured scanout goes with it: a framebuffer above 4 GiB is not
-   * part of the identity map, and the text console draws through a raw
-   * physical pointer, so mm_init() maps that range itself (uncached) before
-   * the switch. Without that the console has to stop drawing for the
-   * duration of mm_init() - and a machine that dies in there then dies with
-   * nothing on screen, which is precisely how this boot used to fail. */
+  /* Build the page tables and switch CR3 (identity map of the described
+   * address space + physmap). The captured scanout goes with it: it may sit
+   * above or outside the RAM descriptors, and the text console draws through
+   * a raw physical pointer, so mm_init() maps that range itself
+   * (write-combining) before the switch. Without that the console has to
+   * stop drawing for the duration of mm_init() - and a machine that dies in
+   * there then dies with nothing on screen, which is precisely how this boot
+   * used to fail. */
   {
     UINT64 fb_phys = 0u;
     UINT64 fb_size = 0u;
@@ -286,12 +358,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
       }
     }
 #endif
-    mm_init(pmm_ram_top(), fb_phys, fb_size);
+    mm_init(pmm_ram_top(), mmap_addr, map_size, desc_size, fb_phys, fb_size);
   }
   mm_selftest();
+  novus_timeline("mm init");
 
   heap_init();
   heap_selftest();
+  novus_timeline("heap init");
 
 #if CONFIG_NOVUS_DISPLAY
   /* Bind the display now the heap exists and re-paint the splash onto an
@@ -310,6 +384,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
     for (;;) {
       __asm__ volatile("cli; hlt");
     }
+    novus_timeline("nd init done");
   }
   nd_boot_splash();
   nd_boot_stage(88, "初始化内存");
@@ -331,6 +406,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * machine's default disk) is gone from the firmware block-device list
    * after ExitBootServices, so drive it natively. */
   (void)ide_init();
+  novus_timeline("power storage probes");
   kputs("[BOOT] power and storage probed\n");
   /* Storage power: arm the idle timer explicitly instead of trusting the
    * static initialiser in blkdev.c - the kernel's .data is laid out behind
@@ -353,12 +429,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * address) and the PCI serial-bus list it has to match against. */
   touchpad_probe(mmap_addr, map_size, desc_size);
   nd_boot_stage(93, "检测设备");
+  novus_timeline("device table done");
   kputs("[BOOT] device table built\n");
 
 #if CONFIG_NOVUS_DISPLAY
   /* Both need the heap; neither needs the scheduler. */
   nd_boot_stage(95, "初始化显示");
   nd_selftest();
+  novus_timeline("display selftest done");
   kputs("[BOOT] display selftest done\n");
 #endif
 
@@ -368,6 +446,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
 #if CONFIG_NOVUS_IPC
   ipc_init();
   ipc_selftest();
+  novus_timeline("ipc ready");
   kputs("[BOOT] ipc ready\n");
 #endif
 
@@ -380,6 +459,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   if (novusfs_selftest() != 0) {
     kputs("[WARN] NovusFS selftest failed, continuing degraded\n");
   }
+  novus_timeline("filesystem selftests");
   storage_mount_ahci_novusfs();
   /* M5: pull the Unicode font out of the mounted system partition (an
    * installed GPT partition, if present) so the desktop has CJK glyphs.
@@ -565,6 +645,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   /* LAPIC bring-up, then wake the B core (AP) with the kernel CR3. */
   nd_boot_stage(97, "唤醒多核");
   lapic_init();
+  novus_timeline("lapic init");
   smp_wake_ap(mm_get_cr3(), mmap_addr, map_size, desc_size);
 
   /* A core rests: last shared-memory log entry, then park (README 2.2
@@ -581,6 +662,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * system - the README asks for a bug to cost the process, not the
    * machine. */
   sched_init(mmap_addr, map_size, desc_size);
+  novus_timeline("scheduler init");
 #if CONFIG_NOVUS_IRQ
   irq_init(mmap_addr, map_size, desc_size);
   serial_irq_init();
@@ -672,6 +754,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
         if (!install_mode) {
           session_init();
         }
+        novus_timeline("session init");
         kputs("[BOOT] session started\n");
         /* M10: bring up PCI, the network stack and the USB HID keyboard before
          * the applications, so the network app has a link to show, the device

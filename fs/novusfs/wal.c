@@ -400,6 +400,37 @@ void wal_abort(novusfs_fs_t *fs, UINT64 txid) {
   (VOID)txid;
 }
 
+/* Retire the whole ring without replaying it. The home blocks are the
+ * authoritative image: wal_commit() applies every committed record to them
+ * at commit time, and novusfs_write_direct() writes them again later without
+ * a log entry. Because the redo records in the ring can therefore be STALE
+ * with respect to the home blocks, replaying them on a later mount would
+ * revert those direct writes and change protected bytes behind the tree's
+ * back.
+ *
+ * A Merkle build is the checkpoint that declares the current home blocks
+ * the new known-good image. At that point every committed transaction has
+ * already been applied and there is nothing left to recover, so the ring is
+ * discarded in the same superblock flush that persists the new root. Callers
+ * must invoke this only at a quiescent point (formatter, installer, update
+ * applier, selftest) - never with a transaction still open. */
+void wal_discard(novusfs_fs_t *fs) {
+  UINT64 b;
+
+  if (fs == NULL || !fs->mounted || fs->dev == NULL ||
+      fs->blkbuf == NULL || fs->sb.wal_blocks == 0) {
+    return;
+  }
+  memset(fs->blkbuf, 0, NOVUSFS_BLOCK_SIZE);
+  for (b = 0; b < fs->sb.wal_blocks; b++) {
+    if (novusfs_write_block(fs, fs->sb.wal_start + b, fs->blkbuf) != 0) {
+      return; /* leave the pointers alone if the region could not be cleared */
+    }
+  }
+  fs->sb.wal_write_ptr = 0;
+  fs->sb.wal_tail_ptr = 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Recovery and verification                                           */
 /* ------------------------------------------------------------------ */

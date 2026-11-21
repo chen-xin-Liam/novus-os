@@ -10,6 +10,8 @@ api::compile → preprocess → lex → parse/AST → sema → x86_64 codegen �
 
 `api.rs` 提供稳定 Rust 编译接口；`driver.rs` 和两个目标工具只是它的 CLI 壳。`ir.rs` 定义目标无关指令骨架，`object.rs` 是当前后端共享的字节/符号/重定位模型。`x86_64.rs` 使用手写指令编码，并按目标 ABI（SysV NUC、SysV Linux、Win64）生成栈帧、调用序列与运行时入口：Win64 使用 RCX/RDX/R8/R9、shadow space 与 IAT 调用；Linux/NUC 使用 syscall 入口，其中 Linux 的 `write` 为 syscall 1，NUC 保留 2。
 
+`src/target/` 是分发层，不参与前端与语义分析：`mod.rs` 负责把目标无关 `ObjectModule` 转成各后端的统一段模型并选择写入器，`nucgen.rs` 保留 NUC V1.0 序列化，`pe32plus.rs` 写 PE32+ 头、节、导入目录/IAT 和重定位，`elf64.rs` 写 Linux ELF64 程序头、动态表、导出符号、GNU stack 与空 `.rela.plt` 元数据。三个目标共用同一份符号/重定位语义，只在容器与 ABI 层分派。
+
 `preprocess.rs` 保留源文件行列映射并处理受限预处理；`lexer.rs` 生成带位置 token；`parser.rs` 递归下降构造 AST 并在语法错误后恢复；`sema.rs` 收集函数、全局变量、结构体和作用域符号，报告类型/return/void 错误；`nucgen.rs` 序列化并自校验 NUC 文件。
 
 ## 2. 语言子集

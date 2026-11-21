@@ -13,13 +13,18 @@
  * something to glance at, and a bar that walks 4, 88, 90, 91 percent in three
  * tenths of a second reads as a stutter rather than as progress.
  *
- * The logo is baked into a plain ARGB array by tools/splash/mkbootlogo.py
- * and copied with nd_blit(); there is no PNG decoder or heap this early in
- * boot. Everything else uses the ordinary renderer (nd_fill_rect/nd_text),
- * so there is no separate "boot drawing" path to keep in sync. The only
- * special case is the surface: before nd_init() there is no heap and possibly
- * no high mapping, so the splash binds a static surface straight to the
- * framebuffer the boot stage captured, as long as it sits in the low 4 GiB.
+ * The logo is whichever mark this machine actually has: the firmware's own
+ * boot logo when the boot stage caught one, otherwise the baked ARGB array
+ * from tools/splash/mkbootlogo.py. The bake exists because there is no PNG
+ * decoder and no heap this early in boot; the capture exists because on a
+ * laptop the screen should look like that laptop's boot screen. Everything
+ * else uses the ordinary renderer (nd_fill_rect/nd_round_rect/nd_text), so
+ * there is no separate "boot drawing" path to keep in sync. The only special
+ * case is the surface: before nd_init() there is no heap and possibly no high
+ * mapping, so the splash binds a static surface straight to the framebuffer
+ * the boot stage captured, provided the boot stage's page tables cover it -
+ * which nd_capture_boot() establishes by probing the live tables and adding
+ * an uncached identity mapping when the firmware left one out.
  *
  * Updates repaint the status line only. Repainting the whole screen on every
  * step would be the very flicker this milestone is about.
@@ -27,7 +32,8 @@
 
 #include "kernel.h"
 #include "nd.h"
-#include "boot_logo.h"
+#include "boot_logo.h"   /* baked fallback mark */
+#include "nd_oemlogo.h"  /* the firmware's own logo, when captured */
 
 #define SPLASH_TOP    0x0A0F17u
 #define SPLASH_BOTTOM 0x131C2Bu
@@ -45,6 +51,7 @@ static struct {
   UINT8        active;
   char         label[SPLASH_LABEL_MAX];
   nd_rect_t    mark;
+  nd_rect_t    logo;    /* where the vendor logo sits, when there is one */
   nd_rect_t    status;
   nd_surface_t scratch; /* used only before nd_init() */
 } g_splash __attribute__((section(".data")));
@@ -63,18 +70,17 @@ nd_surface_t *splash_surface(void) {
     return &g_splash.scratch;
   }
   d = nd_display();
-  if (d == 0 || !d->available || d->fb_phys == 0 ||
-      d->fb_phys >= 0x100000000ULL || d->width == 0 || d->height == 0) {
-    /* The splash draws before the paging layer exists, so it can only use a
-     * framebuffer the boot identity map already covers. On a discrete card
-     * the firmware framebuffer lives inside the card's VRAM aperture, which
-     * is above 4 GiB: the splash is skipped there and the first thing drawn
-     * is the desktop, through the aperture mapping set up later. Say why
-     * instead of going quiet. */
-    if (d != 0 && d->available && d->fb_phys >= 0x100000000ULL) {
+  /* What matters is whether the boot stage's page tables actually cover
+   * this framebuffer, not where it sits: nd_capture_boot() already asked,
+   * and built an uncached identity mapping when the firmware had none. */
+  if (d == 0 || !d->available || d->fb_phys == 0 || !d->fb_boot_usable ||
+      d->width == 0 || d->height == 0) {
+    /* Say why instead of going quiet: a splash that does not appear is
+     * otherwise indistinguishable from one that was never attempted. */
+    if (d != 0 && d->available && d->fb_phys != 0 && !d->fb_boot_usable) {
       kputs("[ND] boot splash skipped: framebuffer at ");
       kputs_hex(d->fb_phys);
-      kputs(" is above the 4 GiB identity map\n");
+      kputs(" is not mapped by the boot stage\n");
     }
     return 0;
   }
@@ -116,15 +122,25 @@ static void splash_backdrop(nd_surface_t *s, nd_rect_t r) {
  * so a 768- and a 1080-line panel put them in the same places relative to
  * their own height instead of hugging one edge. */
 static void splash_layout(nd_surface_t *s) {
-  INT32 lw = BOOT_LOGO_W;
-  INT32 lh = BOOT_LOGO_H;
-  INT32 max_w = s->w - 64;
-  INT32 max_h = (s->h * 45) / 100;
+  /* Two marks can land here and they have different shapes: the firmware's
+   * capture arrives at panel resolution (so it is capped at 22% of the
+   * height to keep the status line its room), while the baked fallback is
+   * a fixed lockup that may take 45%. Everything after the caps is shared,
+   * so both sit in the same place relative to their own panel height. */
+  int   oem = nd_oem_logo_available();
+  INT32 lw = oem ? nd_oem_logo_width() : BOOT_LOGO_W;
+  INT32 lh = oem ? nd_oem_logo_height() : BOOT_LOGO_H;
+  INT32 max_w = oem ? (s->w * 62) / 100 : s->w - 64;
+  INT32 max_h = oem ? (s->h * 22) / 100 : (s->h * 45) / 100;
   INT32 logo_top;
   INT32 status_y;
 
-  if (max_w < 32 || max_h < 32) {
+  if (oem && max_w < 120) {
+    max_w = s->w - 48;
+  }
+  if (max_w < 32 || max_h < 32 || lw <= 0 || lh <= 0) {
     g_splash.mark = nd_rect(0, 0, 0, 0);
+    g_splash.logo = g_splash.mark;
     g_splash.status = nd_rect(0, 0, s->w, 0);
     return;
   }
@@ -145,6 +161,7 @@ static void splash_layout(nd_surface_t *s) {
     status_y = logo_top + lh + 32;
   }
   g_splash.mark = nd_rect((s->w - lw) / 2, logo_top, lw, lh);
+  g_splash.logo = g_splash.mark;
   g_splash.status = nd_rect(0, status_y, s->w, SPLASH_STATUS_H);
 }
 
@@ -156,6 +173,13 @@ static void splash_logo(nd_surface_t *s) {
   nd_surface_t img;
 
   if (r.w <= 0 || r.h <= 0) {
+    return;
+  }
+  /* The firmware's own mark wins when the boot stage caught one: the point
+   * of showing it is that the screen looks like this machine's boot screen
+   * and not like an advertisement for an operating system. */
+  if (nd_oem_logo_available()) {
+    nd_oem_logo_draw(s, r, 255);
     return;
   }
   img.px = (UINT32 *)(UINTN)g_boot_logo;
@@ -188,6 +212,55 @@ static void splash_logo(nd_surface_t *s) {
   }
 }
 
+/* The rectangle the logo moves through during the intro: its first frame
+ * sits `rise` pixels lower than its resting place, so the band has to
+ * cover both and the backdrop under it has to be rebuilt every frame. */
+static nd_rect_t splash_logo_band(INT32 rise) {
+  nd_rect_t a = g_splash.logo;
+
+  a = nd_rect(a.x - 8, a.y - 8, a.w + 16, a.h + 16 + rise);
+  return a;
+}
+
+/* Opening move of the splash: the logo fades in as it lifts the last few
+ * pixels into place. `delay_ms` is the boot stage's Stall; the kernel
+ * passes NULL and the splash simply appears finished, because by then the
+ * user has been looking at it for the whole kernel stage anyway. */
+void nd_boot_splash_intro(void (*delay_ms)(UINT32)) {
+  nd_surface_t *s = splash_surface();
+  /* 16 steps at 24 ms: long enough for the eye to read a fade rather than
+   * a flash, short enough that the boot stage still feels responsive. The
+   * alpha follows an ease-out curve; the old 10 linear steps spent most of
+   * their time at near-final opacity and read as a cut. */
+  const INT32   frames = 16;
+  const INT32   rise = 28;
+  INT32         i;
+
+  if (!g_splash.active || s == 0 || !nd_oem_logo_available() || delay_ms == 0) {
+    return;
+  }
+  nd_surface_reset_clip(s);
+  for (i = 0; i <= frames; i++) {
+    UINT32    p = ((UINT32)i * 1000u) / (UINT32)frames;
+    UINT32    q = 1000u - p;
+    UINT32    eased = 1000u - (q * q) / 1000u;
+    UINT8     fade = (UINT8)((255u * eased) / 1000u);
+    INT32     dy = rise - (rise * i) / frames;
+
+    splash_backdrop(s, splash_logo_band(rise));
+    nd_oem_logo_draw(s, nd_rect(g_splash.logo.x, g_splash.logo.y + dy,
+                                g_splash.logo.w, g_splash.logo.h),
+                     (i == 0) ? 0u : fade);
+    if (i == 0) {
+      continue; /* the empty band is the start state, nothing to hold on */
+    }
+    delay_ms(24);
+  }
+  /* Last frame exactly on the resting rect, fully opaque. */
+  splash_backdrop(s, splash_logo_band(rise));
+  nd_oem_logo_draw(s, g_splash.logo, 255);
+}
+
 /* The one line: whatever the boot is doing right now, centred, no
  * percentage. Sized up on a tall panel and shrunk back to 1x if the label is
  * too long to fit - a clipped step name is worse than a small one. */
@@ -213,6 +286,19 @@ static void splash_status(nd_surface_t *s) {
 
 void nd_boot_splash_end(void) { g_splash.active = 0; }
 
+/* Where the splash put the machine's logo. The desktop transition lifts
+ * the same pixels from the same place, so the handover reads as one
+ * continuous movement rather than as two screens that happen to share a
+ * colour. Returns 0 when there was no captured logo. */
+int nd_boot_logo_rect(nd_rect_t *out) {
+  if (out == 0 || !nd_oem_logo_available() || g_splash.logo.w <= 0) {
+    return 0;
+  }
+  *out = g_splash.logo;
+  return 1;
+}
+
+
 int nd_boot_splash_active(void) { return g_splash.active != 0; }
 
 int nd_boot_splash(void) {
@@ -229,6 +315,12 @@ int nd_boot_splash(void) {
   g_splash.label[0] = '\0';
   splash_layout(s);
   nd_surface_reset_clip(s);
+  /* The firmware drew its logo and its console through its own cacheable
+   * mapping. Those dirty lines can land on the framebuffer after our first
+   * fill and ghost through the backdrop - the vendor text sitting on top of
+   * the splash is that writeback seen from the other side. Flush once, then
+   * paint over a clean surface. */
+  __asm__ volatile("wbinvd" ::: "memory");
   splash_backdrop(s, nd_rect(0, 0, s->w, s->h));
   splash_logo(s);
   return 1;

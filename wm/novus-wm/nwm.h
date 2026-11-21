@@ -24,6 +24,21 @@ void nwm_init(void);
 /* Timer tick: input routing, IPC server pump, composite. */
 void nwm_tick(void);
 
+/* The shutdown the user sees: windows fade and collapse, the dock drops
+ * out of the bottom edge, the wallpaper fades to black, then the platform
+ * is asked for S5. Played by nwm_tick(), one frame per tick. */
+
+/* Ask for the shutdown from a widget action. The animation is played by
+ * nwm_tick() - one frame per tick - and the platform is asked for S5 once
+ * the screen is black. A widget callback runs inside the shell's own
+ * compositing pass and the compositor lives on the timer interrupt, so the
+ * request itself only records that a shutdown was asked for. */
+void nwm_request_shutdown(void);
+
+/* Non-zero while the shutdown animation is running: the shell stops
+ * rebuilding anything of its own and lets the compositor own the screen. */
+int nwm_shutdown_active(void);
+
 /* Protocol self test: drives the request handlers with synthetic messages
  * and checks window state, z-order, focus and error paths. */
 int nwm_selftest(void);
@@ -52,6 +67,10 @@ void   nwm_theme_set_mode(UINT32 mode);
 
 /* Windows currently held, for the sysinfo stats reply. */
 UINT32 nwm_window_count(void);
+
+/* Window commands from the shell's title-bar context menu: 0 restore,
+ * 1 minimize, 2 maximize/restore toggle, 3 close. */
+void nwm_window_command(UINT32 id, UINT32 op);
 
 /* ---- kernel-callable window API (M9 Win32 compatibility layer) --------
  *

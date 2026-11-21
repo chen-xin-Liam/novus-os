@@ -29,6 +29,7 @@
 #include "nvgui.h"
 #include "nwm.h"
 #include "nwm_proto.h"
+#include "power.h"
 
 #if CONFIG_NOVUS_WM
 
@@ -1156,6 +1157,62 @@ static void handle_request(const ipc_msg_t *m) {
   }
 }
 
+/* Commands from the shell's title-bar menu. 0 restore, 1 minimize,
+ * 2 maximize/restore toggle, 3 close. Runs in the tick that dispatched the
+ * menu click, so it only mutates window state and damages the old and new
+ * rectangles; the compositor paints them on the same tick. */
+void nwm_window_command(UINT32 id, UINT32 op) {
+  nwm_window_t *w = win_get(id);
+
+  if (w == 0 || w->used == 0u) {
+    return;
+  }
+  damage_frame(w->rect);
+  switch (op) {
+  case 0u: /* restore */
+    if (w->state == 2u) {
+      w->rect = w->restore;
+    }
+    w->state = 0;
+    focus_set((int)(w - g_wins));
+    break;
+  case 1u: /* minimize */
+    w->state = 1;
+    if (g_focus == (int)(w - g_wins)) {
+      focus_set(-1);
+    }
+    break;
+  case 2u: /* maximize / restore toggle */
+    if (w->state == 2u) {
+      w->rect = w->restore;
+      w->state = 0;
+    } else {
+      nd_surface_t *s = screen();
+
+      w->restore = w->rect;
+      w->state = 2;
+      w->rect = nd_rect(0, 0, s != 0 ? s->w : 1024, s != 0 ? s->h : 768);
+    }
+    break;
+  case 3u: { /* close, the same pair the title-bar button sends */
+    UINT32     win = w->id;
+    ipc_msg_t  self;
+
+    deliver(w->owner, NWM_EV_CLOSE, &win, 4);
+    memset(&self, 0, sizeof(self));
+    self.hdr.type = NWM_REQ_DESTROY;
+    self.hdr.len = 4;
+    self.hdr.sender = NWM_PID_SHELL;
+    memcpy(self.payload, &win, 4);
+    handle_request(&self);
+    return;
+  }
+  default:
+    break;
+  }
+  damage_frame(w->rect);
+}
+
 /* ---- input routing ---------------------------------------------------- */
 
 static void deliver_mouse(nwm_window_t *w, const nd_event_t *ev) {
@@ -1237,6 +1294,12 @@ static void route(const nd_event_t *ev) {
     nd_demo_dispatch(ev);
     return;
   }
+  /* Any press that missed an overlay dismisses the shell's context menu
+   * before it reaches a window or the desktop, so the menu cannot stay on
+   * screen after the click that should have closed it. */
+  if (ev->type == ND_EV_MOUSE_DOWN && modal < 0 && g_drag < 0) {
+    nd_shell_menu_close();
+  }
   if (modal >= 0) {
     /* A press outside the sheet is swallowed; the pointer still moves so
      * the cursor keeps tracking, and a release still ends a capture. */
@@ -1285,9 +1348,22 @@ static void route(const nd_event_t *ev) {
     z_raise(idx);
     focus_set(idx);
     damage_frame(g_wins[idx].rect);
-    g_capture = idx;
     if (ev->y < g_wins[idx].rect.y + NWM_TITLE_H) {
-      UINT8 b = title_button(&g_wins[idx], ev->x, ev->y);
+      UINT8 b;
+
+      /* The caption is not a drag surface for the right button: a right
+       * press opens the window's context menu instead (drawing by the
+       * shell's overlay so it matches the desktop and dock menus). */
+      if ((ev->button & ND_BUTTON_RIGHT) != 0u) {
+        nd_shell_window_menu(ev->x, ev->y, g_wins[idx].id,
+                             (UINT8)g_wins[idx].state);
+        break;
+      }
+      if ((ev->button & ND_BUTTON_LEFT) == 0u) {
+        break;
+      }
+      g_capture = idx;
+      b = title_button(&g_wins[idx], ev->x, ev->y);
 
       if (b == 1u) {
         UINT32    id = g_wins[idx].id;
@@ -1326,6 +1402,7 @@ static void route(const nd_event_t *ev) {
         g_drag_dy = ev->y - g_wins[idx].rect.y;
       }
     } else {
+      g_capture = idx;
       deliver_mouse(&g_wins[idx], ev);
     }
     break;
@@ -1338,6 +1415,15 @@ static void route(const nd_event_t *ev) {
       g_drag = -1;
       g_capture = -1;
       break;
+    }
+    if ((ev->button & ND_BUTTON_RIGHT) != 0u) {
+      idx = hit_test(ev->x, ev->y);
+      if (idx >= 0 && ev->y < g_wins[idx].rect.y + NWM_TITLE_H) {
+        /* The caption only saw a right press; do not pair it with a
+         * client event the client never received a press for. */
+        g_capture = -1;
+        break;
+      }
     }
     idx = (g_capture >= 0 && g_wins[g_capture].used) ? g_capture
                                                      : hit_test(ev->x, ev->y);
@@ -1506,12 +1592,64 @@ UINT32 nwm_window_count(void) {
   return n;
 }
 
+/* Shutdown is asked for from inside an event dispatch - a widget's action
+ * runs while the shell is halfway through laying out and compositing a
+ * frame - and the compositor itself runs on the timer interrupt. So the
+ * request only sets a flag here; nwm_tick() plays one animation frame per
+ * tick and asks the platform to power off when the screen is black. */
+
+/* The shutdown state machine lives with the rest of the shutdown code
+ * below; the tick needs its entry points. */
+static void shutdown_begin(void);
+static void shutdown_advance(void);
+static int  g_sh_req;
+static UINT32 g_sh_phase;
+static UINT32 g_sh_power_hold;
+#define NWM_SH_PHASE_POWER 5u
+/* The timer tick is 10 ms (kernel/sched.c), so one frame per tick is a
+ * 10 ms frame budget - inside the 16 ms limit - while each nwm_tick() still
+ * does exactly one bounded paint. The old 2-tick hold made every frame
+ * 30 ms and turned the fade into a hard cut.
+ *
+ * The final black frame is different: it is already composited when the
+ * phase becomes POWER, but S5 must not tear it down during scanout. Hold
+ * the screen for two full ticks (~20 ms, one 60 Hz refresh) before writing
+ * the sleep register. */
+#define NWM_SH_POWER_HOLD_TICKS 2u
+
 void nwm_tick(void) {
   nd_event_t ev;
   nd_rect_t  d;
   nd_rect_t  cd;
 
   if (!g_ready) {
+    return;
+  }
+  if (g_sh_req) {
+    g_sh_req = 0;
+    shutdown_begin();
+    return;
+  }
+  if (g_sh_phase == NWM_SH_PHASE_POWER) {
+    /* Nothing may repaint over the last veil frame. Give it a full display
+     * interval before S5 instead of killing the panel mid-scanout. */
+    if (g_sh_power_hold != 0u) {
+      g_sh_power_hold--;
+      return;
+    }
+    g_sh_phase = 0;
+    /* Write S5 now, from the tick. The deferred form (flush, park, then S5
+     * from task context) lives on the branch that owns kernel/power.c; until
+     * it is committed here, the compositor must not call a function this
+     * tree does not have. */
+    power_off_now();
+    return;
+  }
+  if (g_sh_phase != 0u) {
+    shutdown_advance();
+    if (g_sh_phase == NWM_SH_PHASE_POWER) {
+      g_sh_power_hold = NWM_SH_POWER_HOLD_TICKS - 1u;
+    }
     return;
   }
   nd_input_poll();
@@ -1557,6 +1695,185 @@ void nwm_tick(void) {
     if (!nd_rect_empty(clip)) {
       paint(clip);
     }
+  }
+}
+
+/* ---- shutdown --------------------------------------------------------- */
+
+/* One finished frame of the shutdown, with `veil` black on top of it. The
+ * compositor proper presents as part of paint(); this variant needs the
+ * veil between the scene and the present, which is why it composes here
+ * rather than reusing paint(). */
+static void compose_shutdown_frame(UINT8 veil) {
+  nd_surface_t *dst = target();
+  nd_rect_t     clip;
+  UINT32        i;
+
+  if (dst == 0 || dst->px == 0) {
+    return;
+  }
+  clip = nd_rect(0, 0, dst->w, dst->h);
+  nd_demo_paint(clip);
+  nd_surface_set_clip(dst, clip);
+  for (i = 0; i < g_zcount; i++) {
+    paint_window(&g_wins[g_z[i]], clip);
+  }
+  ng_render_overlay(clip);
+  if (veil != 0u) {
+    nd_blend_rect(dst, clip, ND_RGB(0, 0, 0), veil);
+  }
+  nd_surface_reset_clip(dst);
+  nd_present(clip);
+}
+
+/* Ease-out cubic on a 0..1000 scale, the curve windows open and close on. */
+static UINT32 shutdown_ease(UINT32 p) {
+  UINT32 q = 1000u - p;
+
+  return 1000u - (q * q * q) / 1000000u;
+}
+
+/* The shutdown the user sees, before the platform is asked for S5:
+ *
+ *   1. every window fades to black and shrinks towards its own centre at
+ *      the same time, so all open programs close together rather than in
+ *      some arbitrary order;
+ *   2. they are removed as a group, in one frame;
+ *   3. the dock drops out of the bottom of the screen;
+ *   4. the wallpaper - and with it the desktop icons - fades to black;
+ *   5. the screen is left black.
+ *
+ * power_off() then writes the S5 sleep type and the machine really turns
+ * off.
+ *
+ * This runs on the tick, one frame at a time, instead of as a blocking
+ * sequence: the compositor lives in the timer interrupt (sched.c calls
+ * nwm_tick() from it), so sleeping between frames - let alone
+ * blocking on a disk - would wedge the machine inside an interrupt
+ * handler. The stage machine below keeps every frame a single bounded
+ * paint, and the last stage asks the platform to power off. */
+#define NWM_SH_PHASE_FADE    1u
+#define NWM_SH_PHASE_CLEAR   2u
+#define NWM_SH_PHASE_DOCK    3u
+#define NWM_SH_PHASE_VEIL    4u
+
+static UINT32    g_sh_step;
+static INT32     g_sh_span;
+static nd_rect_t g_sh_start[NWM_MAX_WINDOWS];
+
+/* Ask for the shutdown from a widget action. The animation itself is played
+ * by nwm_tick(), one frame per tick, because the action runs inside the
+ * shell's own event dispatch and the compositor owns the timer interrupt. */
+void nwm_request_shutdown(void) { g_sh_req = 1; }
+
+int nwm_shutdown_active(void) { return (g_sh_phase != 0u) ? 1 : 0; }
+
+/* Snapshot the windows and close the shell's menus: the first frame of the
+ * animation is the desktop as the user left it. */
+static void shutdown_begin(void) {
+  UINT32 i;
+
+  g_sh_phase = NWM_SH_PHASE_FADE;
+  g_sh_step = 0;
+  g_sh_span = nd_dock_span();
+  for (i = 0; i < NWM_MAX_WINDOWS; i++) {
+    g_sh_start[i] = g_wins[i].rect;
+  }
+  nd_shell_close_overlays();
+  kputs("[NWM] shutdown: fade out ");
+  kputs_hex(g_zcount);
+  kputs(" windows\n");
+}
+
+/* Apply the alpha/rect state of the fade for `p` (0..1000). */
+static void shutdown_fade_apply(UINT32 p) {
+  UINT32 i;
+
+  for (i = 0; i < NWM_MAX_WINDOWS; i++) {
+    nwm_window_t *w = &g_wins[i];
+    INT32         cw, ch, nw, nh;
+
+    if (w->used == 0u) {
+      continue;
+    }
+    cw = g_sh_start[i].x + g_sh_start[i].w / 2;
+    ch = g_sh_start[i].y + g_sh_start[i].h / 2;
+    nw = g_sh_start[i].w -
+         (INT32)(((UINT64)g_sh_start[i].w * 380u * p) / 1000000u);
+    nh = g_sh_start[i].h -
+         (INT32)(((UINT64)g_sh_start[i].h * 380u * p) / 1000000u);
+    if (nw < 24) {
+      nw = 24;
+    }
+    if (nh < 16) {
+      nh = 16;
+    }
+    w->rect = nd_rect(cw - nw / 2, ch - nh / 2, nw, nh);
+    w->alpha = (UINT8)(255u - ((255u * p) / 1000u));
+    w->reveal = 0;
+  }
+}
+
+/* One animation step. Each call composes exactly one frame and returns. */
+static void shutdown_advance(void) {
+  UINT32 step = g_sh_step;
+  UINT32 p;
+
+  switch (g_sh_phase) {
+  case NWM_SH_PHASE_FADE:
+    /* 0..10: the group collapses inwards and darkens. */
+    p = shutdown_ease((step * 1000u) / 10u);
+    shutdown_fade_apply(p);
+    compose_shutdown_frame(0u);
+    if (step >= 10u) {
+      g_sh_phase = NWM_SH_PHASE_CLEAR;
+      g_sh_step = 0;
+    } else {
+      g_sh_step++;
+    }
+    break;
+  case NWM_SH_PHASE_CLEAR: {
+    UINT32 i;
+
+    for (i = 0; i < NWM_MAX_WINDOWS; i++) {
+      g_wins[i].used = 0;
+    }
+    g_zcount = 0;
+    g_focus = -1;
+    g_drag = -1;
+    g_capture = -1;
+    compose_shutdown_frame(0u);
+    g_sh_phase = NWM_SH_PHASE_DOCK;
+    g_sh_step = 0;
+    kputs("[NWM] shutdown: programs closed\n");
+    break;
+  }
+  case NWM_SH_PHASE_DOCK:
+    /* 0..8: the dock accelerates out of the bottom edge. */
+    p = shutdown_ease((step * 1000u) / 8u);
+    nd_dock_shift((INT32)(((UINT64)g_sh_span * p) / 1000u));
+    compose_shutdown_frame(0u);
+    if (step >= 8u) {
+      nd_dock_shift(g_sh_span);
+      g_sh_phase = NWM_SH_PHASE_VEIL;
+      g_sh_step = 0;
+      kputs("[NWM] shutdown: dock out\n");
+    } else {
+      g_sh_step++;
+    }
+    break;
+  case NWM_SH_PHASE_VEIL:
+    /* 0..12: the wallpaper and the desktop fade to black. */
+    compose_shutdown_frame((UINT8)((255u * step) / 12u));
+    if (step >= 12u) {
+      g_sh_phase = NWM_SH_PHASE_POWER;
+      kputs("[NWM] shutdown: screen black, powering off\n");
+    } else {
+      g_sh_step++;
+    }
+    break;
+  default:
+    break;
   }
 }
 
@@ -2070,5 +2387,7 @@ int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
   (void)win; (void)x; (void)y; (void)w; (void)h;
   return NWM_EBADWIN;
 }
+void nwm_request_shutdown(void) {}
+int nwm_shutdown_active(void) { return 0; }
 
 #endif /* CONFIG_NOVUS_WM */

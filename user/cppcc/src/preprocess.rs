@@ -19,26 +19,6 @@ pub struct PreprocessedSource {
 }
 
 impl PreprocessedSource {
-    /// Wrap text that is already preprocessed (a caller holding a string
-    /// rather than a file). One location per byte, with the line and column
-    /// the byte sits on, so diagnostics still point at the right place.
-    pub fn from_text(text: &str, file: impl Into<std::path::PathBuf>) -> Self {
-        let file = file.into();
-        let mut locations = Vec::with_capacity(text.len() + 1);
-        let mut line = 1usize;
-        let mut column = 1usize;
-        for byte in text.bytes() {
-            locations.push(SourceLocation::new(file.clone(), line, column));
-            if byte == b'\n' {
-                line += 1;
-                column = 1;
-            } else {
-                column += 1;
-            }
-        }
-        Self { text: text.to_owned(), locations }
-    }
-
     pub fn location_at(&self, byte_offset: usize) -> SourceLocation {
         self.locations
             .get(byte_offset)
@@ -1379,7 +1359,7 @@ mod tests {
         let file = dir.join("main.cc");
         fs::write(&file, source).unwrap();
         let (out, errors) = Preprocessor::new(vec![]).preprocess(&file).unwrap();
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir); // a scanner can hold the file briefly on Windows
         (out.text, errors)
     }
 
@@ -1409,7 +1389,7 @@ mod tests {
         let (out, errors) = Preprocessor::new(vec![]).preprocess(&main).unwrap();
         assert!(errors.is_empty(), "{:?}", errors);
         assert_eq!(out.text.matches("int included;").count(), 1);
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir); // a scanner can hold the file briefly on Windows
     }
 
     #[test]
@@ -1480,7 +1460,7 @@ mod tests {
             .unwrap();
         assert!(errors.is_empty(), "{:?}", errors);
         assert!(out.text.contains("int native_decl;"));
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir); // a scanner can hold the file briefly on Windows
     }
 
     #[test]

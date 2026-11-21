@@ -42,6 +42,9 @@ pub struct Symbol {
     pub offset: u64,
     pub size: u64,
     pub binding: Binding,
+    /// NUC symbol type, carried through so the kernel loader sees the same
+    /// records the generator produced (1 = function, 2 = object).
+    pub sym_type: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -62,6 +65,8 @@ pub struct ObjectModule {
     pub relocations: Vec<Relocation>,
     pub imports: Vec<String>,
     pub entry: String,
+    /// Byte offset of `entry` inside TEXT, as the generator laid it out.
+    pub entry_point: u32,
 }
 
 impl ObjectModule {
@@ -117,6 +122,7 @@ pub(crate) fn from_code_sections(sections: CodeSections) -> Result<ObjectModule>
         relocations: Vec::new(),
         imports: Vec::new(),
         entry: "_start".to_owned(),
+        entry_point: sections.entry_point,
     };
     for symbol in sections.symbols {
         module.symbols.push(Symbol {
@@ -125,6 +131,7 @@ pub(crate) fn from_code_sections(sections: CodeSections) -> Result<ObjectModule>
             offset: symbol.value,
             size: symbol.size,
             binding: if symbol.bind == 0 { Binding::Local } else { Binding::Global },
+            sym_type: symbol.sym_type,
         });
     }
     for relocation in sections.relocations {

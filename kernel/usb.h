@@ -40,4 +40,17 @@ typedef struct {
 UINTN usb_device_count(void);
 int   usb_device_info(UINTN index, usb_info_t *out);
 
+/* ---- keyboard LED state (boot protocol) ------------------------------- */
+
+typedef struct {
+  UINT8 num_lock;    /* 1 when Num Lock is on */
+  UINT8 cap_lock;    /* 1 when Caps Lock is on */
+  UINT8 scroll_lock; /* 1 when Scroll Lock is on */
+} hid_kbd_led_t;
+
+/* Send led_state back to the keyboard so its hardware LEDs track the OS
+ * indicator state.  Returns 0 on success; callers must not assume failure
+ * is fatal — old keyboards simply ignore the command. */
+int hid_kbd_set_leds(hid_kbd_led_t *led);
+
 #endif /* NOVUS_USB_H */

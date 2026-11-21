@@ -111,6 +111,7 @@ void nd_surface_reset_clip(nd_surface_t *s);
 typedef struct {
   UINT8       available; /* 1 = a linear framebuffer was captured */
   UINT8       bgr;       /* 1 = memory byte order B,G,R,X */
+  UINT8       fb_boot_usable; /* 1 = the boot stage's page tables reach it */
   UINT32      width;
   UINT32      height;
   UINT32      pitch;     /* pixels per scanline */
@@ -185,6 +186,30 @@ void nd_present(nd_rect_t r);
 /* 1 when presents are synchronised to the display's vertical blank. */
 int nd_present_vsync(void);
 
+/* ---- frame timing ----------------------------------------------------- */
+
+/* Raw TSC and its calibrated rate. Shell paint code uses the same clock as
+ * the HAL so a paint and its present can be compared in one log stream. */
+UINT64 nd_tsc(void);
+UINT64 nd_tsc_khz(void);
+
+/* Write one `[NDF]` line with a measured interval and the rectangle it
+ * covers. Called after the measurement, so serial output is not timed. */
+void nd_frame_timing(const char *label, UINT64 t0, UINT64 t1,
+                     UINT32 w, UINT32 h);
+
+/* Running totals for every nd_present() since boot. Full-screen frames are
+ * logged individually; small damage frames are counted here and summarised
+ * every 60 presents. */
+typedef struct {
+  UINT64 frames;
+  UINT64 cycles;
+  UINT64 pixels;
+  UINT64 max_cycles;
+} nd_frame_stats_t;
+
+void nd_frame_stats(nd_frame_stats_t *out);
+
 /* Software mouse pointer, composited on top of a present.
  *
  * `nd_cursor_set` only moves it and records the damage the move exposes;
@@ -225,6 +250,18 @@ nd_surface_t *splash_surface(void);
 /* The desktop is about to be presented: the splash stops owning the
  * screen. */
 void nd_boot_splash_end(void);
+
+/* Where the splash drew the machine's boot logo (its resting rectangle on
+ * the splash surface), for the boot-to-desktop transition. Returns 0 when
+ * there was no captured logo and the splash drew its own mark instead. */
+int nd_boot_logo_rect(nd_rect_t *out);
+
+/* Play the splash's opening move: the vendor logo fades in while it lifts
+ * into place. `delay_ms` is the only sleep available at that point - the
+ * firmware's Stall while the boot stage still has boot services - and NULL
+ * draws the finished frame with no motion at all. Repaints the logo band
+ * only, so the backdrop behind it is never rebuilt. */
+void nd_boot_splash_intro(void (*delay_ms)(UINT32));
 
 /* Convert one canonical colour to what the framebuffer expects. */
 UINT32 nd_hw_pixel(const nd_surface_t *s, nd_color_t c);
@@ -352,5 +389,43 @@ void nd_demo_paint(nd_rect_t clip);
  * owned by the WM and survive; the shell's own demo windows are recreated
  * hidden, which is the price of a static widget pool. */
 void nd_demo_theme_sync(void);
+
+/* Open the title-bar context menu for a WM client window at screen (x, y).
+ * `state` is the WM window state: 2 means maximized, which swaps the
+ * maximize item for restore. The items call back into nwm_window_command().
+ * Called by the WM on a right press over a caption; the shared menu is an
+ * overlay, so it is composited above the windows. */
+void nd_shell_window_menu(INT32 x, INT32 y, UINT32 win_id, UINT8 state);
+
+/* Close the shell's shared context menu if it is open. The WM calls this
+ * before it delivers a press to a client window or to the desktop, so the
+ * menu cannot outlive the click that dismissed it. */
+void nd_shell_menu_close(void);
+
+/* ---- shell animation ------------------------------------------------- */
+
+/* Sleep on hlt until `ms` have elapsed on the 10 ms tick. Used by the two
+ * transitions below, which run before and outside the normal tick loop. */
+void nd_wait_ms(UINT32 ms);
+
+/* The dock - the floating taskbar pill and every icon, run dot and clock
+ * inside it - is one unit that can be moved as a whole: `dy` is the pixel
+ * offset from where build_desktop() placed it, 0 restores that. Both the
+ * old and the new band are damaged, so a slide repaints only the strip
+ * that changed. */
+void  nd_dock_shift(INT32 dy);
+/* Distance from the dock's built position to fully off the bottom edge;
+ * the shutdown slide uses it, and the boot slide starts from it. */
+INT32 nd_dock_span(void);
+
+/* Close the shell's floating cards (start menu, quick settings), its
+ * context menu and any hover/press highlight, without touching windows:
+ * the first step of a shutdown. */
+void nd_shell_close_overlays(void);
+
+/* Splash to desktop: the vendor logo lifts and fades off the top, the dock
+ * rises into place, the wallpaper and desktop fade up from black. Runs
+ * once, from nd_demo_init(), on the finished desktop scene. */
+void nd_boot_transition(void);
 
 #endif /* NOVUS_ND_H */

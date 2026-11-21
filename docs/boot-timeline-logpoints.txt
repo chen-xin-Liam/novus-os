@@ -1,0 +1,43 @@
+Novus OS boot timeline log points
+
+Format: "[T] +NNNms <stage>"
+
+UEFI boot stage (arch/x86_64/boot/main.c)
+- efi_main start
+- shared memory init
+- stage3 init
+- cpu check
+- memory check
+- stage3 menu done
+- stage3 load done
+- exit boot services
+
+Kernel stage (kernel/kmain.c)
+- kmain start
+- gdt idt init
+- pmm init
+- mm init
+- heap init
+- nd init done
+- power storage probes
+- device table done
+- display selftest done
+- ipc ready
+- filesystem selftests
+- lapic init
+- scheduler init
+- session init
+
+NovusDisplay HAL (graphics/nd_hal.c)
+- nd boot capture start
+- nd init start
+
+Desktop shell (graphics/nd_demo.c)
+- demo init start
+- demo tick start (first tick only)
+
+Clock:
+- UEFI and kernel stages use CPUID leaf 0x15 TSC frequency, with leaf 0x16
+  base frequency as fallback.
+- Both UEFI and kernel log lines are written to COM1 and the active text
+  screen; kernel kputs also mirrors to VGA/framebuffer console.

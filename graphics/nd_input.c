@@ -2,7 +2,10 @@
  * Novus OS - PS/2 keyboard and mouse IRQ input.
  *
  * IRQ1/12 capture raw bytes; the existing tick consumer decodes the queue.
- * Hardware reads during initialization only exchange controller commands.
+ * nd_input_init() programs the 8042 and the aux device once (controller
+ * self test, port tests, mouse reset, sample rate, resolution, scaling,
+ * data reporting) and prints every acknowledgement on the serial console:
+ * on cloned 8042s a missing 0xFA is only visible there.
  *
  * Absolute mouse position is kept here rather than in the widget layer:
  * the WM in M6 will need the same value, and clamping it to the screen is
@@ -23,31 +26,67 @@
 #define PS2_ST_OUT_FULL 0x01
 #define PS2_ST_IN_FULL  0x02
 #define PS2_ST_AUX      0x20
+/* Parity and timeout errors: the byte in the output buffer is corrupt and
+ * must never reach the keyboard or mouse decoder. */
+#define PS2_ST_ERR      0xC0
 
-#define PS2_CMD_READ_CFG  0x20
-#define PS2_CMD_WRITE_CFG 0x60
-#define PS2_CMD_DISABLE_K 0xAD
-#define PS2_CMD_ENABLE_K  0xAE
-#define PS2_CMD_DISABLE_M 0xA7
-#define PS2_CMD_ENABLE_M  0xA8
+/* Controller commands. */
+#define PS2_CMD_READ_CFG   0x20
+#define PS2_CMD_WRITE_CFG  0x60
+#define PS2_CMD_DISABLE_K  0xAD
+#define PS2_CMD_ENABLE_K   0xAE
+#define PS2_CMD_DISABLE_M  0xA7
+#define PS2_CMD_ENABLE_M   0xA8
 #define PS2_CMD_NEXT_MOUSE 0xD4
+#define PS2_CMD_SELF_TEST  0xAA
+#define PS2_CMD_TEST_AUX   0xA9
+#define PS2_SELF_TEST_PASS 0x55
+#define PS2_AUX_TEST_PASS  0x00
+
+/* Device (aux port) commands. */
+#define PS2_DEV_RESET     0xFF
+#define PS2_DEV_SET_RATE  0xF3
+#define PS2_DEV_SET_RES   0xE8
+#define PS2_DEV_SCALE_1_1 0xE7
+#define PS2_DEV_ENABLE    0xF4
+
+#define PS2_ACK    0xFA
+#define PS2_RESEND 0xFE
+
+/* Reply budgets, counted in status-port polls. Command ACKs take a few
+ * microseconds; a 0xFF reset may hold the bus for up to 500 ms on 1990s
+ * hardware, so the BAT byte gets a much larger budget. */
+#define PS2_TMO_CMD 40000u
+#define PS2_TMO_BAT 500000u
+#define PS2_TRIES   3u
 
 #define ND_EVENT_QUEUE 64
 #define ND_SCAN_LIMIT  64
 #define ND_RAW_QUEUE 256u
 
+/* A 3-byte packet leaves the mouse back to back (< 1 ms at 100 Hz). The
+ * remaining bytes of a packet split across a poll boundary are therefore
+ * already waiting in the ring by the next pass; a partial packet that
+ * survives two passes lost bytes somewhere on the way. */
+#define PS2_PKT_STALLS 1u
+
 static struct {
   UINT8 data;
   UINT8 aux;
+  UINT8 gap; /* a byte was lost right before this one */
 } g_raw[ND_RAW_QUEUE];
 static UINT32 g_raw_head;
 static UINT32 g_raw_tail;
 static UINT32 g_raw_dropped;
+static UINT8 g_raw_gap;
 static UINT8 g_irq_logged;
 
 /* The IRQ handler only transfers controller bytes plus the AUX-source bit
  * into this ring; key mapping and packet assembly happen later in poll
- * context. One ring slot stays unused to distinguish full from empty. */
+ * context. One ring slot stays unused to distinguish full from empty.
+ * A dropped byte (ring full, parity error, controller timeout) leaves a
+ * `gap` mark on the next stored slot so the decoder can resynchronise the
+ * mouse packet state instead of decoding a shifted byte stream. */
 static void ps2_irq(void *ctx) {
   UINT32 guard = ND_SCAN_LIMIT;
 
@@ -62,12 +101,15 @@ static void ps2_irq(void *ctx) {
     }
     data = io_in8(PS2_DATA);
     next = (g_raw_head + 1u) % ND_RAW_QUEUE;
-    if ((status & 0xC0u) != 0u || next == g_raw_tail) {
+    if ((status & PS2_ST_ERR) != 0u || next == g_raw_tail) {
       g_raw_dropped++;
+      g_raw_gap = 1u;
       continue;
     }
     g_raw[g_raw_head].data = data;
     g_raw[g_raw_head].aux = (UINT8)(status & PS2_ST_AUX);
+    g_raw[g_raw_head].gap = g_raw_gap;
+    g_raw_gap = 0u;
     g_raw_head = next;
   }
 }
@@ -80,6 +122,46 @@ static INT32 g_mx;
 static INT32 g_my;
 static UINT8 g_buttons;
 static int g_absolute_mouse;
+
+/* ---- same-frame arbitration -------------------------------------------
+ * Several devices can feed the one cursor in a single nd_input_poll(): the
+ * raw PS/2 ring, the VMware absolute pointer, each USB HID device and the
+ * I2C-HID touchpad. Their bytes arrive in different IRQ streams, so "the
+ * mouse moved twice" is often one physical motion reported twice.
+ *
+ * Relative samples are parked here until the frame ends. The source whose
+ * last sample carries the newest timestamp is committed; the other sources'
+ * samples are dropped and counted. Absolute pointers are exempt: they carry
+ * a position, are applied immediately (the next source in the frame can read
+ * the updated cursor), and suppress relative samples instead of being
+ * suppressed by them. Nothing is carried into the next frame, so a desktop
+ * with two genuine mice still gets both of their movements on later frames.
+ */
+#define ND_MOVE_SAMPLES 8u
+#define ND_KEY_SAMPLES  16u
+
+typedef struct {
+  INT32 dx, dy;
+} nd_move_sample_t;
+
+typedef struct {
+  nd_move_sample_t move[ND_MOVE_SAMPLES];
+  UINT32 count;
+  UINT32 stamp; /* last event timestamp, monotonic for the boot */
+} nd_src_moves_t;
+
+static nd_src_moves_t g_src_moves[ND_INPUT_SRC_COUNT];
+static UINT32 g_arb_stamp;
+static int g_absolute_frame;
+static struct {
+  UINT32 key;
+  UINT8  src;
+} g_frame_keys[ND_KEY_SAMPLES];
+static UINT32 g_frame_key_count;
+static UINT32 g_frame_dropped_moves;
+static UINT32 g_frame_dropped_keys;
+static UINT32 g_arb_moves; /* cumulative suppressed MOUSE_MOVE events */
+static UINT32 g_arb_keys;  /* cumulative suppressed KEY events */
 
 typedef struct {
   UINT32 a, b, c, d;
@@ -118,6 +200,10 @@ static void vm_mouse_init(void) {
 
 static UINT8 g_mouse_packet[3];
 static UINT8 g_mouse_bytes;
+/* Poll passes during which the open packet made no progress; a packet that
+ * survives PS2_PKT_STALLS + 1 passes lost bytes. */
+static UINT8 g_mouse_stall;
+static UINT32 g_mouse_resync;
 static UINT8 g_extended;
 
 static int g_shift;
@@ -167,6 +253,58 @@ void nd_input_mouse(INT32 *x, INT32 *y, UINT8 *buttons) {
 
 /* ---- 8042 helpers ----------------------------------------------------- */
 
+/* "0xNN": the bring-up log prints raw controller bytes, and the 16-digit
+ * kputs_hex() spelling of a single ACK is unreadable there. */
+static void ps2_hex8(UINT8 v) {
+  static const char digits[] = "0123456789ABCDEF";
+  char buf[5];
+
+  buf[0] = '0';
+  buf[1] = 'x';
+  buf[2] = digits[(v >> 4) & 0x0Fu];
+  buf[3] = digits[v & 0x0Fu];
+  buf[4] = '\0';
+  kputs(buf);
+}
+
+static void ps2_log(const char *what, const char *verdict, UINT8 value,
+                    int with_value) {
+  kputs("[PS2] ");
+  kputs(what);
+  kputs(": ");
+  kputs(verdict);
+  if (with_value != 0) {
+    kputs(" ");
+    ps2_hex8(value);
+  }
+  kputs("\n");
+}
+
+/* Plain decimal for the counters in these logs; kputs_hex() spells them in
+ * 16 digits, which buries a two-digit count. */
+static void ps2_dec(UINT32 v) {
+  char buf[12];
+  UINT32 digits = 0;
+  UINT32 i;
+
+  if (v == 0u) {
+    kputs("0");
+    return;
+  }
+  while (v != 0u && digits < 10u) {
+    buf[digits++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  for (i = 0; i < digits / 2u; i++) {
+    char t = buf[i];
+
+    buf[i] = buf[digits - 1u - i];
+    buf[digits - 1u - i] = t;
+  }
+  buf[digits] = '\0';
+  kputs(buf);
+}
+
 static int ps2_wait_in(void) {
   UINT32 spins;
 
@@ -178,13 +316,30 @@ static int ps2_wait_in(void) {
   return 0;
 }
 
-static int ps2_wait_out(void) {
-  UINT32 spins;
+/* Read one byte from the output buffer. Status bits 6/7 flag a parity or
+ * timeout error: the byte is consumed but never decoded. With `aux_only`,
+ * keyboard bytes are consumed and dropped as well - the keyboard is parked
+ * while the mouse is programmed, so any byte it sends there is stale. */
+static int ps2_read_byte(UINT8 *out, UINT8 aux_only, UINT32 spins) {
+  UINT32 i;
 
-  for (spins = 0; spins < 100000u; spins++) {
-    if ((io_in8(PS2_STATUS) & PS2_ST_OUT_FULL) != 0u) {
-      return 1;
+  for (i = 0; i < spins; i++) {
+    UINT8 status = io_in8(PS2_STATUS);
+
+    if ((status & PS2_ST_OUT_FULL) == 0u) {
+      io_wait();
+      continue;
     }
+    if ((status & PS2_ST_ERR) != 0u) {
+      (void)io_in8(PS2_DATA);
+      continue;
+    }
+    if (aux_only != 0u && (status & PS2_ST_AUX) == 0u) {
+      (void)io_in8(PS2_DATA);
+      continue;
+    }
+    *out = io_in8(PS2_DATA);
+    return 1;
   }
   return 0;
 }
@@ -192,12 +347,14 @@ static int ps2_wait_out(void) {
 static void ps2_cmd(UINT8 cmd) {
   if (ps2_wait_in()) {
     io_out8(PS2_CMD, cmd);
+    io_wait(); /* the 8042 needs a settling delay between bytes */
   }
 }
 
 static void ps2_write(UINT8 data) {
   if (ps2_wait_in()) {
     io_out8(PS2_DATA, data);
+    io_wait();
   }
 }
 
@@ -209,9 +366,38 @@ static void ps2_flush(void) {
   }
 }
 
+/* One byte through the 8042 gate to the mouse, plus its acknowledgement.
+ * 0xFE asks for a resend and restarts the byte; 0xFC, any other value or
+ * silence fails it. Every outcome is printed: on cloned 8042s the serial
+ * log is the only place a missing 0xFA shows up. */
+static UINT8 ps2_mouse_byte(const char *what, UINT8 value, UINT32 spins) {
+  UINT32 attempt;
+  UINT8 reply = 0;
+
+  for (attempt = 0; attempt < PS2_TRIES; attempt++) {
+    ps2_cmd(PS2_CMD_NEXT_MOUSE);
+    ps2_write(value);
+    if (ps2_read_byte(&reply, 1u, spins) == 0) {
+      ps2_log(what, "no reply", 0u, 0);
+      return 0u;
+    }
+    if (reply == PS2_ACK) {
+      ps2_log(what, "ACK", reply, 1);
+      return reply;
+    }
+    ps2_log(what, reply == PS2_RESEND ? "resend requested" : "unexpected",
+            reply, 1);
+    if (reply != PS2_RESEND) {
+      return reply;
+    }
+  }
+  return reply;
+}
+
 void nd_input_init(void) {
   UINT8 cfg = 0;
   int cfg_valid = 0;
+  int mouse_ok = 0;
   INT32 w = 1024;
   INT32 h = 768;
 
@@ -220,13 +406,31 @@ void nd_input_init(void) {
   g_raw_head = 0;
   g_raw_tail = 0;
   g_raw_dropped = 0;
+  g_raw_gap = 0;
   g_irq_logged = 0;
   g_mouse_bytes = 0;
+  g_mouse_stall = 0;
+  g_mouse_resync = 0;
   g_extended = 0;
   g_shift = 0;
   g_caps = 0;
   g_ctrl = 0;
   g_buttons = 0;
+  {
+    UINT32 i;
+
+    for (i = 0; i < ND_INPUT_SRC_COUNT; i++) {
+      g_src_moves[i].count = 0u;
+      g_src_moves[i].stamp = 0u;
+    }
+  }
+  g_arb_stamp = 0u;
+  g_absolute_frame = 0;
+  g_frame_key_count = 0u;
+  g_frame_dropped_moves = 0u;
+  g_frame_dropped_keys = 0u;
+  g_arb_moves = 0u;
+  g_arb_keys = 0u;
 
   {
     const nd_display_t *d = nd_display();
@@ -240,43 +444,131 @@ void nd_input_init(void) {
   g_mx = w / 2;
   g_my = h / 3;
 
-  /* Keep IRQs off until device command replies have been consumed. */
-  ps2_cmd(PS2_CMD_DISABLE_K);
-  ps2_cmd(PS2_CMD_DISABLE_M);
-  ps2_flush();
-  ps2_cmd(PS2_CMD_READ_CFG);
-  if (ps2_wait_out()) {
-    cfg = io_in8(PS2_DATA);
-    cfg = (UINT8)((cfg | 0x40u) & (UINT8)~0x03u);
-    cfg_valid = 1;
-    ps2_cmd(PS2_CMD_WRITE_CFG);
-    ps2_write(cfg);
-  }
-  ps2_cmd(PS2_CMD_ENABLE_K);
-  ps2_cmd(PS2_CMD_ENABLE_M);
-
-  /* Mouse: defaults, then data reporting on. Both answers are read and
-   * ignored; a machine without an auxiliary device just stays silent. */
-  ps2_cmd(PS2_CMD_NEXT_MOUSE);
-  ps2_write(0xF6);
-  if (ps2_wait_out()) {
-    (void)io_in8(PS2_DATA);
-  }
-  ps2_cmd(PS2_CMD_NEXT_MOUSE);
-  ps2_write(0xF4);
-  if (ps2_wait_out()) {
-    (void)io_in8(PS2_DATA);
-  }
-  ps2_flush();
-  if (cfg_valid && irq_register(1u, 0u, ps2_irq, NULL, "ps2-keyboard") >= 0 &&
-      irq_register(12u, 0u, ps2_irq, NULL, "ps2-mouse") >= 0) {
-    ps2_cmd(PS2_CMD_WRITE_CFG);
-    ps2_write((UINT8)((cfg | 0x43u) & (UINT8)~0x30u));
-    kputs("[ND] PS/2 keyboard + mouse IRQ enabled (no hardware polling)\n");
+  /* A floating bus reads back 0xFF - output full, input full, parity and
+   * timeout errors at once - and means there is no 8042 at all. Skip the
+   * whole sequence instead of burning time on timeouts; USB HID and the
+   * absolute pointer are unaffected. */
+  if (io_in8(PS2_STATUS) == 0xFFu) {
+    kputs("[PS2] no 8042 controller; PS/2 input skipped\n");
   } else {
-    (void)irq_unregister(1u, ps2_irq, NULL);
-    (void)irq_unregister(12u, ps2_irq, NULL);
-    kputs("[ND] WARN PS/2 IRQ unavailable: input disabled\n");
+    UINT8 b = 0;
+    int aux_test = 0;
+    /* This function runs again for the desktop after the boot menu already
+     * armed IRQ1/12. With the lines live, the handler would pull an ACK out
+     * of the output buffer into the ring and the read below would time out,
+     * so the whole sequence runs with interrupts parked and restores the
+     * previous state once the handlers are registered and config is written. */
+    UINT64 ps2_flags = irq_save();
+
+    /* Park both devices: report bytes would otherwise race the command
+     * replies read below. */
+    ps2_cmd(PS2_CMD_DISABLE_K);
+    ps2_cmd(PS2_CMD_DISABLE_M);
+    ps2_flush();
+
+    /* Controller self test. 0xAA reloads the config byte on most chipsets,
+     * which is why the config is read after it and not before. The controller
+     * answers this itself, so the short reply budget is enough. */
+    ps2_cmd(PS2_CMD_SELF_TEST);
+    if (ps2_read_byte(&b, 0u, PS2_TMO_CMD) == 0) {
+      ps2_log("controller self-test", "no reply", 0u, 0);
+    } else {
+      ps2_log("controller self-test",
+              b == PS2_SELF_TEST_PASS ? "pass" : "FAIL", b, 1);
+    }
+
+    /* Aux clock first, then the port test: a clone that fails 0xA9 can still
+     * carry a working mouse, so the test only annotates the log. */
+    ps2_cmd(PS2_CMD_ENABLE_M);
+    ps2_cmd(PS2_CMD_TEST_AUX);
+    if (ps2_read_byte(&b, 0u, PS2_TMO_CMD) == 0) {
+      ps2_log("aux port test", "no reply", 0u, 0);
+    } else {
+      aux_test = (b == PS2_AUX_TEST_PASS) ? 1 : 0;
+      ps2_log("aux port test", aux_test != 0 ? "pass" : "FAIL", b, 1);
+    }
+
+    /* Keyboard translation on, both interrupt lines parked until the
+     * handlers are registered below, and both clock lines enabled (bits 4/5
+     * clear): firmware that powered up with a clock gated would otherwise
+     * never see a 0xD4 byte reach the mouse. */
+    ps2_cmd(PS2_CMD_READ_CFG);
+    if (ps2_read_byte(&cfg, 0u, PS2_TMO_CMD) == 0) {
+      ps2_log("config read", "no reply", 0u, 0);
+    } else {
+      UINT8 raw = cfg;
+
+      cfg = (UINT8)((cfg | 0x40u) & 0xCCu);
+      cfg_valid = 1;
+      ps2_log("config read", "value", raw, 1);
+      ps2_cmd(PS2_CMD_WRITE_CFG);
+      ps2_write(cfg);
+      ps2_log("config write", "value", cfg, 1);
+    }
+
+    /* Known state before any parameter is touched: 0xFF answers 0xFA, then
+     * BAT (0xAA) and the device id (0x00 = plain 3-byte mouse). */
+    if (ps2_mouse_byte("mouse reset (0xFF)", PS2_DEV_RESET, PS2_TMO_CMD) !=
+        PS2_ACK) {
+      if (aux_test == 0) {
+        kputs("[PS2] aux port did not answer; mouse programming skipped\n");
+      } else {
+        kputs("[PS2] WARN mouse reset not acknowledged\n");
+      }
+    } else {
+      mouse_ok = 1;
+      if (ps2_read_byte(&b, 1u, PS2_TMO_BAT) == 0) {
+        ps2_log("mouse self-test", "no reply (still probing)", 0u, 0);
+      } else if (b == 0xAAu) {
+        ps2_log("mouse self-test", "pass", b, 1);
+        if (ps2_read_byte(&b, 1u, PS2_TMO_CMD) != 0) {
+          ps2_log("mouse device id", b == 0x00u ? "plain 3-byte" : "id", b, 1);
+        }
+      } else {
+        /* No BAT byte: this device went straight to the id. */
+        ps2_log("mouse device id", "id", b, 1);
+      }
+    }
+
+    if (mouse_ok != 0) {
+      /* 100 reports/s. That is the streaming default, but firmware on old
+       * boards leaves the device at 40 Hz, which reads as a sluggish pointer. */
+      if (ps2_mouse_byte("set sample rate (0xF3)", PS2_DEV_SET_RATE,
+                         PS2_TMO_CMD) == PS2_ACK) {
+        (void)ps2_mouse_byte("sample rate 100 Hz", 100u, PS2_TMO_CMD);
+      }
+      /* 3 counts/mm, the resolution 8042-era mice were built around. */
+      if (ps2_mouse_byte("set resolution (0xE8)", PS2_DEV_SET_RES,
+                         PS2_TMO_CMD) == PS2_ACK) {
+        (void)ps2_mouse_byte("resolution 3/mm", 0x03u, PS2_TMO_CMD);
+      }
+      /* 1:1 scaling: 2:1 doubles every delta and is a classic source of
+       * "the pointer jumps" on machines whose firmware left it enabled. */
+      (void)ps2_mouse_byte("scaling 1:1 (0xE7)", PS2_DEV_SCALE_1_1,
+                           PS2_TMO_CMD);
+      /* Streaming on. This is the last byte that returns an ACK; packets
+       * begin with the next movement. */
+      (void)ps2_mouse_byte("enable reporting (0xF4)", PS2_DEV_ENABLE,
+                           PS2_TMO_CMD);
+    }
+
+    ps2_cmd(PS2_CMD_ENABLE_K);
+    ps2_flush(); /* drop reports queued while the interrupt lines were off */
+
+    if (cfg_valid != 0 &&
+        irq_register(1u, 0u, ps2_irq, NULL, "ps2-keyboard") >= 0 &&
+        irq_register(12u, 0u, ps2_irq, NULL, "ps2-mouse") >= 0) {
+      cfg = (UINT8)((cfg | 0x43u) & 0xCFu);
+      ps2_cmd(PS2_CMD_WRITE_CFG);
+      ps2_write(cfg);
+      ps2_log("IRQ enable", "config", cfg, 1);
+      kputs("[PS2] keyboard IRQ1 + mouse IRQ12 enabled\n");
+    } else {
+      (void)irq_unregister(1u, ps2_irq, NULL);
+      (void)irq_unregister(12u, ps2_irq, NULL);
+      kputs("[PS2] WARN PS/2 IRQ unavailable: input disabled\n");
+    }
+    irq_restore(ps2_flags);
   }
   vm_mouse_init();
 }
@@ -311,17 +603,11 @@ static const char g_keymap_shift[128] = {
 };
 
 static void push_key(UINT32 key) {
-  nd_event_t ev;
+  UINT8 mods = (UINT8)((g_shift ? ND_MOD_SHIFT : 0u) |
+                       (g_ctrl ? ND_MOD_CTRL : 0u) |
+                       (g_alt ? ND_MOD_ALT : 0u));
 
-  memset(&ev, 0, sizeof(ev));
-  ev.type = ND_EV_KEY;
-  ev.key = key;
-  ev.x = (INT16)g_mx;
-  ev.y = (INT16)g_my;
-  ev.mods = (UINT8)((g_shift ? ND_MOD_SHIFT : 0u) |
-                    (g_ctrl ? ND_MOD_CTRL : 0u) |
-                    (g_alt ? ND_MOD_ALT : 0u));
-  nd_input_push(&ev);
+  nd_input_feed_key(ND_INPUT_SRC_PS2_KBD, key, mods);
 }
 
 static void key_down(UINT8 code) {
@@ -477,11 +763,32 @@ static void kbd_byte(UINT8 b) {
   }
 }
 
+/* A packet is exactly three bytes with bit 3 set on the first. A partial
+ * packet that cannot complete means bytes were lost on the way, so drop it
+ * and wait for a real start byte instead of slicing the stream blindly:
+ * a shifted stream turns the next packet's start byte into a data byte and
+ * movement into garbage. */
+static void mouse_resync(const char *why) {
+  g_mouse_bytes = 0;
+  g_mouse_stall = 0;
+  g_mouse_resync++;
+  if (g_mouse_resync == 1u) {
+    kputs("[PS2] mouse: packet resync (");
+    kputs(why);
+    kputs("), bytes dropped by the ring: ");
+    ps2_dec(g_raw_dropped);
+    kputs("\n");
+  }
+}
+
 static void mouse_byte(UINT8 b) {
   if (g_absolute_mouse) return; /* PS/2 packets only notify the absolute queue. */
-  if (g_mouse_bytes == 0 && (b & 0x08u) == 0u) {
-    return; /* out of sync: wait for a packet start */
+
+  if (g_mouse_bytes == 0u && (b & 0x08u) == 0u) {
+    mouse_resync("stray byte"); /* out of sync: wait for a packet start */
+    return;
   }
+  g_mouse_stall = 0u; /* progress: this packet is not stalled */
   g_mouse_packet[g_mouse_bytes++] = b;
   if (g_mouse_bytes < 3u) {
     return;
@@ -489,9 +796,9 @@ static void mouse_byte(UINT8 b) {
   g_mouse_bytes = 0;
   {
     UINT8  flags = g_mouse_packet[0];
+    UINT8  buttons = (UINT8)(flags & 0x07u);
     INT32  dx = (INT32)g_mouse_packet[1];
     INT32  dy = (INT32)g_mouse_packet[2];
-    UINT8  buttons = (UINT8)(flags & 0x07u);
 
     if ((flags & 0x10u) != 0u) {
       dx -= 256; /* sign bit lives in the flags byte */
@@ -499,8 +806,15 @@ static void mouse_byte(UINT8 b) {
     if ((flags & 0x20u) != 0u) {
       dy -= 256;
     }
-    /* PS/2 counts Y upward; nd_input_feed_mouse counts it downward. */
-    nd_input_feed_mouse(dx, -dy, buttons);
+    /* Overflow bits say the real motion exceeded the 8-bit field: the count
+     * is lost, the button state is not, so report buttons without movement
+     * rather than feeding a bogus delta. */
+    if ((flags & 0xC0u) != 0u) {
+      dx = 0;
+      dy = 0;
+    }
+    /* PS/2 counts Y upward; the shared feed counts it downward. */
+    nd_input_feed_mouse_src(ND_INPUT_SRC_PS2_MOUSE, dx, -dy, buttons, 0);
   }
 }
 
@@ -526,19 +840,21 @@ static void vm_mouse_poll(void) {
                       ((r.a & 0x10u) ? 2u : 0u) |
                       ((r.a & 0x08u) ? 4u : 0u));
     if ((r.a & 0x10000u) != 0) {
-      nd_input_feed_mouse((INT32)r.b, -(INT32)r.c, buttons);
+      /* VMware's relative-fallback report: a delta, not a position. */
+      nd_input_feed_mouse_src(ND_INPUT_SRC_VMWARE, (INT32)r.b, -(INT32)r.c,
+                              buttons, 0);
       continue;
     }
     x = (INT32)(((UINT64)(r.b & 0xFFFFu) * (w - 1) + 32767) / 65535);
     y = (INT32)(((UINT64)(r.c & 0xFFFFu) * (h - 1) + 32767) / 65535);
-    nd_input_feed_mouse(x - g_mx, y - g_my, buttons);
+    nd_input_feed_mouse_src(ND_INPUT_SRC_VMWARE, x - g_mx, y - g_my, buttons,
+                            1);
   }
 }
 
-/* Shared pointer update used by both the PS/2 path (above) and USB HID mice.
- * Applies the same screen clamping and button-edge detection, so every mouse
- * source feeds one queue and the rest of the system is source-agnostic. */
-void nd_input_feed_mouse(INT32 dx, INT32 dy, UINT8 buttons) {
+/* Commit one movement sample. This is the old feed body unchanged, so a
+ * frame with a single active source produces exactly the same events. */
+static void nd_commit_move(INT32 dx, INT32 dy) {
   INT32 w = 1024;
   INT32 h = 768;
   const nd_display_t *d = nd_display();
@@ -572,21 +888,184 @@ void nd_input_feed_mouse(INT32 dx, INT32 dy, UINT8 buttons) {
     ev.type = ND_EV_MOUSE_MOVE;
     nd_input_push(&ev);
   }
+}
+
+/* Button edges stay immediate: g_buttons is shared by every source, so a
+ * second source reporting the same buttons adds no second edge. */
+static void nd_commit_buttons(UINT8 buttons) {
   if ((buttons ^ g_buttons) != 0u) {
     UINT8 changed = (UINT8)(buttons ^ g_buttons);
     UINT8 i;
 
     for (i = 0; i < 3u; i++) {
       UINT8 mask = (UINT8)(1u << i);
+      nd_event_t ev;
 
       if ((changed & mask) == 0u) {
         continue;
       }
+      memset(&ev, 0, sizeof(ev));
+      ev.x = (INT16)g_mx;
+      ev.y = (INT16)g_my;
       ev.type = ((buttons & mask) != 0u) ? ND_EV_MOUSE_DOWN : ND_EV_MOUSE_UP;
       ev.button = mask;
       nd_input_push(&ev);
     }
     g_buttons = buttons;
+  }
+}
+
+static UINT32 nd_arb_stamp(void) {
+  g_arb_stamp++;
+  if (g_arb_stamp == 0u) {
+    g_arb_stamp = 1u;
+  }
+  return g_arb_stamp;
+}
+
+void nd_input_feed_mouse_src(UINT8 src, INT32 dx, INT32 dy, UINT8 buttons,
+                             int absolute) {
+  nd_src_moves_t *s;
+  nd_move_sample_t *mv;
+
+  nd_commit_buttons(buttons);
+  if (src >= ND_INPUT_SRC_COUNT) {
+    src = ND_INPUT_SRC_OTHER;
+  }
+  s = &g_src_moves[src];
+  if (dx == 0 && dy == 0) {
+    return;
+  }
+  if (absolute != 0) {
+    /* A position, not a duplicate delta: apply now so sources polled later
+     * in this same frame read the real cursor coordinates. */
+    s->count = 0u;
+    g_absolute_frame = 1;
+    nd_commit_move(dx, dy);
+    return;
+  }
+  s->stamp = nd_arb_stamp();
+  if (s->count < ND_MOVE_SAMPLES) {
+    mv = &s->move[s->count++];
+    mv->dx = dx;
+    mv->dy = dy;
+  } else {
+    /* A source outrunning the table folds into the last slot: arbitration
+     * bookkeeping must never lose real movement. */
+    mv = &s->move[ND_MOVE_SAMPLES - 1u];
+    mv->dx += dx;
+    mv->dy += dy;
+  }
+}
+
+void nd_input_feed_mouse(INT32 dx, INT32 dy, UINT8 buttons) {
+  nd_input_feed_mouse_src(ND_INPUT_SRC_OTHER, dx, dy, buttons, 0);
+}
+
+void nd_input_feed_key(UINT8 src, UINT32 key, UINT8 mods) {
+  nd_event_t ev;
+  UINT32 i;
+
+  if (src >= ND_INPUT_SRC_COUNT) {
+    src = ND_INPUT_SRC_OTHER;
+  }
+  for (i = 0; i < g_frame_key_count; i++) {
+    if (g_frame_keys[i].key != key || g_frame_keys[i].src == src) {
+      continue; /* one keyboard repeating a key is not a duplicate source */
+    }
+    g_frame_dropped_keys++;
+    return;
+  }
+  if (g_frame_key_count < ND_KEY_SAMPLES) {
+    g_frame_keys[g_frame_key_count].key = key;
+    g_frame_keys[g_frame_key_count].src = src;
+    g_frame_key_count++;
+  }
+
+  memset(&ev, 0, sizeof(ev));
+  ev.type = ND_EV_KEY;
+  ev.key = key;
+  ev.x = (INT16)g_mx;
+  ev.y = (INT16)g_my;
+  ev.mods = mods;
+  nd_input_push(&ev);
+}
+
+/* A frame is one nd_input_poll() call: all in-tree sources feed from there. */
+static void nd_arb_frame_begin(void) {
+  UINT32 i;
+
+  for (i = 0; i < ND_INPUT_SRC_COUNT; i++) {
+    g_src_moves[i].count = 0u;
+  }
+  g_frame_key_count = 0u;
+  g_frame_dropped_moves = 0u;
+  g_frame_dropped_keys = 0u;
+  g_absolute_frame = 0;
+}
+
+static void nd_arb_frame_end(void) {
+  UINT32 i;
+  UINT32 winner = ND_INPUT_SRC_COUNT;
+  UINT32 best = 0u;
+  nd_src_moves_t *s;
+
+  if (g_absolute_frame != 0) {
+    /* The absolute device already placed the cursor. Relative deltas from
+     * this frame would push it a second time. */
+    for (i = 0; i < ND_INPUT_SRC_COUNT; i++) {
+      g_frame_dropped_moves += g_src_moves[i].count;
+    }
+  } else {
+    for (i = 0; i < ND_INPUT_SRC_COUNT; i++) {
+      s = &g_src_moves[i];
+      if (s->count == 0u) {
+        continue;
+      }
+      if (winner == ND_INPUT_SRC_COUNT) {
+        winner = i;
+        best = s->stamp;
+      } else if (s->stamp > best) {
+        g_frame_dropped_moves += g_src_moves[winner].count;
+        winner = i;
+        best = s->stamp;
+      } else {
+        g_frame_dropped_moves += s->count;
+      }
+    }
+  }
+
+  if (winner != ND_INPUT_SRC_COUNT) {
+    s = &g_src_moves[winner];
+    for (i = 0; i < s->count; i++) {
+      nd_commit_move(s->move[i].dx, s->move[i].dy);
+    }
+  }
+  for (i = 0; i < ND_INPUT_SRC_COUNT; i++) {
+    g_src_moves[i].count = 0u;
+  }
+
+  g_arb_moves += g_frame_dropped_moves;
+  g_arb_keys += g_frame_dropped_keys;
+  if (g_frame_dropped_moves != 0u || g_frame_dropped_keys != 0u) {
+    kputs("[ND] input arbitration: dropped ");
+    kputs_hex(g_frame_dropped_moves);
+    kputs(" move(s), ");
+    kputs_hex(g_frame_dropped_keys);
+    kputs(" key(s) this frame; total ");
+    kputs_hex(g_arb_moves);
+    kputs("/");
+    kputs_hex(g_arb_keys);
+    kputs("\n");
+  }
+}
+
+void nd_input_arbitration_stats(UINT32 *moves, UINT32 *keys) {
+  if (moves != 0) {
+    *moves = g_arb_moves;
+  }
+  if (keys != 0) {
+    *keys = g_arb_keys;
   }
 }
 
@@ -596,10 +1075,12 @@ void nd_input_feed_mouse(INT32 dx, INT32 dy, UINT8 buttons) {
 void nd_input_poll(void) {
   UINT32 guard = ND_SCAN_LIMIT;
 
+  nd_arb_frame_begin();
   while (guard-- > 0) {
     UINT64 saved = irq_save();
     UINT8 data;
     UINT8 aux;
+    UINT8 gap;
 
     if (g_raw_tail == g_raw_head) {
       irq_restore(saved);
@@ -607,8 +1088,17 @@ void nd_input_poll(void) {
     }
     data = g_raw[g_raw_tail].data;
     aux = g_raw[g_raw_tail].aux;
+    gap = g_raw[g_raw_tail].gap;
     g_raw_tail = (g_raw_tail + 1u) % ND_RAW_QUEUE;
     irq_restore(saved);
+    if (gap != 0u) {
+      /* A byte vanished before this one (ring full, parity or controller
+       * timeout), so both byte runs are broken at this point. */
+      if (g_mouse_bytes != 0u) {
+        mouse_resync("byte gap");
+      }
+      g_extended = 0;
+    }
     if ((g_irq_logged & (aux ? 2u : 1u)) == 0u) {
       g_irq_logged |= aux ? 2u : 1u;
       kputs(aux ? "[ND] mouse byte from IRQ queue\n"
@@ -620,6 +1110,19 @@ void nd_input_poll(void) {
       kbd_byte(data);
     }
   }
+  /* A packet with no progress across two passes lost bytes before the rest
+   * of it could arrive: the bytes of one packet are sent back to back, so
+   * they would have been in the ring by the next pass. Drop the partial
+   * packet rather than let the next packet's start byte land in a data
+   * slot. */
+  if (g_mouse_bytes == 0u) {
+    g_mouse_stall = 0u;
+  } else if (g_mouse_stall >= PS2_PKT_STALLS) {
+    mouse_resync("stalled packet");
+  } else {
+    g_mouse_stall++;
+  }
   vm_mouse_poll();
-  usb_hid_poll(); /* collect USB keyboard/mouse reports, if any */
+  usb_hid_poll();    /* collect USB keyboard/mouse reports, if any */
+  nd_arb_frame_end(); /* one cursor move per source: arbitrate the frame */
 }

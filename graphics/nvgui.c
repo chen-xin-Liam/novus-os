@@ -531,6 +531,28 @@ void ng_show(ng_widget_t *w, int visible) {
   ng_damage_widget(w);
 }
 
+void ng_pointer_reset(void) {
+  UINT32 i;
+
+  if (!g_ready) {
+    return;
+  }
+  for (i = 0; i < g_used; i++) {
+    ng_widget_t *w = &g_pool[i];
+
+    if ((w->state & (NG_ST_HOVER | NG_ST_PRESSED | NG_ST_FOCUS |
+                     NG_ST_DRAG)) != 0u) {
+      w->state &= ~(NG_ST_HOVER | NG_ST_PRESSED | NG_ST_FOCUS | NG_ST_DRAG);
+      ng_damage_widget(w);
+    }
+  }
+  g_ctx.hover = 0;
+  g_ctx.capture = 0;
+  g_ctx.drag_win = 0;
+  g_ctx.focus = 0;
+  g_ctx.buttons = 0;
+}
+
 void ng_set_enabled(ng_widget_t *w, int enabled) {
   if (w == 0) {
     return;

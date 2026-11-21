@@ -21,6 +21,8 @@ void kernel_entry(UINT64 memmap_addr, UINT64 memmap_size, UINT64 desc_size);
 /* Unified kernel-stage output: mirrors text to VGA and COM1. */
 void kputs(const char *s);
 void kputs_hex(UINT64 v);
+/* Coarse boot timeline; mirrored by kputs to VGA, framebuffer and COM1. */
+void novus_timeline(const char *stage);
 
 /* Kernel version, as NKM module headers state it (spec 3.2: a module is
  * refused when its min_kernel_ver is higher than this). Major in the
