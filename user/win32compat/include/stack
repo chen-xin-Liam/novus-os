@@ -1,0 +1,4 @@
+#ifndef NOVUS_STACK
+#define NOVUS_STACK
+#include "__novus_seq.h"
+#endif

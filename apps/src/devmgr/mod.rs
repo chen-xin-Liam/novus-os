@@ -43,6 +43,7 @@ pub struct App {
     hover: usize,
     props: Props,
     menu: i8,
+    ctx_menu: ui::Menu,
     click_row: usize,
     click_tick: u32,
     tick: u32,
@@ -68,6 +69,7 @@ impl App {
             hover: NO_ROW,
             props: Props::new(),
             menu: -1,
+            ctx_menu: ui::Menu::new(),
             click_row: NO_ROW,
             click_tick: 0,
             tick: 0,
@@ -229,6 +231,7 @@ impl App {
         w.text(cw - 12 - (ui::width(label) + ui::width(s)), sy + 6, ui::dim(), label);
         w.text(cw - 12 - ui::width(s), sy + 6, ui::dim(), s);
 
+        self.ctx_menu.draw(w);
         w.invalidate();
     }
 
@@ -249,6 +252,52 @@ impl App {
             3 => &["关于设备管理器"],
             _ => &[],
         }
+    }
+
+    fn context_menu(&mut self, x: i32, y: i32) {
+        let tree_y = 60i16;
+        let tree_h = CH as i16 - 24 - tree_y;
+        let (row, _) = tree::hit(0, tree_y, tree_h, self.row_count, self.scroll, x, y);
+        if row != NO_ROW {
+            self.selected = row;
+            self.ensure_visible();
+        }
+        if row != NO_ROW {
+            self.ctx_menu.set(&[
+                ui::MenuItem::new(ui::l("属性", "Properties"), 1, 0),
+                ui::MenuItem::new(ui::l("刷新", "Refresh"), 2, 0),
+                ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+                ui::MenuItem::new(ui::l("展开全部", "Expand all"), 3, 0),
+                ui::MenuItem::new(ui::l("折叠全部", "Collapse all"), 4, 0),
+            ]);
+        } else {
+            self.ctx_menu.set(&[
+                ui::MenuItem::new(ui::l("刷新", "Refresh"), 2, 0),
+                ui::MenuItem::new(ui::l("展开全部", "Expand all"), 3, 0),
+                ui::MenuItem::new(ui::l("折叠全部", "Collapse all"), 4, 0),
+                ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+                ui::MenuItem::new(ui::l("关于设备管理器", "About"), 5, 0),
+            ]);
+        }
+        self.ctx_menu.open(x, y, CW as i16, CH as i16);
+        self.redraw = true;
+    }
+
+    fn context_action(&mut self, action: u16) {
+        match action {
+            1 => {
+                if self.row_count > 0 && self.selected < self.row_count {
+                    let dev = self.rows[self.selected].idx;
+                    self.open_props(dev);
+                }
+            }
+            2 => self.refresh(),
+            3 => self.tool_action(1),
+            4 => self.tool_action(2),
+            5 => self.menu_action(3, 0),
+            _ => {}
+        }
+        self.redraw = true;
     }
 
     /* ---- main window input --------------------------------------------- */
@@ -461,9 +510,32 @@ impl App {
                             sys::exit(0);
                         }
                         wm::Ev::Mouse(m) => {
-                            if m.kind == wm::MOUSE_DOWN && m.button == 1 {
+                            if self.ctx_menu.is_open() && m.kind == wm::MOUSE_MOVE {
+                                self.ctx_menu.motion(m.x as i32, m.y as i32);
+                                self.redraw = true;
+                            } else if self.ctx_menu.is_open()
+                                && m.kind == wm::MOUSE_DOWN
+                                && m.button == wm::BUTTON_RIGHT
+                            {
+                                self.context_menu(m.x as i32, m.y as i32);
+                            } else if self.ctx_menu.is_open()
+                                && m.kind == wm::MOUSE_DOWN
+                                && m.button == wm::BUTTON_LEFT
+                            {
+                                if let Some(action) = self.ctx_menu.click(m.x as i32, m.y as i32) {
+                                    self.context_action(action);
+                                } else {
+                                    self.ctx_menu.close();
+                                    self.redraw = true;
+                                }
+                            } else if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT {
+                                self.context_menu(m.x as i32, m.y as i32);
+                            } else if !self.ctx_menu.is_open()
+                                && m.kind == wm::MOUSE_DOWN
+                                && m.button == wm::BUTTON_LEFT
+                            {
                                 self.main_mouse(m.x as i32, m.y as i32, true);
-                            } else if m.kind == 1 {
+                            } else if !self.ctx_menu.is_open() && m.kind == wm::MOUSE_MOVE {
                                 // hover tracking for the tree highlight
                                 let tree_y = 60i16;
                                 let tree_h = CH as i16 - 24 - tree_y;
@@ -475,7 +547,14 @@ impl App {
                                 }
                             }
                         }
-                        wm::Ev::Key(k, _mods) => self.main_key(k),
+                        wm::Ev::Key(k, _mods) => {
+                            if k == wm::KEY_ESC && self.ctx_menu.is_open() {
+                                self.ctx_menu.close();
+                                self.redraw = true;
+                            } else {
+                                self.main_key(k);
+                            }
+                        }
                         _ => {}
                     }
                 } else if let Some(win) = self.prop_win.as_ref() {
@@ -483,7 +562,7 @@ impl App {
                         match ev {
                             wm::Ev::Close => self.close_props(),
                             wm::Ev::Mouse(m) => {
-                                let down = m.kind == wm::MOUSE_DOWN && m.button == 1;
+                                let down = m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_LEFT;
                                 self.prop_mouse(m.x as i32, m.y as i32, down);
                             }
                             _ => {}

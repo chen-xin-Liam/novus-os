@@ -11,11 +11,9 @@ use std::collections::HashMap;
 const RELOC_32: u32 = 1;
 const RELOC_PC32: u32 = 2;
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[repr(u8)]
-// The encoding table is deliberately complete even though today's generator
-// only reaches for a subset of it.
-#[allow(dead_code)]
 enum Reg {
     Rax = 0,
     Rcx = 1,
@@ -31,7 +29,36 @@ enum Reg {
     R11 = 11,
 }
 
-const ARG_REGS: [Reg; 6] = [Reg::Rdi, Reg::Rsi, Reg::Rdx, Reg::Rcx, Reg::R8, Reg::R9];
+const SYSV_ARG_REGS: [Reg; 6] = [Reg::Rdi, Reg::Rsi, Reg::Rdx, Reg::Rcx, Reg::R8, Reg::R9];
+const WIN64_ARG_REGS: [Reg; 4] = [Reg::Rcx, Reg::Rdx, Reg::R8, Reg::R9];
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum Abi {
+    /// Novus NUC uses the Linux SysV register order and absolute 32-bit
+    /// addresses, which the NUC loader relocates inside its 32-bit segments.
+    SysvNuc,
+    /// Linux x86_64: SysV register order, RIP-relative addressing, libc loader.
+    SysvLinux,
+    /// Windows x64: RCX/RDX/R8/R9, 32-byte shadow space, IAT thunks.
+    Win64,
+}
+
+impl Abi {
+    fn arg_regs(self) -> &'static [Reg] {
+        match self {
+            Self::SysvNuc | Self::SysvLinux => &SYSV_ARG_REGS,
+            Self::Win64 => &WIN64_ARG_REGS,
+        }
+    }
+
+    fn is_win64(self) -> bool {
+        self == Self::Win64
+    }
+
+    fn needs_rip_relative(self) -> bool {
+        self != Self::SysvNuc
+    }
+}
 
 #[derive(Clone, Debug)]
 struct FunctionSignature {
@@ -50,6 +77,7 @@ struct GlobalObject {
 
 struct Generator<'a> {
     unit: &'a TranslationUnit,
+    abi: Abi,
     layouts: Layouts,
     sections: CodeSections,
     globals: HashMap<String, GlobalObject>,
@@ -59,6 +87,10 @@ struct Generator<'a> {
 }
 
 pub(crate) fn generate(unit: &TranslationUnit) -> Result<CodeSections> {
+    generate_with_abi(unit, Abi::SysvNuc)
+}
+
+pub(crate) fn generate_with_abi(unit: &TranslationUnit, abi: Abi) -> Result<CodeSections> {
     let signatures = unit
         .items
         .iter()
@@ -75,6 +107,7 @@ pub(crate) fn generate(unit: &TranslationUnit) -> Result<CodeSections> {
         .collect();
     let mut generator = Generator {
         unit,
+        abi,
         layouts: Layouts::from_unit(unit)?,
         sections: CodeSections::default(),
         globals: HashMap::new(),
@@ -346,32 +379,47 @@ impl Generator<'_> {
             bail!("{}", codegen_error(&main.location, "entry main must have signature int main()"));
         }
         if self.unit.items.iter().any(|item| matches!(item, TopLevel::Function(function) if function.name == "_start" && function.body.is_some())) {
-            bail!("user-defined _start conflicts with the generated NUC runtime entry");
+            bail!("user-defined _start conflicts with the generated runtime entry");
         }
 
-        self.sections.text.extend_from_slice(&[
-            0x48, 0x83, 0xE4, 0xF0,       // and rsp, -16  (Win64 requires a 16-byte aligned stack at calls)
-            0xE8, 0, 0, 0, 0,             // call main
-            0x48, 0x89, 0xC7,             // mov rdi, rax
-        ]);
-        let exit_call = self.sections.text.len();
-        self.sections.text.extend_from_slice(&[
-            0xE8, 0, 0, 0, 0,             // call __plat_exit
-            0xF4,                         // hlt if it somehow returns
-        ]);
+        if self.abi.is_win64() {
+            /* Windows loader: align the stack, reserve 32 bytes of shadow
+             * space, call main, then hand its result to ExitProcess. */
+            self.sections.text.extend_from_slice(&[
+                0x48, 0x83, 0xE4, 0xF0,             // and rsp, -16
+                0x48, 0x83, 0xEC, 0x20,             // sub rsp, 32
+                0xE8, 0, 0, 0, 0,                   // call main
+                0x48, 0x89, 0xC1,                   // mov rcx, rax
+                0xE8, 0, 0, 0, 0,                   // call ExitProcess
+                0xF4,                               // hlt if it unexpectedly returns
+            ]);
+            self.sections.relocations.push(NucRelocation {
+                place_segment: SegmentKind::Text, place_offset: 9,
+                kind: RELOC_PC32, symbol: "main".into(),
+            });
+            self.sections.relocations.push(NucRelocation {
+                place_segment: SegmentKind::Text, place_offset: 17,
+                kind: RELOC_PC32, symbol: "ExitProcess".into(),
+            });
+        } else {
+            /* NUC and Linux: SysV entry with the kernel syscall ABI. */
+            self.sections.text.extend_from_slice(&[
+                0x48, 0x83, 0xEC, 0x08,       // sub rsp, 8
+                0xE8, 0, 0, 0, 0,             // call main
+                0x48, 0x83, 0xC4, 0x08,       // add rsp, 8
+                0x48, 0x89, 0xC7,             // mov rdi, rax
+                0xB8, 0x3C, 0, 0, 0,          // mov eax, SYS_EXIT
+                0x0F, 0x05,                   // syscall
+                0xF4,                         // hlt if SYS_EXIT unexpectedly returns
+            ]);
+            self.sections.relocations.push(NucRelocation {
+                place_segment: SegmentKind::Text, place_offset: 5,
+                kind: RELOC_PC32, symbol: "main".into(),
+            });
+        }
         self.sections.symbols.push(NucSymbol {
             name: "_start".into(), sym_type: 1, bind: 0,
             segment: SegmentKind::Text, value: 0, size: self.sections.text.len() as u64,
-        });
-        self.sections.relocations.push(NucRelocation {
-            place_segment: SegmentKind::Text, place_offset: 5,
-            kind: RELOC_PC32, symbol: "main".into(),
-        });
-        self.sections.relocations.push(NucRelocation {
-            place_segment: SegmentKind::Text,
-            place_offset: (exit_call + 1) as u64,
-            kind: RELOC_PC32,
-            symbol: "__plat_exit".into(),
         });
 
         for item in &self.unit.items {
@@ -379,8 +427,8 @@ impl Generator<'_> {
             let Some(body) = &function.body else { continue };
             if is_builtin(&function.name) { continue; }
             if function.name == "_start" { continue; }
-            if function.params.len() > ARG_REGS.len() {
-                bail!("{}", codegen_error(&function.location, "functions with more than six parameters are not implemented"));
+            if function.params.len() > self.abi.arg_regs().len() {
+                bail!("{}", codegen_error(&function.location, "too many parameters for target ABI"));
             }
             let start = self.sections.text.len();
             let generated = FunctionGenerator::new(self, function)?.generate(body)?;
@@ -494,6 +542,7 @@ struct BranchFixup {
 
 struct FunctionGenerator<'g, 'u> {
     generator: &'g Generator<'u>,
+    abi: Abi,
     function: Function,
     code: Vec<u8>,
     relocations: Vec<NucRelocation>,
@@ -511,8 +560,8 @@ struct FunctionGenerator<'g, 'u> {
 impl<'g, 'u> FunctionGenerator<'g, 'u> {
     fn new(generator: &'g Generator<'u>, function: &Function) -> Result<Self> {
         let body = function.body.as_ref().ok_or_else(|| anyhow::anyhow!("function body is missing"))?;
-        if function.params.len() > ARG_REGS.len() {
-            bail!("{}", codegen_error(&function.location, "functions with more than six parameters are not implemented"));
+        if function.params.len() > generator.abi.arg_regs().len() {
+            bail!("{}", codegen_error(&function.location, "too many parameters for target ABI"));
         }
         let mut local_bytes = 0usize;
         for param in &function.params {
@@ -520,9 +569,11 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             local_bytes = local_bytes.checked_add(align_to(generator.layouts.size_align_known(&ty)?.0.max(1), 8)?).ok_or_else(|| anyhow::anyhow!("stack frame size overflow"))?;
         }
         count_local_bytes(body, &generator.layouts, &mut local_bytes)?;
-        let frame_size = align_to(local_bytes, 16)?;
+        let scratch = if generator.abi.is_win64() { 16 } else { 0 };
+        let frame_size = align_to(local_bytes + scratch, 16)?;
         Ok(Self {
             generator,
+            abi: generator.abi,
             function: function.clone(),
             code: Vec::new(),
             relocations: Vec::new(),
@@ -550,7 +601,7 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             let ty = param.ty.decay_array();
             let name = param.name.as_ref().ok_or_else(|| anyhow::anyhow!("{}", codegen_error(&param.location, "function definition parameter requires a name")))?;
             let offset = self.allocate_local(name, ty.clone())?;
-            self.emit_mov_rr(Reg::Rax, ARG_REGS[index], true);
+            self.emit_mov_rr(Reg::Rax, self.abi.arg_regs()[index], true);
             if ty.is_reference {
                 self.emit_store(Reg::Rax, Reg::Rbp, -offset, &long_type())?;
             } else {
@@ -781,7 +832,7 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
         self.place_label(step_label);
         self.emit_load(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
         if element_size > 1 {
-            self.emit_scale_rax(element_size)?;
+            self.emit_add_imm(Reg::Rax, element_size as i32);
         }
         self.emit_store(Reg::Rax, Reg::Rbp, -cursor, &long_type())?;
         self.emit_jmp(condition_label);
@@ -1055,10 +1106,14 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
         Ok(())
     }
 
-    /// `call __plat_*`: one opcode and a PC32 relocation the backend points
-    /// at its own platform layer. The generator never emits a syscall, so a
-    /// single code path serves NUC, ELF64 and PE32+.
-    fn emit_symbol_call(&mut self, symbol: &str) -> Result<()> {
+    fn emit_write_syscall(&mut self) {
+        /* NUC's ABI uses syscall 2 for console output. Linux x86_64 uses 1
+         * for write; 2 is open, which silently produced no output. */
+        let number = if self.abi == Abi::SysvLinux { 1 } else { 2 };
+        self.emit_mov_imm32(Reg::Rax, number);
+    }
+
+    fn emit_import_call(&mut self, symbol: &str) {
         let displacement = self.code.len() + 1;
         self.emit_bytes(&[0xE8, 0, 0, 0, 0]);
         self.relocations.push(NucRelocation {
@@ -1067,39 +1122,118 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             kind: RELOC_PC32,
             symbol: symbol.to_owned(),
         });
-        Ok(())
+    }
+
+    /// Win64 runtime builtins call the PE import table instead of issuing
+    /// Linux syscalls. Returns false when `name` is not a target builtin.
+    fn emit_win64_builtin(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        location: &crate::diagnostic::SourceLocation,
+    ) -> Result<bool> {
+        match name {
+            "novus_write" => {
+                if args.len() != 2 {
+                    bail!("{}", codegen_error(location, "novus_write expects two arguments"));
+                }
+                let disp = (-(self.frame_size as i32) + 8) as i8;
+                let base = (-(self.frame_size as i32)) as i8;
+                self.emit_expr(&args[1])?;
+                self.emit_store(Reg::Rax, Reg::Rbp, disp as i32, &long_type())?;
+                self.emit_expr(&args[0])?;
+                self.emit_store(Reg::Rax, Reg::Rbp, base as i32, &long_type())?;
+                /* GetStdHandle(STD_OUTPUT_HANDLE) */
+                self.emit_bytes(&[0x48, 0xC7, 0xC1, 0xF5, 0xFF, 0xFF, 0xFF]);
+                self.emit_bytes(&[0x48, 0x83, 0xEC, 0x20]);
+                self.emit_import_call("GetStdHandle");
+                self.emit_bytes(&[0x48, 0x83, 0xC4, 0x20]);
+                self.emit_mov_rr(Reg::R11, Reg::Rax, true);
+                /* WriteFile(handle, buffer, length, &written, nullptr) */
+                self.emit_mov_rr(Reg::Rcx, Reg::R11, true);
+                self.emit_bytes(&[0x48, 0x8B, 0x55, base as u8]);
+                self.emit_bytes(&[0x4C, 0x8B, 0x45, disp as u8]);
+                self.emit_bytes(&[0x4C, 0x8D, 0x4D, disp as u8]);
+                self.emit_bytes(&[0x48, 0x83, 0xEC, 0x28]);
+                self.emit_import_call("WriteFile");
+                self.emit_bytes(&[0x48, 0x83, 0xC4, 0x28]);
+                self.emit_mov_imm32(Reg::Rax, 0);
+                return Ok(true);
+            }
+            "novus_exit" | "exit" => {
+                if args.len() != 1 {
+                    bail!("{}", codegen_error(location, "exit expects one argument"));
+                }
+                self.emit_expr(&args[0])?;
+                self.emit_mov_rr(Reg::Rcx, Reg::Rax, true);
+                self.emit_bytes(&[0x48, 0x83, 0xEC, 0x20]);
+                self.emit_import_call("ExitProcess");
+                self.emit_bytes(&[0x48, 0x83, 0xC4, 0x20, 0xF4]);
+                return Ok(true);
+            }
+            "abort" => {
+                if !args.is_empty() {
+                    bail!("{}", codegen_error(location, "abort takes no arguments"));
+                }
+                self.emit_mov_imm32(Reg::Rcx, 134);
+                self.emit_bytes(&[0x48, 0x83, 0xEC, 0x20]);
+                self.emit_import_call("ExitProcess");
+                self.emit_bytes(&[0x48, 0x83, 0xC4, 0x20, 0xF4]);
+                return Ok(true);
+            }
+            "novus_yield" => {
+                if !args.is_empty() {
+                    bail!("{}", codegen_error(location, "novus_yield takes no arguments"));
+                }
+                self.emit_bytes(&[0x48, 0x83, 0xEC, 0x20]);
+                self.emit_import_call("SwitchToThread");
+                self.emit_bytes(&[0x48, 0x83, 0xC4, 0x20]);
+                return Ok(true);
+            }
+            "puts" | "putchar" => {
+                bail!("{}", codegen_error(location, "builtin is not available for the Win64 target yet"));
+            }
+            _ => {}
+        }
+        Ok(false)
     }
 
     fn emit_call(&mut self, name: &str, args: &[Expr], location: &crate::diagnostic::SourceLocation) -> Result<()> {
+        if self.abi.is_win64() && self.emit_win64_builtin(name, args, location)? {
+            return Ok(());
+        }
         match name {
             "novus_write" => {
                 if args.len() != 2 { bail!("{}", codegen_error(location, "novus_write expects two arguments")); }
-                self.emit_expr(&args[0])?;
-                self.push(Reg::Rax);
                 self.emit_expr(&args[1])?;
+                self.push(Reg::Rax);
+                self.emit_expr(&args[0])?;
                 self.emit_mov_rr(Reg::Rsi, Reg::Rax, true);
-                self.pop(Reg::Rdi);
-                self.emit_symbol_call("__plat_write")?;
+                self.pop(Reg::Rdx);
+                self.emit_mov_imm32(Reg::Rdi, 1);
+                self.emit_write_syscall();
+                self.emit_bytes(&[0x0F, 0x05]);
                 return Ok(());
             }
             "novus_yield" => {
                 if !args.is_empty() { bail!("{}", codegen_error(location, "novus_yield takes no arguments")); }
-                self.emit_symbol_call("__plat_yield")?;
+                self.emit_mov_imm32(Reg::Rax, 1);
+                self.emit_bytes(&[0x0F, 0x05]);
                 return Ok(());
             }
             "novus_exit" | "exit" => {
                 if args.len() != 1 { bail!("{}", codegen_error(location, "exit expects one argument")); }
                 self.emit_expr(&args[0])?;
                 self.emit_mov_rr(Reg::Rdi, Reg::Rax, true);
-                self.emit_symbol_call("__plat_exit")?;
-                self.emit_bytes(&[0xF4]);
+                self.emit_mov_imm32(Reg::Rax, 60);
+                self.emit_bytes(&[0x0F, 0x05, 0xF4]);
                 return Ok(());
             }
             "abort" => {
                 if !args.is_empty() { bail!("{}", codegen_error(location, "abort takes no arguments")); }
                 self.emit_mov_imm32(Reg::Rdi, 134);
-                self.emit_symbol_call("__plat_exit")?;
-                self.emit_bytes(&[0xF4]);
+                self.emit_mov_imm32(Reg::Rax, 60);
+                self.emit_bytes(&[0x0F, 0x05, 0xF4]);
                 return Ok(());
             }
             "puts" => {
@@ -1117,17 +1251,19 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 self.emit_jmp(scan);
                 self.place_label(done);
                 self.emit_mov_rr(Reg::Rdx, Reg::Rcx, true);
-                self.emit_bytes(&[0x48, 0x29, 0xF2]); // sub rdx, rsi     len
-                self.emit_mov_rr(Reg::Rdi, Reg::Rsi, true); // buf
-                self.emit_mov_rr(Reg::Rsi, Reg::Rdx, true); // len
-                self.emit_symbol_call("__plat_write")?;
+                self.emit_bytes(&[0x48, 0x29, 0xF2]); // sub rdx, rsi
+                self.emit_mov_imm32(Reg::Rdi, 1);
+                self.emit_write_syscall();
+                self.emit_bytes(&[0x0F, 0x05]);
                 // Trailing newline, written from a stack scratch byte.
                 self.adjust_rsp(false, 16)?;
                 self.stack_depth += 16;
                 self.emit_bytes(&[0xC6, 0x04, 0x24, b'\n']); // mov byte [rsp], 10
-                self.emit_mov_rr(Reg::Rdi, Reg::Rsp, true);
-                self.emit_mov_imm32(Reg::Rsi, 1);
-                self.emit_symbol_call("__plat_write")?;
+                self.emit_bytes(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+                self.emit_mov_imm32(Reg::Rdx, 1);
+                self.emit_mov_imm32(Reg::Rdi, 1);
+                self.emit_write_syscall();
+                self.emit_bytes(&[0x0F, 0x05]);
                 self.adjust_rsp(true, 16)?;
                 self.stack_depth -= 16;
                 self.emit_mov_imm32(Reg::Rax, 0);
@@ -1139,9 +1275,11 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 self.adjust_rsp(false, 16)?;
                 self.stack_depth += 16;
                 self.emit_bytes(&[0x88, 0x04, 0x24]); // mov byte [rsp], al
-                self.emit_mov_rr(Reg::Rdi, Reg::Rsp, true);
-                self.emit_mov_imm32(Reg::Rsi, 1);
-                self.emit_symbol_call("__plat_write")?;
+                self.emit_bytes(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
+                self.emit_mov_imm32(Reg::Rdx, 1);
+                self.emit_mov_imm32(Reg::Rdi, 1);
+                self.emit_write_syscall();
+                self.emit_bytes(&[0x0F, 0x05]);
                 self.emit_bytes(&[0x0F, 0xB6, 0x04, 0x24]); // movzx eax, byte [rsp]
                 self.adjust_rsp(true, 16)?;
                 self.stack_depth -= 16;
@@ -1149,7 +1287,10 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             }
             _ => {}
         }
-        if args.len() > ARG_REGS.len() { bail!("{}", codegen_error(location, "calls with more than six arguments are not implemented")); }
+        let arg_regs = self.abi.arg_regs();
+        if args.len() > arg_regs.len() {
+            bail!("{}", codegen_error(location, "too many call arguments for target ABI"));
+        }
         let by_reference: Vec<bool> = self
             .generator
             .signatures
@@ -1161,8 +1302,6 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             })
             .unwrap_or_else(|| vec![false; args.len()]);
         let argument_bytes = args.len() * 8;
-        let padding = (16 - ((self.stack_depth + argument_bytes) & 15)) & 15;
-        if padding != 0 { self.adjust_rsp(false, padding)?; self.stack_depth += padding; }
         for (argument, pass_reference) in args.iter().zip(by_reference.iter()).rev() {
             if *pass_reference {
                 self.emit_lvalue_address(argument)?;
@@ -1171,8 +1310,15 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             }
             self.push(Reg::Rax);
         }
-        for (index, register) in ARG_REGS.iter().take(args.len()).enumerate() {
-            self.emit_load(*register, Reg::Rsp, (index * 8) as i32, &long_type())?;
+        let shadow = if self.abi.is_win64() { 32 } else { 0 };
+        let padding = (16 - ((self.stack_depth + shadow) & 15)) & 15;
+        let below = shadow + padding;
+        if below != 0 {
+            self.adjust_rsp(false, below)?;
+            self.stack_depth += below;
+        }
+        for (index, register) in arg_regs.iter().take(args.len()).enumerate() {
+            self.emit_load(*register, Reg::Rsp, (below + index * 8) as i32, &long_type())?;
         }
         let displacement = self.code.len() + 1;
         self.emit_bytes(&[0xE8, 0, 0, 0, 0]);
@@ -1182,7 +1328,7 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
             kind: RELOC_PC32,
             symbol: name.to_owned(),
         });
-        let cleanup = argument_bytes + padding;
+        let cleanup = below + argument_bytes;
         if cleanup != 0 { self.adjust_rsp(true, cleanup)?; self.stack_depth -= cleanup; }
         Ok(())
     }
@@ -1377,15 +1523,29 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
     }
 
     fn emit_abs32_symbol(&mut self, symbol: &str) {
-        self.emit_u8(0xB8); // mov eax, imm32; zero-extends the address
-        let place = self.code.len();
-        self.emit_u32(0);
-        self.relocations.push(NucRelocation {
-            place_segment: SegmentKind::Text,
-            place_offset: place as u64,
-            kind: RELOC_32,
-            symbol: symbol.to_owned(),
-        });
+        if self.abi.needs_rip_relative() {
+            /* PE32+ and ELF64 images live above 4 GiB, so addresses must be
+             * materialised RIP-relative instead of `mov eax, imm32`. */
+            self.emit_bytes(&[0x48, 0x8D, 0x05]); // lea rax, [rip + disp32]
+            let place = self.code.len();
+            self.emit_u32(0);
+            self.relocations.push(NucRelocation {
+                place_segment: SegmentKind::Text,
+                place_offset: place as u64,
+                kind: RELOC_PC32,
+                symbol: symbol.to_owned(),
+            });
+        } else {
+            self.emit_u8(0xB8); // mov eax, imm32; zero-extends the address
+            let place = self.code.len();
+            self.emit_u32(0);
+            self.relocations.push(NucRelocation {
+                place_segment: SegmentKind::Text,
+                place_offset: place as u64,
+                kind: RELOC_32,
+                symbol: symbol.to_owned(),
+            });
+        }
     }
 
     fn emit_mov_imm64(&mut self, register: Reg, value: u64) {
@@ -1564,6 +1724,7 @@ mod tests {
         let unit: &'static TranslationUnit = Box::leak(Box::new(TranslationUnit { items: Vec::new() }));
         let generator: &'static Generator<'static> = Box::leak(Box::new(Generator {
             unit,
+            abi: Abi::SysvNuc,
             layouts: Layouts::default(),
             sections: CodeSections::default(),
             globals: HashMap::new(),
@@ -1573,6 +1734,7 @@ mod tests {
         }));
         FunctionGenerator {
             generator,
+            abi: Abi::SysvNuc,
             function: Function {
                 name: "test".into(),
                 return_type: Type::int(),

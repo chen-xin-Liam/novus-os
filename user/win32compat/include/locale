@@ -1,0 +1,12 @@
+#ifndef NOVUS_LOCALE
+#define NOVUS_LOCALE
+namespace std {
+  class locale {
+    int id;
+  public:
+    locale():id(0){}
+    locale(const locale& o):id(o.id){}
+    static const locale& classic(){ static locale l; return l; }
+  };
+}
+#endif

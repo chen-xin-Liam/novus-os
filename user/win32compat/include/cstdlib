@@ -1,0 +1,27 @@
+#ifndef NOVUS_CSTDLIB
+#define NOVUS_CSTDLIB
+#include "__novus_rt.h"
+extern "C" {
+  inline void* malloc(novus_size_t n) { return novus_alloc(n); }
+  inline void* calloc(novus_size_t n, novus_size_t s) { void* p = novus_alloc(n*s); if(p) novus_memset(p,0,n*s); return p; }
+  inline void* realloc(void* p, novus_size_t n) { void* q = novus_alloc(n); if(p){ novus_memcpy(q,p,n); novus_free(p);} return q; }
+  inline void free(void* p) { novus_free(p); }
+  inline void abort(void) { for(;;){} }
+  inline void exit(int) { for(;;){} }
+  typedef void (*atexit_fn)(void);
+  inline int atexit(atexit_fn) { return 0; }  /* no-op: test only registers */
+  inline int remove(const char*) { return 0; } /* fstream test removes tmp */
+  inline char* getenv(const char*) { return 0; }
+  inline unsigned long strtoul(const char* s, char** end, int base) {
+    unsigned long v = 0;
+    while (*s >= '0' && *s <= '9') { v = v*(unsigned long)base + (unsigned long)(*s - '0'); s++; }
+    if (end) *end = (char*)s;
+    return v;
+  }
+  inline int abs(int v) { return v < 0 ? -v : v; }
+  inline int rand(void) { return (int)novus_rand(); }
+  inline void srand(unsigned int s) { novus_rand_state = s; }
+}
+namespace std { using ::malloc; using ::calloc; using ::realloc; using ::free; using ::abort; using ::exit; using ::atexit; using ::remove; using ::getenv; using ::strtoul; using ::abs; }
+using ::malloc; using ::free; using ::abs; using ::rand; using ::atexit; using ::remove;
+#endif

@@ -1,0 +1,4 @@
+#ifndef NOVUS_SET
+#define NOVUS_SET
+#include "__novus_assoc.h"
+#endif

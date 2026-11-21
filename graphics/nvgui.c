@@ -290,6 +290,125 @@ ng_widget_t *ng_swatch(ng_widget_t *w, nd_color_t color, int selected,
   return w;
 }
 
+/* ---- context menu ------------------------------------------------------ */
+
+static INT32 menu_row_h(const ng_widget_t *w, UINT32 i) {
+  return (w->u.menu.flags[i] & NG_MENU_SEPARATOR) != 0u ? 10 : 24;
+}
+
+static INT32 menu_height(const ng_widget_t *w) {
+  INT32 h = 8;
+  UINT32 i;
+
+  for (i = 0; i < w->u.menu.count; i++) {
+    h += menu_row_h(w, i);
+  }
+  return h;
+}
+
+static INT32 menu_index_at(const ng_widget_t *w, INT32 x, INT32 y) {
+  INT32 yy;
+  UINT32 i;
+
+  if (!nd_rect_contains(w->abs, x, y)) {
+    return -1;
+  }
+  yy = w->abs.y + 4;
+  for (i = 0; i < w->u.menu.count; i++) {
+    INT32 rh = menu_row_h(w, i);
+    if (y >= yy && y < yy + rh) {
+      return (INT32)i;
+    }
+    yy += rh;
+  }
+  return -1;
+}
+
+ng_widget_t *ng_menu(ng_widget_t *parent, ng_action_fn on_context,
+                     ng_value_fn on_select) {
+  ng_widget_t *w = ng_create(parent, NG_CONTEXT_MENU, 0, 0, 140, 100);
+
+  if (w == 0) {
+    return 0;
+  }
+  w->on_action = on_context;
+  w->on_value = on_select;
+  w->u.menu.count = 0;
+  w->u.menu.hover = -1;
+  w->flags |= NG_WF_OVERLAY;
+  w->flags &= ~NG_WF_VISIBLE;
+  g_ctx.menu = w;
+  return w;
+}
+
+void ng_menu_items(ng_widget_t *w, const char **labels, const INT32 *ids,
+                   const UINT8 *flags, UINT32 count) {
+  UINT32 i;
+
+  if (w == 0 || w->type != NG_CONTEXT_MENU) {
+    return;
+  }
+  count = count > NG_MENU_MAX ? NG_MENU_MAX : count;
+  for (i = 0; i < count; i++) {
+    w->u.menu.labels[i] = labels[i];
+    w->u.menu.ids[i] = ids[i];
+    w->u.menu.flags[i] = flags[i];
+  }
+  w->u.menu.count = count;
+  w->u.menu.hover = -1;
+}
+
+void ng_menu_open(ng_widget_t *w, INT32 x, INT32 y, INT32 screen_w,
+                  INT32 screen_h) {
+  INT32 mw = 120;
+  INT32 mh;
+  INT32 max_x;
+  INT32 max_y;
+  UINT32 i;
+
+  if (w == 0 || w->type != NG_CONTEXT_MENU || w->u.menu.count == 0u) {
+    return;
+  }
+  for (i = 0; i < w->u.menu.count; i++) {
+    const char *label = w->u.menu.labels[i];
+    INT32 tw;
+
+    if (label == 0 || (w->u.menu.flags[i] & NG_MENU_SEPARATOR) != 0u) {
+      continue;
+    }
+    tw = (INT32)nd_text_width(label, 1) + 30;
+    if (tw > mw) {
+      mw = tw;
+    }
+  }
+  if (mw > 260) {
+    mw = 260;
+  }
+  mh = menu_height(w);
+  max_x = screen_w - mw - 4;
+  max_y = screen_h - mh - 4;
+  w->rect.x = x < 4 ? 4 : (x > max_x ? max_x : x);
+  w->rect.y = y < 4 ? 4 : (y > max_y ? max_y : y);
+  w->rect.w = mw;
+  w->rect.h = mh;
+  w->abs = w->rect;
+  w->u.menu.hover = -1;
+  ng_damage_widget(w);
+  w->flags |= NG_WF_VISIBLE;
+  ng_damage_widget(w);
+}
+
+void ng_menu_close(ng_widget_t *w) {
+  if (w == 0) {
+    return;
+  }
+  if ((w->flags & NG_WF_VISIBLE) != 0u) {
+    ng_damage_widget(w);
+  }
+  w->flags &= ~NG_WF_VISIBLE;
+  w->u.menu.hover = -1;
+}
+
 ng_widget_t *ng_checkbox(ng_widget_t *w, const char *text, int checked,
                          ng_action_fn fn) {
   w->u.check.text = text;
@@ -1286,6 +1405,44 @@ static void draw_swatch(ng_widget_t *w) {
   }
 }
 
+static void draw_menu(ng_widget_t *w) {
+  const ng_theme_t *t = &g_ctx.theme;
+  nd_surface_t *s = g_ctx.surf;
+  INT32 yy = w->abs.y + 4;
+  UINT32 i;
+
+  nd_round_rect(s, w->abs, 8, t->ctrl_bg);
+  nd_round_frame(s, w->abs, 8, 1, t->win_border);
+  if (w->abs.h > 10) {
+    nd_fill_rect(s, nd_rect(w->abs.x + 2, w->abs.y + 4, 2,
+                            w->abs.h - 8), t->accent);
+  }
+  for (i = 0; i < w->u.menu.count; i++) {
+    const char *label = w->u.menu.labels[i];
+    UINT8 flags = w->u.menu.flags[i];
+    INT32 rh = menu_row_h(w, i);
+
+    if ((flags & NG_MENU_SEPARATOR) != 0u) {
+      nd_fill_rect(s, nd_rect(w->abs.x + 8, yy + 4, w->abs.w - 16, 1),
+                   t->win_border);
+      yy += rh;
+      continue;
+    }
+    if ((INT32)i == w->u.menu.hover &&
+        (flags & NG_MENU_DISABLED) == 0u) {
+      nd_round_rect(s, nd_rect(w->abs.x + 4, yy, w->abs.w - 8, rh - 2), 5,
+                    t->ctrl_hover);
+    }
+    if (label != 0 && label[0] != '\0') {
+      nd_color_t fg = (flags & NG_MENU_DISABLED) != 0u ? t->text_dim
+                    : (flags & NG_MENU_DANGER) != 0u ? ND_RGB(0xC4, 0x2B, 0x1C)
+                                                     : t->text;
+      nd_text(s, w->abs.x + 16, yy + 5, label, fg, 1);
+    }
+    yy += rh;
+  }
+}
+
 static void draw_self(ng_widget_t *w) {
   switch (w->type) {
   case NG_DESKTOP:
@@ -1338,6 +1495,9 @@ static void draw_self(ng_widget_t *w) {
     break;
   case NG_SWATCH:
     draw_swatch(w);
+    break;
+  case NG_CONTEXT_MENU:
+    draw_menu(w);
     break;
   default:
     break;
@@ -1838,6 +1998,89 @@ static void key_dispatch(const nd_event_t *ev) {
   }
 }
 
+static void menu_fire(ng_widget_t *m, INT32 idx) {
+  UINT8 f;
+
+  if (m == 0 || idx < 0 || (UINT32)idx >= m->u.menu.count || m->on_value == 0) {
+    return;
+  }
+  f = m->u.menu.flags[idx];
+  if ((f & (NG_MENU_DISABLED | NG_MENU_SEPARATOR)) == 0u) {
+    m->on_value(&g_ctx, m, m->u.menu.ids[idx]);
+  }
+}
+
+/* Right-click routing for the shared menu. Returns 1 when the event was
+ * consumed, so ordinary widgets never see a right press as a left one. */
+static int menu_dispatch(const nd_event_t *ev) {
+  ng_widget_t *m = g_ctx.menu;
+  int visible;
+
+  if (m == 0) {
+    return 0;
+  }
+  visible = (m->flags & NG_WF_VISIBLE) != 0u;
+  if (!visible) {
+    if (ev->type == ND_EV_MOUSE_DOWN &&
+        (ev->button & ND_BUTTON_RIGHT) != 0u && m->on_action != 0) {
+      m->on_action(&g_ctx, m);
+      return 1;
+    }
+    return 0;
+  }
+  if (ev->type == ND_EV_MOUSE_MOVE) {
+    INT32 idx = menu_index_at(m, ev->x, ev->y);
+
+    if (idx != m->u.menu.hover) {
+      ng_damage_widget(m);
+      m->u.menu.hover = idx;
+      ng_damage_widget(m);
+    }
+    return 1;
+  }
+  if (ev->type == ND_EV_MOUSE_DOWN) {
+    if ((ev->button & ND_BUTTON_RIGHT) != 0u) {
+      INT32 idx = menu_index_at(m, ev->x, ev->y);
+
+      ng_menu_close(m);
+      if (idx >= 0) {
+        menu_fire(m, idx);
+      } else if (m->on_action != 0) {
+        m->on_action(&g_ctx, m);
+      }
+      return 1;
+    }
+    if ((ev->button & ND_BUTTON_LEFT) != 0u) {
+      if (nd_rect_contains(m->abs, ev->x, ev->y)) {
+        INT32 idx = menu_index_at(m, ev->x, ev->y);
+
+        if (idx != m->u.menu.hover) {
+          ng_damage_widget(m);
+          m->u.menu.hover = idx;
+          ng_damage_widget(m);
+        }
+        return 1;
+      }
+      ng_menu_close(m);
+      return 0;
+    }
+    return 1;
+  }
+  if (ev->type == ND_EV_MOUSE_UP) {
+    if ((ev->button & ND_BUTTON_LEFT) != 0u &&
+        nd_rect_contains(m->abs, ev->x, ev->y)) {
+      INT32 idx = menu_index_at(m, ev->x, ev->y);
+
+      ng_menu_close(m);
+      if (idx >= 0) {
+        menu_fire(m, idx);
+      }
+    }
+    return 1;
+  }
+  return 1;
+}
+
 void ng_dispatch(const nd_event_t *ev) {
   if (!g_ready || ev == 0) {
     return;
@@ -1847,6 +2090,9 @@ void ng_dispatch(const nd_event_t *ev) {
 
   switch (ev->type) {
   case ND_EV_MOUSE_MOVE:
+    if (menu_dispatch(ev)) {
+      return;
+    }
     if (g_ctx.drag_win != 0) {
       window_drag_to(g_ctx.drag_win, ev->x, ev->y);
       return;
@@ -1859,7 +2105,16 @@ void ng_dispatch(const nd_event_t *ev) {
     break;
 
   case ND_EV_MOUSE_DOWN: {
-    ng_widget_t *w = hit_test(ev->x, ev->y);
+    ng_widget_t *w;
+
+    if (menu_dispatch(ev)) {
+      return;
+    }
+    if ((ev->button & ND_BUTTON_RIGHT) != 0u) {
+      g_ctx.buttons |= ev->button;
+      return;
+    }
+    w = hit_test(ev->x, ev->y);
 
     g_ctx.buttons |= ev->button;
     if (w == 0) {
@@ -1951,8 +2206,16 @@ void ng_dispatch(const nd_event_t *ev) {
   }
 
   case ND_EV_MOUSE_UP: {
-    ng_widget_t *w = g_ctx.capture != 0 ? g_ctx.capture
-                                        : hit_test(ev->x, ev->y);
+    ng_widget_t *w;
+
+    if (menu_dispatch(ev)) {
+      return;
+    }
+    if ((ev->button & ND_BUTTON_RIGHT) != 0u) {
+      g_ctx.buttons &= (UINT8)~ev->button;
+      return;
+    }
+    w = g_ctx.capture != 0 ? g_ctx.capture : hit_test(ev->x, ev->y);
 
     g_ctx.buttons &= (UINT8)~ev->button;
     if (g_ctx.drag_win != 0) {

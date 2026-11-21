@@ -5,3 +5,15 @@ edition = "2021"
 
 [dependencies]
 anyhow = "1"
+
+[[bin]]
+name = "cppcc"
+path = "src/main.rs"
+
+[[bin]]
+name = "cppcc_to_win64"
+path = "src/bin/cppcc_to_win64.rs"
+
+[[bin]]
+name = "cppcc_to_linux"
+path = "src/bin/cppcc_to_linux.rs"

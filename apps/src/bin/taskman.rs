@@ -175,6 +175,7 @@ fn draw(
     history_head: usize,
     accent: u32,
     message: &str,
+    menu: &ui::Menu,
 ) {
     w.clear();
     ui::shell(w, CW, CH, "任务管理器", accent);
@@ -188,6 +189,7 @@ fn draw(
     } else {
         draw_performance(w, history, history_count, history_head, cpu, n, total, accent);
     }
+    menu.draw(w);
     w.invalidate();
 }
 
@@ -227,6 +229,80 @@ fn load(port: u64, out: &mut [Row; MAX_ROWS]) -> (usize, u16) {
     (n, total)
 }
 
+fn kill_selected(
+    sys_port: u64,
+    rows: &mut [Row; MAX_ROWS],
+    n: &mut usize,
+    total: &mut u16,
+    selected: &mut usize,
+    page: &mut usize,
+    message: &mut &'static str,
+) {
+    if *selected >= *n || rows[*selected].pid == sys::getpid() {
+        *message = "不能结束任务管理器自身";
+        return;
+    }
+    match sinfo::kill(sys_port, rows[*selected].pid) {
+        Some(0) => *message = "任务已结束",
+        Some(-2) => *message = "系统任务受保护，无法结束",
+        Some(-3) => *message = "任务正在退出",
+        _ => *message = "结束失败：任务不存在或权限不足",
+    }
+    let (a, b) = load(sys_port, rows);
+    *n = a;
+    *total = b;
+    if *selected >= *n && *n > 0 {
+        *selected = *n - 1;
+    }
+    *page = *selected / VISIBLE_ROWS;
+}
+
+fn taskman_menu(
+    menu: &mut ui::Menu,
+    x: i32,
+    y: i32,
+    rows: &[Row; MAX_ROWS],
+    n: usize,
+    selected: usize,
+    page: usize,
+) -> usize {
+    let self_pid = sys::getpid();
+    let on_row = y >= 108 && y < 108 + VISIBLE_ROWS as i32 * ui::ROW_H as i32;
+    let row_index = if on_row {
+        page * VISIBLE_ROWS + (y as usize - 108) / ui::ROW_H as usize
+    } else {
+        usize::MAX
+    };
+
+    if on_row && row_index < n {
+        let kill_flags = if rows[row_index].pid == self_pid { ui::MENU_DISABLED } else { ui::MENU_DANGER };
+        menu.set(&[
+            ui::MenuItem::new(ui::l("结束任务", "End task"), 1, kill_flags),
+            ui::MenuItem::new(ui::l("属性", "Properties"), 6, 0),
+            ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+            ui::MenuItem::new(ui::l("刷新", "Refresh"), 2, 0),
+            ui::MenuItem::new(ui::l("按名称排序", "Sort by name"), 3, 0),
+        ]);
+    } else if y >= 88 && y < 108 {
+        menu.set(&[
+            ui::MenuItem::new(ui::l("按名称排序", "Sort by name"), 3, 0),
+            ui::MenuItem::new(ui::l("按 PID 排序", "Sort by PID"), 4, 0),
+            ui::MenuItem::new(ui::l("按 CPU 排序", "Sort by CPU"), 5, 0),
+            ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+            ui::MenuItem::new(ui::l("刷新", "Refresh"), 2, 0),
+        ]);
+    } else {
+        menu.set(&[
+            ui::MenuItem::new(ui::l("刷新", "Refresh"), 2, 0),
+            ui::MenuItem::new(ui::l("按名称排序", "Sort by name"), 3, 0),
+            ui::MenuItem::new(ui::l("性能", "Performance"), 7, 0),
+        ]);
+    }
+    let _ = selected;
+    menu.open(x, y, CW, CH);
+    if row_index < n { row_index } else { usize::MAX }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] taskman up\n");
@@ -260,7 +336,8 @@ pub extern "C" fn _start() -> ! {
     let mut page = 0usize;
     let mut tab = 0u8;
     let mut message = "选择一个进程以结束任务";
-    draw(&mut win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message);
+    let mut menu = ui::Menu::new();
+    draw(&mut win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message, &menu);
 
     let mut idle = 0u32;
     let mut redraw = false;
@@ -271,7 +348,69 @@ pub extern "C" fn _start() -> ! {
                     win.destroy();
                     sys::exit(0);
                 }
-                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
+                wm::Ev::Mouse(m)
+                    if menu.is_open() && m.kind == wm::MOUSE_MOVE =>
+                {
+                    menu.motion(m.x, m.y);
+                    redraw = true;
+                }
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_RIGHT =>
+                {
+                    let hit = taskman_menu(&mut menu, m.x, m.y, &rows, n, selected, page);
+                    if hit < n {
+                        selected = hit;
+                    }
+                    redraw = true;
+                }
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
+                    if let Some(action) = menu.click(m.x, m.y) {
+                        match action {
+                            1 => kill_selected(sys_port, &mut rows, &mut n, &mut total,
+                                               &mut selected, &mut page, &mut message),
+                            2 => {
+                                let (a, b) = load(sys_port, &mut rows);
+                                n = a;
+                                total = b;
+                            }
+                            3 => sort_rows(&mut rows, n, 0),
+                            4 => sort_rows(&mut rows, n, 1),
+                            5 => sort_rows(&mut rows, n, 2),
+                            6 => message = "进程属性：选中项已在列表中标记",
+                            7 => tab = 1,
+                            _ => {}
+                        }
+                    } else {
+                        menu.close();
+                    }
+                    redraw = true;
+                }
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT =>
+                {
+                    let hit = taskman_menu(&mut menu, m.x, m.y, &rows, n, selected, page);
+                    if hit < n {
+                        selected = hit;
+                    }
+                    redraw = true;
+                }
+                wm::Ev::Key(k, _)
+                    if k == wm::KEY_ESC && menu.is_open() =>
+                {
+                    menu.close();
+                    redraw = true;
+                }
+                wm::Ev::Mouse(m)
+                    if !menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
                     redraw = true;
                     if m.y >= 60 && m.y < 86 {
                         tab = if m.x < 100 { 0 } else { 1 };
@@ -281,21 +420,8 @@ pub extern "C" fn _start() -> ! {
                             selected = row;
                         }
                     } else if tab == 0 && m.y >= 370 && m.y < 400 && m.x < 104 {
-                        if selected < n && rows[selected].pid != sys::getpid() {
-                            match sinfo::kill(sys_port, rows[selected].pid) {
-                                Some(0) => message = "任务已结束",
-                                Some(-2) => message = "系统任务受保护，无法结束",
-                                Some(-3) => message = "任务正在退出",
-                                _ => message = "结束失败：任务不存在或权限不足",
-                            }
-                            let (a, b) = load(sys_port, &mut rows);
-                            n = a;
-                            total = b;
-                            if selected >= n && n > 0 { selected = n - 1; }
-                            page = selected / VISIBLE_ROWS;
-                        } else {
-                            message = "不能结束任务管理器自身";
-                        }
+                        kill_selected(sys_port, &mut rows, &mut n, &mut total,
+                                      &mut selected, &mut page, &mut message);
                     } else if tab == 0 && m.y >= 370 && m.y < 400 && m.x < 194 {
                         let (a, b) = load(sys_port, &mut rows);
                         n = a;
@@ -339,7 +465,7 @@ pub extern "C" fn _start() -> ! {
             redraw = true;
         }
         if redraw {
-            draw(&mut win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message);
+            draw(&mut win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message, &menu);
             redraw = false;
         }
         sys::yield_now();

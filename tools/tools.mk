@@ -206,25 +206,47 @@ $(RUST_HOST_LIB): $(RUST_DEPS)
 	    RUSTFLAGS="-C debuginfo=0" $(CARGO) build --release
 
 # ---------------------------------------------------------------------------
-# cppcc: C++98 subset -> NUC (host-side Rust tool)
+# cppcc: C++11 compilation library and host-side tools
 # ---------------------------------------------------------------------------
 
 CPPCC_DIR        := user/cppcc
 CPPCC_TARGET_DIR := $(CURDIR)/build/rust-cppcc
 CPPCC_HOST_SUFFIX := $(if $(filter Windows_NT,$(OS)),.exe,)
 CPPCC_HOST_BIN   := $(CPPCC_TARGET_DIR)/release/cppcc$(CPPCC_HOST_SUFFIX)
+CPPCC_WIN64_BIN  := $(CPPCC_TARGET_DIR)/release/cppcc_to_win64$(CPPCC_HOST_SUFFIX)
+CPPCC_LINUX_BIN  := $(CPPCC_TARGET_DIR)/release/cppcc_to_linux$(CPPCC_HOST_SUFFIX)
 CPPCC            := $(TOOLS_OUT)/cppcc$(CPPCC_HOST_SUFFIX)
+CPPCC_TO_WIN64   := $(TOOLS_OUT)/cppcc_to_win64$(CPPCC_HOST_SUFFIX)
+CPPCC_TO_LINUX   := $(TOOLS_OUT)/cppcc_to_linux$(CPPCC_HOST_SUFFIX)
 CPPCC_HELLO_SRC  := $(CPPCC_DIR)/examples/hello.cc
 CPPCC_HELLO_NUC  := out/cppcc/hello.nuc
 CPPCC_DEPS       := $(shell find $(CPPCC_DIR) -type f -not -path '$(CPPCC_DIR)/target/*' 2>/dev/null)
 
-.PHONY: cppcc cppcc-demo
+CPPCC_CABI_DIR        := user/cppcc-cabi
+CPPCC_CABI_TARGET_DIR := $(CURDIR)/build/rust-cppcc-cabi
+CPPCC_CABI_BUILT      := $(if $(filter Windows_NT,$(OS)),$(CPPCC_CABI_TARGET_DIR)/release/cppcc_cabi.lib,$(CPPCC_CABI_TARGET_DIR)/release/libcppcc_cabi.a)
+CPPCC_CABI_OUT        := $(TOOLS_OUT)/$(if $(filter Windows_NT,$(OS)),cppcc_cabi.lib,libcppcc_cabi.a)
+CPPCC_CABI_DEPS       := $(shell find $(CPPCC_CABI_DIR) $(CPPCC_DIR) -type f -not -path '*/target/*' 2>/dev/null)
+
+.PHONY: cppcc cppcc-demo cppcc-cabi cppcc-to-win64 cppcc-to-linux cppcc-tools
 cppcc: $(CPPCC)
 cppcc-demo: $(CPPCC_HELLO_NUC)
+cppcc-cabi: $(CPPCC_CABI_OUT)
+cppcc-to-win64: $(CPPCC_TO_WIN64)
+cppcc-to-linux: $(CPPCC_TO_LINUX)
+cppcc-tools: $(CPPCC) $(CPPCC_TO_WIN64) $(CPPCC_TO_LINUX) $(CPPCC_CABI_OUT)
 
 ifeq ($(CONFIG_USER_CPPCC),y)
 all: $(CPPCC)
 tools: $(CPPCC)
+endif
+
+ifeq ($(CONFIG_USER_CPPCC_MULTITARGET),y)
+all: $(CPPCC_TO_WIN64) $(CPPCC_TO_LINUX) $(CPPCC_CABI_OUT)
+tools: $(CPPCC_TO_WIN64) $(CPPCC_TO_LINUX) $(CPPCC_CABI_OUT)
+endif
+
+ifeq ($(CONFIG_USER_CPPCC),y)
 
 $(CPPCC): $(CPPCC_DEPS) | $(TOOLS_OUT)
 	@test -n "$(CARGO)" || { echo "ERROR: cargo not found in PATH; cannot build cppcc." >&2; exit 1; }
@@ -236,6 +258,21 @@ $(CPPCC_HELLO_NUC): $(CPPCC_HELLO_SRC) $(CPPCC) | out
 	$(CPPCC) $< -o $@
 
 endif # CONFIG_USER_CPPCC
+
+ifeq ($(CONFIG_USER_CPPCC_MULTITARGET),y)
+
+$(CPPCC_TO_WIN64) $(CPPCC_TO_LINUX): $(CPPCC_DEPS) | $(TOOLS_OUT)
+	@test -n "$(CARGO)" || { echo "ERROR: cargo not found in PATH; cannot build cppcc tools." >&2; exit 1; }
+	cd $(CPPCC_DIR) && CARGO_TARGET_DIR=$(CPPCC_TARGET_DIR) $(CARGO) build --release
+	cp $(CPPCC_WIN64_BIN) $(CPPCC_TO_WIN64)
+	cp $(CPPCC_LINUX_BIN) $(CPPCC_TO_LINUX)
+
+$(CPPCC_CABI_OUT): $(CPPCC_CABI_DEPS) | $(TOOLS_OUT)
+	@test -n "$(CARGO)" || { echo "ERROR: cargo not found in PATH; cannot build cppcc C ABI." >&2; exit 1; }
+	cd $(CPPCC_CABI_DIR) && CARGO_TARGET_DIR=$(CPPCC_CABI_TARGET_DIR) $(CARGO) build --release
+	cp $(CPPCC_CABI_BUILT) $@
+
+endif # CONFIG_USER_CPPCC_MULTITARGET
 
 # ---------------------------------------------------------------------------
 # Mochi -> NUC: the toolchain that turns a .mochi source into a NUC

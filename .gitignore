@@ -110,3 +110,7 @@ tools/updatesrv/*.key
 security/tls/*.key
 user/ssl/*.key
 scripts/__pycache__/
+
+# cargo's build directory is target/, but cppcc's per-target writers live in
+# user/cppcc/src/target/ and are source, so that one path is not ignored.
+!user/cppcc/src/target/

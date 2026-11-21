@@ -75,7 +75,14 @@ pub extern "C" fn _start() -> ! {
                     win.destroy();
                     sys::exit(0);
                 }
-                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT =>
+                {
+                    /* Right-click is reserved for a context menu. */
+                }
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_LEFT =>
+                {
                     if ui::inside(BTN, m.x, m.y) {
                         clicks += 1;
                         draw(&mut win, clicks);

@@ -190,6 +190,10 @@ static const app_t g_win32[] = {
      * rejection line rather than a silent nothing. */
     {"hello32.exe", k_app_hello32_exe, &k_app_hello32_exe_len},
     {"dosdemo.com", k_app_dosdemo_com, &k_app_dosdemo_com_len},
+    /* ISO C++98 standard-library functional test, compiled from the
+     * unmodified sample against the project's own C++98 headers. Exercises
+     * containers, strings, streams, exceptions, RTTI and CRT from /exe. */
+    {"cpp98test.exe", k_app_cpp98test_exe, &k_app_cpp98test_exe_len},
 };
 
 UINT32 apps_win32_count(void) {

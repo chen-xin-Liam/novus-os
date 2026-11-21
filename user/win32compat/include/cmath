@@ -1,0 +1,7 @@
+#ifndef NOVUS_CMATH
+#define NOVUS_CMATH
+#include "__novus_rt.h"
+namespace std { inline double sqrt(double x){ return novus_sqrt(x); } }
+inline double fabs(double x){ return x<0?-x:x; }
+inline double floor(double x){ return (double)(long long)x; }
+#endif

@@ -18,6 +18,22 @@ cppcc 的 nucgen 在写文件前校验冻结 Header、段表、符号表、重�
 
 当前 boot-stage 只读取固定文件名 `APPS/DEMO.NUC`，`scripts/run.sh` 本身只启动已有 `esp/` 目录；所以请通过 `make run` 进行自动 staging。测试程序运行后由 `_start` 调用 `main`，再显式发起 `SYS_EXIT=60`。
 
-## 本次验证记录（2026-10-18）
+## 多目标验证
 
-工作区静态诊断未报告 cppcc 源码错误。当前 Windows 环境中 `make`、`cargo`、`rustc`、`qemu-system-x86_64`、`xxd` 和 MinGW x86-64 GCC 均未出现在 PATH，因此本次无法执行 Cargo 测试、编译 NUC、逐字节查看实际产物或启动 QEMU；不能将预期串口日志视为已实测结果。工具链可用后，按上面的 `make run` 路径完成运行验证，并以 `[NUC ] APPS/DEMO.NUC staged`、`[NUC] demo: ...` 和 `[USER] Hello, Novus!` 为检查点。
+```sh
+make cppcc-tools
+build/tools/cppcc examples/cxx11_smoke.cc -o /tmp/smoke.nuc
+build/tools/cppcc_to_win64 examples/cxx11_smoke.cc -o /tmp/smoke.exe
+build/tools/cppcc_to_linux examples/cxx11_smoke.cc -o /tmp/smoke.elf
+chmod +x /tmp/smoke.elf && /tmp/smoke.elf
+cargo test --manifest-path user/cppcc/Cargo.toml --release
+```
+
+`cppcc_to_win64` 产物可用 `x86_64-w64-mingw32-objdump -x` 检查 PE32+ 头、节表和 kernel32 导入表；`cppcc_to_linux` 产物可用 `readelf -h -l -d` 检查 ELF64 程序头、PT_INTERP 与 dynamic 段。
+
+## 本次验证记录（2026-11-20）
+
+- `make -j2 cppcc-tools` 成功，产出 cppcc、cppcc_to_win64、cppcc_to_linux 与 libcppcc_cabi.a。
+- `cargo test --release` 全部通过：59 个单元测试、4 个编译 API 测试、PE32+ 结构测试与 ELF64 结构测试。
+- `examples/cxx11_smoke.cc` 已用三个目标成功编译；生成的 ELF64 在本机实际执行并输出 `ok`，退出码 0。
+- NUC/QEMU 启动路径仍按上文 `make run` 检查点验证；本次未在 QEMU 中重复启动。

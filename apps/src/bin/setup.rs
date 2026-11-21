@@ -68,6 +68,7 @@ struct App {
     prog: install::Progress,
     sys_port: u64,
     frame: u32,
+    menu: ui::Menu,
 }
 
 fn fmt_mib(v: u64, buf: &mut [u8]) -> &str {
@@ -605,6 +606,7 @@ fn draw(app: &mut App) {
         Page::Done => draw_done(&mut app.win),
         Page::Fail => draw_fail(&mut app.win, app.prog.err),
     }
+    app.menu.draw(&mut app.win);
     app.win.invalidate();
 }
 
@@ -676,6 +678,35 @@ fn go_back(app: &mut App) {
     }
 }
 
+fn setup_menu(app: &mut App, x: i32, y: i32) {
+    app.menu.set(&[
+        ui::MenuItem::new(ui::l("下一步", "Next"), 1, 0),
+        ui::MenuItem::new(ui::l("上一步", "Back"), 2, 0),
+        ui::MenuItem::new(ui::l("重新扫描磁盘", "Rescan disks"), 3, 0),
+        ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+        ui::MenuItem::new(ui::l("中止安装", "Abort"), 4, ui::MENU_DANGER),
+    ]);
+    app.menu.open(x, y, CW, CH);
+}
+
+fn setup_action(app: &mut App, action: u16) {
+    match action {
+        1 => advance(app),
+        2 => go_back(app),
+        3 => scan(app),
+        4 => {
+            if app.started && install::abort() {
+                app.started = false;
+                install::reset();
+            }
+            app.confirmed = false;
+            app.page = Page::Disk;
+            scan(app);
+        }
+        _ => {}
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] setup wizard up\n");
@@ -711,6 +742,7 @@ pub extern "C" fn _start() -> ! {
         prog: install::Progress::new(),
         sys_port,
         frame: 0,
+        menu: ui::Menu::new(),
     };
     scan(&mut app);
     draw(&mut app);
@@ -718,7 +750,49 @@ pub extern "C" fn _start() -> ! {
     loop {
         while let Some(ev) = app.win.next_event() {
             match ev {
-                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
+                wm::Ev::Mouse(m)
+                    if app.menu.is_open() && m.kind == wm::MOUSE_MOVE =>
+                {
+                    app.menu.motion(m.x, m.y);
+                    draw(&mut app);
+                }
+                wm::Ev::Mouse(m)
+                    if app.menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_RIGHT =>
+                {
+                    setup_menu(&mut app, m.x, m.y);
+                    draw(&mut app);
+                }
+                wm::Ev::Mouse(m)
+                    if app.menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
+                    if let Some(action) = app.menu.click(m.x, m.y) {
+                        setup_action(&mut app, action);
+                    } else {
+                        app.menu.close();
+                    }
+                    draw(&mut app);
+                }
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT =>
+                {
+                    setup_menu(&mut app, m.x, m.y);
+                    draw(&mut app);
+                }
+                wm::Ev::Key(key, _mods)
+                    if key == wm::KEY_ESC && app.menu.is_open() =>
+                {
+                    app.menu.close();
+                    draw(&mut app);
+                }
+                wm::Ev::Mouse(m)
+                    if !app.menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
                     let x = m.x as i16;
                     let y = m.y as i16;
                     let page = app.page;

@@ -69,8 +69,16 @@ typedef enum {
   NG_LIST,
   NG_TREE,
   NG_ICON,
-  NG_SWATCH
+  NG_SWATCH,
+  NG_CONTEXT_MENU
 } ng_type_t;
+
+/* Context menu items are fixed-size static tables: no allocation in the
+ * input path, and at most eight actions per popup. */
+#define NG_MENU_MAX 8u
+#define NG_MENU_DISABLED 0x01u
+#define NG_MENU_DANGER   0x02u
+#define NG_MENU_SEPARATOR 0x04u
 
 /* Glyphs are drawn from primitives, never loaded from a resource: one
  * monochrome shape set that recolours with the theme and needs no bitmap
@@ -195,6 +203,13 @@ struct ng_widget {
       UINT8      selected;
       UINT8      pad[3];
     } swatch;
+    struct {
+      const char *labels[NG_MENU_MAX];
+      INT32       ids[NG_MENU_MAX];
+      UINT8       flags[NG_MENU_MAX];
+      UINT32      count;
+      INT32       hover;
+    } menu;
   } u;
 };
 
@@ -226,6 +241,7 @@ struct ng_ctx {
   INT32         mouse_x;
   INT32         mouse_y;
   UINT8         buttons;
+  ng_widget_t  *menu;      /* the single shared context menu, if any */
   UINT32        frame;
   nd_rect_t     damage;
   ng_theme_t    theme;
@@ -261,6 +277,17 @@ ng_widget_t *ng_tree(ng_widget_t *w, ng_tnode_t *nodes, UINT32 count,
 ng_widget_t *ng_panel(ng_widget_t *w, nd_color_t color);
 /* Give a panel a rounded border and corner radius (start menu, taskbar). */
 void ng_panel_frame(ng_widget_t *w, int on);
+
+/* One shared right-click menu per scene. `on_context` is called on a right
+ * press so the owner can fill the item table; `on_select` receives the id
+ * of the chosen item. Labels/ids/flags must live as long as the widget. */
+ng_widget_t *ng_menu(ng_widget_t *parent, ng_action_fn on_context,
+                     ng_value_fn on_select);
+void ng_menu_items(ng_widget_t *w, const char **labels, const INT32 *ids,
+                   const UINT8 *flags, UINT32 count);
+void ng_menu_open(ng_widget_t *w, INT32 x, INT32 y, INT32 screen_w,
+                  INT32 screen_h);
+void ng_menu_close(ng_widget_t *w);
 
 /* A tile button: icon above a one-line caption, no chrome until hovered.
  * Used by the desktop grid, the taskbar and the start menu's pinned grid. */

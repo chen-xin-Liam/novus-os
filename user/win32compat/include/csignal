@@ -1,0 +1,17 @@
+#ifndef NOVUS_CSIGNAL
+#define NOVUS_CSIGNAL
+typedef void (*__sighandler_t)(int);
+#define SIGINT 2
+#define SIGILL 4
+#define SIGABRT 6
+#define SIGFPE 8
+#define SIGSEGV 11
+#define SIGTERM 15
+#define SIG_DFL ((__sighandler_t)0)
+#define SIG_IGN ((__sighandler_t)1)
+extern "C" {
+  inline __sighandler_t signal(int, __sighandler_t h) { return h; } /* register no-op */
+  inline int raise(int) { return 0; }
+}
+namespace std { using ::signal; using ::raise; }
+#endif

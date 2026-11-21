@@ -699,7 +699,7 @@ TextOutA`。
   且行数在 2..8 之间；
 * 目视：`window.exe` 被点击后置顶、获得焦点，键入 `abcd` 以红色画在窗口里。
 
-仍未做（别当成已做）：菜单、模态对话框、`ws2_32` 的传输部分、`crypt32`、
+仍未做（别当成已做）：模态对话框、`ws2_32` 的传输部分、`crypt32`、
 `comctl32`、`ole32`、`shell32`、SEH、PE TLS 目录、多线程、D3D。微信 / QQ
 那一层还没碰。
 
@@ -761,8 +761,11 @@ Windows 的对话框本质是"带子窗口的窗口"，所以这块先把子窗�
 `RegisterClassExA`、三个句柄非零且互异、`GetDlgItem(hwnd, 2)` 等于按钮句柄、
 控件上的文本往返；画面上点按钮后标签变成 `btn #1`，在编辑框里键入字符可见。
 
-仍未做：菜单（`CreateMenu` / `AppendMenu` / 菜单栏由谁画还没定，见下）、
-`DialogBox` 与 `DLGTEMPLATE`、`SendMessage` 的同步语义、子控件自己的窗口过程、
+菜单已实现：`CreateMenu` / `CreatePopupMenu` / `AppendMenuA` / `SetMenu` 维护菜单栏，
+`TrackPopupMenu` 在客户区弹出右键菜单并支持 `TPM_RETURNCMD`；右键事件产生
+`WM_RBUTTONDOWN` / `WM_RBUTTONUP` 与 `WM_CONTEXTMENU`。
+`user/win32compat/samples/menudemo.c` 同时自检菜单栏与右键弹出层。
+仍未做：`DialogBox` 与 `DLGTEMPLATE`、`SendMessage` 的同步语义、子控件自己的窗口过程、
 `comctl32` 的通用控件。
 
 ## 17. 第十三块：`MessageBoxA`

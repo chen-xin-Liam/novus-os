@@ -280,6 +280,10 @@ enum {
   /* The version calls pair with this one: IsWow64Process takes a process
    * handle, and the pseudo handle for "this process" is what programs pass. */
   WIN32_API_GET_CURRENT_PROCESS,
+  WIN32_API_TRACK_POPUP_MENU,
+  /* Console text color, used by self-hosted C++ programs that port
+   * SetConsoleTextAttribute/FOREGROUND_* style output. */
+  WIN32_API_SET_CONSOLE_TEXT_ATTR,
 };
 
 typedef struct {
@@ -440,6 +444,8 @@ static const win32_api_t g_api[] = {
     {"kernel32.dll", "LockResource", WIN32_API_LOCK_RESOURCE},
     {"kernel32.dll", "SizeofResource", WIN32_API_SIZE_OF_RESOURCE},
     {"kernel32.dll", "LoadStringA", WIN32_API_LOAD_STRING},
+    {"user32.dll", "TrackPopupMenu", WIN32_API_TRACK_POPUP_MENU},
+    {"kernel32.dll", "SetConsoleTextAttribute", WIN32_API_SET_CONSOLE_TEXT_ATTR},
 };
 
 /* ---- small helpers ----------------------------------------------------- */
@@ -920,6 +926,47 @@ static void api_write(trap_frame_t *f) {
   f->rax = 1u;
 }
 
+/* SetConsoleTextAttribute: the self-hosted C++98 test colors PASS/FAIL via
+ * FOREGROUND_* bits. The Win32 console prototype has no real color buffer, so
+ * emit the corresponding ANSI SGR sequence to the serial log. The sequence is
+ * written immediately before the text the program prints, giving the same
+ * visual result in any ANSI-capable terminal. */
+static void api_set_console_text_attr(trap_frame_t *f) {
+  UINT32 attr = (UINT32)f->rdx; /* arg1(handle)->rdi, arg2(attr)->rdx */
+  int fg;
+
+  if ((attr & 0x0007u) == 0x0007u) {
+    fg = 37;                       /* grey/white: reset to default */
+  } else if ((attr & 0x0005u) == 0x0005u) {
+    fg = 35;                       /* red+blue -> magenta */
+  } else if ((attr & 0x0006u) == 0x0006u) {
+    fg = 33;                       /* green+red -> yellow */
+  } else if ((attr & 0x0003u) == 0x0003u) {
+    fg = 36;                       /* blue+green -> cyan */
+  } else if ((attr & 0x0004u) != 0u) {
+    fg = 31;                       /* red */
+  } else if ((attr & 0x0002u) != 0u) {
+    fg = (attr & 0x0008u) ? 92 : 32; /* bright green / green */
+  } else if ((attr & 0x0001u) != 0u) {
+    fg = 34;                       /* blue */
+  } else {
+    fg = 37;
+  }
+  /* Emit a fixed SGR code so no integer formatter is needed in the gate. */
+  switch (fg) {
+    case 31: kputs("\x1b[31m"); break;
+    case 32: kputs("\x1b[32m"); break;
+    case 33: kputs("\x1b[33m"); break;
+    case 34: kputs("\x1b[34m"); break;
+    case 35: kputs("\x1b[35m"); break;
+    case 36: kputs("\x1b[36m"); break;
+    case 37: kputs("\x1b[37m"); break;
+    case 92: kputs("\x1b[92m"); break;
+    default: kputs("\x1b[0m"); break;
+  }
+  f->rax = 1u;
+}
+
 static void api_sleep(trap_frame_t *f) {
   UINT64 ms = f->rdi;
   UINT32 ticks = (UINT32)((ms + 9u) / 10u);
@@ -1344,6 +1391,9 @@ static void api_set_filter(trap_frame_t *f) {
 #define WM_MOUSEMOVE  0x0200u
 #define WM_LBUTTONDOWN 0x0201u
 #define WM_LBUTTONUP  0x0202u
+#define WM_RBUTTONDOWN 0x0204u
+#define WM_RBUTTONUP  0x0205u
+#define WM_CONTEXTMENU 0x007Bu
 #define WM_TIMER      0x0113u
 #define WM_ERASEBKGND 0x0014u
 #define WM_COMMAND    0x0111u
@@ -1401,6 +1451,13 @@ static void api_set_filter(trap_frame_t *f) {
 #define WIN32_RES_MAX         8u
 #define RT_STRING             6u
 #define RT_RCDATA             10u
+/* TrackPopupMenu flags. Unsupported flags are ignored rather than causing a
+ * fake failure, so a ported program can still display its context menu. */
+#define TPM_CENTERALIGN  0x0004u
+#define TPM_RIGHTALIGN   0x0008u
+#define TPM_VCENTERALIGN 0x0010u
+#define TPM_BOTTOMALIGN  0x0020u
+#define TPM_RETURNCMD    0x0100u
 
 #define WIN32_ERROR_INVALID_HANDLE 6u
 #define WIN32_ERROR_INVALID_PARAM  87u
@@ -1441,6 +1498,12 @@ typedef struct {
   UINT32 menu;
   UINT8  menu_open;
   UINT8  menu_open_idx;
+  UINT8  ctx_open;    /* TrackPopupMenu popup is showing */
+  UINT8  ctx_retcmd;  /* TPM_RETURNCMD: do not post WM_COMMAND */
+  UINT32 ctx_menu;    /* menu handle for the context popup */
+  INT32  ctx_x;       /* client-space origin of the popup */
+  INT32  ctx_y;
+  UINT32 ctx_result;  /* id chosen by the popup, 0 when dismissed */
 } win32_wnd_t;
 
 typedef struct {
@@ -1732,6 +1795,8 @@ static int  gui_menu_click(task_t *t, win32_gui_t *gu, win32_wnd_t *w, INT32 x,
                            INT32 y, int down);
 static win32_child_t *gui_focus_cycle(win32_gui_t *gu, UINT32 parent,
                                       UINT32 cur, INT32 dir);
+static int  gui_ctx_click(win32_gui_t *gu, win32_wnd_t *w, INT32 x, INT32 y,
+                          int down);
 /* Translate one delivered message into a queued WM_* message. */
 static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
   ipc_msg_t m = *msg;
@@ -2003,6 +2068,22 @@ static void gui_translate(task_t *t, win32_gui_t *gu, const ipc_msg_t *msg) {
         msg = WM_LBUTTONUP;
       }
       lp = (UINT64)(UINT32)mm.x | ((UINT64)(UINT32)mm.y << 16);
+      if ((mm.button & 2u) != 0u) {
+        win32_wnd_t *mw = gui_window(gu, hwnd);
+
+        if (mw != NULL && mw->ctx_open &&
+            gui_ctx_click(gu, mw, mm.x, mm.y,
+                          mm.type == ND_EV_MOUSE_DOWN)) {
+          break;
+        }
+        msg = (mm.type == ND_EV_MOUSE_DOWN) ? WM_RBUTTONDOWN
+                                            : WM_RBUTTONUP;
+        gui_push(gu, hwnd, msg, 0, lp);
+        if (mm.type == ND_EV_MOUSE_UP) {
+          gui_push(gu, hwnd, WM_CONTEXTMENU, (UINT64)hwnd, lp);
+        }
+        break;
+      }
       /* The menu strip and its popup belong to the layer: a click there is
        * consumed here and either opens a menu or turns into WM_COMMAND, and
        * the program never sees the raw mouse message. */
@@ -2855,12 +2936,142 @@ static int gui_menu_bar_slot(win32_menu_t *m, UINT32 idx, INT32 *x, INT32 *w) {
   return 0;
 }
 
+static INT32 gui_popup_height(win32_menu_t *m) {
+  INT32 h = WIN32_MENU_POPUP_PAD * 2;
+  UINT32 k;
+
+  if (m == NULL) {
+    return 0;
+  }
+  for (k = 0; k < m->n; k++) {
+    h += m->item[k].sep ? 7 : WIN32_MENU_ITEM_H;
+  }
+  return h;
+}
+
+/* Draw the popup opened by TrackPopupMenu. The bar dropdown keeps its own
+ * drawing code because its origin is tied to the bar item that opened it. */
+static void gui_ctx_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
+  win32_menu_t *m = win32_menu(gu, w->ctx_menu);
+  INT32         sx = w->ctx_x;
+  INT32         sy = w->ctx_y;
+  INT32         sh;
+  UINT32        k;
+  INT32         y;
+
+  if (!w->ctx_open || m == NULL || m->n == 0u) {
+    return;
+  }
+  if (sx < 0) {
+    sx = 0;
+  }
+  if (sy < 0) {
+    sy = 0;
+  }
+  if (sx + WIN32_MENU_POPUP_W > w->w) {
+    sx = w->w - WIN32_MENU_POPUP_W;
+  }
+  if (sx < 0) {
+    sx = 0;
+  }
+  sh = gui_popup_height(m);
+  if (sy + sh > w->h) {
+    sy = w->h - sh;
+  }
+  if (sy < 0) {
+    sy = 0;
+  }
+  w->ctx_x = sx;
+  w->ctx_y = sy;
+  (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL, (INT16)sx, (INT16)sy,
+                        WIN32_MENU_POPUP_W, (INT16)sh, 0xFAFAFAu);
+  (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FRAME, (INT16)sx, (INT16)sy,
+                        WIN32_MENU_POPUP_W, (INT16)sh, 0x707070u);
+  gu->nshape += 2u;
+  y = sy + WIN32_MENU_POPUP_PAD;
+  for (k = 0; k < m->n; k++) {
+    win32_mitem_t *it = &m->item[k];
+
+    if (it->sep) {
+      (void)nwm_owner_shape(t->pid, w->win, NWM_OP_HLINE, (INT16)(sx + 6),
+                            (INT16)(y + 3), WIN32_MENU_POPUP_W - 12, 1,
+                            0xC0C0C0u);
+      gu->nshape++;
+      y += 7;
+      continue;
+    }
+    if (it->checked) {
+      (void)nwm_owner_text(t->pid, w->win, (INT16)(sx + 5), (INT16)(y + 2),
+                           1u, "*", 1u, 0x101010u);
+      gu->ntext++;
+    }
+    (void)nwm_owner_text(t->pid, w->win, (INT16)(sx + 20), (INT16)(y + 2),
+                         1u, it->text, menu_text_len(it->text),
+                         it->disabled ? 0xA0A0A0u : 0x101010u);
+    gu->ntext++;
+    y += WIN32_MENU_ITEM_H;
+  }
+}
+
+/* A click in the TrackPopupMenu popup. Returns 1 when the click was owned by
+ * the popup, including a click outside that only dismisses it. */
+static int gui_ctx_click(win32_gui_t *gu, win32_wnd_t *w, INT32 x, INT32 y,
+                         int down) {
+  win32_menu_t *m;
+  INT32         sy;
+  INT32         yy;
+  UINT32        k;
+
+  if (!w->ctx_open) {
+    return 0;
+  }
+  m = win32_menu(gu, w->ctx_menu);
+  if (m == NULL || m->n == 0u) {
+    w->ctx_open = 0u;
+    return 0;
+  }
+  sy = w->ctx_y;
+  if (x < w->ctx_x || x >= w->ctx_x + WIN32_MENU_POPUP_W ||
+      y < sy || y >= sy + gui_popup_height(m)) {
+    if (down) {
+      w->ctx_open = 0u;
+      w->dirty = 1u;
+    }
+    return 1;
+  }
+  if (!down) {
+    return 1;
+  }
+  yy = sy + WIN32_MENU_POPUP_PAD;
+  for (k = 0; k < m->n; k++) {
+    win32_mitem_t *it = &m->item[k];
+    INT32          ih = it->sep ? 7 : WIN32_MENU_ITEM_H;
+
+    if (y >= yy && y < yy + ih) {
+      if (!it->sep && !it->disabled && it->id != 0u) {
+        w->ctx_result = it->id;
+        if (!w->ctx_retcmd) {
+          gui_push(gu, w->hwnd, WM_COMMAND, (UINT64)it->id, 0u);
+        }
+      }
+      w->ctx_open = 0u;
+      w->dirty = 1u;
+      return 1;
+    }
+    yy += ih;
+  }
+  w->ctx_open = 0u;
+  w->dirty = 1u;
+  return 1;
+}
+
 static void gui_menu_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
   win32_menu_t *bar = win32_menu(gu, w->menu);
   UINT32        i;
   INT32         px = 8;
 
   if (bar == NULL || bar->n == 0u) {
+    gui_ctx_draw(t, gu, w);
     return;
   }
   (void)nwm_owner_shape(t->pid, w->win, NWM_OP_FILL, 0, 0, (INT16)w->w,
@@ -2945,6 +3156,7 @@ static void gui_menu_draw(task_t *t, win32_gui_t *gu, win32_wnd_t *w) {
       }
     }
   }
+  gui_ctx_draw(t, gu, w);
 }
 
 /* A click inside the menu strip, or inside the open popup. Returns 1 when the
@@ -3478,6 +3690,68 @@ static void api_load_string(trap_frame_t *f) {
     }
     (void)dst;
     f->rax = (UINT64)n;
+  }
+}
+
+/* TrackPopupMenu(hMenu, flags, x, y, reserved, hwnd, reserved).
+ * The popup is a layer-owned overlay on the target window. TPM_RETURNCMD
+ * pumps compositor events until a command is chosen, so the call can return
+ * the id the same way the Win32 API does; without it the choice is posted as
+ * WM_COMMAND and the call returns immediately. */
+static void api_track_popup_menu(trap_frame_t *f) {
+  task_t       *t = sched_current();
+  win32_gui_t  *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
+  win32_menu_t *m;
+  win32_wnd_t  *w;
+  UINT64        reserved;
+  UINT64        hwnd64;
+  UINT32        flags;
+  INT32         x;
+  INT32         y;
+  UINT32        spins = 0u;
+
+  if (gu == NULL || stack_arg(f, t, 5u, &reserved) != 0 ||
+      stack_arg(f, t, 6u, &hwnd64) != 0) {
+    f->rax = 0u;
+    return;
+  }
+  (void)reserved;
+  w = gui_window(gu, (UINT32)hwnd64);
+  m = win32_menu(gu, (UINT32)f->rdi);
+  if (w == NULL || m == NULL || m->n == 0u) {
+    f->rax = 0u;
+    return;
+  }
+  flags = (UINT32)f->rdx;
+  x = (INT32)f->r8;
+  y = (INT32)f->r9;
+  if ((flags & TPM_RIGHTALIGN) != 0u) {
+    x -= WIN32_MENU_POPUP_W;
+  } else if ((flags & TPM_CENTERALIGN) != 0u) {
+    x -= WIN32_MENU_POPUP_W / 2;
+  }
+  if ((flags & TPM_BOTTOMALIGN) != 0u) {
+    y -= gui_popup_height(m);
+  } else if ((flags & TPM_VCENTERALIGN) != 0u) {
+    y -= gui_popup_height(m) / 2;
+  }
+  w->ctx_menu = (UINT32)f->rdi;
+  w->ctx_open = 1u;
+  w->ctx_retcmd = (flags & TPM_RETURNCMD) != 0u ? 1u : 0u;
+  w->ctx_result = 0u;
+  w->ctx_x = x;
+  w->ctx_y = y;
+  w->dirty = 1u;
+  gui_ctx_draw(t, gu, w);
+  (void)nwm_owner_flush(t->pid, w->win);
+  if (w->ctx_retcmd) {
+    while (w->ctx_open && spins++ < 200000u) {
+      gui_pump(t, gu);
+      sched_yield();
+    }
+    f->rax = w->ctx_result;
+  } else {
+    f->rax = 1u;
   }
 }
 
@@ -6363,10 +6637,10 @@ static void api_invalidate_rect(trap_frame_t *f) {
 /* ---- thread-local storage --------------------------------------------- */
 
 /* One bit per TEB TLS slot, process-wide because the layer runs one Win32
- * process. Bit 0 stays set: slot 0 belongs to the image's TLS directory
- * (the loader has no PE TLS support yet), so TlsAlloc must not hand it out
- * and a compiler-emitted %fs-based access keeps reading a null slot
- * instead of somebody else's value. */
+ * process. Bit 0 stays set: slot 0 belongs to the image's TLS directory,
+ * which the loader fills from the PE TLS template (pe_tls); TlsAlloc must
+ * not hand it out, so a compiler-emitted %fs-based module-TLS access reads
+ * the template pointer instead of somebody else's value. */
 static UINT64 g_tls_used = 1u;
 
 static int win32_teb_read(task_t *t, UINT64 off, void *buf, UINT32 len) {
@@ -6928,6 +7202,11 @@ void win32_syscall(trap_frame_t *f) {
     return;
   case WIN32_API_LOAD_STRING:
     api_load_string(f);
+  case WIN32_API_TRACK_POPUP_MENU:
+    api_track_popup_menu(f);
+    return;
+  case WIN32_API_SET_CONSOLE_TEXT_ATTR:
+    api_set_console_text_attr(f);
     return;
   default:
     t->win32_last_error = WIN32_ERROR_INVALID_PARAM;

@@ -565,6 +565,28 @@ pub extern "C" fn _start() -> ! {
     window_mode()
 }
 
+fn menu_command(shell: &mut shell::Shell, scroll: &mut Scroll, cmd: &str) {
+    let mut eb = [0u8; 200];
+    let mut en = build_prompt(shell, &mut eb);
+
+    for &b in cmd.as_bytes() {
+        if en < 198 {
+            eb[en] = b;
+            en += 1;
+        }
+    }
+    eb[en] = b'\n';
+    en += 1;
+    for &b in &eb[..en] {
+        scroll.push_byte(b);
+    }
+    {
+        let mut sink = TermSink { scroll };
+        shell.run_line(cmd.as_bytes(), &mut sink);
+    }
+    scroll.flush_pending();
+}
+
 /// Graphical terminal: a window on the Novus desktop.
 fn window_mode() -> ! {
     let wm_port = match ipc::lookup(wm::PORT_NAME) {
@@ -593,13 +615,16 @@ fn window_mode() -> ! {
     let mut ilen = 0usize;
     let mut cursor = 0usize;
     let mut hist_idx = shell.history_len();
+    let mut menu = ui::Menu::new();
 
     loop {
         render(&mut win, &shell, &scroll, &input, ilen, cursor);
+        menu.draw(&mut win);
         win.invalidate();
 
         match win.next_event() {
             Some(wm::Ev::Key(key, mods)) => match key {
+                k if k == wm::KEY_ESC && menu.is_open() => menu.close(),
                 KEY_ENTER => {
                     let mut eb = [0u8; 200];
                     let mut en = build_prompt(&shell, &mut eb);
@@ -738,7 +763,49 @@ fn window_mode() -> ! {
             },
             Some(wm::Ev::Close) => sys::exit(0),
             Some(wm::Ev::Focus(_)) => {}
-            Some(wm::Ev::Mouse(_)) => {}
+            Some(wm::Ev::Mouse(m)) => {
+                if menu.is_open() && m.kind == wm::MOUSE_MOVE {
+                    menu.motion(m.x, m.y);
+                } else if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT {
+                    if !menu.is_open() {
+                        menu.set(&[
+                            ui::MenuItem::new("清屏", 1, 0),
+                            ui::MenuItem::new("命令帮助", 2, 0),
+                            ui::MenuItem::new("命令历史", 3, 0),
+                            ui::MenuItem::new("当前用户", 4, 0),
+                            ui::MenuItem::new("磁盘列表", 5, 0),
+                        ]);
+                        menu.open(m.x, m.y, CW, CH);
+                    } else if let Some(action) = menu.click(m.x, m.y) {
+                        match action {
+                            1 => scroll.clear(),
+                            2 => menu_command(&mut shell, &mut scroll, "help"),
+                            3 => menu_command(&mut shell, &mut scroll, "history"),
+                            4 => menu_command(&mut shell, &mut scroll, "whoami"),
+                            5 => menu_command(&mut shell, &mut scroll, "drives"),
+                            _ => {}
+                        }
+                    } else {
+                        menu.close();
+                    }
+                } else if menu.is_open()
+                    && m.kind == wm::MOUSE_DOWN
+                    && m.button == wm::BUTTON_LEFT
+                {
+                    if let Some(action) = menu.click(m.x, m.y) {
+                        match action {
+                            1 => scroll.clear(),
+                            2 => menu_command(&mut shell, &mut scroll, "help"),
+                            3 => menu_command(&mut shell, &mut scroll, "history"),
+                            4 => menu_command(&mut shell, &mut scroll, "whoami"),
+                            5 => menu_command(&mut shell, &mut scroll, "drives"),
+                            _ => {}
+                        }
+                    } else {
+                        menu.close();
+                    }
+                }
+            }
             Some(wm::Ev::Other(_)) => {}
             None => sys::yield_now(),
         }

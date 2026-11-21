@@ -19,26 +19,6 @@ pub struct PreprocessedSource {
 }
 
 impl PreprocessedSource {
-    /// Wrap text that is already preprocessed (a caller holding a string
-    /// rather than a file). One location per byte, with the line and column
-    /// the byte sits on, so diagnostics still point at the right place.
-    pub fn from_text(text: &str, file: impl Into<std::path::PathBuf>) -> Self {
-        let file = file.into();
-        let mut locations = Vec::with_capacity(text.len() + 1);
-        let mut line = 1usize;
-        let mut column = 1usize;
-        for byte in text.bytes() {
-            locations.push(SourceLocation::new(file.clone(), line, column));
-            if byte == b'\n' {
-                line += 1;
-                column = 1;
-            } else {
-                column += 1;
-            }
-        }
-        Self { text: text.to_owned(), locations }
-    }
-
     pub fn location_at(&self, byte_offset: usize) -> SourceLocation {
         self.locations
             .get(byte_offset)
@@ -136,6 +116,28 @@ impl Preprocessor {
         self.install_predefined();
         let path = canonical_or_absolute(input)?;
         self.process_file(&path)?;
+        Ok((
+            PreprocessedSource {
+                text: self.output,
+                locations: self.locations,
+            },
+            self.errors.into_errors(),
+        ))
+    }
+
+    /// Preprocess an in-memory translation unit. Includes are still resolved
+    /// from the configured include directories; `path` is used for diagnostics.
+    pub fn preprocess_source(
+        mut self,
+        path: &Path,
+        source: &str,
+    ) -> Result<(PreprocessedSource, Vec<CompileError>)> {
+        self.install_predefined();
+        let path = canonical_or_absolute(path)?;
+        self.include_stack.push(path.clone());
+        let result = self.process_source(&path, source);
+        self.include_stack.pop();
+        result?;
         Ok((
             PreprocessedSource {
                 text: self.output,

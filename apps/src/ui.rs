@@ -404,3 +404,194 @@ pub fn inside(r: (i16, i16, i16, i16), x: i32, y: i32) -> bool {
 
 /// Height of a list row, so callers do not repeat the number.
 pub const ROW_H: i16 = 22;
+
+// ---------------------------------------------------------------------------
+// Context menu
+// ---------------------------------------------------------------------------
+
+/// Fixed capacity of a context menu. Applications never allocate; eight
+/// entries are enough for every built-in action set.
+pub const MENU_MAX: usize = 8;
+pub const MENU_DISABLED: u8 = 1;
+pub const MENU_DANGER: u8 = 2;
+pub const MENU_SEPARATOR: u8 = 4;
+
+const MENU_LABEL_MAX: usize = 48;
+const MENU_ITEM_H: i16 = 26;
+const MENU_SEP_H: i16 = 9;
+
+#[derive(Clone, Copy)]
+pub struct MenuItem {
+    label: [u8; MENU_LABEL_MAX],
+    len: u8,
+    pub action: u16,
+    pub flags: u8,
+}
+
+impl MenuItem {
+    /// `label` is stored in translated form so the menu can show dynamic
+    /// names (file names, process names) without a lifetime parameter.
+    pub fn new(label: &str, action: u16, flags: u8) -> MenuItem {
+        let src = lang::tr(label);
+        let bytes = src.as_bytes();
+        let mut n = bytes.len().min(MENU_LABEL_MAX - 1);
+        while n > 0 && n < bytes.len() && (bytes[n] & 0xC0) == 0x80 {
+            n -= 1;
+        }
+        let mut item = MenuItem {
+            label: [0u8; MENU_LABEL_MAX],
+            len: n as u8,
+            action,
+            flags,
+        };
+        item.label[..n].copy_from_slice(&bytes[..n]);
+        item
+    }
+
+    pub fn label(&self) -> &str {
+        core::str::from_utf8(&self.label[..self.len as usize]).unwrap_or("")
+    }
+
+    fn painted_width(&self) -> i16 {
+        self.label()[..].chars().fold(0i16, |acc, c| acc + char_adv(c))
+    }
+
+    fn height(&self) -> i16 {
+        if self.flags & MENU_SEPARATOR != 0 { MENU_SEP_H } else { MENU_ITEM_H }
+    }
+}
+
+/// A theme-aware popup menu drawn inside the owning window's client area.
+/// The window clips anything outside the client, so `open()` keeps the panel
+/// inside `cw`/`ch` rather than depending on WM overlay support.
+pub struct Menu {
+    shown: bool,
+    x: i16,
+    y: i16,
+    w: i16,
+    count: usize,
+    hover: i16,
+    items: [MenuItem; MENU_MAX],
+}
+
+impl Menu {
+    pub fn new() -> Menu {
+        Menu {
+            shown: false,
+            x: 0,
+            y: 0,
+            w: 120,
+            count: 0,
+            hover: -1,
+            items: [MenuItem::new("", 0, 0); MENU_MAX],
+        }
+    }
+
+    pub fn set(&mut self, items: &[MenuItem]) {
+        self.count = items.len().min(MENU_MAX);
+        for i in 0..self.count {
+            self.items[i] = items[i];
+        }
+        self.hover = -1;
+    }
+
+    pub fn is_open(&self) -> bool { self.shown }
+
+    pub fn close(&mut self) {
+        self.shown = false;
+        self.hover = -1;
+    }
+
+    pub fn open(&mut self, x: i32, y: i32, cw: i16, ch: i16) {
+        self.shown = true;
+        self.hover = -1;
+        let mut widest = 96i16;
+        for i in 0..self.count {
+            widest = widest.max(self.items[i].painted_width() + 28);
+        }
+        self.w = widest.min(cw.saturating_sub(8)).max(64);
+        let h = self.height();
+        let max_x = cw - self.w - 4;
+        let max_y = ch - h - 4;
+        let px = x as i16;
+        let py = y as i16;
+        self.x = if max_x <= 4 { 4 } else if px < 4 { 4 } else if px > max_x { max_x } else { px };
+        self.y = if max_y <= 4 { 4 } else if py < 4 { 4 } else if py > max_y { max_y } else { py };
+    }
+
+    fn height(&self) -> i16 {
+        let mut h = 8i16;
+        for i in 0..self.count {
+            h += self.items[i].height();
+        }
+        h
+    }
+
+    fn index_at(&self, x: i32, y: i32) -> Option<usize> {
+        if !self.shown || !inside((self.x, self.y, self.w, self.height()), x, y) {
+            return None;
+        }
+        let mut yy = self.y + 4;
+        for i in 0..self.count {
+            let ih = self.items[i].height();
+            if y >= yy as i32 && y < (yy + ih) as i32 {
+                return Some(i);
+            }
+            yy += ih;
+        }
+        None
+    }
+
+    pub fn contains(&self, x: i32, y: i32) -> bool {
+        self.shown && inside((self.x, self.y, self.w, self.height()), x, y)
+    }
+
+    pub fn motion(&mut self, x: i32, y: i32) {
+        self.hover = match self.index_at(x, y) {
+            Some(i) if self.items[i].flags & MENU_DISABLED == 0
+                && self.items[i].flags & MENU_SEPARATOR == 0 => i as i16,
+            _ => -1,
+        };
+    }
+
+    /// Resolve a click. Any click closes the menu; only an enabled item
+    /// returns its action code.
+    pub fn click(&mut self, x: i32, y: i32) -> Option<u16> {
+        let action = match self.index_at(x, y) {
+            Some(i) if self.items[i].flags & (MENU_DISABLED | MENU_SEPARATOR) == 0 => {
+                Some(self.items[i].action)
+            }
+            _ => None,
+        };
+        self.close();
+        action
+    }
+
+    pub fn draw(&self, w: &mut wm::Win) {
+        if !self.shown {
+            return;
+        }
+        let h = self.height();
+        w.round_fill(self.x, self.y, self.w, h, 8, card_bg());
+        w.round_frame(self.x, self.y, self.w, h, 8, line());
+        w.fill(self.x + 2, self.y + 4, 2, h - 8, accent());
+        let mut yy = self.y + 4;
+        for i in 0..self.count {
+            let it = &self.items[i];
+            if it.flags & MENU_SEPARATOR != 0 {
+                w.fill(self.x + 8, yy + 4, self.w - 16, 1, line());
+                yy += MENU_SEP_H;
+                continue;
+            }
+            let disabled = it.flags & MENU_DISABLED != 0;
+            if i as i16 == self.hover && !disabled {
+                w.round_fill(self.x + 4, yy, self.w - 8, MENU_ITEM_H - 2, 5, row_sel());
+            }
+            let color = if disabled { dim() }
+                else if it.flags & MENU_DANGER != 0 { danger() }
+                else { text() };
+            w.text(self.x + 14, yy + 5, color, it.label());
+            yy += MENU_ITEM_H;
+        }
+    }
+}

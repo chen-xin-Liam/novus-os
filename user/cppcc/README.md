@@ -1,6 +1,6 @@
 # cppcc
 
-`cppcc` 是 Novus OS 的 C++98 子集编译器，使用 Rust 编写，在构建主机运行。它直接将带语义类型标注的 AST 降为 x86_64 原生机器码，再经目标无关的 `CodeSections`（代码/符号/重定位）交由三个后端之一写出：NUC V1.0 `.nuc`、Linux 静态 ELF64、Win64 PE32+。内置函数统一调用 `__plat_write`/`__plat_yield`/`__plat_exit` 平台桩，由 `platform.rs` 按目标填入具体实现，因此三个目标都是可运行产物。
+`cppcc` 是 Novus OS 的主机端 C++11 编译库与工具集，使用 Rust 编写。前端完成预处理、词法、语法和语义分析后，生成目标无关对象模型；后端可输出 NUC V1.0 镜像、Windows x64 PE32+ 可执行或 Linux x64 ELF64 动态可执行。Rust 公共 API 与 C ABI 静态库均可供宿主复用。完整 C++11（STL、异常、RTTI、模板元编程）是分阶段终态，当前支持范围见 `docs/C++11 支持矩阵.md`。
 
 ## 构建
 
@@ -10,7 +10,7 @@
 cargo build --release
 ```
 
-在仓库根目录可运行 `make cppcc`，生成 `build/tools/cppcc`（Windows 主机为 `cppcc.exe`）。`CONFIG_USER_CPPCC=y` 时，顶层 `make` 也会构建该工具。构建 smoke 样例：
+在仓库根目录运行 `make cppcc-tools`，生成 `build/tools/cppcc`、`build/tools/cppcc_to_win64`、`build/tools/cppcc_to_linux` 与 `build/tools/libcppcc_cabi.a`。`CONFIG_USER_CPPCC_MULTITARGET=y` 时，顶层 `make` 也会构建这些产物。构建 smoke 样例：
 
 ```sh
 cargo run --release -- examples/hello.cc -o hello.nuc
@@ -18,20 +18,26 @@ cargo run --release -- examples/hello.cc -o hello.nuc
 make cppcc-demo
 ```
 
-`make cppcc-demo` 的产物为 `out/cppcc/hello.nuc`。`make run` 会将样例复制到 `esp/DEMO.NUC` 并调用 `scripts/run.sh`。
+`make cppcc-demo` 的产物为 `out/cppcc/hello.nuc`。`make run` 会将样例复制到 `esp/APPS/DEMO.NUC` 并调用 `scripts/run.sh`。
+
+多目标工具：
+
+```sh
+cppcc_to_win64 examples/hello.cc -o hello.exe
+cppcc_to_linux examples/hello.cc -o hello.elf
+chmod +x hello.elf && ./hello.elf
+```
+
+C 宿主可包含 `user/cppcc-cabi/include/cppcc.h` 并链接 `libcppcc_cabi.a`，调用 `cppcc_compile_file()` 或 `cppcc_compile_source()`。
 
 ## 用法
 
 ```sh
 cppcc hello.cc -o hello.nuc
 cppcc -I include hello.cc -o hello.nuc
-cppcc --target elf64 hello.cc -o hello.elf
-cppcc --target pe32+ hello.cc -o hello.exe
 cppcc --check hello.cc
 cppcc --dump-ast hello.cc --check
 ```
-
-`--target` 取 `nuc`（默认）、`elf64`（别名 `elf`）、`pe32+`（别名 `pe`/`pe64`）。
 
 默认内置头文件 `<novus/syscall.h>` 声明：
 
@@ -41,7 +47,7 @@ void novus_yield();
 void novus_exit(int status);
 ```
 
-示例 `examples/hello.cc` 使用 `novus_write` 输出文本。三个目标各自把它落到自己的系统调用/API：NUC 走内核 `SYS_WRITE=2`（单次写入内核截断到 128 字节，长文本需调用方分段），Linux 走 `write(1)`，Windows 走 `GetStdHandle`+`WriteFile`。
+示例 `examples/hello.cc` 使用 `novus_write` 调用 `SYS_WRITE=2` 输出文本。`novus_write` 当前发起单次 syscall；内核将一次写入截断到 128 字节，较长文本需要调用方自行分段。
 
 ## 支持范围
 
@@ -52,18 +58,14 @@ void novus_exit(int status);
 - 对象式 `#define`、本地 `#include`、`#pragma once`、`#ifdef/#ifndef/#else/#endif`、`#undef`、行注释和块注释。
 - syscall builtin `novus_write/yield/exit`；合成入口要求 `int main()` 或 `int main(void)`。
 
-编译器输出静态 x86_64 镜像，最多六个函数参数、只做直接函数调用和镜像内 `R_X86_64_32`/`R_X86_64_PC32` 重定位：
-
-- NUC：TEXT/可选 RODATA/DATA/BSS 段；写出前校验表顺序、字段范围、段权限、入口、符号和重定位。
-- ELF64：静态 `ET_EXEC`，`0x400000` 起，3 个 `PT_LOAD`（代码 R|X、只读 R、数据 R|W 且 `memsz` 含 BSS），无 `PT_INTERP`/`PT_DYNAMIC`（动态链接后端未建）。
-- PE32+：COFF 头 + `PE32+` 可选头（`0x20B`）、5 段（`.text`/`.rdata`/`.data`/`.bss`/`.idata`）、`.idata` 里一条 `kernel32.dll` 导入目录（`GetStdHandle`/`WriteFile`/`ExitProcess`），固定基址 `0x400000`、不写 `.reloc`、`DllCharacteristics=0`。
+编译器输出静态 x86_64 NUC，包含 TEXT/可选 RODATA、DATA、BSS 段，最多六个函数参数，支持直接函数调用和镜像内 `R_X86_64_32`/`R_X86_64_PC32` 重定位。每次生成后会校验 NUC 表顺序、字段范围、段权限、入口、符号和重定位。
 
 ## 已知限制
 
-- 不是完整 C++98：无类、继承、虚函数、模板、命名空间、函数重载、引用、异常、RTTI、`new/delete`、STL、浮点、枚举、联合体、位域、变长/多维数组、可变参数和函数指针。
-- 仅支持单个变量声明器；无逗号表达式、C/C++ 显式 cast、`sizeof`、局部结构体定义和聚合初始化。结构体定义需在顶层，之后可声明局部/全局 POD 对象。
-- 预处理不支持函数式宏、`#if/#elif` 表达式、`#pragma`（除 `once`）及系统头文件。
-- 仅支持单翻译单元、最多六个参数；无动态链接、跨单元链接、SDK 外部符号、PIC、栈保护、C++ 运行时或标准库。
+- 尚未达到完整 C++11：类、继承、虚函数、模板元编程、异常、RTTI、`new/delete`、STL、浮点、联合体、位域、多维数组、可变参数和函数指针仍在分阶段路线图中。
+- 已支持的 C++11 骨架：`namespace`、`using` 类型别名、`enum class`、`static_assert`、`auto`、引用、`nullptr`、范围 for（含本次修复的数组类型与游标递增）。
+- Win64 后端把内建输出映射到 kernel32 导入函数；`puts`/`putchar` 在该目标上给出明确诊断。Linux 后端生成 PT_INTERP/dynamic 结构，当前不解析外部 PLT 符号。
+- 仍为单翻译单元；NUC 目标最多六个参数，Win64 目标最多四个参数；无跨单元链接、PIC、栈保护、完整 C++ 运行时或标准库。
 - 不支持局部 `static`、聚合初始化、结构体按值传参/返回、全局非字面量初始化、间接函数调用。全局指针初始化限字符串或全局对象地址。
 - NUC 使用固定低地址布局；不生成预留的 `R_X86_64_64`。shell 通用 `./app.nuc` 执行命令尚未实现；当前集成通过 boot-stage 固定读取 `APPS/DEMO.NUC`。
 - 当前 `kernel/nuc.c` 按规范映射 TEXT 为可执行、非 BSS 数据为 NX，但现有实现仍给这些页写权限，尚未按段 flags 落实 W^X；header 的 8 MiB 栈值也会被 loader 限制到 64–256 KiB。

@@ -93,7 +93,7 @@ fn kv(w: &mut wm::Win, y: i16, key: &str, value: &str) {
     w.text(110, y, ui::text(), value);
 }
 
-fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
+fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str, menu: &ui::Menu) {
     let mut b = [0u8; 16];
     let mut m = [0u8; 16];
     let mut g = [0u8; 16];
@@ -192,12 +192,24 @@ fn draw(w: &mut wm::Win, n: &sinfo::Net, note: &str) {
     w.text(298, TEST_BUTTON_Y + 6, ui::text(), "NCSI 检测");
 
     w.text(24, TEST_BUTTON_Y + 34, ui::dim(), if note.is_empty() { "ncsi.novus-os.ryzn.pro" } else { note });
+    menu.draw(w);
     w.invalidate();
 }
 
 /* Network state and test requests go through the named sysinfo IPC service;
  * the app has no direct device handle and only renders the kernel's snapshot.
  * A missing service is a startup error rather than a fabricated live state. */
+fn netman_menu(menu: &mut ui::Menu, x: i32, y: i32, cw: i16, ch: i16) {
+    menu.set(&[
+        ui::MenuItem::new("Ping 网关", 1, 0),
+        ui::MenuItem::new("TCP 回显测试", 2, 0),
+        ui::MenuItem::new("NCSI 检测", 3, 0),
+        ui::MenuItem::new("", 0, ui::MENU_SEPARATOR),
+        ui::MenuItem::new("刷新状态", 4, 0),
+    ]);
+    menu.open(x, y, cw, ch);
+}
+
 #[no_mangle]
 pub extern "C" fn _start() -> ! {
     sys::write(b"[APP] netman up\n");
@@ -224,7 +236,8 @@ pub extern "C" fn _start() -> ! {
         model: [0; 32],
     });
 
-    draw(&mut win, &n, note);
+    let mut menu = ui::Menu::new();
+    draw(&mut win, &n, note, &menu);
 
     /* Test buttons enqueue work, then later snapshots reveal its completion.
      * Periodic refresh keeps counters and asynchronous results current without
@@ -237,7 +250,54 @@ pub extern "C" fn _start() -> ! {
                     win.destroy();
                     sys::exit(0);
                 }
-                wm::Ev::Mouse(m) if m.kind == wm::MOUSE_DOWN && m.button == 1 => {
+                wm::Ev::Mouse(m)
+                    if menu.is_open() && m.kind == wm::MOUSE_MOVE =>
+                {
+                    menu.motion(m.x, m.y);
+                    draw(&mut win, &n, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_RIGHT =>
+                {
+                    netman_menu(&mut menu, m.x, m.y, CW, CH);
+                    draw(&mut win, &n, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
+                    if let Some(action) = menu.click(m.x, m.y) {
+                        match action {
+                            1 => { let gw = n.gw; let _ = sinfo::ping(sys_port, gw); note = "已发出 ping"; }
+                            2 => { let gw = n.gw; let _ = sinfo::tcp_test(sys_port, gw, 9000); note = "连接 10.0.2.2:9000"; }
+                            3 => { let _ = sinfo::ncsi(sys_port); note = "NCSI 检测中…"; }
+                            4 => note = "状态已刷新",
+                            _ => {}
+                        }
+                        n = sinfo::net(sys_port).unwrap_or(n);
+                    } else {
+                        menu.close();
+                    }
+                    draw(&mut win, &n, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if m.kind == wm::MOUSE_DOWN && m.button == wm::BUTTON_RIGHT =>
+                {
+                    netman_menu(&mut menu, m.x, m.y, CW, CH);
+                    draw(&mut win, &n, note, &menu);
+                }
+                wm::Ev::Key(k, _) if k == wm::KEY_ESC && menu.is_open() => {
+                    menu.close();
+                    draw(&mut win, &n, note, &menu);
+                }
+                wm::Ev::Mouse(m)
+                    if !menu.is_open()
+                        && m.kind == wm::MOUSE_DOWN
+                        && m.button == wm::BUTTON_LEFT =>
+                {
                     if m.x >= 24 && m.x < 134 && m.y >= TEST_BUTTON_Y as i32 && m.y < (TEST_BUTTON_Y + 26) as i32 {
                         let gw = n.gw;
                         let _ = sinfo::ping(sys_port, gw);
@@ -251,19 +311,19 @@ pub extern "C" fn _start() -> ! {
                         note = "NCSI 检测中…";
                     }
                     n = sinfo::net(sys_port).unwrap_or(n);
-                    draw(&mut win, &n, note);
+                    draw(&mut win, &n, note, &menu);
                 }
                 _ => {}
             }
         }
         idle += 1;
         if ui::poll(sys_port) {
-            draw(&mut win, &n, note);
+            draw(&mut win, &n, note, &menu);
         }
         if idle >= 40 {
             idle = 0;
             n = sinfo::net(sys_port).unwrap_or(n);
-            draw(&mut win, &n, note);
+            draw(&mut win, &n, note, &menu);
         }
         sys::yield_now();
     }
