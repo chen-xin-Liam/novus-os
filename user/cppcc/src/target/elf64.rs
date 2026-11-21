@@ -32,16 +32,32 @@ const PF_R: u32 = 4;
 
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
+const DT_HASH: u64 = 4;
 const DT_STRTAB: u64 = 5;
+const DT_SYMTAB: u64 = 6;
 const DT_STRSZ: u64 = 10;
+const DT_SYMENT: u64 = 11;
+const DT_RELA: u64 = 7;
+const DT_RELASZ: u64 = 8;
+const DT_RELAENT: u64 = 9;
+const DT_DEBUG: u64 = 21;
+
+/// One null dynamic symbol: the image exports nothing, but the loader still
+/// looks its own imports up here first and needs a table to search.
+const DYN_SYMS: u64 = 1;
+const SYM_ENTRY: u64 = 24;
+const HASH_HEADER: u64 = 16; /* nbucket, nchain, one bucket, one chain */
 
 /// The interpreter a Linux x86-64 dynamic executable names.
 const INTERP: &[u8] = b"/lib64/ld-linux-x86-64.so.2\0";
 /// The dynamic string table: an empty name, then the library the image needs.
 const DYNSTR: &[u8] = b"\0libc.so.6\0";
 const DYNSTR_LIBC: u64 = 1;
-/// DT_NULL terminates the table, so four tags: NEEDED, STRTAB, STRSZ, NULL.
-const DYN_ENTRIES: usize = 4;
+/// The loader is handed a table it can walk without guessing: the library,
+/// the string and symbol tables, empty relocation ranges (this image needs
+/// none, but absent tags are not the same as empty ones), and DT_DEBUG for
+/// the loader's own bookkeeping, then DT_NULL.
+const DYN_ENTRIES: usize = 11;
 
 struct Section {
     vaddr: u64,
@@ -60,19 +76,25 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     }
 
     // ---- placement of the read-only first segment ---------------------
-    // The header page carries the ELF header and the program headers, then
-    // the interpreter string, the dynamic string table and .dynamic.
-    // RODATA follows at the next page boundary and shares that segment: the
-    // three loadable segments are all the phdr count has room for.
+    // The header page carries the ELF header, the program headers, the
+    // interpreter string and the dynamic string table; RODATA follows at the
+    // next page boundary and shares that segment, because the program header
+    // count has room for only three loadable segments.
+    //
+    // .dynamic does not live here: the loader writes its own DT_DEBUG entry
+    // into that table while it starts the program, so it has to be in the
+    // writable segment or the process dies on the first instruction.
     let interp_offset = EHDR_SIZE + PHNUM * PHDR_SIZE;
     let dynstr_offset = align(interp_offset + INTERP.len() as u64, 8);
-    let dynamic_offset = align(dynstr_offset + DYNSTR.len() as u64, 8);
+    let dynsym_offset = align(dynstr_offset + DYNSTR.len() as u64, 8);
+    let hash_offset = align(dynsym_offset + DYN_SYMS * SYM_ENTRY, 8);
     let rodata_offset = PAGE;
     let rodata_span = align(sections.rodata.len() as u64, PAGE);
     let first_filesz = rodata_offset + rodata_span;
-    if dynamic_offset + DYN_ENTRIES as u64 * 16 > rodata_offset {
-        bail!("dynamic table overflows the header page");
+    if hash_offset + HASH_HEADER > rodata_offset {
+        bail!("interp, dynstr, dynsym and hash overflow the header page");
     }
+    let dynamic_size = DYN_ENTRIES as u64 * 16;
 
     let mut layout: Vec<Section> = Vec::new();
     let mut cursor_va = BASE;
@@ -97,11 +119,12 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
         &mut layout,
     );
     push(
-        sections.data.len() as u64,
-        sections.data.len() as u64 + sections.bss_size,
+        dynamic_size + sections.data.len() as u64,
+        dynamic_size + sections.data.len() as u64 + sections.bss_size,
         PF_R | PF_W,
         &mut layout,
     );
+    let dynamic_offset = layout[2].offset;
 
     let image_size = cursor_off;
     let mut image = vec![0u8; image_size as usize];
@@ -152,8 +175,8 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     put64(&mut image, phdr(2) + 8, dynamic_offset);
     put64(&mut image, phdr(2) + 16, BASE + dynamic_offset);
     put64(&mut image, phdr(2) + 24, BASE + dynamic_offset);
-    put64(&mut image, phdr(2) + 32, DYN_ENTRIES as u64 * 16);
-    put64(&mut image, phdr(2) + 40, DYN_ENTRIES as u64 * 16);
+    put64(&mut image, phdr(2) + 32, dynamic_size);
+    put64(&mut image, phdr(2) + 40, dynamic_size);
     put64(&mut image, phdr(2) + 48, 8);
     load(phdr(3), &layout[1], &mut image);
     load(phdr(4), &layout[2], &mut image);
@@ -162,21 +185,40 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     image[interp_offset as usize..interp_offset as usize + INTERP.len()].copy_from_slice(INTERP);
     image[dynstr_offset as usize..dynstr_offset as usize + DYNSTR.len()].copy_from_slice(DYNSTR);
     let dynamic = dynamic_offset as usize;
-    put64(&mut image, dynamic, DT_NEEDED);
-    put64(&mut image, dynamic + 8, DYNSTR_LIBC);
-    put64(&mut image, dynamic + 16, DT_STRTAB);
-    put64(&mut image, dynamic + 24, BASE + dynstr_offset);
-    put64(&mut image, dynamic + 32, DT_STRSZ);
-    put64(&mut image, dynamic + 40, DYNSTR.len() as u64);
-    put64(&mut image, dynamic + 48, DT_NULL);
-    put64(&mut image, dynamic + 56, 0);
+    let tags: [(u64, u64); DYN_ENTRIES] = [
+        (DT_NEEDED, DYNSTR_LIBC),
+        (DT_STRTAB, BASE + dynstr_offset),
+        (DT_STRSZ, DYNSTR.len() as u64),
+        (DT_SYMTAB, BASE + dynsym_offset),
+        (DT_SYMENT, SYM_ENTRY),
+        (DT_HASH, BASE + hash_offset),
+        (DT_RELA, 0),
+        (DT_RELASZ, 0),
+        (DT_RELAENT, SYM_ENTRY),
+        (DT_DEBUG, 0),
+        (DT_NULL, 0),
+    ];
+    for (index, (tag, value)) in tags.iter().enumerate() {
+        let at = dynamic + index * 16;
+        put64(&mut image, at, *tag);
+        put64(&mut image, at + 8, *value);
+    }
+    // The dynamic symbol table holds the mandatory null entry only, and the
+    // SysV hash table describes exactly that one symbol: one bucket, one
+    // chain entry, both zero. The loader still searches this image before
+    // libc for every symbol libc imports, so the table has to exist.
+    for index in 0..(DYN_SYMS * SYM_ENTRY) as usize {
+        put64(&mut image, dynsym_offset as usize + index, 0);
+    }
+    put64(&mut image, hash_offset as usize, 1); // nbucket
+    put64(&mut image, hash_offset as usize + 8, DYN_SYMS); // nchain
 
     // ---- segment contents ---------------------------------------------
     let text_at = layout[1].offset as usize;
     image[text_at..text_at + sections.text.len()].copy_from_slice(&sections.text);
     let rodata_at = (layout[0].offset + rodata_offset) as usize;
     image[rodata_at..rodata_at + sections.rodata.len()].copy_from_slice(&sections.rodata);
-    let data_at = layout[2].offset as usize;
+    let data_at = (layout[2].offset + dynamic_size) as usize;
     image[data_at..data_at + sections.data.len()].copy_from_slice(&sections.data);
 
     // ---- resolve symbols and relocations ------------------------------
@@ -185,8 +227,10 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
         let address = match symbol.segment {
             SegmentKind::Text => layout[1].vaddr + symbol.value,
             SegmentKind::Rodata => layout[0].vaddr + rodata_offset + symbol.value,
-            SegmentKind::Data => layout[2].vaddr + symbol.value,
-            SegmentKind::Bss => layout[2].vaddr + sections.data.len() as u64 + symbol.value,
+            SegmentKind::Data => layout[2].vaddr + dynamic_size + symbol.value,
+            SegmentKind::Bss => {
+                layout[2].vaddr + dynamic_size + sections.data.len() as u64 + symbol.value
+            }
         };
         addresses.insert(symbol.name.clone(), address);
     }
@@ -198,7 +242,11 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
                 sections.rodata.len() as u64,
                 layout[0].offset + rodata_offset,
             ),
-            SegmentKind::Data => (layout[2].vaddr, layout[2].filesz, layout[2].offset),
+            SegmentKind::Data => (
+                layout[2].vaddr + dynamic_size,
+                sections.data.len() as u64,
+                layout[2].offset + dynamic_size,
+            ),
             SegmentKind::Bss => bail!("relocation in BSS has no file data"),
         };
         let place = base + relocation.place_offset;
