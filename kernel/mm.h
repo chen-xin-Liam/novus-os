@@ -32,6 +32,11 @@ void mm_heap_unmap(UINT64 offset, UINT32 pages);
  * the CR3 switch instead of having to go dark inside this function. */
 void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size);
 
+/* End of the identity-mapped window (exclusive). A physical address below
+ * this can be used as a pointer as it stands; one above it has to go
+ * through mm_map_phys() first. */
+UINT64 mm_ram_top(void);
+
 /* Current CR3 value, read with inline assembly. */
 UINT64 mm_get_cr3(void);
 

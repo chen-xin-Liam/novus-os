@@ -649,7 +649,9 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * first window is painted. The software path runs on the CPU over the
        * firmware framebuffer; a vendor engine plugs in here when it exists. */
       gpu2d_init();
+      kputs("[BOOT] gpu and 2d ready\n");
       sysinfo_init();
+      kputs("[BOOT] sysinfo ready\n");
       {
         int install_mode = (shared_mem_get() != NULL &&
                             shared_mem_get()->boot_mode == SHM_BOOT_MODE_INSTALL);
@@ -660,6 +662,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
         if (!install_mode) {
           session_init();
         }
+        kputs("[BOOT] session started\n");
         /* M10: bring up PCI, the network stack and the USB HID keyboard before
          * the applications, so the network app has a link to show, the device
          * manager sees the adapter, and the boot menu can read arrow keys. */

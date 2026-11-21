@@ -62,6 +62,13 @@
  * degrades to uncached instead of faulting. */
 static int g_pat_ok;
 
+/* The end of the identity-mapped window, as handed to mm_init(). Anything
+ * below this is reachable as a raw physical address, with whatever cache
+ * policy mm_init gave it; anything above it needs mm_map_phys(). */
+static UINT64 g_ram_top;
+
+UINT64 mm_ram_top(void) { return g_ram_top; }
+
 static int mm_cpu_has_pat(void) {
   UINT32 a, b, c, d;
   UINT32 leaf = 1u;
@@ -172,6 +179,7 @@ void mm_init(UINT64 ram_top_bytes, UINT64 fb_phys, UINT64 fb_size) {
   UINT32 i;
   UINT64 fb_bits;
 
+  g_ram_top = ram_top_bytes;
   /* 5-level paging: our tables are 4-level, so loading one of them while
    * CR4.LA57 is set makes every walk interpret a PML5 whose entries we do
    * not own - the first instruction after the CR3 write faults. There is

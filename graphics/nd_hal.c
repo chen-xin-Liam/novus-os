@@ -90,6 +90,17 @@ static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
   if (size == 0u) {
     size = 1u;
   }
+  /* The framebuffer is inside the identity window: mm_init() already
+   * described these pages, and marked the scanout range uncacheable when it
+   * did. Use that address instead of building a second mapping - it is the
+   * one the boot text console draws through, so it is known to work on the
+   * hardware before the desktop ever paints. The devmap below is for a
+   * framebuffer above ram_top (a card's VRAM aperture), which no identity
+   * page covers. */
+  if (phys != 0u && size <= mm_ram_top() && phys <= mm_ram_top() - size) {
+    kputs("[ND] framebuffer inside the identity map, used as it stands\n");
+    return (void *)(UINTN)phys;
+  }
   /* Write-combining, not uncacheable. The scanout is written far more than
    * it is read, and on a discrete card every pixel store is a PCIe
    * transaction into the VRAM aperture: UC means one transaction per
@@ -368,6 +379,11 @@ int nd_init(void) {
       return 0;
     }
     g_screen.px = (UINT32 *)fb;
+    kputs("[ND] framebuffer mapped at ");
+    kputs_hex((UINT64)(UINTN)fb);
+    kputs(", ");
+    kputs_hex(g_disp.fb_size);
+    kputs(" bytes\n");
     cpu_wbinvd(); /* drop WB data the boot splash wrote through the identity map */
   }
   g_screen.w = (INT32)g_disp.width;
@@ -474,8 +490,21 @@ int nd_init(void) {
      * desktop has a finished first frame. */
     kputs("[ND] boot splash kept until the desktop presents\n");
   } else {
+    /* The first full-screen paint of the session: clear the off-screen
+     * canvas, then copy it to the panel. Both halves walk the whole frame
+     * (8 MiB at 1920x1080), and one of them is the first code in the boot
+     * to touch the framebuffer as a drawing surface - so each half says
+     * when it starts and when it ends. A machine that goes quiet inside
+     * this bracket is stuck writing pixels, not stuck in a driver. */
+    kputs("[ND] clearing canvas ");
+    kputs_hex((UINT64)g_screen.w);
+    kputs("x");
+    kputs_hex((UINT64)g_screen.h);
+    kputs("\n");
     nd_clear(nd_canvas(), ND_RGB(0x10, 0x14, 0x1C));
+    kputs("[ND] canvas cleared, presenting\n");
     nd_present(nd_rect(0, 0, g_screen.w, g_screen.h));
+    kputs("[ND] first frame presented\n");
   }
   return 1;
 }
