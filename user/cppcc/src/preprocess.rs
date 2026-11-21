@@ -1359,7 +1359,7 @@ mod tests {
         let file = dir.join("main.cc");
         fs::write(&file, source).unwrap();
         let (out, errors) = Preprocessor::new(vec![]).preprocess(&file).unwrap();
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir); // a scanner can hold the file briefly on Windows
         (out.text, errors)
     }
 
@@ -1389,7 +1389,7 @@ mod tests {
         let (out, errors) = Preprocessor::new(vec![]).preprocess(&main).unwrap();
         assert!(errors.is_empty(), "{:?}", errors);
         assert_eq!(out.text.matches("int included;").count(), 1);
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir); // a scanner can hold the file briefly on Windows
     }
 
     #[test]
@@ -1460,7 +1460,7 @@ mod tests {
             .unwrap();
         assert!(errors.is_empty(), "{:?}", errors);
         assert!(out.text.contains("int native_decl;"));
-        fs::remove_dir_all(dir).unwrap();
+        let _ = fs::remove_dir_all(dir); // a scanner can hold the file briefly on Windows
     }
 
     #[test]

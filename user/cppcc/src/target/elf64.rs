@@ -20,11 +20,12 @@ const PAGE: u64 = 0x1000;
 const BASE: u64 = 0x0040_0000;
 const EHDR_SIZE: u64 = 64;
 const PHDR_SIZE: u64 = 56;
-const PHNUM: u64 = 5;
+const PHNUM: u64 = 6;
 
 const PT_LOAD: u32 = 1;
 const PT_DYNAMIC: u32 = 2;
 const PT_INTERP: u32 = 3;
+const PT_GNU_STACK: u32 = 0x6474_e551;
 
 const PF_X: u32 = 1;
 const PF_W: u32 = 2;
@@ -32,6 +33,7 @@ const PF_R: u32 = 4;
 
 const DT_NULL: u64 = 0;
 const DT_NEEDED: u64 = 1;
+const DT_PLTRELSZ: u64 = 2;
 const DT_HASH: u64 = 4;
 const DT_STRTAB: u64 = 5;
 const DT_SYMTAB: u64 = 6;
@@ -41,23 +43,23 @@ const DT_RELA: u64 = 7;
 const DT_RELASZ: u64 = 8;
 const DT_RELAENT: u64 = 9;
 const DT_DEBUG: u64 = 21;
+const DT_SONAME: u64 = 14;
+const DT_PLTREL: u64 = 27;
+const DT_JMPREL: u64 = 23;
 
-/// One null dynamic symbol: the image exports nothing, but the loader still
-/// looks its own imports up here first and needs a table to search.
-const DYN_SYMS: u64 = 1;
 const SYM_ENTRY: u64 = 24;
-const HASH_HEADER: u64 = 16; /* nbucket, nchain, one bucket, one chain */
 
 /// The interpreter a Linux x86-64 dynamic executable names.
 const INTERP: &[u8] = b"/lib64/ld-linux-x86-64.so.2\0";
-/// The dynamic string table: an empty name, then the library the image needs.
-const DYNSTR: &[u8] = b"\0libc.so.6\0";
+/// Fixed dynamic names in the string table. "libc.so.6" is nine bytes at
+/// offset 1, so its terminating NUL is at 10 and "cppcc-linux" starts at 11.
+const DYNSTR_PREFIX: &[u8] = b"\0libc.so.6\0cppcc-linux\0";
 const DYNSTR_LIBC: u64 = 1;
+const DYNSTR_SONAME: u64 = 11;
 /// The loader is handed a table it can walk without guessing: the library,
-/// the string and symbol tables, empty relocation ranges (this image needs
-/// none, but absent tags are not the same as empty ones), and DT_DEBUG for
-/// the loader's own bookkeeping, then DT_NULL.
-const DYN_ENTRIES: usize = 11;
+/// the string and symbol tables, SONAME, empty .rela.plt metadata, and
+/// DT_DEBUG for the loader's own bookkeeping, then DT_NULL.
+const DYN_ENTRIES: usize = 15;
 
 struct Section {
     vaddr: u64,
@@ -75,6 +77,34 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
         bail!("entry_point is outside TEXT");
     }
 
+    let mut exports: Vec<(String, u64, u64, u8)> = Vec::new();
+    let mut seen = HashMap::<String, ()>::new();
+    for symbol in &sections.symbols {
+        if symbol.bind == 0 || seen.contains_key(&symbol.name) {
+            continue;
+        }
+        seen.insert(symbol.name.clone(), ());
+        let address = match symbol.segment {
+            SegmentKind::Text => BASE + symbol.value,
+            SegmentKind::Rodata => 0, // filled after the RODATA layout is known
+            SegmentKind::Data => 0,
+            SegmentKind::Bss => 0,
+        };
+        exports.push((symbol.name.clone(), address, symbol.size, symbol.sym_type));
+    }
+
+    let mut dynstr = DYNSTR_PREFIX.to_vec();
+    let mut dynstr_offsets: HashMap<String, u64> = HashMap::new();
+    for (name, _, _, _) in &exports {
+        let offset = dynstr.len() as u64;
+        dynstr.extend_from_slice(name.as_bytes());
+        dynstr.push(0);
+        dynstr_offsets.insert(name.clone(), offset);
+    }
+    let dyn_syms = 1u64 + exports.len() as u64;
+    let nbucket = 1u64.max(dyn_syms);
+    let hash_size = 8u64 + (nbucket + dyn_syms) * 4;
+
     // ---- placement of the read-only first segment ---------------------
     // The header page carries the ELF header, the program headers, the
     // interpreter string and the dynamic string table; RODATA follows at the
@@ -86,13 +116,14 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     // writable segment or the process dies on the first instruction.
     let interp_offset = EHDR_SIZE + PHNUM * PHDR_SIZE;
     let dynstr_offset = align(interp_offset + INTERP.len() as u64, 8);
-    let dynsym_offset = align(dynstr_offset + DYNSTR.len() as u64, 8);
-    let hash_offset = align(dynsym_offset + DYN_SYMS * SYM_ENTRY, 8);
+    let dynsym_offset = align(dynstr_offset + dynstr.len() as u64, 8);
+    let hash_offset = align(dynsym_offset + dyn_syms * SYM_ENTRY, 8);
+    let rela_plt_offset = align(hash_offset + hash_size, 8);
     let rodata_offset = PAGE;
     let rodata_span = align(sections.rodata.len() as u64, PAGE);
     let first_filesz = rodata_offset + rodata_span;
-    if hash_offset + HASH_HEADER > rodata_offset {
-        bail!("interp, dynstr, dynsym and hash overflow the header page");
+    if rela_plt_offset > rodata_offset {
+        bail!("interp, dynstr, dynsym, hash and .rela.plt overflow the header page");
     }
     let dynamic_size = DYN_ENTRIES as u64 * 16;
 
@@ -153,7 +184,8 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     // 2: PT_DYNAMIC
     // 3: PT_LOAD, TEXT
     // 4: PT_LOAD, DATA + BSS
-    let mut load = |at: usize, section: &Section, image: &mut [u8]| {
+    // 5: PT_GNU_STACK
+    let load = |at: usize, section: &Section, image: &mut [u8]| {
         put32(image, at, PT_LOAD);
         put32(image, at + 4, section.flags);
         put64(image, at + 8, section.offset);
@@ -180,21 +212,33 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     put64(&mut image, phdr(2) + 48, 8);
     load(phdr(3), &layout[1], &mut image);
     load(phdr(4), &layout[2], &mut image);
+    put32(&mut image, phdr(5), PT_GNU_STACK);
+    put32(&mut image, phdr(5) + 4, PF_R | PF_W);
+    put64(&mut image, phdr(5) + 8, 0);
+    put64(&mut image, phdr(5) + 16, 0);
+    put64(&mut image, phdr(5) + 24, 0);
+    put64(&mut image, phdr(5) + 32, 0);
+    put64(&mut image, phdr(5) + 40, 0);
+    put64(&mut image, phdr(5) + 48, 16);
 
     // ---- interp, dynstr, dynamic --------------------------------------
     image[interp_offset as usize..interp_offset as usize + INTERP.len()].copy_from_slice(INTERP);
-    image[dynstr_offset as usize..dynstr_offset as usize + DYNSTR.len()].copy_from_slice(DYNSTR);
+    image[dynstr_offset as usize..dynstr_offset as usize + dynstr.len()].copy_from_slice(&dynstr);
     let dynamic = dynamic_offset as usize;
     let tags: [(u64, u64); DYN_ENTRIES] = [
         (DT_NEEDED, DYNSTR_LIBC),
+        (DT_SONAME, DYNSTR_SONAME),
         (DT_STRTAB, BASE + dynstr_offset),
-        (DT_STRSZ, DYNSTR.len() as u64),
+        (DT_STRSZ, dynstr.len() as u64),
         (DT_SYMTAB, BASE + dynsym_offset),
         (DT_SYMENT, SYM_ENTRY),
         (DT_HASH, BASE + hash_offset),
-        (DT_RELA, 0),
+        (DT_RELA, BASE + rela_plt_offset),
         (DT_RELASZ, 0),
-        (DT_RELAENT, SYM_ENTRY),
+        (DT_RELAENT, 24),
+        (DT_JMPREL, BASE + rela_plt_offset),
+        (DT_PLTRELSZ, 0),
+        (DT_PLTREL, DT_RELA),
         (DT_DEBUG, 0),
         (DT_NULL, 0),
     ];
@@ -203,15 +247,6 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
         put64(&mut image, at, *tag);
         put64(&mut image, at + 8, *value);
     }
-    // The dynamic symbol table holds the mandatory null entry only, and the
-    // SysV hash table describes exactly that one symbol: one bucket, one
-    // chain entry, both zero. The loader still searches this image before
-    // libc for every symbol libc imports, so the table has to exist.
-    for index in 0..(DYN_SYMS * SYM_ENTRY) as usize {
-        put64(&mut image, dynsym_offset as usize + index, 0);
-    }
-    put64(&mut image, hash_offset as usize, 1); // nbucket
-    put64(&mut image, hash_offset as usize + 8, DYN_SYMS); // nchain
 
     // ---- segment contents ---------------------------------------------
     let text_at = layout[1].offset as usize;
@@ -233,6 +268,33 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
             }
         };
         addresses.insert(symbol.name.clone(), address);
+    }
+    for (index, (name, _, size, sym_type)) in exports.iter().enumerate() {
+        let entry = (dynsym_offset + (index as u64 + 1) * SYM_ENTRY) as usize;
+        let address = *addresses
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("dynamic export {} has no address", name))?;
+        let name_offset = *dynstr_offsets
+            .get(name)
+            .ok_or_else(|| anyhow::anyhow!("dynamic export {} has no string", name))?;
+        put32(&mut image, entry, name_offset as u32);
+        image[entry + 4] = if *sym_type == 1 { 0x12 } else { 0x11 }; // GLOBAL + FUNC/OBJECT
+        put64(&mut image, entry + 8, address);
+        put64(&mut image, entry + 16, *size);
+    }
+    put32(&mut image, hash_offset as usize, nbucket as u32);
+    put32(&mut image, hash_offset as usize + 4, dyn_syms as u32);
+    // SysV hash chains: bucket[n] holds the first symbol index whose name hashes
+    // into that bucket, chain[i] holds the next one or zero. Symbol 0 is the
+    // mandatory null entry and is never reachable through the hash.
+    let bucket_at = hash_offset as usize + 8;
+    let chain_at = bucket_at + nbucket as usize * 4;
+    for (index, (name, _, _, _)) in exports.iter().enumerate() {
+        let symbol = index + 1;
+        let bucket = (elf_hash(name.as_bytes()) % nbucket) as usize;
+        let head = read32(&image, bucket_at + bucket * 4);
+        put32(&mut image, chain_at + symbol * 4, head);
+        put32(&mut image, bucket_at + bucket * 4, symbol as u32);
     }
     for relocation in &sections.relocations {
         let (base, limit, file_base) = match relocation.place_segment {
@@ -270,6 +332,20 @@ pub fn generate(sections: &CodeSections) -> Result<Vec<u8>> {
     }
 
     Ok(image)
+}
+
+/// The SysV hash the dynamic linker applies to a symbol name.
+fn elf_hash(name: &[u8]) -> u64 {
+    let mut hash = 0u64;
+    for byte in name {
+        hash = (hash << 4) + *byte as u64;
+        let high = hash & 0xf000_0000;
+        if high != 0 {
+            hash ^= high >> 24;
+        }
+        hash &= !high;
+    }
+    hash
 }
 
 fn align(value: u64, to: u64) -> u64 {
