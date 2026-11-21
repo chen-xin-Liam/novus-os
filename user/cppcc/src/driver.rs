@@ -19,6 +19,7 @@ struct Options {
     check_only: bool,
     preprocess_only: bool,
     no_standard_include: bool,
+    target: crate::platform::Target,
     help: bool,
 }
 
@@ -76,10 +77,18 @@ pub fn run(args: impl IntoIterator<Item = String>) -> Result<i32> {
         return Ok(0);
     }
     let output = options.output.expect("output required unless check-only");
-    let image = crate::nucgen::generate(&unit)?;
+    let image = crate::emit(&unit, options.target)?;
     fs::write(&output, &image).with_context(|| format!("failed to write {}", output.display()))?;
-    println!("cppcc: wrote {} ({} bytes)", output.display(), image.len());
+    println!("cppcc: wrote {} ({} bytes, target {})", output.display(), image.len(), target_name(options.target));
     Ok(0)
+}
+
+fn target_name(target: crate::platform::Target) -> &'static str {
+    match target {
+        crate::platform::Target::Nuc => "nuc",
+        crate::platform::Target::Elf64 => "elf64",
+        crate::platform::Target::Pe32Plus => "pe32+",
+    }
 }
 
 fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Options> {
@@ -92,6 +101,11 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Options> {
             "--check" => options.check_only = true,
             "-E" | "--preprocess" => options.preprocess_only = true,
             "-nostdinc" => options.no_standard_include = true,
+            "--target" => {
+                let name = args.next().context("--target requires a name")?;
+                options.target = crate::platform::Target::from_name(&name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown target '{}' (nuc, elf64, pe32+)", name))?;
+            }
             "-o" => {
                 options.output = Some(PathBuf::from(args.next().context("-o requires an output path")?));
             }
@@ -114,6 +128,11 @@ fn parse_options(args: impl IntoIterator<Item = String>) -> Result<Options> {
             }
             _ if arg.starts_with("-D") && arg.len() > 2 => {
                 options.defines.push(split_define(&arg[2..]));
+            }
+            _ if arg.starts_with("--target=") => {
+                let name = &arg["--target=".len()..];
+                options.target = crate::platform::Target::from_name(name)
+                    .ok_or_else(|| anyhow::anyhow!("unknown target '{}' (nuc, elf64, pe32+)", name))?;
             }
             _ if arg.starts_with("-U") && arg.len() > 2 => {
                 options.undefines.push(arg[2..].to_owned());
@@ -149,8 +168,9 @@ fn print_errors(errors: &[CompileError]) {
 }
 
 fn print_usage() {
-    println!("Usage: cppcc [options] input.cc -o output.nuc");
+    println!("Usage: cppcc [options] input.cc -o output.<nuc|elf|exe>");
     println!("Options:");
+    println!("  --target <t>   Output format: nuc (default), elf64, pe32+");
     println!("  -I <dir>       Add a quote-include search directory");
     println!("  -isystem <dir> Add a system include search directory");
     println!("  -D <name[=v]>  Predefine a macro (repeatable)");
@@ -158,7 +178,7 @@ fn print_usage() {
     println!("  -nostdinc      Do not search the bundled freestanding headers");
     println!("  -E             Preprocess to stdout and stop");
     println!("  --dump-ast     Print the parsed and semantically checked AST");
-    println!("  --check        Run front-end checks without requesting NUC output");
+    println!("  --check        Run front-end checks without writing an image");
     println!("  -h, --help     Show this help");
 }
 

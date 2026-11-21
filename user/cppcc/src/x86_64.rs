@@ -347,13 +347,14 @@ impl Generator<'_> {
         }
 
         self.sections.text.extend_from_slice(&[
-            0x48, 0x83, 0xEC, 0x08,       // sub rsp, 8
+            0x48, 0x83, 0xE4, 0xF0,       // and rsp, -16  (Win64 requires a 16-byte aligned stack at calls)
             0xE8, 0, 0, 0, 0,             // call main
-            0x48, 0x83, 0xC4, 0x08,       // add rsp, 8
             0x48, 0x89, 0xC7,             // mov rdi, rax
-            0xB8, 0x3C, 0, 0, 0,          // mov eax, SYS_EXIT
-            0x0F, 0x05,                   // syscall
-            0xF4,                         // hlt if SYS_EXIT unexpectedly returns
+        ]);
+        let exit_call = self.sections.text.len();
+        self.sections.text.extend_from_slice(&[
+            0xE8, 0, 0, 0, 0,             // call __plat_exit
+            0xF4,                         // hlt if it somehow returns
         ]);
         self.sections.symbols.push(NucSymbol {
             name: "_start".into(), sym_type: 1, bind: 0,
@@ -362,6 +363,12 @@ impl Generator<'_> {
         self.sections.relocations.push(NucRelocation {
             place_segment: SegmentKind::Text, place_offset: 5,
             kind: RELOC_PC32, symbol: "main".into(),
+        });
+        self.sections.relocations.push(NucRelocation {
+            place_segment: SegmentKind::Text,
+            place_offset: (exit_call + 1) as u64,
+            kind: RELOC_PC32,
+            symbol: "__plat_exit".into(),
         });
 
         for item in &self.unit.items {
@@ -1045,39 +1052,51 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
         Ok(())
     }
 
+    /// `call __plat_*`: one opcode and a PC32 relocation the backend points
+    /// at its own platform layer. The generator never emits a syscall, so a
+    /// single code path serves NUC, ELF64 and PE32+.
+    fn emit_symbol_call(&mut self, symbol: &str) -> Result<()> {
+        let displacement = self.code.len() + 1;
+        self.emit_bytes(&[0xE8, 0, 0, 0, 0]);
+        self.relocations.push(NucRelocation {
+            place_segment: SegmentKind::Text,
+            place_offset: displacement as u64,
+            kind: RELOC_PC32,
+            symbol: symbol.to_owned(),
+        });
+        Ok(())
+    }
+
     fn emit_call(&mut self, name: &str, args: &[Expr], location: &crate::diagnostic::SourceLocation) -> Result<()> {
         match name {
             "novus_write" => {
                 if args.len() != 2 { bail!("{}", codegen_error(location, "novus_write expects two arguments")); }
-                self.emit_expr(&args[1])?;
-                self.push(Reg::Rax);
                 self.emit_expr(&args[0])?;
+                self.push(Reg::Rax);
+                self.emit_expr(&args[1])?;
                 self.emit_mov_rr(Reg::Rsi, Reg::Rax, true);
-                self.pop(Reg::Rdx);
-                self.emit_mov_imm32(Reg::Rdi, 1);
-                self.emit_mov_imm32(Reg::Rax, 2);
-                self.emit_bytes(&[0x0F, 0x05]);
+                self.pop(Reg::Rdi);
+                self.emit_symbol_call("__plat_write")?;
                 return Ok(());
             }
             "novus_yield" => {
                 if !args.is_empty() { bail!("{}", codegen_error(location, "novus_yield takes no arguments")); }
-                self.emit_mov_imm32(Reg::Rax, 1);
-                self.emit_bytes(&[0x0F, 0x05]);
+                self.emit_symbol_call("__plat_yield")?;
                 return Ok(());
             }
             "novus_exit" | "exit" => {
                 if args.len() != 1 { bail!("{}", codegen_error(location, "exit expects one argument")); }
                 self.emit_expr(&args[0])?;
                 self.emit_mov_rr(Reg::Rdi, Reg::Rax, true);
-                self.emit_mov_imm32(Reg::Rax, 60);
-                self.emit_bytes(&[0x0F, 0x05, 0xF4]);
+                self.emit_symbol_call("__plat_exit")?;
+                self.emit_bytes(&[0xF4]);
                 return Ok(());
             }
             "abort" => {
                 if !args.is_empty() { bail!("{}", codegen_error(location, "abort takes no arguments")); }
                 self.emit_mov_imm32(Reg::Rdi, 134);
-                self.emit_mov_imm32(Reg::Rax, 60);
-                self.emit_bytes(&[0x0F, 0x05, 0xF4]);
+                self.emit_symbol_call("__plat_exit")?;
+                self.emit_bytes(&[0xF4]);
                 return Ok(());
             }
             "puts" => {
@@ -1095,19 +1114,17 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 self.emit_jmp(scan);
                 self.place_label(done);
                 self.emit_mov_rr(Reg::Rdx, Reg::Rcx, true);
-                self.emit_bytes(&[0x48, 0x29, 0xF2]); // sub rdx, rsi
-                self.emit_mov_imm32(Reg::Rdi, 1);
-                self.emit_mov_imm32(Reg::Rax, 2);
-                self.emit_bytes(&[0x0F, 0x05]);
+                self.emit_bytes(&[0x48, 0x29, 0xF2]); // sub rdx, rsi     len
+                self.emit_mov_rr(Reg::Rdi, Reg::Rsi, true); // buf
+                self.emit_mov_rr(Reg::Rsi, Reg::Rdx, true); // len
+                self.emit_symbol_call("__plat_write")?;
                 // Trailing newline, written from a stack scratch byte.
                 self.adjust_rsp(false, 16)?;
                 self.stack_depth += 16;
                 self.emit_bytes(&[0xC6, 0x04, 0x24, b'\n']); // mov byte [rsp], 10
-                self.emit_bytes(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
-                self.emit_mov_imm32(Reg::Rdx, 1);
-                self.emit_mov_imm32(Reg::Rdi, 1);
-                self.emit_mov_imm32(Reg::Rax, 2);
-                self.emit_bytes(&[0x0F, 0x05]);
+                self.emit_mov_rr(Reg::Rdi, Reg::Rsp, true);
+                self.emit_mov_imm32(Reg::Rsi, 1);
+                self.emit_symbol_call("__plat_write")?;
                 self.adjust_rsp(true, 16)?;
                 self.stack_depth -= 16;
                 self.emit_mov_imm32(Reg::Rax, 0);
@@ -1119,11 +1136,9 @@ impl<'g, 'u> FunctionGenerator<'g, 'u> {
                 self.adjust_rsp(false, 16)?;
                 self.stack_depth += 16;
                 self.emit_bytes(&[0x88, 0x04, 0x24]); // mov byte [rsp], al
-                self.emit_bytes(&[0x48, 0x89, 0xE6]); // mov rsi, rsp
-                self.emit_mov_imm32(Reg::Rdx, 1);
-                self.emit_mov_imm32(Reg::Rdi, 1);
-                self.emit_mov_imm32(Reg::Rax, 2);
-                self.emit_bytes(&[0x0F, 0x05]);
+                self.emit_mov_rr(Reg::Rdi, Reg::Rsp, true);
+                self.emit_mov_imm32(Reg::Rsi, 1);
+                self.emit_symbol_call("__plat_write")?;
                 self.emit_bytes(&[0x0F, 0xB6, 0x04, 0x24]); // movzx eax, byte [rsp]
                 self.adjust_rsp(true, 16)?;
                 self.stack_depth -= 16;

@@ -1,6 +1,6 @@
 # cppcc
 
-`cppcc` 是 Novus OS 的 C++98 子集编译器，使用 Rust 编写，在构建主机运行。它直接将带语义类型标注的 AST 降为 x86_64 原生机器码，并由 `nucgen` 写出符合 NUC V1.0 冻结规范的静态 `.nuc` 文件；当前不含独立 IR 模块。
+`cppcc` 是 Novus OS 的 C++98 子集编译器，使用 Rust 编写，在构建主机运行。它直接将带语义类型标注的 AST 降为 x86_64 原生机器码，再经目标无关的 `CodeSections`（代码/符号/重定位）交由三个后端之一写出：NUC V1.0 `.nuc`、Linux 静态 ELF64、Win64 PE32+。内置函数统一调用 `__plat_write`/`__plat_yield`/`__plat_exit` 平台桩，由 `platform.rs` 按目标填入具体实现，因此三个目标都是可运行产物。
 
 ## 构建
 
@@ -18,16 +18,20 @@ cargo run --release -- examples/hello.cc -o hello.nuc
 make cppcc-demo
 ```
 
-`make cppcc-demo` 的产物为 `out/cppcc/hello.nuc`。`make run` 会将样例复制到 `esp/APPS/DEMO.NUC` 并调用 `scripts/run.sh`。
+`make cppcc-demo` 的产物为 `out/cppcc/hello.nuc`。`make run` 会将样例复制到 `esp/DEMO.NUC` 并调用 `scripts/run.sh`。
 
 ## 用法
 
 ```sh
 cppcc hello.cc -o hello.nuc
 cppcc -I include hello.cc -o hello.nuc
+cppcc --target elf64 hello.cc -o hello.elf
+cppcc --target pe32+ hello.cc -o hello.exe
 cppcc --check hello.cc
 cppcc --dump-ast hello.cc --check
 ```
+
+`--target` 取 `nuc`（默认）、`elf64`（别名 `elf`）、`pe32+`（别名 `pe`/`pe64`）。
 
 默认内置头文件 `<novus/syscall.h>` 声明：
 
@@ -37,7 +41,7 @@ void novus_yield();
 void novus_exit(int status);
 ```
 
-示例 `examples/hello.cc` 使用 `novus_write` 调用 `SYS_WRITE=2` 输出文本。`novus_write` 当前发起单次 syscall；内核将一次写入截断到 128 字节，较长文本需要调用方自行分段。
+示例 `examples/hello.cc` 使用 `novus_write` 输出文本。三个目标各自把它落到自己的系统调用/API：NUC 走内核 `SYS_WRITE=2`（单次写入内核截断到 128 字节，长文本需调用方分段），Linux 走 `write(1)`，Windows 走 `GetStdHandle`+`WriteFile`。
 
 ## 支持范围
 
@@ -48,7 +52,11 @@ void novus_exit(int status);
 - 对象式 `#define`、本地 `#include`、`#pragma once`、`#ifdef/#ifndef/#else/#endif`、`#undef`、行注释和块注释。
 - syscall builtin `novus_write/yield/exit`；合成入口要求 `int main()` 或 `int main(void)`。
 
-编译器输出静态 x86_64 NUC，包含 TEXT/可选 RODATA、DATA、BSS 段，最多六个函数参数，支持直接函数调用和镜像内 `R_X86_64_32`/`R_X86_64_PC32` 重定位。每次生成后会校验 NUC 表顺序、字段范围、段权限、入口、符号和重定位。
+编译器输出静态 x86_64 镜像，最多六个函数参数、只做直接函数调用和镜像内 `R_X86_64_32`/`R_X86_64_PC32` 重定位：
+
+- NUC：TEXT/可选 RODATA/DATA/BSS 段；写出前校验表顺序、字段范围、段权限、入口、符号和重定位。
+- ELF64：静态 `ET_EXEC`，`0x400000` 起，3 个 `PT_LOAD`（代码 R|X、只读 R、数据 R|W 且 `memsz` 含 BSS），无 `PT_INTERP`/`PT_DYNAMIC`（动态链接后端未建）。
+- PE32+：COFF 头 + `PE32+` 可选头（`0x20B`）、5 段（`.text`/`.rdata`/`.data`/`.bss`/`.idata`）、`.idata` 里一条 `kernel32.dll` 导入目录（`GetStdHandle`/`WriteFile`/`ExitProcess`），固定基址 `0x400000`、不写 `.reloc`、`DllCharacteristics=0`。
 
 ## 已知限制
 

@@ -5,10 +5,23 @@
 `cppcc` 是 host-native Rust 工具，不链接进内核，也不依赖 LLVM 或外部汇编器。当前流水线为：
 
 ```text
-driver → preprocess → lexer → parser/AST → sema → x86_64 AST codegen → nucgen
+driver → preprocess → lexer → parser/AST → sema → x86_64 AST codegen
+      → CodeSections（目标无关代码/符号/重定位）
+      → platform::install（追加该目标的平台桩）
+      → nucgen | elf64 | pe32plus
 ```
 
-后端直接遍历经过语义检查的 AST：表达式已标注类型，符号作用域已验证。M7 只有 x86_64 一个后端，因此未增加独立 `ir.rs`，避免维护重复的类型、作用域和控制流状态。`x86_64.rs` 使用手写指令编码，包含栈帧/局部槽分配、算术与比较、分支标签、直接调用和 syscall intrinsic；函数调用遵守 SysV x86_64 参数寄存器与 16 字节栈对齐。
+后端直接遍历经过语义检查的 AST：表达式已标注类型，符号作用域已验证。`CodeSections` 承担了"目标无关 IR + 符号 + 重定位"这一层的职责，因此仍未建独立的 `ir.rs`：它记录 `text/rodata/data/bss`、符号表与 PC32/ABS32 重定位，是三个后端共用的唯一中间表示。`x86_64.rs` 使用手写指令编码，包含栈帧/局部槽分配、算术与比较、分支标签、直接调用；函数调用遵守 SysV x86_64 参数寄存器与 16 字节栈对齐。
+
+当前三个后端：
+
+| 目标 | 模块 | 产物 | 平台桩实现 |
+| --- | --- | --- | --- |
+| NUC V1.0 | `nucgen.rs` | `.nuc` | `rax=2/1/60` + `syscall` |
+| Linux ELF64 | `elf64.rs` | 静态 `ET_EXEC`，3 个 `PT_LOAD` | `write(1)/sched_yield(24)/exit(60)` |
+| Win64 PE32+ | `pe32plus.rs` | `IMAGE_FILE_MACHINE_AMD64`、导入表 + IAT | `GetStdHandle`/`WriteFile`/`ExitProcess` |
+
+内置函数不再自行发系统调用，而是统一调用 `__plat_write`/`__plat_yield`/`__plat_exit` 三个符号，由 `platform.rs` 按目标追加桩代码并登记符号和重定位——这是"目标无关"能成立的关键，也让三个后端都成为可运行路径而非摆设。Rust 侧对外暴露 `cppcc::compile_source(source, target)` 与 `cppcc::emit(unit, target)`（图 1 中的"Rust 编译 API"）。
 
 `preprocess.rs` 保留源文件行列映射并处理受限预处理；`lexer.rs` 生成带位置 token；`parser.rs` 递归下降构造 AST 并在语法错误后恢复；`sema.rs` 收集函数、全局变量、结构体和作用域符号，报告类型/return/void 错误；`nucgen.rs` 序列化并自校验 NUC 文件。
 
@@ -42,7 +55,7 @@ driver → preprocess → lexer → parser/AST → sema → x86_64 AST codegen �
 
 生成器始终写规范段权限，但当前 `kernel/nuc.c` 映射代码页时也保留写权限、映射其他非 BSS 段时同样可写；实际 loader 尚未落实段 flags 所表达的 W^X/RODATA 保护。Header 按规范写 8 MiB stack_size，loader 当前会 clamp 到 64–256 KiB。
 
-合成 `_start` 以 `rsp` 对齐后调用 `main`，取返回值到 `rdi`，发起 `SYS_EXIT=60`。`novus_write` 设置 `rax=2, rdi=1, rsi=buffer, rdx=len`；`novus_yield` 使用 1。硬件 `syscall` 会覆盖 `rcx`，本实现的 builtin 不把 `rcx` 用作 syscall 参数。
+合成 `_start` 先把 `rsp` 对齐到 16 字节（`and rsp, -16`，Win64 与 SysV 都要求调用点 16 字节对齐，这也是 PE 目标能在 Windows 上跑起来的前提之一），`call main` 后把返回值移到 `rdi`，再 `call __plat_exit`。三个 builtin 都只是"拼参数 + 调平台桩"：`novus_write` 把 `buf/len` 放进 `rdi/rsi` 后调 `__plat_write`，`puts` 在内联 strlen 后分两次调用（正文 + 栈上换行字节），`putchar` 在栈上放单字节后调用。NUC 桩里 `write` 用 `rax=2, rdi=1, rsi=buffer, rdx=len`，`yield` 用 1，`exit` 用 60。
 
 ## 4. 加载与运行
 
@@ -50,4 +63,14 @@ boot-stage `stage3.c` 从 ESP 固定读取 `APPS/DEMO.NUC` 到 reserved pages，
 
 ## 5. 验证状态
 
-测试代码覆盖冻结 Header/段表 flags/表偏移、符号和两种重定位、Hello syscall 程序，以及 `for`/`if`/函数调用样例。错误路径测试覆盖非法语法和行列诊断。2026-10-18 当前工作站未安装 Cargo/Rust、Make、MinGW、QEMU 或 xxd，因此这些测试与实机/模拟器运行尚未执行；不能将测试源码或预期日志视作通过记录。
+测试代码覆盖冻结 Header/段表 flags/表偏移、符号和两种重定位、Hello syscall 程序，以及 `for`/`if`/函数调用样例。错误路径测试覆盖非法语法和行列诊断。
+
+2026-11-21 三后端的实机结果（同一份 `examples/hello.cc`）：
+
+| 目标 | 验证方式 | 结果 |
+| --- | --- | --- |
+| NUC | 内核 `CONFIG_USER_CPPCC` 启动 smoke（ESP 根目录 `DEMO.NUC`） | 通过，串口 `[USER] Hello, Novus!`，demo 任务退出码 0 |
+| Linux ELF64 | 在 Ubuntu x86_64 上 `chmod +x` 直接执行 | 通过，输出 `Hello, Novus!`，退出码 0 |
+| Win64 PE32+ | 在 Windows 11 x86_64 上直接运行（另用 `LoadLibraryEx` 验证镜像可被内核映射） | 通过，输出 `Hello, Novus!`，退出码 0；`return 42` 样例退出码 42 |
+
+PE 目标曾长期被 Windows 以 `ERROR_BAD_EXE_FORMAT (193)` 拒绝，根因有两条，都已修掉：段表里 `VirtualSize == 0` 的空段（`.data`/`.bss` 在没有数据时）会让加载器直接判格式非法；`_start` 的 `sub rsp, 8` 使调用点未对齐 16 字节，导致 `ExitProcess` 与 `WriteFile` 在 x64 上异常。写输出也从 `WriteConsoleA` 换成 `WriteFile`，这样控制台句柄与重定向管道都能写。

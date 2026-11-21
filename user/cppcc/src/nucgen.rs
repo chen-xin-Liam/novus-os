@@ -17,7 +17,7 @@ const FLAG_DATA: u32 = 0x0B;
 const FLAG_RODATA: u32 = 0x09;
 const FLAG_BSS: u32 = 0x0B;
 const RELOC_32: u32 = 1;
-const RELOC_PC32: u32 = 2;
+pub(crate) const RELOC_PC32: u32 = 2;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum SegmentKind {
@@ -93,8 +93,9 @@ struct SegmentRecord {
 }
 
 pub fn generate(unit: &TranslationUnit) -> Result<Vec<u8>> {
-    let sections = crate::x86_64::generate(unit)?;
-    serialize(sections)
+    // The whole NUC pipeline, including the platform stubs the generator
+    // now calls instead of emitting syscalls itself.
+    crate::emit(unit, crate::platform::Target::Nuc)
 }
 
 pub(crate) fn serialize(sections: CodeSections) -> Result<Vec<u8>> {
