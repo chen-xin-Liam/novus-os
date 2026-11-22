@@ -214,3 +214,23 @@ config NOVUS_WM
 	  side of the GUI protocol on the well-known port "nwm". The timer
 	  tick drives it instead of the M5 demo tick; the demo desktop stays
 	  as the shell scene underneath. Requires NOVUS_GUI and NOVUS_IPC.
+
+config NOVUS_DWM
+	bool "Mini-DWM compositor"
+	default y
+	depends on NOVUS_WM && NOVUS_DISPLAY
+	help
+	  Build the Mini-DWM display base: the vidmem object allocator, the
+	  CRTC/VSync scanout abstraction and the display syscall ABI, plus a
+	  user-space compositor process. The existing in-kernel Novus-WM stays
+	  as the fallback desktop, so a compositor that fails to start cannot
+	  blank the screen. Requires NOVUS_WM and NOVUS_DISPLAY.
+
+config NOVUS_DWM_HW
+	bool "Mini-DWM hardware compositing backend"
+	default n
+	depends on NOVUS_DWM
+	help
+	  Allow a vendor GPU backend to register a hardware compositing pipeline.
+	  No vendor driver exists yet, so the default is the software backend over
+	  gpu2d/NovusDisplay. Enabling this without a driver changes nothing.

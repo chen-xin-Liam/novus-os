@@ -23,7 +23,7 @@
 
 #include "uefi.h"
 
-#define NWM_PROTO_VERSION 0x00010001u /* 1.1: window content lists */
+#define NWM_PROTO_VERSION 0x00020000u /* 2.0: surface redirection / Mini-DWM */
 #define NWM_PORT_NAME     "nwm"
 #define NWM_PID_SHELL     0ull /* the desktop itself: no inbox, local call */
 
@@ -68,6 +68,17 @@
  * a full frame in one burst ends with this, so the frame is composited
  * once with every item present instead of one rectangle per message. */
 #define NWM_REQ_INVALIDATE 0x0110u
+
+/* v2 (Mini-DWM) surface redirection. These extend the protocol without
+ * changing any v1.x message: an old client keeps using display lists, a v2
+ * client allocates a vidmem object with SYS_VMEM_ALLOC and hands the WM only
+ * a handle + geometry, so no pixels cross the IPC boundary. */
+#define NWM_REQ_SURFACE_CREATE  0x0111u /* attach a vidmem object to a window */
+#define NWM_REQ_SURFACE_DESTROY 0x0112u /* detach it */
+#define NWM_REQ_FLIP_PRESENT    0x0113u /* zero-copy: new front buffer handle */
+#define NWM_REQ_BLT_SUBMIT      0x0114u /* compat: window content -> flip */
+#define NWM_REQ_SET_EXCLUSIVE   0x0115u /* full-screen lease of a CRTC */
+#define NWM_REQ_THUMBNAIL       0x0116u /* request a window thumbnail handle */
 
 /* Replies: WM -> requester's inbox, flagged IPC_F_REPLY. */
 #define NWM_RSP_OK  0x0001u
@@ -190,6 +201,50 @@ typedef struct {
   UINT16    pad;
   nwm_cmd_t cmd[NWM_MAX_CMDS];
 } nwm_draw_t;
+
+/* ---- v2 surface-redirection payloads (Mini-DWM) ----------------------- */
+
+/* Attach a vidmem object as a window's redirected surface. v2 windows draw
+ * into the object directly; the WM only stores the handle and geometry. */
+typedef struct {
+  UINT32 win;
+  UINT32 handle;      /* vidmem object handle from SYS_VMEM_ALLOC */
+  INT32  x, y;        /* client-area local position of the surface */
+  UINT32 w, h;        /* surface size in pixels */
+  UINT32 flags;       /* VIDMEM flag mirror / future use */
+  UINT32 pad;
+} nwm_surface_t;
+
+/* Flip: hand the WM a new front-buffer handle for the window's surface. The
+ * old handle's reference is released by the WM after the next present. */
+typedef struct {
+  UINT32 win;
+  UINT32 handle;      /* new front buffer (0 = keep current) */
+  UINT32 pad[2];
+} nwm_flip_t;
+
+/* Compatibility Blt: a legacy display-list window asks the WM to copy its
+ * committed client area into a WM-managed vidmem object so the new compositor
+ * can treat it like any other layer. */
+typedef struct {
+  UINT32 win;
+  UINT32 handle;      /* destination object (0 = WM allocates one) */
+  UINT32 pad[2];
+} nwm_blt_t;
+
+/* Full-screen exclusive lease of an output. */
+typedef struct {
+  UINT32 crtc;
+  UINT32 handle;      /* 0 = release */
+  UINT32 pad[2];
+} nwm_exclusive_t;
+
+/* Thumbnail request: replay a window's current surface into `handle`. */
+typedef struct {
+  UINT32 win;
+  UINT32 handle;      /* destination object */
+  UINT32 w, h;        /* requested thumbnail size */
+} nwm_thumb_t;
 
 /* ---- reply and event payloads ----------------------------------------- */
 

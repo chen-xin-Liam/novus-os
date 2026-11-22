@@ -145,6 +145,9 @@ SRC := arch/x86_64/boot/main.c \
        kernel/pci.c \
        kernel/gpu.c \
        kernel/gpu2d.c \
+       kernel/vidmem.c \
+       kernel/crtc.c \
+       kernel/dwmsys.c \
        kernel/net.c \
        kernel/net_dhcp.c \
        kernel/net_tcp.c \
@@ -243,6 +246,8 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_DISPLAY=$(if $(filter y,$(CONFIG_NOVUS_DISPLAY)),1,0) \
           -DCONFIG_NOVUS_GUI=$(if $(filter y,$(CONFIG_NOVUS_GUI)),1,0) \
           -DCONFIG_NOVUS_WM=$(if $(filter y,$(CONFIG_NOVUS_WM)),1,0) \
+          -DCONFIG_NOVUS_DWM=$(if $(filter y,$(CONFIG_NOVUS_DWM)),1,0) \
+          -DCONFIG_NOVUS_DWM_HW=$(if $(filter y,$(CONFIG_NOVUS_DWM_HW)),1,0) \
           -DCONFIG_NOVUS_IPC=$(if $(filter y,$(CONFIG_NOVUS_IPC)),1,0) \
           -DCONFIG_NOVUS_PCI=$(if $(filter y,$(CONFIG_NOVUS_PCI)),1,0) \
           -DCONFIG_NOVUS_NET=$(if $(filter y,$(CONFIG_NOVUS_NET)),1,0) \
@@ -457,7 +462,7 @@ $(RUST_LIB): $(RUST_DEPS)
 APPS_DIR    := apps
 APPS_TARGET := $(CURDIR)/build/rust-apps
 APPS_STAMP  := build/apps.stamp
-APPS_NAMES  := fileman taskman settings netman session setup nsh devmgmt novusd
+APPS_NAMES  := fileman taskman settings netman session setup nsh devmgmt novusd dwm
 APPS_BINS   := $(addprefix out/apps/,$(addsuffix .bin,$(APPS_NAMES)))
 APPS_BLOB_H := build/apps_blobs.h
 APPS_DEPS   := $(shell find $(APPS_DIR)/src -type f 2>/dev/null) \

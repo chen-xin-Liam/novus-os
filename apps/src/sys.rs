@@ -179,3 +179,102 @@ pub fn console_write(bytes: &[u8]) -> i64 {
 pub fn console_read(buf: &mut [u8]) -> i64 {
     call(27, 1, buf.as_mut_ptr() as u64, buf.len() as u64, 0)
 }
+
+/* ---- Mini-DWM display ABI (kernel/dwmsys.h, syscalls 28-36) ------------ */
+
+pub const SYS_VMEM_ALLOC: u64 = 28;
+pub const SYS_VMEM_FREE: u64 = 29;
+pub const SYS_VMEM_MAP: u64 = 30;
+pub const SYS_VMEM_GRANT: u64 = 31;
+pub const SYS_SURFACE_PRESENT: u64 = 32;
+pub const SYS_WAIT_VSYNC: u64 = 33;
+pub const SYS_SET_EXCLUSIVE: u64 = 34;
+pub const SYS_SET_CURSOR: u64 = 35;
+pub const SYS_DWM_QUERY: u64 = 36;
+pub const SYS_SET_MODE: u64 = 37;
+
+pub const VMEM_FLAG_WC: u32 = 0x1;
+pub const VMEM_FLAG_SCANOUT: u32 = 0x2;
+pub const VM_PROT_WRITE: u32 = 0x2;
+pub const VM_PROT_USER: u32 = 0x4;
+pub const VM_PROT_EXEC: u32 = 0x8;
+
+pub const DWM_LAYER_FLIP: u32 = 0;
+pub const DWM_LAYER_BLT: u32 = 1;
+pub const DWM_MODE_CLONE: u32 = 0;
+pub const DWM_MODE_EXTEND: u32 = 1;
+
+/// One composited layer (mirrors kernel `dwm_layer_t`, 24 bytes).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DwmLayer {
+    pub handle: u32,
+    pub flags: u32,
+    pub x: i32,
+    pub y: i32,
+    pub w: u32,
+    pub h: u32,
+}
+const _: [(); 24] = [(); core::mem::size_of::<DwmLayer>()];
+
+/// Output/geometry snapshot (mirrors kernel `dwm_query_t`).
+#[repr(C)]
+pub struct DwmQuery {
+    pub mode: u32,
+    pub count: u32,
+    pub out: [DwmOutput; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct DwmOutput {
+    pub width: u32,
+    pub height: u32,
+    pub primary: u8,
+    pub available: u8,
+    pub pad: [u8; 2],
+}
+
+/// Allocate a shared video-memory object; returns a non-zero handle or 0.
+pub fn vmem_alloc(size: u32, flags: u32) -> u32 {
+    call(SYS_VMEM_ALLOC, size as u64, flags as u64, 0, 0) as u32
+}
+
+pub fn vmem_free(handle: u32) -> i64 {
+    call(SYS_VMEM_FREE, handle as u64, 0, 0, 0)
+}
+
+pub fn vmem_map(handle: u32, va: u64, prot: u32) -> i64 {
+    call(SYS_VMEM_MAP, handle as u64, va, prot as u64, 0)
+}
+
+pub fn vmem_grant(handle: u32, pid: u64) -> i64 {
+    call(SYS_VMEM_GRANT, handle as u64, pid, 0, 0)
+}
+
+pub fn surface_present(crtc: u32, layers: &[DwmLayer]) -> i64 {
+    call(SYS_SURFACE_PRESENT, crtc as u64, layers.as_ptr() as u64,
+         layers.len() as u64, 0)
+}
+
+pub fn wait_vsync(crtc: u32) -> i64 {
+    call(SYS_WAIT_VSYNC, crtc as u64, 0, 0, 0)
+}
+
+pub fn set_exclusive(crtc: u32, handle: u32) -> i64 {
+    call(SYS_SET_EXCLUSIVE, crtc as u64, handle as u64, 0, 0)
+}
+
+pub fn set_cursor(crtc: u32, x: i32, y: i32, visible: bool) -> i64 {
+    call(SYS_SET_CURSOR, crtc as u64, x as u64, y as u64, visible as u64)
+}
+
+pub fn dwm_query(q: &mut DwmQuery) -> i64 {
+    call(SYS_DWM_QUERY, q as *mut DwmQuery as u64,
+         core::mem::size_of::<DwmQuery>() as u64, 0, 0)
+}
+
+/// Set the display topology: DWM_MODE_CLONE or DWM_MODE_EXTEND.
+pub fn set_mode(mode: u32) -> i64 {
+    call(SYS_SET_MODE, mode as u64, 0, 0, 0)
+}

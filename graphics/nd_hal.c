@@ -948,6 +948,66 @@ const nd_output_t *nd_outputs(UINT32 *count) {
 
 nd_surface_t *nd_screen(void) { return g_screen_ready ? &g_screen : 0; }
 
+int nd_wait_vsync(void) {
+  present_probe();
+  if (g_retrace != 1u) {
+    return 0;
+  }
+  if ((io_in8(ND_VGA_STATUS) & ND_VGA_VRETRACE) != 0u) {
+    return 1;
+  }
+  present_wait_blank(nd_rect(0, 0, g_screen.w, g_screen.h));
+  return 1;
+}
+
+void nd_crtc_blit(UINT32 index, const UINT32 *src, UINT32 src_stride,
+                  INT32 x, INT32 y, UINT32 w, UINT32 h) {
+  nd_surface_t *dst;
+  nd_rect_t     r;
+  INT32         row;
+
+  if (src == 0 || w == 0u || h == 0u || src_stride < w) {
+    return;
+  }
+  if (index == 0u) {
+    dst = &g_screen;
+  } else {
+    UINT32 m = index - 1u;
+    if (m >= g_mirror_count) {
+      return;
+    }
+    dst = &g_mirror[m];
+  }
+  if (!g_screen_ready || dst->px == 0) {
+    return;
+  }
+  r = nd_rect_intersect(nd_rect(x, y, (INT32)w, (INT32)h),
+                        nd_rect(0, 0, dst->w, dst->h));
+  if (nd_rect_empty(r)) {
+    return;
+  }
+  {
+    int swap = surface_swapped(dst); /* source is canonical ARGB, not fb */
+    UINT32 sx0 = (UINT32)(r.x - x);  /* source offsets that clipping removed */
+    UINT32 sy0 = (UINT32)(r.y - y);
+
+    for (row = 0; row < r.h; row++) {
+      const UINT32 *s = src + (UINT32)(sy0 + (UINT32)row) * src_stride + sx0;
+      UINT32       *d = dst->px + (UINT32)(r.y + row) * dst->stride +
+                        (UINT32)r.x;
+      UINT32        col;
+
+      if (!swap) {
+        memcpy(d, s, (UINT64)r.w * 4u);
+      } else {
+        for (col = 0; col < (UINT32)r.w; col++) {
+          d[col] = swap_rb(s[col]);
+        }
+      }
+    }
+  }
+}
+
 /* Present a rectangle of the composed frame on every other output. A
  * mirror that matches the primary is a straight row-wise clone (the same
  * memcpy path as the primary present); one that does not is scaled to fit

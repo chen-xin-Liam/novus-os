@@ -17,6 +17,11 @@
 #define PTE_W 0x0000000000000002ULL
 #define PTE_U 0x0000000000000004ULL
 #define PTE_PS 0x0000000000000080ULL
+/* Software-only AVL bit 11: a user page whose physical frame is owned by a
+ * vidmem object. free_user_leafs() must clear the PTE but must not hand the
+ * frame back to the PMM, or a process exit would invalidate a buffer the
+ * compositor still maps. */
+#define PTE_SHARED 0x0000000000000800ULL
 #define PTE_ADDR4K 0x000FFFFFFFFFF000ULL
 #define PTE_ADDR2M 0x000FFFFFFFE00000ULL
 #define PTE_FLAGS 0x0000000000000FFFULL
@@ -245,6 +250,9 @@ int vm_user_map(vm_space_t *sp, UINT64 va, UINT64 phys, UINT32 prot) {
    * pages is the whole point: a user program that jumps into its own
    * buffer is stopped by the page tables, not by luck. */
   pt[i1] = phys | PTE_P | (prot & (PTE_W | PTE_U));
+  if ((prot & VM_PROT_SHARED) != 0u) {
+    pt[i1] |= PTE_SHARED;
+  }
   if ((prot & VM_PROT_EXEC) == 0u) {
     pt[i1] |= PTE_NX;
   }
@@ -360,7 +368,12 @@ static UINT32 free_user_leafs(vm_space_t *sp) {
         pt = table(pd[i2] & PTE_ADDR4K);
         for (i1 = 0; i1 < 512u; i1++) {
           if ((pt[i1] & PTE_P) != 0 && (pt[i1] & PTE_U) != 0) {
-            pmm_free_page((void *)(UINTN)(pt[i1] & PTE_ADDR4K));
+            /* Shared vidmem pages are owned by a vidmem object, which frees
+             * them once the last handle reference is gone. Clearing the PTE
+             * here is enough: a dying process drops its view, not the frame. */
+            if ((pt[i1] & PTE_SHARED) == 0u) {
+              pmm_free_page((void *)(UINTN)(pt[i1] & PTE_ADDR4K));
+            }
             pt[i1] = 0;
             n++;
           }

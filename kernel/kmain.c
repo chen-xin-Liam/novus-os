@@ -77,6 +77,8 @@
 #include "sysinfo.h"
 #include "gpu.h"
 #include "gpu2d.h"
+#include "vidmem.h"
+#include "crtc.h"
 #include "net.h"
 #include "irq.h"
 #include "klog.h"
@@ -830,6 +832,32 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * firmware framebuffer; a vendor engine plugs in here when it exists. */
       gpu2d_init();
       kputs("[BOOT] gpu and 2d ready\n");
+      /* Mini-DWM display base: video-memory objects and the CRTC/scanout
+       * abstraction sit on top of the bound display stack. They are inert
+       * until a compositor submits a present; the existing nwm keeps drawing
+       * the desktop, so this is additive and cannot blank the screen. */
+#if CONFIG_NOVUS_DWM
+      vidmem_init();
+      (void)vidmem_selftest();
+      crtc_init();
+      (void)crtc_selftest();
+      kputs("[BOOT] vidmem and crtc ready\n");
+      /* The compositor listens on a well-known port for v2 layer updates.
+       * Register it in the kernel (apps cannot create named ports), then
+       * start the user-space dwm process as a system service. The in-kernel
+       * WM stays up as the fallback desktop. */
+      {
+        UINT64 dwm_port = 0u;
+
+        if (ipc_port_create("dwm", 0u, 0u, &dwm_port) == IPC_OK) {
+          int rc = apps_launch_service("dwm");
+          (void)rc;
+          kputs("[BOOT] dwm compositor port ready\n");
+        } else {
+          kputs("[WARN] dwm port registration failed; kernel WM only\n");
+        }
+      }
+#endif
       sysinfo_init();
       kputs("[BOOT] sysinfo ready\n");
       {

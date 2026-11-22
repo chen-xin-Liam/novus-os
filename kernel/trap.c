@@ -31,6 +31,9 @@
 #include "session.h"
 #include "install.h"
 #include "win32.h"
+#if CONFIG_NOVUS_DWM
+#include "dwmsys.h"
+#endif
 #include "novu_format.h"
 #include "novu_service.h"
 #include "novu_index.h"
@@ -1089,6 +1092,18 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_UPDATE, "update", sys_update_call},
     {SYS_HTTPS, "https", sys_https_call},
     {SYS_CONSOLE, "console", sys_console},
+#if CONFIG_NOVUS_DWM
+    {SYS_VMEM_ALLOC, "vmem_alloc", dwm_sys_vmem_alloc},
+    {SYS_VMEM_FREE, "vmem_free", dwm_sys_vmem_free},
+    {SYS_VMEM_MAP, "vmem_map", dwm_sys_vmem_map},
+    {SYS_VMEM_GRANT, "vmem_grant", dwm_sys_vmem_grant},
+    {SYS_SURFACE_PRESENT, "surface_present", dwm_sys_surface_present},
+    {SYS_WAIT_VSYNC, "wait_vsync", dwm_sys_wait_vsync},
+    {SYS_SET_EXCLUSIVE, "set_exclusive", dwm_sys_set_exclusive},
+    {SYS_SET_CURSOR, "set_cursor", dwm_sys_set_cursor},
+    {SYS_DWM_QUERY, "dwm_query", dwm_sys_query},
+    {SYS_SET_MODE, "set_mode", dwm_sys_set_mode},
+#endif
 };
 
 /* Unknown numbers are reported once each and refused; a wrong ABI must be

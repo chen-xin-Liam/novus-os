@@ -186,6 +186,23 @@ void nd_present(nd_rect_t r);
 /* 1 when presents are synchronised to the display's vertical blank. */
 int nd_present_vsync(void);
 
+/* Wait for the start of the vertical blank on the primary output. Returns 1
+ * when a usable retrace source was found and the wait actually synchronised,
+ * 0 when the machine has no probeable VBlank (caller may proceed at once).
+ * Bounded: it never spins longer than one blank interval. */
+int nd_wait_vsync(void);
+
+/* ---- CRTC compositing seam (Mini-DWM) --------------------------------- */
+
+/* Blit canonical 0xAARRGGBB pixels from `src` (stride in pixels) into output
+ * `index` (0 = primary, 1.. = mirror outputs in nd_outputs() order) at (`x`,
+ * `y`). Byte order is converted for framebuffers that store B,G,R,X. The
+ * rectangle is clipped to the output; nothing is done for an invalid index.
+ * No VSync wait or cursor overlay is performed here - callers compose first
+ * and call nd_present()/crtc_present() to scan out. */
+void nd_crtc_blit(UINT32 index, const UINT32 *src, UINT32 src_stride,
+                  INT32 x, INT32 y, UINT32 w, UINT32 h);
+
 /* ---- frame timing ----------------------------------------------------- */
 
 /* Raw TSC and its calibrated rate. Shell paint code uses the same clock as

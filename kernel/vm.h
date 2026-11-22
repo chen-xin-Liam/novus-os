@@ -35,6 +35,11 @@
 #define VM_PROT_WRITE 0x2u
 #define VM_PROT_USER  0x4u
 #define VM_PROT_EXEC  0x8u /* without it the leaf gets NX */
+/* A shared vidmem page: the physical page belongs to a vidmem object, not to
+ * this address space. vm_space_free() clears the PTE but leaves the page to
+ * the object owner, so an app exit cannot pull the buffer out from under the
+ * compositor that maps the same handle. */
+#define VM_PROT_SHARED 0x10u
 
 /* 6 for the space itself (PML4, PDPT, four PDs) plus one PT per 2 MiB
  * region the loader touches. A NUC image has at most 16 segments, and the

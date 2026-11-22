@@ -32,6 +32,7 @@ pub mod shell;
 pub mod nuomi;
 pub mod devmgr;
 pub mod novusd_proto;
+pub mod dwm;
 
 #[cfg(target_os = "none")]
 use core::panic::PanicInfo;

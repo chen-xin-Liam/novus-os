@@ -15,7 +15,7 @@
 
 #include "uefi.h"
 
-#define APPS_MAX 9
+#define APPS_MAX 10
 #define APPS_EAUTH (-101)
 
 /* Number of embedded applications. */
@@ -43,6 +43,11 @@ int apps_find(const char *name);
 /* Start by name. The shell and the session manager use this so adding an
  * application cannot silently shift what a table index means. */
 int apps_launch_name(const char *name);
+
+/* Start a system service by name without requiring a logged-in session.
+ * Used for the Mini-DWM compositor, which must be up for the desktop to
+ * composite. Same return codes as apps_launch(), minus the auth gate. */
+int apps_launch_service(const char *name);
 
 /* ---- Win32 compatibility images (M9) ---------------------------------- */
 /* Kept as a second table so the NUC indices above (and everything the

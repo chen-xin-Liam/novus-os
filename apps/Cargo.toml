@@ -33,6 +33,10 @@ path = "src/bin/nsh.rs"
 name = "devmgmt"
 path = "src/bin/devmgmt.rs"
 
+[[bin]]
+name = "dwm"
+path = "src/bin/dwm.rs"
+
 [profile.release]
 panic = "abort"
 opt-level = "s"

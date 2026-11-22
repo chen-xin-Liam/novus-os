@@ -86,3 +86,9 @@ CONFIG_NOVUS_NTP=y
 # M6: Novus-WM window manager and the GUI protocol server. Requires
 # CONFIG_NOVUS_GUI and CONFIG_NOVUS_IPC.
 CONFIG_NOVUS_WM=y
+
+# Mini-DWM compositor display base (vidmem objects, CRTC/VSync, display
+# syscalls and the user-space compositor). The in-kernel WM stays as fallback.
+CONFIG_NOVUS_DWM=y
+# No vendor GPU backend exists yet; the software compositor is the default.
+CONFIG_NOVUS_DWM_HW=n

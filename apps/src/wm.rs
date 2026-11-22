@@ -21,6 +21,13 @@ pub const REQ_CLEAR: u16 = 0x010D;
 pub const REQ_SHAPE: u16 = 0x010E;
 pub const REQ_TEXT: u16 = 0x010F;
 pub const REQ_INVALIDATE: u16 = 0x0110;
+/* v2 (Mini-DWM): surface redirection. */
+pub const REQ_SURFACE_CREATE: u16 = 0x0111;
+pub const REQ_SURFACE_DESTROY: u16 = 0x0112;
+pub const REQ_FLIP_PRESENT: u16 = 0x0113;
+pub const REQ_BLT_SUBMIT: u16 = 0x0114;
+pub const REQ_SET_EXCLUSIVE: u16 = 0x0115;
+pub const REQ_THUMBNAIL: u16 = 0x0116;
 
 pub const RSP_OK: u16 = 0x0001;
 pub const RSP_ERR: u16 = 0x0002;
@@ -103,6 +110,48 @@ struct Text {
     len: u8,
     color: u32,
     text: [u8; TEXT_MAX],
+}
+
+/* v2 surface-redirection payloads (wm/novus-wm/nwm_proto.h). */
+#[repr(C)]
+struct SurfaceCreate {
+    win: u32,
+    handle: u32,
+    x: i32,
+    y: i32,
+    w: u32,
+    h: u32,
+    flags: u32,
+    pad: u32,
+}
+
+#[repr(C)]
+struct FlipPresent {
+    win: u32,
+    handle: u32,
+    pad: [u32; 2],
+}
+
+#[repr(C)]
+struct BltSubmit {
+    win: u32,
+    handle: u32,
+    pad: [u32; 2],
+}
+
+#[repr(C)]
+struct SetExclusive {
+    crtc: u32,
+    handle: u32,
+    pad: [u32; 2],
+}
+
+#[repr(C)]
+struct Thumbnail {
+    win: u32,
+    handle: u32,
+    w: u32,
+    h: u32,
 }
 
 #[repr(C)]
@@ -366,6 +415,45 @@ impl Win {
         let w = self.id.to_le_bytes();
 
         send(self.port, REQ_DESTROY, 0, &w);
+    }
+
+    /* ---- v2 surface redirection (Mini-DWM) --------------------------- */
+
+    /// Attach a shared vidmem object as this window's redirected surface.
+    pub fn surface_create(&self, handle: u32, x: i32, y: i32, w: u32, h: u32) {
+        let s = SurfaceCreate {
+            win: self.id, handle, x, y, w, h, flags: 0, pad: 0,
+        };
+        send(self.port, REQ_SURFACE_CREATE, 0, ipc::bytes_of(&s));
+    }
+
+    pub fn surface_destroy(&self) {
+        let w = self.id.to_le_bytes();
+        send(self.port, REQ_SURFACE_DESTROY, 0, &w);
+    }
+
+    /// Flip to a new front-buffer handle with zero pixel copies.
+    pub fn flip(&self, handle: u32) {
+        let f = FlipPresent { win: self.id, handle, pad: [0, 0] };
+        send(self.port, REQ_FLIP_PRESENT, 0, ipc::bytes_of(&f));
+    }
+
+    /// Submit a legacy display-list window to the compositor's Blt path.
+    pub fn blt_submit(&self, handle: u32) {
+        let b = BltSubmit { win: self.id, handle, pad: [0, 0] };
+        send(self.port, REQ_BLT_SUBMIT, 0, ipc::bytes_of(&b));
+    }
+
+    /// Take/release a full-screen exclusive lease of an output.
+    pub fn set_exclusive(port: u64, crtc: u32, handle: u32) {
+        let e = SetExclusive { crtc, handle, pad: [0, 0] };
+        send(port, REQ_SET_EXCLUSIVE, 0, ipc::bytes_of(&e));
+    }
+
+    /// Request a thumbnail of this window into a destination object.
+    pub fn thumbnail(&self, handle: u32, w: u32, h: u32) {
+        let t = Thumbnail { win: self.id, handle, w, h };
+        send(self.port, REQ_THUMBNAIL, 0, ipc::bytes_of(&t));
     }
 
     /// Next event for any window of this process, tagged with its window

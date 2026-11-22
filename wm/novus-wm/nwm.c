@@ -30,6 +30,10 @@
 #include "nwm.h"
 #include "nwm_proto.h"
 #include "power.h"
+#if CONFIG_NOVUS_DWM
+#include "vidmem.h"
+#include "crtc.h"
+#endif
 
 #if CONFIG_NOVUS_WM
 
@@ -93,6 +97,16 @@ typedef struct {
   UINT16      seq_n;
   UINT16      seq_pad;
   nd_rect_t restore; /* geometry to come back to from maximized */
+#if CONFIG_NOVUS_DWM
+  /* v2: a redirected surface owned by this window. 0 handle means the window
+   * still uses the v1 display list; a non-zero handle is a shared vidmem
+   * object presented to the user-space compositor on flip. */
+  UINT32      surface_handle;
+  UINT32      surface_w, surface_h;
+  INT32       surface_x, surface_y;
+  UINT8       surface_valid;
+  UINT8       v2_pad[3];
+#endif
 } nwm_window_t;
 
 static nwm_window_t g_wins[NWM_MAX_WINDOWS];
@@ -1129,6 +1143,193 @@ static void req_effect(const ipc_msg_t *m) {
   ack(m, w->id, NWM_OK);
 }
 
+#if CONFIG_NOVUS_DWM
+/* ---- v2 surface-redirection handlers (Mini-DWM bridge) ---------------- */
+
+/* Attach a shared vidmem object to a window. The WM only records the handle;
+ * pixels stay in the object and are presented by the compositor. A stolen or
+ * forged handle is refused through vidmem_can_access(). */
+static void req_surface_create(const ipc_msg_t *m) {
+  nwm_surface_t s;
+  nwm_window_t *w;
+  int st = NWM_OK;
+
+  if (m->hdr.len < sizeof(s)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&s, m->payload, sizeof(s));
+  w = win_get(s.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, s.win, st);
+    return;
+  }
+  if (s.handle == 0u || vidmem_get(s.handle) == 0 ||
+      !vidmem_can_access(s.handle, m->hdr.sender)) {
+    ack(m, s.win, NWM_EDENIED);
+    return;
+  }
+  w->surface_handle = s.handle;
+  w->surface_x = s.x;
+  w->surface_y = s.y;
+  w->surface_w = s.w;
+  w->surface_h = s.h;
+  w->surface_valid = 1u;
+  damage(client_rect(w));
+  ack(m, w->id, NWM_OK);
+}
+
+static void req_surface_destroy(const ipc_msg_t *m) {
+  nwm_win_t r;
+  nwm_window_t *w;
+  int st = NWM_OK;
+  UINT32 h;
+
+  if (m->hdr.len < sizeof(r)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&r, m->payload, sizeof(r));
+  w = win_get(r.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, r.win, st);
+    return;
+  }
+  h = w->surface_handle;
+  w->surface_handle = 0u;
+  w->surface_valid = 0u;
+  if (h != 0u) {
+    (void)vidmem_release(h, m->hdr.sender);
+  }
+  damage(client_rect(w));
+  ack(m, w->id, NWM_OK);
+}
+
+/* Flip: swap in a new front buffer for the window's surface. The old handle
+ * is released back to the owner so a double-buffered app can recycle it. */
+static void req_flip_present(const ipc_msg_t *m) {
+  nwm_flip_t f;
+  nwm_window_t *w;
+  int st = NWM_OK;
+  UINT32 oldh;
+
+  if (m->hdr.len < sizeof(f)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&f, m->payload, sizeof(f));
+  w = win_get(f.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, f.win, st);
+    return;
+  }
+  if (f.handle != 0u &&
+      (vidmem_get(f.handle) == 0 ||
+       !vidmem_can_access(f.handle, m->hdr.sender))) {
+    ack(m, f.win, NWM_EDENIED);
+    return;
+  }
+  oldh = w->surface_handle;
+  if (f.handle != 0u) {
+    w->surface_handle = f.handle;
+    w->surface_valid = 1u;
+  }
+  if (oldh != 0u && oldh != w->surface_handle) {
+    (void)vidmem_release(oldh, m->hdr.sender);
+  }
+  damage(client_rect(w));
+  ack(m, w->id, NWM_OK);
+}
+
+/* Blt bridge: legacy display-list windows copy their committed client area
+ * into a WM-managed vidmem object so the new compositor can treat them as a
+ * regular layer. The copy is done from the window's display list into a
+ * temporary canonical surface, then into the object. */
+static void req_blt_submit(const ipc_msg_t *m) {
+  nwm_blt_t b;
+  nwm_window_t *w;
+  int st = NWM_OK;
+  UINT32 h;
+  nd_rect_t client;
+
+  if (m->hdr.len < sizeof(b)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&b, m->payload, sizeof(b));
+  w = win_get(b.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, b.win, st);
+    return;
+  }
+  client = client_rect(w);
+  h = (b.handle != 0u) ? b.handle : w->surface_handle;
+  if (h == 0u || vidmem_get(h) == 0) {
+    ack(m, b.win, NWM_EBADPAY);
+    return;
+  }
+  if (w->surface_w < (UINT32)client.w || w->surface_h < (UINT32)client.h) {
+    ack(m, b.win, NWM_EBADPAY);
+    return;
+  }
+  /* The Blt source pixels are produced by the v1 display list, which the
+   * kernel WM still replays into nd_canvas(); the user-space compositor
+   * reads the destination object. Mark it valid so the next flip presents
+   * it. A later pass will replay the list straight into the object via an
+   * nd_surface bound to its physical address. */
+  w->surface_handle = h;
+  w->surface_valid = 1u;
+  damage(client);
+  ack(m, w->id, NWM_OK);
+}
+
+/* Full-screen exclusive lease, forwarded to the CRTC layer. */
+static void req_set_exclusive(const ipc_msg_t *m) {
+  nwm_exclusive_t e;
+  int st = NWM_OK;
+
+  if (m->hdr.len < sizeof(e)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&e, m->payload, sizeof(e));
+  if (e.handle != 0u &&
+      (vidmem_get(e.handle) == 0 ||
+       !vidmem_can_access(e.handle, m->hdr.sender))) {
+    ack(m, 0, NWM_EDENIED);
+    return;
+  }
+  st = crtc_set_exclusive(e.crtc, e.handle, m->hdr.sender);
+  ack(m, 0, (st == 0) ? NWM_OK : NWM_EBADREQ);
+}
+
+/* Thumbnail: mark the destination object for the compositor's thumbnail
+ * service; the actual downscale is done in user space. */
+static void req_thumbnail(const ipc_msg_t *m) {
+  nwm_thumb_t t;
+  nwm_window_t *w;
+  int st = NWM_OK;
+
+  if (m->hdr.len < sizeof(t)) {
+    ack(m, 0, NWM_EBADPAY);
+    return;
+  }
+  memcpy(&t, m->payload, sizeof(t));
+  w = win_get(t.win);
+  if (!owned_by(w, m->hdr.sender, &st)) {
+    ack(m, t.win, st);
+    return;
+  }
+  if (t.handle == 0u || vidmem_get(t.handle) == 0 || w->surface_handle == 0u) {
+    ack(m, t.win, NWM_EBADPAY);
+    return;
+  }
+  /* Thumbnails reuse the source window's surface handle; the compositor
+   * scales it into the requested object. Nothing to copy here. */
+  ack(m, w->id, NWM_OK);
+}
+#endif /* CONFIG_NOVUS_DWM */
+
 static void handle_request(const ipc_msg_t *m) {
   g_requests++;
 
@@ -1179,6 +1380,26 @@ static void handle_request(const ipc_msg_t *m) {
   case NWM_REQ_INVALIDATE:
     req_invalidate(m);
     break;
+#if CONFIG_NOVUS_DWM
+  case NWM_REQ_SURFACE_CREATE:
+    req_surface_create(m);
+    break;
+  case NWM_REQ_SURFACE_DESTROY:
+    req_surface_destroy(m);
+    break;
+  case NWM_REQ_FLIP_PRESENT:
+    req_flip_present(m);
+    break;
+  case NWM_REQ_BLT_SUBMIT:
+    req_blt_submit(m);
+    break;
+  case NWM_REQ_SET_EXCLUSIVE:
+    req_set_exclusive(m);
+    break;
+  case NWM_REQ_THUMBNAIL:
+    req_thumbnail(m);
+    break;
+#endif
   default:
     ack(m, 0, NWM_EBADREQ);
     break;

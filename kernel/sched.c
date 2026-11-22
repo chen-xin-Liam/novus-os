@@ -24,6 +24,10 @@
 #include "novu_service.h"
 #include "nuc.h"
 #include "win32.h"
+#if CONFIG_NOVUS_DWM
+#include "vidmem.h"
+#include "crtc.h"
+#endif
 
 /* Written by trap.S: the stack the syscall gate switches to, and the
  * gate itself. */
@@ -644,6 +648,13 @@ void sched_exit_current(int code) {
   /* Its inbox and any named port it owned go with it; a window whose
    * owner is gone is closed by the WM on the next tick. */
   ipc_owner_exit(g_current->pid);
+#if CONFIG_NOVUS_DWM
+  /* Release the task's vidmem references and any exclusive CRTC lease before
+   * its address space is torn down; shared frames other tasks still map stay
+   * alive because those references belong to them. */
+  vidmem_owner_exit(g_current->pid);
+  crtc_owner_exit(g_current->pid);
+#endif
 #if CONFIG_NOVUS_WIN32
   /* Registry handles are not task-owned memory: release the slots the
    * process left open so a relaunch does not exhaust the table. */

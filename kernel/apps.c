@@ -34,6 +34,7 @@ static const app_t g_apps[] = {
     {"nsh", k_app_nsh, &k_app_nsh_len},
     {"devmgmt", k_app_devmgmt, &k_app_devmgmt_len},
     {"novusd", k_app_novusd, &k_app_novusd_len},
+    {"dwm", k_app_dwm, &k_app_dwm_len},
 };
 
 /* These positions are also the IDs sent by sysinfo's spawn request and the
@@ -149,6 +150,21 @@ int apps_launch_name(const char *name) {
     return apps_win32_launch((UINT32)w);
   }
   return -1;
+}
+
+int apps_launch_service(const char *name) {
+  int i = apps_find(name);
+
+  if (i < 0) {
+    return -1;
+  }
+  if (sched_find_name(name) != 0) {
+    return APPS_ERUNNING;
+  }
+  kputs("[APPS] launching service ");
+  kputs(name);
+  kputs("\n");
+  return nuc_spawn_blob(g_apps[i].name, g_apps[i].data, *g_apps[i].size, 0);
 }
 
 #if CONFIG_NOVUS_WIN32
