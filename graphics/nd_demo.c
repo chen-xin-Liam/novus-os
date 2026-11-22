@@ -1639,6 +1639,14 @@ void nd_boot_transition(void) {
   span = nd_dock_span();
   has_logo = nd_boot_logo_rect(&logo);
 
+  /* The boot animation ends here, not at ExitBootServices: the rail has just
+   * been filled to 100% by the caller, and this closes it out by dimming the
+   * splash to black with the mark still on it. Frame zero below is then
+   * pixel-identical to what is already on the glass - black, with the
+   * machine's mark in the same rectangle - so the desktop rises out of the
+   * boot screen instead of cutting to a black frame first. */
+  nd_boot_anim_close();
+
   /* Phase one: the finished desktop is already on the canvas - nd_demo_init()
    * composed it before calling here - so paint it first, cover it with the
    * veil, then draw the splash logo above the veil. The logo lifts the last
@@ -1647,7 +1655,10 @@ void nd_boot_transition(void) {
   nd_dock_shift(span);
   for (i = 0; i <= out_frames; i++) {
     UINT32 p = ((UINT32)i * 1000u) / (UINT32)out_frames;
-    UINT32 fade = ease_out(p);
+    /* ease_out() works on a 0..1000 scale and the renderer's alpha is
+     * 0..255: convert before subtracting, or the fade wraps at every step
+     * past the first and the mark flickers instead of dissolving. */
+    UINT32 fade = (ease_out(p) * 255u) / 1000u;
     INT32  lift = -((i * 32) / out_frames);
     UINT8  veil = (UINT8)(255u - ((255u * (UINT32)i) /
                                   (UINT32)total_frames));
@@ -1659,9 +1670,9 @@ void nd_boot_transition(void) {
     /* The logo sits above the veil: at frame zero the desktop is fully
      * covered and the splash looks exactly as it did before the handover. */
     if (has_logo) {
-      nd_oem_logo_draw(canvas,
-                       nd_rect(logo.x, logo.y + lift, logo.w, logo.h),
-                       (UINT8)(255u - fade));
+      nd_boot_logo_draw(canvas, nd_rect(logo.x, logo.y + lift, logo.w,
+                                         logo.h),
+                        (UINT8)(255u - fade));
     }
     nd_present(full);
     nd_frame_timing("frame-out", t0, nd_tsc(),
@@ -1696,6 +1707,17 @@ void nd_boot_transition(void) {
     nd_frame_timing("frame-final", t0, nd_tsc(),
                     (UINT32)full.w, (UINT32)full.h);
   }
+  /* The frame above was painted with veil = 0, so it is the desktop itself,
+   * pixel for pixel - the same picture nd_demo_init() is about to log as
+   * painted. That is the contract the boot animation ends on: its last frame
+   * is the desktop's first frame, which is why nothing can jump or flash
+   * between the two. Reported on the log with the frame count and the TSC
+   * stamp of the hand-over so a smoke run can check the ordering. */
+  kputs("[BA] timeline end frames=");
+  kputs_hex((UINT64)total_frames + 1u);
+  kputs(" veil=0 last=desktop tsc=");
+  kputs_hex(nd_tsc());
+  kputs("\n");
 }
 
 void nd_demo_init(void) {
@@ -1736,6 +1758,10 @@ void nd_demo_init(void) {
   g_theme_seen = nd_theme_version();
   g_lang_seen = nd_lang_version();
 
+  /* The boot animation's last authored step: the rail reaches 100% and the
+   * line says what the machine has arrived at, one frame before the dim and
+   * the desktop. Everything before this was progress; this is the end. */
+  nd_boot_stage(100, "桌面就绪");
   /* One present for the whole desktop: the boot splash is replaced by a
    * finished picture, never by a half-built one. The text console that
    * stood in for it on a machine without a splash gives the screen up in

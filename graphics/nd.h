@@ -269,16 +269,39 @@ nd_surface_t *splash_surface(void);
 void nd_boot_splash_end(void);
 
 /* Where the splash drew the machine's boot logo (its resting rectangle on
- * the splash surface), for the boot-to-desktop transition. Returns 0 when
- * there was no captured logo and the splash drew its own mark instead. */
+ * the splash surface), for the boot-to-desktop transition. Answers for both
+ * the firmware's captured logo and the baked mark. Returns 0 when the splash
+ * drew no mark at all. */
 int nd_boot_logo_rect(nd_rect_t *out);
 
-/* Play the splash's opening move: the vendor logo fades in while it lifts
- * into place. `delay_ms` is the only sleep available at that point - the
- * firmware's Stall while the boot stage still has boot services - and NULL
- * draws the finished frame with no motion at all. Repaints the logo band
- * only, so the backdrop behind it is never rebuilt. */
-void nd_boot_splash_intro(void (*delay_ms)(UINT32));
+/* Draw that same mark into `s` at `r` with `alpha` (0 = invisible). The
+ * desktop transition uses it to lift the mark off the splash; the sampler is
+ * the splash's, so the first transition frame is identical to the last
+ * splash frame. */
+void nd_boot_logo_draw(nd_surface_t *s, nd_rect_t r, UINT8 alpha);
+
+/* Play the boot animation's opening: paint the empty frame (backdrop, rail
+ * at zero, no mark, no label) and take ownership of the screen. The frames
+ * themselves are authored by the caller and handed over one at a time with
+ * nd_boot_anim_frame(), so the timeline - and the clock it runs on - lives
+ * in the boot stage. Returns 0 when there is no drawable output. */
+int nd_boot_anim_begin(void);
+
+/* One frame of the timeline. `logo_scale` is the mark's size as a percentage
+ * of its resting rectangle (>100 is clamped), `logo_alpha` its opacity,
+ * `bar` the rail fill in percent (monotonic: a smaller value is ignored) and
+ * `label` the stage line under the rail (NULL keeps the current one). Only
+ * the marks strip is repainted, at a fixed cost per frame: the animation
+ * runs before the heap exists and cannot afford full-panel repaints. */
+void nd_boot_anim_frame(UINT32 logo_scale, UINT8 logo_alpha, UINT32 bar,
+                        const char *label);
+
+/* The closing move: dim the boot screen to black while the mark stays
+ * opaque, leaving the exact frame the desktop transition starts from. Call
+ * it immediately before nd_boot_transition(); it is the last thing the boot
+ * animation does, and it is what makes the hand-over a fade rather than a
+ * cut. Kernel stage only (it sleeps on the scheduler tick). */
+void nd_boot_anim_close(void);
 
 /* Convert one canonical colour to what the framebuffer expects. */
 UINT32 nd_hw_pixel(const nd_surface_t *s, nd_color_t c);
