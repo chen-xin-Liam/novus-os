@@ -192,7 +192,10 @@ static UINTN g_usb_disks;
  * are parked here so the HID poll can pick them up instead of losing them. */
 #define USB_DEFER_MAX 8u
 typedef struct {
-  UINT8  dci;
+  UINT8  dci;     /* doorbell DCI — primary key for lookup */
+  UINT8  epid;    /* USB endpoint number: must match device->hid_in_num for a
+                  * valid deferred entry. Prevents cross-talk between HID
+                  * interfaces on a shared xHCI event ring. */
   UINT8  code;
   UINT32 resid;
   UINT8  valid;
@@ -200,13 +203,22 @@ typedef struct {
 static usb_defer_t g_defer[USB_DEFER_MAX];
 
 /* Park a transfer completion that arrived on an endpoint nobody is waiting on
- * right now; usb_hid_poll reclaims it later keyed by its endpoint DCI. */
-static void usb_defer_push(UINT8 dci, UINT8 code, UINT32 resid) {
+ * right now; usb_hid_poll reclaims it later keyed by dci+epid.
+ *
+ * Both fields must match for a successful reclaim: dci identifies WHICH
+ * endpoint the event belongs to (the doorbell target), and epid identifies
+ * THE SAME ENDPOINT from the USB perspective (the raw endpoint number).
+ * Storing both prevents one HID interface's deferred report from being
+ * incorrectly claimed by another interface that happens to share a DCI
+ * collision on a prior enumeration round, and from the race described in
+ * the HID cross-talk bug where ep-A steals ep-B's event from the ring. */
+static void usb_defer_push(UINT8 dci, UINT8 epid, UINT8 code, UINT32 resid) {
   UINT32 k;
 
   for (k = 0; k < USB_DEFER_MAX; k++) {
     if (g_defer[k].valid == 0u) {
       g_defer[k].dci = dci;
+      g_defer[k].epid = epid;
       g_defer[k].code = code;
       g_defer[k].resid = resid;
       g_defer[k].valid = 1u;
@@ -215,12 +227,15 @@ static void usb_defer_push(UINT8 dci, UINT8 code, UINT32 resid) {
   }
 }
 
-/* Reclaim a previously parked transfer for endpoint dci. */
-static int usb_defer_take(UINT8 dci, UINT8 *code_out, UINT32 *resid_out) {
+/* Reclaim a previously parked transfer for endpoint dci whose epid also
+ * matches. Returns 1 on success; 0 if no matching entry was found. */
+static int usb_defer_take(UINT8 dci, UINT8 epid, UINT8 *code_out,
+                          UINT32 *resid_out) {
   UINT32 k;
 
   for (k = 0; k < USB_DEFER_MAX; k++) {
-    if (g_defer[k].valid != 0u && g_defer[k].dci == dci) {
+    if (g_defer[k].valid != 0u && g_defer[k].dci == dci &&
+        g_defer[k].epid == epid) {
       *code_out = g_defer[k].code;
       *resid_out = g_defer[k].resid;
       g_defer[k].valid = 0u;
@@ -398,7 +413,11 @@ static int wait_transfer(usb_t *u, UINT8 ep, UINT32 *code_out) {
         /* A transfer finished on an endpoint we are not waiting for (e.g. a
          * HID report while a disk read is draining the ring). Park it so the
          * HID poll can collect it instead of dropping the keystroke. */
-        usb_defer_push((UINT8)epid, (UINT8)((ev.p[2] >> 24) & 0xFFu),
+        /* dci keys the parked transfer (the event's endpoint id is the
+         * doorbell target), while the stored epid is the USB endpoint number
+         * usb_hid_poll validates against; dci = 2 * number + direction. */
+        usb_defer_push((UINT8)epid, (UINT8)(epid >> 1),
+                       (UINT8)((ev.p[2] >> 24) & 0xFFu),
                        ev.p[2] & 0xFFFFFFu);
         continue;
       }
@@ -1432,7 +1451,10 @@ void usb_hid_poll(void) {
     if (u->kind != USB_KIND_HID || u->slot == 0u) {
       continue;
     }
-    if (usb_defer_take(u->hid_in_dci, &code, &resid)) {
+    /* hid_in_num is the USB endpoint number; hid_in_dci is the doorbell DCI
+     * (= 2*ep + 1 for interrupt IN). Both are needed: dci keys the defer
+     * buffer, epid validates that a deferred entry really belongs to us. */
+    if (usb_defer_take(u->hid_in_dci, u->hid_in_num, &code, &resid)) {
       got = 1;
     } else {
       trb_t ev;
@@ -1446,7 +1468,18 @@ void usb_hid_poll(void) {
             resid = ev.p[2] & 0xFFFFFFu;
             got = 1;
           } else {
-            usb_defer_push((UINT8)epid, (UINT8)((ev.p[2] >> 24) & 0xFFu),
+            /* Park for the owning device: key by the event's epid (the
+             * doorbell DCI of the owner) and the computed USB endpoint
+             * number (epid >> 1 for interrupt IN endpoints where dci =
+             * 2*ep+1). This lets usb_defer_take(dci, ep) find the correct
+             * entry even when another device's poll loop consumed the raw
+             * event first — without this both dci and epid must match or
+             * the deferred report gets silently lost, which is exactly how
+             * the HID cross-talk bug manifested (a mouse report on a
+             * keyboard dci was deferred with the wrong epid and never
+             * retrieved by the real owner). */
+            usb_defer_push((UINT8)epid, (UINT8)(epid >> 1),
+                           (UINT8)((ev.p[2] >> 24) & 0xFFu),
                            ev.p[2] & 0xFFFFFFu);
           }
         }
