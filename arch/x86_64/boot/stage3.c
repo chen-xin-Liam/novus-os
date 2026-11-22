@@ -181,6 +181,10 @@ static const char *g_esp_via = "none";
  * is not USB (a CD or a hard disk). */
 static void say(const CHAR16 *s);
 static void say_line(const CHAR16 *s);
+static void say_ms(const char *tag);
+static void say_span(const char *tag, UINT64 from, UINT64 to);
+static UINT64 boot_ms(void);
+static int prefetch_take(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len);
 
 /* Is the volume we booted from sitting on a USB controller?
  *
@@ -267,6 +271,23 @@ static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   UINT64             size;
   UINT8             *buf;
   UINTN              got;
+  UINT64             t0 = boot_ms();
+
+  /* A payload already staged during the menu countdown: hand the buffer
+   * over instead of reading the medium twice. The cache drops it, so the
+   * caller owns the memory and frees it as usual. */
+  {
+    UINT8 *pbuf = NULL;
+    UINT64 plen = 0;
+
+    if (prefetch_take(path, &pbuf, &plen) == 0) {
+      *out_buf = pbuf;
+      *out_len = plen;
+      g_dbg_route = 2u;
+      say_span("prefetched payload taken", t0, boot_ms());
+      return 0;
+    }
+  }
 
   /* Prefer the built-in FAT reader. It reads the volume through Block I/O
    * directly and is immune to firmware file-protocol bugs - OVMF's FAT
@@ -276,8 +297,11 @@ static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
    * volume on any block device. */
   if (fat32_read_file(path, out_buf, out_len) == 0) {
     g_dbg_route = 2u;
+    say_span("fat read done", t0, boot_ms());
     return 0;
   }
+  say_span("fat miss", t0, boot_ms());
+  t0 = boot_ms();
 
   if (g_esp_root == NULL) {
     return -1;
@@ -312,12 +336,24 @@ static int esp_read(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len) {
   *out_len = size;
   g_dbg_route = 1u;
   esp_report_route(g_esp_via, NULL);
+  say_span("firmware file read done", t0, boot_ms());
   return 0;
 }
 
 /* Read a file into reserved pages. The bytes come through pool memory
  * first because a file handle reads into an ordinary buffer; the copy is
  * what makes the final home survive ExitBootServices. */
+static UINT64 fnv1a64(const UINT8 *p, UINT64 n) {
+  UINT64 h = 0xcbf29ce484222325ULL;
+  UINT64 i;
+
+  for (i = 0; i < n; i++) {
+    h ^= (UINT64)p[i];
+    h *= 0x100000001b3ULL;
+  }
+  return h;
+}
+
 static int esp_read_reserved(const CHAR16 *path, UINT64 *out_base,
                              UINT64 *out_size) {
   UINT8               *tmp = NULL;
@@ -335,6 +371,15 @@ static int esp_read_reserved(const CHAR16 *path, UINT64 *out_base,
     return -1;
   }
   memcpy((VOID *)(UINTN)addr, tmp, len);
+  /* One hash line per payload: the bytes that reached reserved memory are
+   * the bytes on disk after every transfer size change, and a firmware that
+   * truncates a large Block I/O request is caught here rather than as a
+   * corrupt kernel later. */
+  say(L"[FAT] fnv ");
+  boot_put_hex(fnv1a64(tmp, len));
+  say(L" len=");
+  boot_put_dec(len);
+  say_line(L"");
   {
     shared_mem_t *shm = shared_mem_get();
     UINT64 offs[3];
@@ -964,7 +1009,7 @@ static void fat32_close(fat32_ctx_t *ctx) {
  * FAT32_MAX_RUN_SECTORS (512-unit sectors) - large enough to collapse a
  * whole sequential file into a handful of calls, small enough that any
  * firmware's Block I/O transfer limit accepts it. */
-#define FAT32_MAX_RUN_SECTORS 512u /* 256 KiB per Block I/O call */
+#define FAT32_MAX_RUN_SECTORS 2048u /* 1 MiB per Block I/O call */
 
 /* The live ESP cannot change while the boot stage runs, so the volume is
  * located once and kept open for every later read.
@@ -1131,6 +1176,30 @@ static void say_ascii(const char *s) {
 static void say_line(const CHAR16 *s) {
   boot_puts((CHAR16 *)s);
   boot_puts(L"\r\n");
+}
+
+/* Step timing on COM1, in the boot stage's own clock - the same one the
+ * splash label counts in. The screen belongs to the splash once the
+ * animation starts, so a step that costs seconds has to be attributable
+ * from the serial log alone. */
+static void say_ms(const char *tag) {
+  say(L"[T] +");
+  boot_put_dec(boot_ms());
+  say(L"ms ");
+  say_ascii(tag);
+  say_line(L"");
+}
+
+/* The same line with the span this step took appended, so a slow phase and
+ * the step inside it that caused it can be read against each other. */
+static void say_span(const char *tag, UINT64 from, UINT64 to) {
+  say(L"[T] +");
+  boot_put_dec(to);
+  say(L"ms ");
+  say_ascii(tag);
+  say(L" (");
+  boot_put_dec(to >= from ? to - from : 0u);
+  say_line(L"ms)");
 }
 
 /* Report the ESP path once, the first time either route is used, so the
@@ -1648,6 +1717,85 @@ done:
 #endif /* CONFIG_NOVUS_INSTALLER && CONFIG_NOVUS_INSTALLER_TEXT */
 
 /* ------------------------------------------------------------------ */
+/* Payload prefetch                                                    */
+/* ------------------------------------------------------------------ */
+/* The menu waits three seconds for a key that almost never comes, and by
+ * the time the prompt is on screen the set of files a live boot needs is
+ * already known. Reading them inside that wait is the one piece of real
+ * parallelism the boot stage has: the keyboard is polled between files (and
+ * still wins), while stage3_load then finds the bytes already in memory
+ * instead of paying for a second pass over the medium. */
+#define PREFETCH_SLOTS 4u
+
+typedef struct {
+  CHAR16 *name; /* borrowed: the literals the callers pass live forever */
+  UINT8  *buf;
+  UINT64  len;
+} prefetch_slot_t;
+
+static prefetch_slot_t g_pre[PREFETCH_SLOTS];
+static UINT32          g_pre_n;
+
+static int wide_eq(const CHAR16 *a, const CHAR16 *b) {
+  while (*a != 0 && *a == *b) {
+    a++;
+    b++;
+  }
+  return (*a == 0 && *b == 0) ? 1 : 0;
+}
+
+/* Hand the staged copy over, if there is one. The slot is cleared, so the
+ * caller owns the buffer from here on. */
+static int prefetch_take(const CHAR16 *path, UINT8 **out_buf,
+                         UINT64 *out_len) {
+  UINT32 i;
+
+  for (i = 0; i < g_pre_n; i++) {
+    if (g_pre[i].buf != NULL && wide_eq(g_pre[i].name, path)) {
+      *out_buf = g_pre[i].buf;
+      *out_len = g_pre[i].len;
+      g_pre[i].buf = NULL;
+      g_pre[i].len = 0;
+      return 0;
+    }
+  }
+  return -1;
+}
+
+/* Drop what is still staged: the pool allocator goes away at
+ * ExitBootServices, and a payload nobody took is dead weight. */
+static void prefetch_drop(void) {
+  UINT32 i;
+
+  for (i = 0; i < g_pre_n; i++) {
+    if (g_pre[i].buf != NULL) {
+      efi_free(g_pre[i].buf);
+      g_pre[i].buf = NULL;
+    }
+  }
+  g_pre_n = 0;
+}
+
+static void prefetch_file(const CHAR16 *path) {
+  UINT8 *buf = NULL;
+  UINT64 len = 0;
+
+  if (g_pre_n >= PREFETCH_SLOTS) {
+    return;
+  }
+  if (fat32_read_file(path, &buf, &len) != 0) {
+    return; /* a miss costs a directory lookup, nothing more */
+  }
+  g_pre[g_pre_n].name = (CHAR16 *)path;
+  g_pre[g_pre_n].buf = buf;
+  g_pre[g_pre_n].len = len;
+  g_pre_n++;
+  say(L"[PRE] staged ");
+  boot_put_dec(len);
+  say_line(L" bytes");
+}
+
+/* ------------------------------------------------------------------ */
 /* Live menu                                                           */
 /* ------------------------------------------------------------------ */
 /* A text menu on the firmware console. It is not a shell: it offers
@@ -1662,7 +1810,24 @@ done:
 
 #define MENU_INPUT_TIMEOUT_MS 3000u
 
-static EFI_INPUT_KEY menu_wait_key(void) {
+static EFI_INPUT_KEY menu_peek_key(int *got) {
+  EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin =
+      (EFI_SIMPLE_TEXT_INPUT_PROTOCOL *)g_st->ConIn;
+  EFI_INPUT_KEY key;
+
+  key.ScanCode = 0;
+  key.UnicodeChar = 0;
+  *got = 0;
+  if (conin == NULL || conin->ReadKeyStroke == NULL) {
+    return key;
+  }
+  if (conin->ReadKeyStroke(conin, &key) == EFI_SUCCESS) {
+    *got = 1;
+  }
+  return key;
+}
+
+static EFI_INPUT_KEY menu_wait_key(UINTN budget_ms) {
   EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin =
       (EFI_SIMPLE_TEXT_INPUT_PROTOCOL *)g_st->ConIn;
   EFI_INPUT_KEY key;
@@ -1675,11 +1840,11 @@ static EFI_INPUT_KEY menu_wait_key(void) {
   }
   /* Bounded poll. WaitForEvent would be tidier, but a bounded poll
    * keeps the menu from hanging on a firmware that never signals. */
-  for (spins = 0; spins < MENU_INPUT_TIMEOUT_MS; spins++) {
+  for (spins = 0; spins < budget_ms; spins++) {
     if (conin->ReadKeyStroke(conin, &key) == EFI_SUCCESS) {
       return key;
     }
-    g_bs->Stall(1000u); /* 1 ms; MENU_INPUT_TIMEOUT_MS at most */
+    g_bs->Stall(1000u); /* 1 ms */
   }
   return key;
 }
@@ -1720,6 +1885,25 @@ static int menu_marker_present(void) {
   return 1;
 }
 
+/* Stage the live-boot payloads inside the countdown. Returns 1 when the
+ * user pressed something while staging: the choice wins over finishing the
+ * read, and the remaining files are read by stage3_load as usual. */
+static int menu_prefetch(EFI_INPUT_KEY *key_out) {
+  static const CHAR16 *const files[3] = {L"DEMO.NUC", L"WPAPERS.PKG",
+                                         L"SYSTEM.IMG"};
+  UINTN i;
+  int   got = 0;
+
+  for (i = 0; i < 3u; i++) {
+    prefetch_file(files[i]);
+    *key_out = menu_peek_key(&got);
+    if (got != 0) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
 static void menu_run(void) {
   EFI_INPUT_KEY key;
 
@@ -1737,7 +1921,23 @@ static void menu_run(void) {
 #endif
 
   menu_show();
-  key = menu_wait_key();
+  {
+    UINT64 t0 = boot_ms();
+    int    pressed = menu_prefetch(&key);
+
+    if (pressed == 0) {
+      /* Whatever the prefetch cost comes off the countdown, not on top of
+       * it: the wait exists to give the user a chance to interrupt, and it
+       * is honoured in wall-clock terms. */
+      UINT64 spent = boot_ms() - t0;
+
+      key = menu_wait_key((spent < (UINT64)MENU_INPUT_TIMEOUT_MS)
+                              ? (UINTN)((UINT64)MENU_INPUT_TIMEOUT_MS - spent)
+                              : 0u);
+    } else {
+      say_line(L"");
+    }
+  }
   if (key.UnicodeChar == 0) {
     say_line(L"4 (no input)");
     return;
@@ -1903,6 +2103,13 @@ static void boot_clock_init(void) {
     cpuid(0x16u, 0u, &mhz, &b, &c, &d); /* base frequency, MHz */
     g_tsc_khz = (UINT64)mhz * 1000u;
   }
+  if (g_tsc_khz == 0u) {
+    /* QEMU's i440fx CPU names neither leaf, and a clock that reads 0 is
+     * worse than no clock at all: every step below then reports "0.0s".
+     * Take the frequency the boot stage itself measured with the PM
+     * timer. */
+    g_tsc_khz = boot_timeline_tsc_hz() / 1000u;
+  }
 }
 
 /* Milliseconds since boot_clock_init(), 0 when the clock is unknown. */
@@ -1963,6 +2170,7 @@ void stage3_load(void) {
                                               : SHM_BOOT_MODE_LIVE;
 
   stage_at(12, "校验系统");
+  say_ms("load start");
 #if CONFIG_NOVUS_MERKLE
   /* Verify the NovusFS partition only for the installer, which is about to
    * write over a disk and wants to know what is on it. A live boot mounts
@@ -1984,15 +2192,18 @@ void stage3_load(void) {
 #if CONFIG_NOVUS_NKM
   stage_at(26, "加载内核模块");
   modules_load();
+  say_ms("modules load done");
 #endif
 
   /* M4: stage the NUC application next to the module. */
   stage_at(38, "加载应用程序");
   app_load();
+  say_ms("app load done");
 
   /* The photo package: one file, same staging path as everything else. */
   stage_at(50, "加载壁纸");
   wpkg_load();
+  say_ms("wallpaper load done");
 
   /* Live root: adopt the NovusFS image off the ESP into reserved pages.
    * Without it the kernel has no filesystem at all, so a failure here is
@@ -2010,6 +2221,7 @@ void stage3_load(void) {
     g_live_base = 0;
     g_live_size = 0;
   }
+  say_ms("live root done");
 
   /* The installer writes a complete ESP, including the boot loader, so
    * its template has to come off the live medium while the firmware file
@@ -2025,6 +2237,7 @@ void stage3_load(void) {
     g_esp_tpl_base = 0;
     g_esp_tpl_size = 0;
   }
+  say_ms("install template done");
 }
 
 void stage3_menu(void) {
@@ -2054,6 +2267,10 @@ void stage3_finish(void) {
   /* Restore the kernel heap allocator: from here on AllocatePool is
    * gone, and NovusFS must never call into it. */
   novusfs_set_allocator(NULL, NULL);
+
+  /* Any payload the menu staged and stage3_load did not take is pool
+   * memory, and pool memory is about to stop existing. */
+  prefetch_drop();
 
   /* Detach every boot-only device so no firmware protocol pointer
    * survives into the kernel, where calling it would fault. */

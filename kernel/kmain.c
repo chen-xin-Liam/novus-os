@@ -203,6 +203,40 @@ static UINT64 timeline_probe_hz(void) {
   }
 }
 
+void cpu_delay_us(UINT32 us) {
+  UINT32 ticks;
+  UINT32 start;
+
+  if (us == 0u) {
+    return;
+  }
+  if (g_pm_timer_port == 0u) {
+    /* No readable oscillator: fall back to the old assumption that one ISA
+     * read is roughly a microsecond. */
+    while (us-- != 0u) {
+      (void)io_in8(0x80u);
+    }
+    return;
+  }
+  ticks = (UINT32)(((UINT64)us * PM_TIMER_HZ) / 1000000ULL);
+  if (ticks == 0u) {
+    ticks = 1u;
+  }
+  start = io_in32(g_pm_timer_port) & PM_TIMER_MASK;
+  {
+    UINT32 spins;
+
+    for (spins = 0; spins < PM_TIMER_SPINS; spins++) {
+      UINT32 now = io_in32(g_pm_timer_port) & PM_TIMER_MASK;
+
+      if (((now - start) & PM_TIMER_MASK) >= ticks) {
+        return;
+      }
+      __asm__ volatile("pause");
+    }
+  }
+}
+
 void novus_timeline(const char *stage) {
   UINT64 elapsed;
   UINT64 value;
@@ -487,10 +521,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   kputs("[BOOT] display bound\n");
 
   power_init(mmap_addr, map_size, desc_size);
+  novus_timeline("power init done");
   (void)ahci_init();
+  novus_timeline("ahci probe done");
   (void)nvme_init();
+  novus_timeline("nvme probe done");
   /* M11: USB sticks are ordinary block devices to everything above. */
   (void)usb_init();
+  novus_timeline("usb probe done");
   /* Storage milestone: the onboard IDE/ATA controller (the QEMU "pc"
    * machine's default disk) is gone from the firmware block-device list
    * after ExitBootServices, so drive it natively. */
@@ -878,6 +916,7 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
         (void)net_init();
         net_ntp_init();
         devtab_refresh();
+        novus_timeline("network probes done");
         kputs("[BOOT] session and network ready\n");
 
         if (install_mode) {

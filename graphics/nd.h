@@ -153,6 +153,12 @@ void nd_mirror_rect(nd_rect_t r);
  * the numbers. Returns 1 when a usable linear framebuffer was found. */
 int nd_capture_boot(void *system_table);
 
+/* The boot stage's millisecond clock, handed in by the caller of
+ * nd_capture_boot(): firmware calls burn host time without advancing the
+ * guest TSC on an emulated machine, so capture timing is only meaningful
+ * against a real-time clock. */
+void nd_boot_clock_set(UINT64 (*fn)(void));
+
 /* Kernel stage, after mm_init()/heap_init(): bind a surface to the
  * captured framebuffer and log the mode. Returns 1 when the screen is
  * drawable. */

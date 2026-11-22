@@ -24,6 +24,13 @@ void kputs_hex(UINT64 v);
 /* Coarse boot timeline; mirrored by kputs to VGA, framebuffer and COM1. */
 void novus_timeline(const char *stage);
 
+/* Busy-wait |us| microseconds against the ACPI PM timer. Drivers that have
+ * to let a device settle (a USB port reset, a controller reset) use this
+ * instead of counting I/O reads: an ISA read is only "about a microsecond"
+ * on real silicon, and on an emulated machine one read can cost hundreds of
+ * microseconds, which turns a 60 ms reset settle into half a minute. */
+void cpu_delay_us(UINT32 us);
+
 /* Kernel version, as NKM module headers state it (spec 3.2: a module is
  * refused when its min_kernel_ver is higher than this). Major in the
  * high 32 bits, minor in the low 32 bits: 1.0. */

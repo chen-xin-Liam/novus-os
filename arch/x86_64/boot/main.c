@@ -273,6 +273,20 @@ static UINT64 timeline_cycles(void) {
 
 void boot_log_str(const CHAR16 *s);
 
+/* The boot stage's calibrated TSC frequency, in Hz. stage3 keeps its own
+ * millisecond clock for the splash label and the load steps, and CPUID does
+ * not always name the frequency (QEMU's i440fx CPU exposes neither leaf
+ * 0x15 nor 0x16), so it asks here for the number the PM timer measured.
+ * 0 only when neither route could name it. */
+UINT64 boot_timeline_tsc_hz(void) {
+  (void)timeline_ms(); /* probes the frequency on the first call */
+  return g_timeline_hz;
+}
+
+UINT64 boot_now_ms(void) {
+  return timeline_ms();
+}
+
 static void boot_timeline(const char *stage) {
   CHAR16 buf[96];
   UINTN i = 0;
@@ -903,42 +917,58 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
    * protocol still exists. Only the numbers are kept; the framebuffer is
    * MMIO and stays valid after ExitBootServices. Done before the payload
    * reads so the progress bar is on screen while they run. */
-  if (nd_capture_boot(SystemTable)) {
-    const nd_display_t *d = nd_display();
+  /* The text phase ends here: the next thing on the panel is the splash, so
+   * the firmware console is muted before the capture. Its redraw is driven
+   * by the CPU (OVMF glyphs straight onto the GOP scanout), which is slow
+   * enough to show up in the boot timeline, and every character it paints
+   * after this point lands on top of the splash anyway. */
+  boot_quiet(1);
+  boot_timeline("splash capture start");
+  boot_timeline("splash capture print done");
+  nd_boot_clock_set(boot_now_ms);
+  {
+    int cap_ok = nd_capture_boot(SystemTable);
 
-    boot_puts(L"[BOOT] NovusDisplay framebuffer: ");
-    boot_put_dec(d->width);
-    boot_puts(L"x");
-    boot_put_dec(d->height);
-    boot_puts(L" at ");
-    boot_put_hex(d->fb_phys);
-    boot_puts(L", ");
-    boot_put_dec(d->fb_size);
-    boot_puts(L" bytes\r\n");
-    if (nd_boot_anim_begin()) {
-      /* The text phase is over: the screen now shows the splash and the
-       * rest of the boot log goes to COM1. */
-      boot_quiet(1);
-      /* Opening move: seven authored frames on the TSC timeline - the mark
-       * scales and fades in, the rail fills, the stage line names the step.
-       * The kernel carries the same rail to 100% and the hand-over ends on
-       * the desktop's own first frame, so there is no cut and no black
-       * screen between the two halves. */
-      boot_anim_play();
-    } else if (d->fb_phys != 0 && !d->fb_boot_usable) {
-      /* The numbers are the point here: the splash is skipped only when the
-       * boot stage could not map the scanout at all, and on a laptop that is
-       * the difference between the splash and a text log. Print it where the
-       * firmware console can still show it. */
-      boot_puts(L"[BOOT] boot splash unavailable: framebuffer at ");
+    boot_timeline("splash capture returned");
+    if (cap_ok) {
+      const nd_display_t *d = nd_display();
+
+      boot_timeline("splash capture done");
+      boot_puts(L"[BOOT] NovusDisplay framebuffer: ");
+      boot_put_dec(d->width);
+      boot_puts(L"x");
+      boot_put_dec(d->height);
+      boot_puts(L" at ");
       boot_put_hex(d->fb_phys);
-      boot_puts(L" is not reachable from the boot page tables, "
-                L"kernel text console takes over\r\n");
+      boot_puts(L", ");
+      boot_put_dec(d->fb_size);
+      boot_puts(L" bytes\r\n");
+      if (nd_boot_anim_begin()) {
+        /* Opening move: seven authored frames on the TSC timeline - the mark
+         * scales and fades in, the rail fills, the stage line names the step.
+         * The kernel carries the same rail to 100% and the hand-over ends on
+         * the desktop's own first frame, so there is no cut and no black
+         * screen between the two halves. */
+        boot_anim_play();
+        boot_timeline("splash anim done");
+      } else if (d->fb_phys != 0 && !d->fb_boot_usable) {
+        /* The numbers are the point here: the splash is skipped only when the
+         * boot stage could not map the scanout at all, and on a laptop that is
+         * the difference between the splash and a text log. Print it where the
+         * firmware console can still show it. */
+        boot_quiet(0);
+        boot_puts(L"[BOOT] boot splash unavailable: framebuffer at ");
+        boot_put_hex(d->fb_phys);
+        boot_puts(L" is not reachable from the boot page tables, ");
+        boot_puts(L"kernel text console takes over\r\n");
+      } else {
+        boot_quiet(0);
+        boot_puts(L"[BOOT] boot splash unavailable, text console stays\r\n");
+      }
     } else {
-      boot_puts(L"[BOOT] boot splash unavailable, text console stays\r\n");
+      boot_quiet(0);
+      boot_puts(L"[BOOT] NovusDisplay: no linear framebuffer, VGA fallback\r\n");
     }
-  } else {
-    boot_puts(L"[BOOT] NovusDisplay: no linear framebuffer, VGA fallback\r\n");
   }
 #endif
 

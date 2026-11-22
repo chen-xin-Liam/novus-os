@@ -18,6 +18,15 @@ void boot_puts(CHAR16 *s);
 void boot_put_hex(UINT64 v);
 void boot_put_dec(UINT64 v);
 
+/* Calibrated TSC frequency in Hz (PM timer / CPUID), 0 when unknown. */
+UINT64 boot_timeline_tsc_hz(void);
+
+/* Milliseconds since the boot stage started, on the same clock the timeline
+ * lines print. Firmware calls (a protocol lookup, a mode set) burn host time
+ * without advancing the guest's TSC on an emulated machine, so only this
+ * clock shows what a call really costs. */
+UINT64 boot_now_ms(void);
+
 /* Render up to `max_len` bytes of a CHAR8 buffer as UTF-16, stopping at
  * the first NUL. */
 void boot_put_ascii(const CHAR8 *s, UINTN max_len);
