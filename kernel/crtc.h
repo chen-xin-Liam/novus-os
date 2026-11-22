@@ -62,8 +62,8 @@ int crtc_wait_vsync(UINT32 index);
  * game drives that scanout directly, bypassing the compositor); the
  * compositor's presents to that output are refused. Returns 0 on success,
  * -1 for a bad index/handle or an ownership violation. */
-int crtc_present(UINT32 index, UINT32 handle, INT32 x, INT32 y,
-                 UINT32 w, UINT32 h, UINT64 owner);
+int crtc_present(UINT32 index, UINT32 handle, UINT32 stride,
+                 INT32 x, INT32 y, UINT32 w, UINT32 h, UINT64 owner);
 
 /* Take/release a full-screen exclusive lease on `index`. handle==0 releases.
  * Only the current owner (or the compositor when unowned) may release. */

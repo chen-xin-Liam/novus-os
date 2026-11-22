@@ -36,6 +36,8 @@ impl Thumbnail {
             y: self.y,
             w: self.w,
             h: self.h,
+            stride: self.w,
+            pad: 0,
         }
     }
 }

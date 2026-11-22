@@ -111,6 +111,11 @@ flowchart LR
 
 ## 4. 显示 syscall ABI（28–37）
 
+`dwm_layer_t` 是 32 字节：`handle, flags, x, y, w, h, stride, pad`。
+`stride` 是**源对象每行的像素宽度**；必须显式给出。早期版本用 `size/4`（像素
+总数）当 stride，导致除首行外每行都从分配区外读取，刷新时整屏变黑 —— 这是
+已修复的回归点，勿再把 stride 推回从对象大小推导。
+
 | 号 | 名称 | 参数 (rdi/rsi/rdx/r10) | 返回 |
 |----|------|------------------------|------|
 | 28 | vmem_alloc | size, flags | handle（0=失败）|
@@ -153,6 +158,9 @@ v2 应用用 `SYS_VMEM_ALLOC` 建对象、经 `Win::surface_create()/flip()` 注
 
 ## 7. 生命周期与回退
 
+* **空图层不 present**：`dwm` 主循环在图层树为空时直接 yield，不提交任何帧。
+  此时桌面继续由内核 WM 绘制。若提交一帧清屏后的深色全屏图层，就会在每个
+  VSync 把桌面刷成黑色 —— 这是已修复的"刷新黑屏"回归点。
 * 显存对象按 pid 引用计数：分配者持一个 owner 引用，每个映射进程持一个引用；
   `vidmem_owner_exit()`（任务退出钩子）只释放该 pid 的引用，最后一个引用消失才
   归还 PMM。共享页用 PTE 软件位 `PTE_SHARED` 标记，`vm_space_free()` 清 PTE 但

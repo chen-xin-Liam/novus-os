@@ -105,7 +105,7 @@ void dwm_sys_surface_present(trap_frame_t *f) {
     /* Only handles the caller may use are accepted, so a forged handle in a
      * Present cannot scan out another process's pixels. */
     if (!vidmem_can_access(layer.handle, t->pid) ||
-        crtc_present(crtc, layer.handle, layer.x, layer.y,
+        crtc_present(crtc, layer.handle, layer.stride, layer.x, layer.y,
                      layer.w, layer.h, t->pid) != 0) {
       f->rax = (UINT64)(INT64)-1;
       return;

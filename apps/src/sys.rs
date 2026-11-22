@@ -204,7 +204,7 @@ pub const DWM_LAYER_BLT: u32 = 1;
 pub const DWM_MODE_CLONE: u32 = 0;
 pub const DWM_MODE_EXTEND: u32 = 1;
 
-/// One composited layer (mirrors kernel `dwm_layer_t`, 24 bytes).
+/// One composited layer (mirrors kernel `dwm_layer_t`, 32 bytes).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DwmLayer {
@@ -214,8 +214,18 @@ pub struct DwmLayer {
     pub y: i32,
     pub w: u32,
     pub h: u32,
+    /// Source row pitch in pixels. Must be >= `w`; the kernel clamps to `w`
+    /// but otherwise reads each source row at `pitch` pixels apart.
+    pub stride: u32,
+    pub pad: u32,
 }
-const _: [(); 24] = [(); core::mem::size_of::<DwmLayer>()];
+const _: [(); 32] = [(); core::mem::size_of::<DwmLayer>()];
+
+impl DwmLayer {
+    pub const fn empty() -> Self {
+        DwmLayer { handle: 0, flags: 0, x: 0, y: 0, w: 0, h: 0, stride: 0, pad: 0 }
+    }
+}
 
 /// Output/geometry snapshot (mirrors kernel `dwm_query_t`).
 #[repr(C)]

@@ -100,8 +100,12 @@ impl LayerMaps {
     }
 }
 
-/// Compose one frame from the tree into the mapped front buffer, then stage a
-/// single full-screen layer carrying that buffer for the kernel CRTC to scan.
+/// Compose one frame from the tree into the mapped front buffer.
+///
+/// Returns `None` when there is nothing to composite. That case is critical:
+/// the in-kernel Novus-WM still owns and paints the desktop, so an empty v2
+/// tree must produce NO present at all. Presenting a cleared (dark) full-screen
+/// frame in that state is what blanked the screen on every refresh.
 fn compose_frame(
     tree: &Tree,
     frame: &mut [u32],
@@ -109,14 +113,18 @@ fn compose_frame(
     fh: u32,
     dpi: u32,
     maps: &mut LayerMaps,
-) -> DwmLayer {
-    // Clear to a dark desktop backdrop.
+) -> Option<DwmLayer> {
+    let mut layers = [DwmLayer::empty(); 16];
+    let n = tree.collect(&mut layers, dpi);
+    if n == 0 {
+        return None;
+    }
+
+    // Only now, with real layers to draw, take over the framebuffer.
     for p in frame.iter_mut() { *p = 0xFF0E1116u32; }
 
-    let mut layers = [DwmLayer { handle: 0, flags: 0, x: 0, y: 0, w: 0, h: 0 }; 16];
-    let n = tree.collect(&mut layers, dpi);
     let words = (fw as usize) * (fh as usize);
-
+    let mut drawn = 0usize;
     for l in layers.iter().take(n) {
         let sw = l.w;
         let sh = l.h;
@@ -129,18 +137,24 @@ fn compose_frame(
                 &SOFT_OPS, frame, fw, fh, src, sw, sh,
                 l.x, l.y, l.w, l.h, 255, 0,
             );
+            drawn += 1;
         }
+    }
+    if drawn == 0 {
+        return None;
     }
 
     // Colour-space adjustment is a no-op at unity gain; kept in the pipeline
     // so a backends/HDR path can hook it without changing this loop.
     color_adjust(frame, 1000);
 
-    DwmLayer {
+    Some(DwmLayer {
         handle: 0, // filled with the front-buffer handle by the caller
         flags: sys::DWM_LAYER_BLT,
         x: 0, y: 0, w: fw, h: fh,
-    }
+        stride: fw, // front buffer is packed at the frame width
+        pad: 0,
+    })
 }
 
 fn main_loop() -> ! {
@@ -188,6 +202,9 @@ fn main_loop() -> ! {
     let mut dpi = DPI_SCALE_100;
     let mut mode = PresentQueue::mode();
     let mut queue = PresentQueue::new(0, fw, fh);
+    /* Keep the mapping table across frames: recreating it each frame would
+     * re-map every source handle and leak a reference on each object. */
+    let mut maps = LayerMaps::new();
 
     loop {
         if let Some(p) = port.and_then(|pt| ipc::recv(pt, false)) {
@@ -220,8 +237,16 @@ fn main_loop() -> ! {
             }
         }
 
-        let mut maps = LayerMaps::new();
-        let mut out = compose_frame(&tree, frame, fw, fh, dpi, &mut maps);
+        let frame_layer = match compose_frame(&tree, frame, fw, fh, dpi, &mut maps) {
+            Some(l) => l,
+            None => {
+                // No v2 surfaces: leave the framebuffer to the kernel WM.
+                sys::yield_now();
+                continue;
+            }
+        };
+
+        let mut out = frame_layer;
         out.handle = front;
         queue.stage(&[out]);
 

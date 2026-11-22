@@ -108,6 +108,11 @@ impl Tree {
                 y: l.y,
                 w: sw,
                 h: sh,
+                /* Source pitch is the unscaled allocation width. A layer can
+                 * be scaled for display, but the kernel reads rows from the
+                 * backing object at its original pitch. */
+                stride: l.w,
+                pad: 0,
             };
             n += 1;
         }

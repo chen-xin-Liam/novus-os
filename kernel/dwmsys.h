@@ -53,7 +53,12 @@ void dwm_sys_query(trap_frame_t *f);
 #define DWM_LAYER_BLT        1u  /* layer was copied into the object by flt */
 
 /* One composited layer. The compositor usually submits a single layer: the
- * fully composed frame. Multiple layers are blitted in array order. */
+ * fully composed frame. Multiple layers are blitted in array order.
+ *
+ * `stride` is the source object's row pitch in pixels. It must be supplied
+ * explicitly: deriving it from the object's byte size (as an early version
+ * did) yields the TOTAL pixel count, which makes every row but the first read
+ * out of bounds and paints a black/garbage frame. */
 typedef struct {
   UINT32 handle;
   UINT32 flags;
@@ -61,7 +66,9 @@ typedef struct {
   INT32  y;
   UINT32 w;
   UINT32 h;
-} dwm_layer_t; /* 24 bytes */
+  UINT32 stride;
+  UINT32 pad;
+} dwm_layer_t; /* 32 bytes */
 
 #define DWM_QUERY_MAX_OUTPUTS 4u
 

@@ -20,9 +20,7 @@ pub struct PresentQueue {
 impl PresentQueue {
     pub fn new(crtc: u32, width: u32, height: u32) -> Self {
         PresentQueue {
-            crtc, layers: [DwmLayer {
-                handle: 0, flags: 0, x: 0, y: 0, w: 0, h: 0,
-            }; 16],
+            crtc, layers: [DwmLayer::empty(); 16],
             count: 0, width, height, synced: false,
         }
     }

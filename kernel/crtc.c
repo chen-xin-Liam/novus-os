@@ -60,8 +60,8 @@ int crtc_wait_vsync(UINT32 index) {
   return nd_wait_vsync();
 }
 
-static int blit_object(UINT32 index, vidmem_handle_t handle, INT32 x, INT32 y,
-                       UINT32 w, UINT32 height) {
+static int blit_object(UINT32 index, vidmem_handle_t handle, UINT32 src_stride,
+                       INT32 x, INT32 y, UINT32 w, UINT32 height) {
   vidmem_obj_t *o = vidmem_get(handle);
   UINT32        stride;
 
@@ -80,19 +80,23 @@ static int blit_object(UINT32 index, vidmem_handle_t handle, INT32 x, INT32 y,
   if (height > g_crtc[index].height - (UINT32)y) {
     height = g_crtc[index].height - (UINT32)y;
   }
-  /* The object's bytes are a packed ARGB bitmap; its stride in pixels is the
-   * width requested at allocation time (the compositor renders row-major w). */
-  stride = (o->size / 4u) ? (o->size / 4u) : w;
-  if (stride < w) {
-    stride = w;
+  /* The source row pitch comes from the layer descriptor, not from the
+   * object's total byte size. A packed surface has stride == w; a surface
+   * rendered into a wider allocation may legitimately have stride > w.
+   * Never fall back to `size/4`: that is the pixel COUNT, and reading rows at
+   * that offset walked off the allocation and produced the refresh black
+   * screen. Clamp to w only when the caller passed an obviously bad value. */
+  stride = (src_stride >= w) ? src_stride : w;
+  if ((UINT64)stride * height * 4u > o->size) {
+    return -1;
   }
   nd_crtc_blit(index, (const UINT32 *)phys_to_virt(o->phys), stride,
                x, y, w, height);
   return 0;
 }
 
-int crtc_present(UINT32 index, UINT32 handle, INT32 x, INT32 y,
-                 UINT32 w, UINT32 h, UINT64 owner) {
+int crtc_present(UINT32 index, UINT32 handle, UINT32 stride,
+                 INT32 x, INT32 y, UINT32 w, UINT32 h, UINT64 owner) {
   UINT32 i;
   int rc;
   crtc_t *c;
@@ -110,7 +114,7 @@ int crtc_present(UINT32 index, UINT32 handle, INT32 x, INT32 y,
       return -1;
     }
     (void)crtc_wait_vsync(index);
-    return blit_object(index, handle, x, y, w, h);
+    return blit_object(index, handle, stride, x, y, w, h);
   }
 
   /* A compositor (owner 0) present must not touch a leased output even in
@@ -123,7 +127,7 @@ int crtc_present(UINT32 index, UINT32 handle, INT32 x, INT32 y,
       if (!d->enabled || d->exclusive_owner != 0u) {
         continue;
       }
-      rc = blit_object(i, handle, x, y, w, h);
+      rc = blit_object(i, handle, stride, x, y, w, h);
       if (rc != 0) {
         return rc;
       }
@@ -135,7 +139,7 @@ int crtc_present(UINT32 index, UINT32 handle, INT32 x, INT32 y,
   if (!c->enabled) {
     return -1;
   }
-  return blit_object(index, handle, x, y, w, h);
+  return blit_object(index, handle, stride, x, y, w, h);
 }
 
 int crtc_set_exclusive(UINT32 index, UINT32 handle, UINT64 owner) {
@@ -219,7 +223,7 @@ int crtc_selftest(void) {
     ok = 0;
     kputs("[CRTC] selftest FAIL: primary output missing\n");
   }
-  if (crtc_present(0xffffu, 1u, 0, 0, 1u, 1u, 0u) == 0) {
+  if (crtc_present(0xffffu, 1u, 1u, 0, 0, 1u, 1u, 0u) == 0) {
     ok = 0;
     kputs("[CRTC] selftest FAIL: bad index accepted\n");
   }
