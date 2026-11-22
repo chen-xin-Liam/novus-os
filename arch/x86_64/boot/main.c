@@ -321,7 +321,11 @@ static void boot_timeline(const char *stage) {
 
   boot_log_str(buf);
   boot_serial_write(buf);
-  if (g_con != 0) {
+  /* The firmware console draws with its own font straight onto the GOP
+   * scanout, so a stage line printed after the splash owns the screen lands
+   * on top of it (and its scrolling drags the splash's own rows with it).
+   * Once the splash is up, COM1 is the only place a timeline line goes. */
+  if (g_con != 0 && !g_quiet) {
     g_con->OutputString(g_con, buf);
   }
 }
@@ -331,6 +335,110 @@ static void boot_stall_ms(UINT32 ms) {
     (void)g_bs->Stall((UINTN)ms * 1000u);
   }
 }
+
+#if CONFIG_NOVUS_DISPLAY
+/* ---- boot animation ---------------------------------------------------
+ *
+ * The timeline is a table, not a curve: seven authored frames that carry the
+ * mark from 86% scale and nothing visible to full size and full opacity
+ * while the rail starts to move and the stage line names what the machine is
+ * doing. The rail's percentages are the boot's own: this opening fills it to
+ * 10%, stage3_load() takes it to 86% while it reads the medium, the kernel's
+ * stages carry it to 99%, and nd_demo_init() closes it at 100%. One rail,
+ * one animation, from the first frame to the desktop - instead of a splash
+ * that stops at ExitBootServices and a second one that starts over.
+ *
+ * `at_ms` is an absolute deadline on the TSC timeline (timeline_ms(), whose
+ * rate is the PM-timer-calibrated one this boot stage already publishes), so
+ * a frame's position in time does not depend on how long the previous frame
+ * took to draw. A slow machine draws fewer pixels per second, not a longer
+ * animation. */
+typedef struct {
+  UINT16      at_ms;  /* absolute TSC deadline, milliseconds */
+  UINT8       scale;  /* mark size, percent of its resting rectangle */
+  UINT8       fade;   /* mark opacity, 0..255 */
+  UINT8       bar;    /* rail fill, percent */
+  const char *label;  /* stage line under the rail */
+} boot_frame_t;
+
+static const boot_frame_t g_boot_frames[] = {
+    /* at_ms scale fade bar  label */
+    {    0,   86,   0,   0, "" },
+    {  120,   89,  56,   2, "硬件自检" },
+    {  240,   92, 104,   4, "初始化内存" },
+    {  360,   95, 150,   5, "初始化堆" },
+    {  480,   97, 190,   7, "检测设备" },
+    {  600,   99, 224,   9, "启动引导" },
+    {  720,  100, 255,  10, "进入内核" },
+};
+
+#define BOOT_FRAME_COUNT \
+  ((UINT32)(sizeof(g_boot_frames) / sizeof(g_boot_frames[0])))
+
+/* One line per frame on COM1: the frame's index, the deadline it was
+ * authored for and the TSC time it actually landed at, both measured from
+ * the first frame. The two numbers are the whole proof that the animation
+ * runs on the calibrated clock - they are equal on an idle machine and
+ * drift only by the cost of the frame itself. */
+static void boot_anim_log(UINT32 index, const boot_frame_t *f, UINT64 now_ms) {
+  boot_puts(L"[BA] frame ");
+  boot_put_dec((UINT64)index);
+  boot_puts(L"/");
+  boot_put_dec((UINT64)BOOT_FRAME_COUNT);
+  boot_puts(L" tsc=+");
+  boot_put_dec(now_ms);
+  boot_puts(L"ms (due +");
+  boot_put_dec((UINT64)f->at_ms);
+  boot_puts(L"ms) logo=");
+  boot_put_dec((UINT64)f->scale);
+  boot_puts(L"% fade=");
+  boot_put_dec((UINT64)f->fade);
+  boot_puts(L" bar=");
+  boot_put_dec((UINT64)f->bar);
+  boot_puts(L"% ");
+  boot_put_ascii((const CHAR8 *)f->label, 48);
+  boot_puts(L"\r\n");
+}
+
+/* Wait until the calibrated timeline reaches `deadline_ms`. The comparison is
+ * TSC-only; the firmware Stall is a yield, not a timer, so the deadline is
+ * what decides when the next frame starts. When the clock never calibrated
+ * (timeline_ms() stays 0) the frames are drawn back to back instead of
+ * spinning forever. */
+static void boot_anim_wait(UINT64 deadline_ms) {
+  for (;;) {
+    UINT64 now = timeline_ms();
+
+    if (now == 0u || now >= deadline_ms) {
+      return;
+    }
+    boot_stall_ms(1);
+  }
+}
+
+static void boot_anim_play(void) {
+  /* The table's deadlines are relative to the animation, and timeline_ms()
+   * counts from efi_main - the boot has been running for seconds by the time
+   * the splash opens. Pin the origin once, then every frame is scheduled
+   * against it. */
+  UINT64 base = timeline_ms();
+  UINT32 i;
+
+  for (i = 0; i < BOOT_FRAME_COUNT; i++) {
+    const boot_frame_t *f = &g_boot_frames[i];
+    UINT64              landed;
+
+    boot_anim_wait(base + (UINT64)f->at_ms);
+    /* The frame itself is drawn straight into the GOP scanout through the
+     * splash surface - no GPU, no kernel driver, no heap: the same software
+     * renderer the desktop uses, bound to the framebuffer the firmware left
+     * behind. */
+    nd_boot_anim_frame(f->scale, f->fade, f->bar, f->label);
+    landed = timeline_ms();
+    boot_anim_log(i + 1, f, landed >= base ? landed - base : 0u);
+  }
+}
+#endif /* CONFIG_NOVUS_DISPLAY */
 
 /* CPU and memory facts gathered by the boot self-check. Collection
  * always runs (even with the A-core switch on, cpuid just stops
@@ -807,15 +915,16 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_puts(L", ");
     boot_put_dec(d->fb_size);
     boot_puts(L" bytes\r\n");
-    if (nd_boot_splash()) {
+    if (nd_boot_anim_begin()) {
       /* The text phase is over: the screen now shows the splash and the
        * rest of the boot log goes to COM1. */
       boot_quiet(1);
-      /* Opening move: the logo lifts and fades in, with the firmware's
-       * own Stall providing the frames. ~200 ms, before the payload reads
-       * start, so it never delays anything the user is waiting for. */
-      nd_boot_splash_intro(boot_stall_ms);
-      nd_boot_stage(4, "正在启动");
+      /* Opening move: seven authored frames on the TSC timeline - the mark
+       * scales and fades in, the rail fills, the stage line names the step.
+       * The kernel carries the same rail to 100% and the hand-over ends on
+       * the desktop's own first frame, so there is no cut and no black
+       * screen between the two halves. */
+      boot_anim_play();
     } else if (d->fb_phys != 0 && !d->fb_boot_usable) {
       /* The numbers are the point here: the splash is skipped only when the
        * boot stage could not map the scanout at all, and on a laptop that is

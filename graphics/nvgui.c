@@ -514,9 +514,12 @@ void ng_panel_frame(ng_widget_t *w, int on) {
 /* ---- visibility, focus, z-order --------------------------------------- */
 
 void ng_show(ng_widget_t *w, int visible) {
+  int was_visible;
+
   if (w == 0) {
     return;
   }
+  was_visible = (w->flags & NG_WF_VISIBLE) != 0u;
   if (visible) {
     w->flags |= NG_WF_VISIBLE;
   } else {
@@ -528,7 +531,13 @@ void ng_show(ng_widget_t *w, int visible) {
       g_ctx.hover = 0;
     }
   }
-  ng_damage_widget(w);
+  /* Damage the widget only when its visibility actually changed. The shell
+   * polls the six taskbar run dots every timer tick (idle), and an
+   * unconditional damage here turned that into a full compose+present on
+   * every tick even when nothing on screen moved. */
+  if (was_visible != (visible != 0)) {
+    ng_damage_widget(w);
+  }
 }
 
 void ng_pointer_reset(void) {
