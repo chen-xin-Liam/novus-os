@@ -79,8 +79,10 @@
 #include "gpu2d.h"
 #include "net.h"
 #include "irq.h"
+#include "klog.h"
 
-/* Unified output entry: mirror text to both VGA and COM1. */
+/* Unified output entry: mirror text to VGA, COM1 and the ring the boot
+ * splash paints over its backdrop. */
 void kputs(const char *s) {
   /* Reentrant: the timer ISR (and other interrupt handlers) also call kputs
    * to mirror to the UART, whose byte-wise writes are not concurrency-safe.
@@ -88,6 +90,7 @@ void kputs(const char *s) {
   UINT64 flags = irq_save();
   vga_puts(s);
   serial_puts(s);
+  klog_puts(s);
 #if CONFIG_NOVUS_DISPLAY
   /* Third sink: the framebuffer, when the graphical splash is not running.
    * It is what makes a laptop without a serial port readable at all. */
@@ -354,6 +357,9 @@ static void storage_mount_ahci_novusfs(void) {
 
 void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   shared_mem_kernel_init();
+  /* Inherit the boot stage's lines before the first kernel line goes out,
+   * so the splash's log panel stays chronological across the handoff. */
+  klog_init();
   serial_init();
   vga_init();
   /* The PM timer port comes from the FADT, which is the only place that says

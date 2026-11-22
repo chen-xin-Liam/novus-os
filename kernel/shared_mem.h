@@ -125,7 +125,15 @@ typedef struct {
   UINT64 dbg_fat[4];               /* 0x388: fat reader diag: ndev,vlba0,init,0 */
   UINT64 dbg_ktest;                /* 0x3A8: kernel write/read test result    */
 
-  UINT8  reserved[7456 - 16 - 24 - 16 - 40 - 64 - 48]; /* 0x3B0: pad to 8 KiB */
+  /* ---- M11: boot-stage log ring, carved out of the reserved tail (spec 2.3
+   * permits repurposing reserved bytes; no field above moves). klog_init()
+   * seeds the kernel ring from this before its own first line, so the boot
+   * splash shows the firmware stage as well as the kernel. ---- */
+  volatile UINT32 boot_log_len;    /* 0x3B0: valid bytes, capped at 4096 */
+  volatile UINT32 boot_log_head;   /* 0x3B4: next write index */
+  UINT8  boot_log[4096];           /* 0x3B8: chronological byte ring */
+
+  UINT8  reserved[7248u - 8u - 4096u]; /* 0x13B8: pad to 8 KiB */
 } shared_mem_t;
 
 #define SHM_INSTALL_FLAG_PAYLOADS 0x00000001u /* ESP and system images staged */
@@ -161,7 +169,12 @@ _Static_assert(__builtin_offsetof(shared_mem_t, boot_usb_port) == 0x304,
 /* The wallpaper package occupies the next bytes of the reserved tail. */
 _Static_assert(__builtin_offsetof(shared_mem_t, wpkg_img_base) == 0x308,
                "shared_mem frozen layout drift: wpkg_img_base");
-_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x3B0,
+/* The M11 log ring is the first carve-out of the reserved tail. */
+_Static_assert(__builtin_offsetof(shared_mem_t, boot_log_len) == 0x3B0,
+               "shared_mem frozen layout drift: boot_log_len");
+_Static_assert(__builtin_offsetof(shared_mem_t, boot_log) == 0x3B8,
+               "shared_mem frozen layout drift: boot_log");
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x13B8,
                "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the loader-owned handoff copy

@@ -271,6 +271,8 @@ static UINT64 timeline_cycles(void) {
   return now >= g_timeline_start ? now - g_timeline_start : 0u;
 }
 
+void boot_log_str(const CHAR16 *s);
+
 static void boot_timeline(const char *stage) {
   CHAR16 buf[96];
   UINTN i = 0;
@@ -317,6 +319,7 @@ static void boot_timeline(const char *stage) {
   buf[i++] = L'\n';
   buf[i] = 0;
 
+  boot_log_str(buf);
   boot_serial_write(buf);
   if (g_con != 0) {
     g_con->OutputString(g_con, buf);
@@ -386,10 +389,59 @@ void boot_quiet(int on) {
   }
 }
 
+/* Mirror one byte into the handoff ring. The ring is carved out of the
+ * shared-memory reserved tail, so it survives ExitBootServices and the
+ * kernel can seed klog() with the firmware stage of the log. */
+static void boot_log_byte(UINT8 b) {
+  shared_mem_t *sh = shared_mem_get();
+  UINT32 cap;
+  UINT32 head;
+
+  if (sh == 0) {
+    return;
+  }
+  cap = (UINT32)sizeof(sh->boot_log);
+  if (cap == 0u) {
+    return;
+  }
+  head = sh->boot_log_head;
+  if (head >= cap) {
+    head = 0u;
+  }
+  sh->boot_log[head] = b;
+  sh->boot_log_head = head + 1u;
+  if (sh->boot_log_len < cap) {
+    sh->boot_log_len++;
+  }
+}
+
+/* Convert the firmware's UCS-2 string to UTF-8 bytes for the ring. CRLF is
+ * kept as-is: the kernel ring stores the same bytes kputs() writes, and the
+ * splash's line splitter treats CR as a control code. */
+void boot_log_str(const CHAR16 *s) {
+  if (s == 0) {
+    return;
+  }
+  while (*s != 0) {
+    UINT32 cp = *s++;
+    if (cp < 0x80u) {
+      boot_log_byte((UINT8)cp);
+    } else if (cp < 0x800u) {
+      boot_log_byte((UINT8)(0xC0u | (cp >> 6u)));
+      boot_log_byte((UINT8)(0x80u | (cp & 0x3Fu)));
+    } else {
+      boot_log_byte((UINT8)(0xE0u | (cp >> 12u)));
+      boot_log_byte((UINT8)(0x80u | ((cp >> 6u) & 0x3Fu)));
+      boot_log_byte((UINT8)(0x80u | (cp & 0x3Fu)));
+    }
+  }
+}
+
 void boot_puts(CHAR16 *s) {
   if (s == 0) {
     return;
   }
+  boot_log_str(s);
   if (g_quiet) {
     /* The screen belongs to the splash. Until then the firmware console
      * carries the log, and sends it to COM1 itself on machines that have a
@@ -665,6 +717,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   g_bs = bs;
   g_st = SystemTable;
   boot_serial_init();
+  /* Publish the handoff block before the first log line: boot_puts() and
+   * boot_timeline() now also fill the shared log ring, and the kernel seeds
+   * its own ring from it before printing its first line. */
+  shared_mem_bootstage_init(CONFIG_NOVUS_A_CORE_DISABLE ? 0 : 1);
   boot_timeline("efi_main start");
 
   /* The one picture worth keeping from the firmware: its own boot logo,
@@ -684,11 +740,6 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_puts(L"; the splash draws its own mark\r\n");
   }
 
-  /* Publish the spec 2.3 shared memory block before anything else.
-   * The A-core switch decides whether the self-check output happens;
-   * the plain boolean maps to the frozen field convention inside
-   * shared_mem_bootstage_init(). */
-  shared_mem_bootstage_init(CONFIG_NOVUS_A_CORE_DISABLE ? 0 : 1);
   boot_timeline("shared memory init");
 
   /* Disable the firmware watchdog timer. */

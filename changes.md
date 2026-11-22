@@ -1,5 +1,25 @@
 # Changes
 
+## 启动过渡画面直接显示日志
+
+- 新增 `kernel/klog.{h,c}`：一条贯穿两个阶段的日志环。UEFI 启动阶段把
+  `boot_puts()` / `boot_timeline()` 的每一行写进共享内存保留区里的 4 KiB
+  环（`shared_mem.h` 的尾部 carve-out，冻结字段一个没动）；内核 `kmain()`
+  在第一行输出前用 `klog_init()` 继承它，之后 `kputs()` 追加到 32 KiB 环。
+  `klog_snapshot()` 在继承前直接读共享内存环，所以 splash 第一阶段就能
+  显示固件日志，不需要等内核起来。
+- `graphics/nd_boot.c`：启动 splash 在 logo 与状态行之间多了一块半透明
+  日志面板，显示日志环里最新的若干行。面板是纯叠加层：logo 和状态行的
+  矩形、字体、位置都没变，不参与它们的布局；刷新只重画面板自己的矩形
+  （先重铺渐变背景再画面板和文字），屏幕其余像素不动，因此没有整屏重绘
+  带来的闪烁。日志有新增时由 `nd_boot_stage()` 触发重画，进度文字更新
+  仍只重画状态带。
+- `shared_mem_bootstage_init()` 提前到 `efi_main()` 里第一条日志之前，
+  否则第一阶段的日志会被它的 `memset()` 清掉。
+- 验证：`make` 通过；QEMU 1280x800 截图确认 splash 上日志面板已出现，
+  状态行和 logo 位置不变；60 秒 headless 启动无新增内核异常（唯一的
+  `#PF` 是既有的 nxprobe 用户态自测）。未创建 git commit。
+
 ## QEMU 网卡全线打通（e1000 / e1000e / virtio-net / rtl8139）
 
 - 新增 `kernel/net_rtl8139.c`：I/O BAR 驱动，8 KiB 收环 + CBR/CAPR 握手、

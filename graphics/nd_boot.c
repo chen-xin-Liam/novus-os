@@ -32,6 +32,7 @@
 
 #include "kernel.h"
 #include "nd.h"
+#include "klog.h"
 #include "boot_logo.h"   /* baked fallback mark */
 #include "nd_oemlogo.h"  /* the firmware's own logo, when captured */
 
@@ -43,6 +44,16 @@
 #define SPLASH_STATUS_H  44  /* the one status line's band */
 #define SPLASH_LABEL_MAX 56
 
+/* The boot log rides on the splash as a translucent panel between the logo
+ * and the status line. It is drawn from the same ring the kernel keeps, so
+ * the firmware stage's lines are already on screen when splash first paints. */
+#define SPLASH_LOG_MAX_W    900
+#define SPLASH_LOG_MAX_H    320
+#define SPLASH_LOG_LINE_H   16
+#define SPLASH_LOG_MAX_LINES 20
+#define SPLASH_LOG_SNAP     4096
+#define SPLASH_LOG_PAD      10
+
 /* .data, not .bss: the boot stage paints the splash before ExitBootServices
  * and kernel_entry zeroes .bss on its way into kmain, which would otherwise
  * make the kernel believe there is no splash and clear the screen. The
@@ -53,8 +64,15 @@ static struct {
   nd_rect_t    mark;
   nd_rect_t    logo;    /* where the vendor logo sits, when there is one */
   nd_rect_t    status;
+  nd_rect_t    log;     /* boot-log panel, between logo and status */
+  UINT32       log_seen; /* klog version the panel was last painted with */
   nd_surface_t scratch; /* used only before nd_init() */
 } g_splash __attribute__((section(".data")));
+
+/* Allocated in .bss: kernel_entry clears it on the way in, and the first
+ * kernel-stage nd_boot_stage() repaints the panel from the inherited ring. */
+static char  g_log_snap[SPLASH_LOG_SNAP];
+static char *g_log_lines[SPLASH_LOG_MAX_LINES];
 
 /* The surface to draw on: the real screen once the kernel has bound it,
  * otherwise a temporary view of the captured framebuffer. Exported so the
@@ -117,6 +135,8 @@ static void splash_backdrop(nd_surface_t *s, nd_rect_t r) {
   }
 }
 
+static void splash_log_layout(nd_surface_t *s);
+
 /* Upper third: the boot logo, centred and scaled down only when the panel
  * cannot fit it. Lower fifth: the status band. Both are centred horizontally,
  * so a 768- and a 1080-line panel put them in the same places relative to
@@ -142,6 +162,7 @@ static void splash_layout(nd_surface_t *s) {
     g_splash.mark = nd_rect(0, 0, 0, 0);
     g_splash.logo = g_splash.mark;
     g_splash.status = nd_rect(0, 0, s->w, 0);
+    splash_log_layout(s);
     return;
   }
   if (lw > max_w) {
@@ -163,6 +184,33 @@ static void splash_layout(nd_surface_t *s) {
   g_splash.mark = nd_rect((s->w - lw) / 2, logo_top, lw, lh);
   g_splash.logo = g_splash.mark;
   g_splash.status = nd_rect(0, status_y, s->w, SPLASH_STATUS_H);
+  splash_log_layout(s);
+}
+
+/* The log panel is an overlay in the literal sense: the logo and the status
+ * line keep their rectangles, and the log fills the gap between them. It is
+ * bottom-aligned so the newest line sits just above the status band, the way
+ * a console scrolls. */
+static void splash_log_layout(nd_surface_t *s) {
+  INT32 logo_bottom = (g_splash.logo.h > 0)
+                          ? g_splash.logo.y + g_splash.logo.h
+                          : (s->h * 20) / 100;
+  INT32 top = logo_bottom + 16;
+  INT32 bottom = (g_splash.status.h > 0) ? g_splash.status.y - 12 : s->h - 24;
+  INT32 h = bottom - top;
+  INT32 w = s->w - 96;
+
+  if (h > SPLASH_LOG_MAX_H) {
+    h = SPLASH_LOG_MAX_H;
+  }
+  if (w > SPLASH_LOG_MAX_W) {
+    w = SPLASH_LOG_MAX_W;
+  }
+  if (h < SPLASH_LOG_LINE_H * 2 || w < 240) {
+    g_splash.log = nd_rect(0, 0, 0, 0);
+    return;
+  }
+  g_splash.log = nd_rect((s->w - w) / 2, bottom - h, w, h);
 }
 
 /* Copy the baked logo. At 1:1 nd_blit handles clipping and the framebuffer's
@@ -284,6 +332,79 @@ static void splash_status(nd_surface_t *s) {
           scale);
 }
 
+/* One line of the ring becomes one row of the panel. Lines are split in
+ * place in the static snapshot; only the last few are kept, so a long boot
+ * still shows the part that matters without a scrolling control. */
+static UINT32 splash_log_lines(void) {
+  UINT32 n = klog_snapshot(g_log_snap, (UINT32)sizeof(g_log_snap));
+  UINT32 count = 0u;
+  UINT32 i;
+  UINT32 start = 0u;
+
+  for (i = 0u; i < n; i++) {
+    if (g_log_snap[i] == '\n') {
+      g_log_snap[i] = '\0';
+      if (count < SPLASH_LOG_MAX_LINES) {
+        g_log_lines[count++] = &g_log_snap[start];
+      } else {
+        UINT32 k;
+        for (k = 0u; k + 1u < SPLASH_LOG_MAX_LINES; k++) {
+          g_log_lines[k] = g_log_lines[k + 1u];
+        }
+        g_log_lines[SPLASH_LOG_MAX_LINES - 1u] = &g_log_snap[start];
+      }
+      start = i + 1u;
+    }
+  }
+  if (start < n && g_log_snap[start] != '\0') {
+    if (count < SPLASH_LOG_MAX_LINES) {
+      g_log_lines[count++] = &g_log_snap[start];
+    } else {
+      UINT32 k;
+      for (k = 0u; k + 1u < SPLASH_LOG_MAX_LINES; k++) {
+        g_log_lines[k] = g_log_lines[k + 1u];
+      }
+      g_log_lines[SPLASH_LOG_MAX_LINES - 1u] = &g_log_snap[start];
+    }
+  }
+  return count;
+}
+
+/* Repaint just the log rectangle. The backdrop is rebuilt before the panel
+ * and its text, so no old glyph survives underneath; nothing outside the
+ * rectangle is touched, which is what keeps the splash from flickering. */
+static void splash_log_paint(nd_surface_t *s) {
+  nd_rect_t r = g_splash.log;
+  UINT32    count;
+  UINT32    visible;
+  UINT32    i;
+
+  if (r.w <= 0 || r.h <= 0) {
+    return;
+  }
+  g_splash.log_seen = klog_version();
+  count = splash_log_lines();
+  visible = (UINT32)((r.h - 2 * SPLASH_LOG_PAD) / SPLASH_LOG_LINE_H);
+  if (visible > count) {
+    visible = count;
+  }
+  if (visible > SPLASH_LOG_MAX_LINES) {
+    visible = SPLASH_LOG_MAX_LINES;
+  }
+
+  splash_backdrop(s, r);
+  nd_blend_rect(s, r, ND_RGB(0x05, 0x0A, 0x12), 176u);
+  nd_frame(s, r, 1, ND_RGB(0x2C, 0x40, 0x58));
+  for (i = 0u; i < visible; i++) {
+    const char *line = g_log_lines[count - visible + i];
+    INT32       y = r.y + r.h - SPLASH_LOG_PAD -
+                    (INT32)((visible - i) * SPLASH_LOG_LINE_H);
+
+    nd_text_limit(s, r.x + SPLASH_LOG_PAD, y, line,
+                  (UINT32)(r.w - 2 * SPLASH_LOG_PAD), SPLASH_DIM, 1u);
+  }
+}
+
 void nd_boot_splash_end(void) { g_splash.active = 0; }
 
 /* Where the splash put the machine's logo. The desktop transition lifts
@@ -323,6 +444,9 @@ int nd_boot_splash(void) {
   __asm__ volatile("wbinvd" ::: "memory");
   splash_backdrop(s, nd_rect(0, 0, s->w, s->h));
   splash_logo(s);
+  /* The firmware stage's lines are already in the handoff ring, so the very
+   * first splash frame carries the whole boot log collected so far. */
+  splash_log_paint(s);
   return 1;
 }
 
@@ -355,7 +479,7 @@ void nd_boot_stage(UINT32 percent, const char *text) {
       changed = 1;
     }
   }
-  if (!changed) {
+  if (!changed && klog_version() == g_splash.log_seen) {
     return;
   }
   s = splash_surface();
@@ -364,10 +488,15 @@ void nd_boot_stage(UINT32 percent, const char *text) {
   }
   splash_layout(s);
   nd_surface_reset_clip(s);
-  /* Only the status band is touched; the lockup above it is already correct
-   * on the glass. */
-  dirty = g_splash.status;
-  dirty = nd_rect(dirty.x, dirty.y - 4, dirty.w, dirty.h + 8);
-  splash_backdrop(s, dirty);
-  splash_status(s);
+  if (changed) {
+    /* Only the status band is touched; the lockup above it is already
+     * correct on the glass. */
+    dirty = g_splash.status;
+    dirty = nd_rect(dirty.x, dirty.y - 4, dirty.w, dirty.h + 8);
+    splash_backdrop(s, dirty);
+    splash_status(s);
+  }
+  if (klog_version() != g_splash.log_seen) {
+    splash_log_paint(s);
+  }
 }

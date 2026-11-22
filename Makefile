@@ -80,6 +80,7 @@ SRC := arch/x86_64/boot/main.c \
        arch/x86_64/boot/scanout.c \
        kernel/kmain.c \
        kernel/fbcon.c \
+       kernel/klog.c \
        kernel/vga.c \
        kernel/serial.c \
        kernel/novuslib.c \
