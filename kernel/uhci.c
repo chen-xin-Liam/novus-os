@@ -134,6 +134,7 @@ typedef struct {
 typedef struct {
   uhci_hc_t *hc;
   UINT8  used;
+  UINT8  gone;     /* port reads as disconnected; slot kept for src ids */
   UINT8  addr;
   UINT8  port;
   UINT8  low;      /* 1 when PORTSC.LSDA was set */
@@ -164,13 +165,22 @@ static uhci_dev_t g_dev[UHCI_MAX_DEV];
 static UINTN      g_ndev;
 static UINT8      g_next_addr = 1u;
 static UINTN      g_disks;
+/* Per root port: something answered on it (HID device or hub). A hub is not
+ * kept in g_dev, so without this a port carrying one would look empty on
+ * every scan and be re-enumerated, which piles up duplicate hub children. */
+static UINT8      g_uhci_port_dev[UHCI_MAX_HC][UHCI_PORTS + 1u];
 
 /* ---- small helpers ---------------------------------------------------- */
 
-static void udelay(UINT32 iterations) {
-  while (iterations-- != 0u) {
-    (void)io_in8(0x80u); /* posted read: roughly a microsecond on real HW */
-  }
+/* Port-reset settle time. It used to be a loop of io_in8(0x80) reads on the
+ * assumption that one ISA read costs about a microsecond; on real silicon it
+ * roughly does, but under an emulated machine each read goes through the
+ * hypervisor's I/O path and costs hundreds of microseconds, so the 60 ms
+ * settle before the reset deassert took about half a minute. cpu_delay_us()
+ * measures against the ACPI PM timer instead, which is the same 60 ms on
+ * either machine. */
+static void udelay(UINT32 us) {
+  cpu_delay_us(us);
 }
 
 static void *dma_page(UINT64 *phys) {
@@ -749,6 +759,7 @@ static void uhci_dump_ifaces(UINT8 port, const UINT8 *cfg, UINT32 len) {
 static void uhci_enumerate_port(uhci_hc_t *hc, UINT8 port) {
   UINT8 low = 0;
 
+  g_uhci_port_dev[hc - g_hc][port] = 0u;
   if (uhci_port_reset(hc, port, &low) != 0) {
     return;
   }
@@ -766,6 +777,7 @@ static void uhci_probe_device(uhci_hc_t *hc, UINT8 port, UINT8 low,
   memset(&probe, 0, sizeof(probe));
   probe.hc = hc;
   probe.low = low;
+  probe.port = port;
   probe.buf = hc->buf;
   probe.buf_phys = hc->buf_phys;
   /* Enumeration borrows the controller's shared control QH, which is
@@ -777,6 +789,11 @@ static void uhci_probe_device(uhci_hc_t *hc, UINT8 port, UINT8 low,
   if (uhci_get_desc(&probe, 0x01u, 8u, probe.buf + UHCI_DATA_OFF) != 0) {
     kputs("[USB] uhci device descriptor failed\n");
     return;
+  }
+  if (depth == 0u) {
+    /* Something answered on this root port - a HID function or a hub, and a
+     * hub never reaches g_dev, so record it here. */
+    g_uhci_port_dev[hc - g_hc][port] = 1u;
   }
   if (g_next_addr >= 127u) {
     g_next_addr = 1u;
@@ -938,7 +955,75 @@ int uhci_init(void) {
 
 /* ---- shared poll / LED / device-manager entry points ------------------ */
 
-void uhci_hid_poll(void) {
+/* ---- hotplug ----------------------------------------------------------- */
+
+#define UHCI_HOTPLUG_EVERY   32u  /* input ticks between two root-port scans */
+#define UHCI_HOTPLUG_RETRIES 3u
+
+static UINT32 g_uhci_ticks;
+static UINT8  g_uhci_fail[UHCI_MAX_HC][UHCI_PORTS + 1u];
+
+/* Root-port state machine: a port that reads as connected with no device of
+ * ours behind it has had something plugged in; a port whose device vanished
+ * has had the plug pulled. A port that carries a hub is left alone here: a
+ * hub has to be re-walked to see what sits behind it, and re-walking means
+ * resetting its ports, which throws away the interrupt transfer of a mouse
+ * that is working perfectly well. Replug detection for hub children is the
+ * hub's own job, so this only covers what is plugged into the root ports. */
+static void uhci_hotplug_scan(void) {
+  UINTN c;
+  UINT8 port;
+
+  for (c = 0; c < UHCI_MAX_HC; c++) {
+    uhci_hc_t *hc = &g_hc[c];
+
+    if (!hc->used) {
+      continue;
+    }
+    for (port = 1u; port <= UHCI_PORTS; port++) {
+      UINT16 st = io_in16((UINT16)(hc->io + U_REG_PORTSC + (port - 1u) * 2u));
+      int    connected = (st & U_PORT_CCS) != 0u;
+      UINTN  k;
+      int    live = g_uhci_port_dev[c][port];
+
+      if (connected && live == 0) {
+        if (g_uhci_fail[c][port] >= UHCI_HOTPLUG_RETRIES) {
+          continue;
+        }
+        uhci_enumerate_port(hc, port);
+        if (g_uhci_port_dev[c][port] != 0u) {
+          int found = 0;
+
+          for (k = 0; k < UHCI_MAX_DEV; k++) {
+            if (g_dev[k].used && g_dev[k].gone == 0u && g_dev[k].hc == hc &&
+                g_dev[k].port == port) {
+              found = 1;
+            }
+          }
+          g_uhci_fail[c][port] = 0u;
+          kputs("[USB] hotplug: uhci device on port ");
+          kputs_hex(port);
+          kputs(found ? " attached\n" : " hub attached\n");
+        } else {
+          g_uhci_fail[c][port]++;
+        }
+      } else if (!connected && live != 0) {
+        for (k = 0; k < UHCI_MAX_DEV; k++) {
+          uhci_dev_t *d = &g_dev[k];
+
+          if (d->used && d->gone == 0u && d->hc == hc && d->port == port) {
+            d->gone = 1u;
+          }
+        }
+        g_uhci_port_dev[c][port] = 0u;
+        g_uhci_fail[c][port] = 0u;
+        kputs("[USB] hotplug: uhci port ");
+        kputs_hex(port);
+        kputs(" disconnected\n");
+      }
+    }
+  }
+}void uhci_hid_poll(void) {
   UINTN k;
 
   for (k = 0; k < UHCI_MAX_DEV; k++) {
@@ -946,7 +1031,7 @@ void uhci_hid_poll(void) {
     UINT32 status;
     UINT16 len;
 
-    if (!d->used) {
+    if (!d->used || d->gone != 0u) {
       continue;
     }
     status = d->intr_td->status;
@@ -991,28 +1076,56 @@ void uhci_hid_poll(void) {
     d->intr_toggle ^= 1u;
     uhci_intr_arm(d);
   }
+  /* Same cadence as the xHCI scanner: reading two port status words is cheap
+   * enough to do every UHCI_HOTPLUG_EVERY input ticks. */
+  if (++g_uhci_ticks >= UHCI_HOTPLUG_EVERY) {
+    g_uhci_ticks = 0u;
+    uhci_hotplug_scan();
+  }
 }
 
 int uhci_kbd_set_leds(hid_kbd_led_t *led) {
   UINTN k;
 
   for (k = 0; k < UHCI_MAX_DEV; k++) {
-    if (g_dev[k].used && g_dev[k].kind == USB_HID_KEYBOARD) {
+    if (g_dev[k].used && g_dev[k].gone == 0u &&
+        g_dev[k].kind == USB_HID_KEYBOARD) {
       hid_boot_kbd_set_leds(&g_dev[k].kbd, led);
     }
   }
   return 0;
 }
 
-UINTN uhci_device_count(void) { return g_ndev; }
+UINTN uhci_device_count(void) {
+  UINTN k;
+  UINTN live = 0;
+
+  for (k = 0; k < UHCI_MAX_DEV; k++) {
+    if (g_dev[k].used && g_dev[k].gone == 0u) {
+      live++;
+    }
+  }
+  return live;
+}
 
 int uhci_device_info(UINTN index, usb_info_t *out) {
-  uhci_dev_t *d;
+  uhci_dev_t *d = NULL;
+  UINTN       k;
+  UINTN       live = 0;
 
-  if (out == NULL || index >= g_ndev) {
+  for (k = 0; k < UHCI_MAX_DEV; k++) {
+    if (!g_dev[k].used || g_dev[k].gone != 0u) {
+      continue;
+    }
+    if (live == index) {
+      d = &g_dev[k];
+      break;
+    }
+    live++;
+  }
+  if (out == NULL || d == NULL) {
     return -1;
   }
-  d = &g_dev[index];
   memset(out, 0, sizeof(*out));
   out->kind = (d->kind == USB_HID_KEYBOARD) ? USB_INFO_KEYBOARD
                                              : USB_INFO_MOUSE;

@@ -47,6 +47,7 @@
 #define TRB_STATUS   4u
 #define TRB_LINK     6u
 #define TRB_ENABLE_SLOT 9u
+#define TRB_DISABLE_SLOT 10u
 #define TRB_ADDRESS_DEV 11u
 #define TRB_CONFIG_EP   12u
 #define TRB_CMD_COMPLETE 33u
@@ -132,6 +133,11 @@ typedef struct usb_dev {
   UINT64  sectors;
   UINT32  tag;
   UINT8   lun;
+  /* Set when the port the device lives on no longer reads as connected. The
+   * slot is kept - the input tick addresses devices by their index in
+   * g_dev[], so compacting the array would silently hand a keyboard's
+   * events to the mouse next to it. */
+  UINT8   gone;
   blkdev_t dev;
   char     name[8];
 
@@ -186,6 +192,20 @@ static usb_t  g_dev[USB_MAX_DEVICES];
 static UINTN  g_ndev;
 static usb_disk_t g_usb_disks_ctx[USB_MAX_DISKS];
 static UINTN g_usb_disks;
+
+/* Hotplug state. One counter per root port: a port that is connected but
+ * refuses to enumerate (a dead cable, a hub the controller cannot address)
+ * is retried a few times and then left alone until it reads as empty again,
+ * so a broken socket cannot turn the input tick into an enumeration loop. */
+#define USB_HOTPLUG_EVERY   32u  /* input ticks between two scans */
+#define USB_PORT_OFF(p)     (0x400u + ((p) - 1u) * 0x10u)
+#define USB_HOTPLUG_RETRIES 3u
+
+static UINT8  g_port_fail[USB_MAX_CONTROLLERS][USB_MAX_PORTS + 1u];
+static UINT32 g_hotplug_ticks;
+
+static int xhci_attach_port(xhci_t *hc, UINT32 port, UINT32 speed);
+static void xhci_hotplug_scan(void);
 
 /* Transfer events that arrived on an endpoint we were not actively waiting for
  * (e.g. a HID report delivered while a disk read was draining the event ring)
@@ -1448,7 +1468,7 @@ void usb_hid_poll(void) {
     UINT32 resid = 0;
     int got = 0;
 
-    if (u->kind != USB_KIND_HID || u->slot == 0u) {
+    if (u->kind != USB_KIND_HID || u->slot == 0u || u->gone != 0u) {
       continue;
     }
     /* hid_in_num is the USB endpoint number; hid_in_dci is the doorbell DCI
@@ -1534,7 +1554,121 @@ void usb_hid_poll(void) {
       hid_intr_submit(u); /* initial arm / recovery */
     }
   }
+  if (++g_hotplug_ticks >= USB_HOTPLUG_EVERY) {
+    g_hotplug_ticks = 0u;
+    xhci_hotplug_scan();
+  }
   uhci_hid_poll();
+}
+
+/* Hand a slot back to the controller and return its DMA buffers. The usb_t
+ * entry itself stays behind (input source ids are array indices) marked gone;
+ * everything the controller owns goes away so a replug starts on a clean
+ * slot instead of burning one of the 16 entries for every plug cycle. */
+static void xhci_dev_release(usb_t *u) {
+  if (u->hc != NULL && u->slot != 0u) {
+    if (cmd_submit(u, TRB_DISABLE_SLOT, 0u, 0u, 0u, u->slot, NULL) != 0) {
+      /* The device is already off the bus; a slot that will not disable is
+       * useless but not fatal, so report it once and carry on. */
+      kputs("[USB] disable slot ");
+      kputs_hex(u->slot);
+      kputs(" failed\n");
+    }
+    if (u->slot < 256u && u->hc->dcbaa != NULL) {
+      u->hc->dcbaa[u->slot] = 0u;
+    }
+    u->slot = 0u;
+  }
+  if (u->dev_ctx != NULL) {
+    pmm_free_contig(u->dev_ctx, XHCI_DEV_CTX);
+    u->dev_ctx = NULL;
+  }
+  if (u->ep0 != NULL) {
+    pmm_free_contig(u->ep0, XHCI_EP0_RING);
+    u->ep0 = NULL;
+  }
+  if (u->ep_in != NULL) {
+    pmm_free_contig(u->ep_in, XHCI_BULK_RING);
+    u->ep_in = NULL;
+  }
+  if (u->ep_out != NULL) {
+    pmm_free_contig(u->ep_out, XHCI_BULK_RING);
+    u->ep_out = NULL;
+  }
+  if (u->hid_in != NULL) {
+    pmm_free_contig(u->hid_in, XHCI_BULK_RING);
+    u->hid_in = NULL;
+  }
+  if (u->hid_buf != NULL) {
+    pmm_free_contig(u->hid_buf, 1u);
+    u->hid_buf = NULL;
+  }
+}
+
+/* One pass over every root port of every controller we brought up.
+ *
+ * A port is "ours" when a usb_t in g_dev[] still points at it and has not
+ * been marked gone. PORTSC bit 0 is the current-connect status: it stays
+ * set for a device that is still there, clears when the plug is pulled,
+ * and - this is the whole trick - a *newly* inserted device sets the
+ * connect-change bit while the port is not yet enabled, so a plain "connected
+ * and no device of ours" test is what tells an unplugged port from a freshly
+ * used one. */
+static void xhci_hotplug_scan(void) {
+  UINT32 c;
+
+  for (c = 0; c < USB_MAX_CONTROLLERS; c++) {
+    xhci_t *hc = &g_hc[c];
+    UINT32  port;
+
+    if (hc->cap == 0) {
+      continue;
+    }
+    for (port = 1; port <= hc->max_ports && port <= USB_MAX_PORTS; port++) {
+      UINT32 sc = urd(hc->op, USB_PORT_OFF(port));
+      int    connected = (sc & 1u) != 0u;
+      UINTN  d;
+      int    live = 0;
+
+      for (d = 0; d < g_ndev; d++) {
+        if (g_dev[d].hc == hc && g_dev[d].port == port &&
+            g_dev[d].gone == 0u) {
+          live = 1;
+        }
+      }
+      if (connected && !live) {
+        UINT32 speed = (sc >> 10) & 0xFu;
+
+        if (g_port_fail[c][port] >= USB_HOTPLUG_RETRIES) {
+          continue; /* left alone until the port reads empty again */
+        }
+        if (port_reset(hc, port, &speed) != 0) {
+          g_port_fail[c][port]++;
+          continue;
+        }
+        if (xhci_attach_port(hc, port, speed) == 0) {
+          g_port_fail[c][port] = 0u;
+          kputs("[USB] hotplug: device on port ");
+          kputs_hex(port);
+          kputs(" attached\n");
+        } else {
+          g_port_fail[c][port]++;
+        }
+      } else if (!connected && live) {
+        for (d = 0; d < g_ndev; d++) {
+          if (g_dev[d].hc == hc && g_dev[d].port == port &&
+              g_dev[d].gone == 0u) {
+            xhci_dev_release(&g_dev[d]);
+            g_dev[d].gone = 1u;
+          }
+        }
+        g_port_fail[c][port] = 0u;
+        kputs("[USB] hotplug: port ");
+        kputs_hex(port);
+        kputs(" disconnected\n");
+      }
+    }
+  }
 }
 
 static int attach_base(usb_t *u, UINT32 port, UINT32 speed) {
@@ -1725,6 +1859,224 @@ static void usb_log_bdf(const char *name, const pci_dev_t *d, UINTN ports) {
   kputs("\n");
 }
 
+/* Pick the array entry for an arriving device: the lowest entry an unplugged
+ * device left behind, otherwise a fresh one. A recycled entry keeps its
+ * index, which is what keeps input source ids stable. */
+static usb_t *usb_entry_for_new_device(void) {
+  UINTN k;
+
+  for (k = 0; k < g_ndev; k++) {
+    if (g_dev[k].gone != 0u) {
+      return &g_dev[k];
+    }
+  }
+  if (g_ndev >= USB_MAX_DEVICES) {
+    return NULL;
+  }
+  return &g_dev[g_ndev];
+}
+
+/* Raise the high-water mark only for an entry at the top of the array; a
+ * recycled index is already inside it. */
+static void usb_entry_commit(usb_t *u) {
+  if (u == &g_dev[g_ndev]) {
+    g_ndev++;
+  }
+}
+
+/* One device on a root port whose reset already succeeded.
+ *
+ * Everything the boot enumeration does for a port lives here so the hotplug
+ * scanner can bring a device that was plugged in after boot through exactly
+ * the same path: slot and rings, descriptor read, HID interfaces or the
+ * mass-storage block device. Returns 0 when the device was published, -1
+ * when the port was given up on (no DMA, failed enumeration, unusable
+ * interface), which the scanner treats as "not ours" until the port changes
+ * state again. */
+static int xhci_attach_port(xhci_t *hc, UINT32 port, UINT32 speed) {
+  usb_t *u;
+        int    published = 0;
+
+        u = usb_entry_for_new_device();
+        if (u == NULL) {
+          return -1;
+        }
+        memset(u, 0, sizeof(*u));
+        u->hc = hc;
+        u->dev_ctx = (UINT8 *)dma_contig(XHCI_DEV_CTX, &u->dev_ctx_phys);
+        u->ep0 = (trb_t *)dma_contig(XHCI_EP0_RING, &u->ep0_phys);
+        u->ep_in = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_in_phys);
+        u->ep_out = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_out_phys);
+        u->hid_in = (trb_t *)dma_contig(XHCI_BULK_RING, &u->hid_in_phys);
+        u->hid_buf = (UINT8 *)dma_contig(1, &u->hid_buf_phys);
+        if (u->dev_ctx == NULL || u->ep0 == NULL || u->ep_in == NULL ||
+            u->ep_out == NULL || u->hid_in == NULL || u->hid_buf == NULL) {
+          kputs("[USB] no DMA memory for device\n");
+          xhci_dev_release(u);
+          u->gone = 1u;
+          return -1;
+        }
+        ep_ring_reset(u->ep0, u->ep0_phys, &u->ep0_idx, &u->ep0_cycle);
+
+        if (attach_base(u, port, speed) != 0) {
+          kputs("[USB] enumeration failed\n");
+          xhci_dev_release(u);
+          u->gone = 1u;
+          return -1;
+        }
+
+        if (u->kind == USB_KIND_HID) {
+          /* HID device: one usb_t per HID interface so a composite
+           * keyboard+mouse receiver keeps both halves. The interface list
+           * comes from the configuration descriptor that attach_base stored;
+           * it is never re-read over the wire, because there is no legal
+           * GET_DESCRIPTOR for a bare interface header (a HID function
+           * answers such a request with a STALL). */
+          UINT8  n_hid = 0;
+          UINT32 idx;
+
+          (void)cfg_hid_iface(u->cfg, u->cfg_len, 0u, &u->iface, &n_hid);
+          if (n_hid == 0u) {
+            n_hid = 1u; /* attach_base already classified interface 0 */
+            u->iface = 0u;
+          }
+          for (idx = 0; idx < (UINT32)n_hid && idx < 4u; idx++) {
+            usb_t *v = u;
+
+            if (idx != 0u) {
+              UINT8 iface = 0u;
+
+              if (g_ndev >= USB_MAX_DEVICES) {
+                break;
+              }
+              if (cfg_hid_iface(u->cfg, u->cfg_len, idx, &iface, NULL) < 0) {
+                break;
+              }
+              v = &g_dev[g_ndev];
+              /* Same slot / DCBAA as u, but its own rings: EP0 is per-slot
+               * state the controller walks independently per transfer. */
+              memcpy(v, u, sizeof(*v));
+              v->ep0 = (trb_t *)dma_contig(XHCI_EP0_RING, &v->ep0_phys);
+              v->hid_in = (trb_t *)dma_contig(XHCI_BULK_RING, &v->hid_in_phys);
+              v->hid_buf = (UINT8 *)dma_contig(1, &v->hid_buf_phys);
+              if (v->ep0 == NULL || v->hid_in == NULL || v->hid_buf == NULL) {
+                kputs("[USB] no DMA for second HID iface\n");
+                break;
+              }
+              ep_ring_reset(v->ep0, v->ep0_phys, &v->ep0_idx, &v->ep0_cycle);
+              v->iface = iface;
+            }
+            if (parse_config_iface(v, u->cfg, u->cfg_len, v->iface) != 0 ||
+                v->hid_kind == 0u) {
+              /* This interface carries no boot report we understand. */
+              if (v != u) {
+                pmm_free_contig(v->ep0, XHCI_EP0_RING);
+                pmm_free_contig(v->hid_in, XHCI_BULK_RING);
+                pmm_free_contig(v->hid_buf, 1);
+              }
+              continue;
+            }
+            if (attach_hid_interface(v) == 0) {
+              kputs("[USB] HID interface ready\n");
+              usb_entry_commit(v);
+              published = 1;
+            } else if (v != u) {
+              pmm_free_contig(v->ep0, XHCI_EP0_RING);
+              pmm_free_contig(v->hid_in, XHCI_BULK_RING);
+              pmm_free_contig(v->hid_buf, 1);
+            }
+          }
+          if (!published) {
+            /* Nothing usable on this device: leave the port for the retry
+             * counter instead of re-enumerating it on every scan tick. */
+            xhci_dev_release(u);
+            u->gone = 1u;
+            return -1;
+          }
+          return 0;
+        }
+
+        /* Mass-storage (or non-HID device): register one block device per LUN. */
+        {
+          int max_lun = usb_max_lun(u);
+          int lun;
+
+          /* Bring up the bulk endpoints before any mass-storage commands. */
+          ep_ring_reset(u->ep_in, u->ep_in_phys, &u->ep_in_idx, &u->ep_in_cycle);
+          ep_ring_reset(u->ep_out, u->ep_out_phys, &u->ep_out_idx, &u->ep_out_cycle);
+          if (configure_endpoints(u) != 0) {
+            kputs("[USB] storage endpoint config failed\n");
+            xhci_dev_release(u);
+            u->gone = 1u;
+            return -1;
+          }
+
+          for (lun = 0; lun <= max_lun; lun++) {
+            usb_disk_t *d;
+
+            if (g_usb_disks >= USB_MAX_DISKS) {
+              break;
+            }
+            u->lun = (UINT8)lun;
+            if (read_capacity(u) != 0) {
+              continue;
+            }
+            d = &g_usb_disks_ctx[g_usb_disks];
+            memset(d, 0, sizeof(*d));
+            d->u = u;
+            d->lun = (UINT8)lun;
+
+            d->name[0] = 'u'; d->name[1] = 's'; d->name[2] = 'b';
+            d->name[3] = (char)('0' + (g_usb_disks / 10));
+            d->name[4] = (char)('0' + (g_usb_disks % 10));
+            d->name[5] = '\0';
+
+            d->dev.name = d->name;
+            d->dev.sector_count = u->sectors;
+            d->dev.block_size = (u->dev.block_size == 0u) ? 512u : u->dev.block_size;
+            d->dev.flags = BLKDEV_FLAG_REMOVABLE;
+            /* The medium the system was booted from must never be a target.
+             * The boot stage publishes the USB port it came from; the port
+             * number in the device path and the xHCI root hub port can differ
+             * by one, so both are accepted. When several USB volumes were
+             * present the running one could not be identified, and every USB
+             * disk is refused instead of guessing. */
+            {
+              shared_mem_t *shm = shared_mem_get();
+
+              if (shm != NULL &&
+                  (shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB) != 0u) {
+                UINT32 raw = shm->boot_usb_port;
+
+                if ((shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB_AMBIGUOUS)
+                        != 0u ||
+                    (UINT32)port == raw || (UINT32)port == raw + 1u) {
+                  d->dev.flags |= BLKDEV_FLAG_BOOT_ONLY;
+                  kputs("[USB] disk ");
+                  kputs(d->name);
+                  kputs(" is the boot medium\n");
+                }
+              }
+            }
+            d->dev.ctx = d;
+            d->dev.read = usb_read;
+            d->dev.write = usb_write;
+            d->dev.flush = usb_flush;
+            d->dev.powerdown = usb_powerdown;
+            if (blkdev_register(&d->dev) == 0) {
+              g_usb_disks++;
+              kputs("[USB] disk ");
+              kputs(d->name);
+              kputs(" capacity ");
+              kputs_hex(u->sectors);
+              kputs(" sectors\n");
+            }
+          }
+        }
+        usb_entry_commit(u);
+  return 0;
+}
+
 int usb_init(void) {
   pci_dev_t devices[PCI_MAX_DEVICES];
   int       n;
@@ -1825,7 +2177,6 @@ int usb_init(void) {
 
       for (port = 1; port <= hc->max_ports && port <= USB_MAX_PORTS; port++) {
         UINT32 speed = 0;
-        usb_t *u;
 
         if (g_ndev >= USB_MAX_DEVICES) {
           break;
@@ -1838,166 +2189,7 @@ int usb_init(void) {
         kputs(" connected, speed=");
         kputs_hex(speed);
         kputs("\n");
-        u = &g_dev[g_ndev];
-        memset(u, 0, sizeof(*u));
-        u->hc = hc;
-        u->dev_ctx = (UINT8 *)dma_contig(XHCI_DEV_CTX, &u->dev_ctx_phys);
-        u->ep0 = (trb_t *)dma_contig(XHCI_EP0_RING, &u->ep0_phys);
-        u->ep_in = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_in_phys);
-        u->ep_out = (trb_t *)dma_contig(XHCI_BULK_RING, &u->ep_out_phys);
-        u->hid_in = (trb_t *)dma_contig(XHCI_BULK_RING, &u->hid_in_phys);
-        u->hid_buf = (UINT8 *)dma_contig(1, &u->hid_buf_phys);
-        if (u->dev_ctx == NULL || u->ep0 == NULL || u->ep_in == NULL ||
-            u->ep_out == NULL || u->hid_in == NULL || u->hid_buf == NULL) {
-          kputs("[USB] no DMA memory for device\n");
-          continue;
-        }
-        ep_ring_reset(u->ep0, u->ep0_phys, &u->ep0_idx, &u->ep0_cycle);
-
-        if (attach_base(u, port, speed) != 0) {
-          kputs("[USB] enumeration failed\n");
-          continue;
-        }
-
-        if (u->kind == USB_KIND_HID) {
-          /* HID device: one usb_t per HID interface so a composite
-           * keyboard+mouse receiver keeps both halves. The interface list
-           * comes from the configuration descriptor that attach_base stored;
-           * it is never re-read over the wire, because there is no legal
-           * GET_DESCRIPTOR for a bare interface header (a HID function
-           * answers such a request with a STALL). */
-          UINT8  n_hid = 0;
-          UINT32 idx;
-
-          (void)cfg_hid_iface(u->cfg, u->cfg_len, 0u, &u->iface, &n_hid);
-          if (n_hid == 0u) {
-            n_hid = 1u; /* attach_base already classified interface 0 */
-            u->iface = 0u;
-          }
-          for (idx = 0; idx < (UINT32)n_hid && idx < 4u; idx++) {
-            usb_t *v = u;
-
-            if (idx != 0u) {
-              UINT8 iface = 0u;
-
-              if (g_ndev >= USB_MAX_DEVICES) {
-                break;
-              }
-              if (cfg_hid_iface(u->cfg, u->cfg_len, idx, &iface, NULL) < 0) {
-                break;
-              }
-              v = &g_dev[g_ndev];
-              /* Same slot / DCBAA as u, but its own rings: EP0 is per-slot
-               * state the controller walks independently per transfer. */
-              memcpy(v, u, sizeof(*v));
-              v->ep0 = (trb_t *)dma_contig(XHCI_EP0_RING, &v->ep0_phys);
-              v->hid_in = (trb_t *)dma_contig(XHCI_BULK_RING, &v->hid_in_phys);
-              v->hid_buf = (UINT8 *)dma_contig(1, &v->hid_buf_phys);
-              if (v->ep0 == NULL || v->hid_in == NULL || v->hid_buf == NULL) {
-                kputs("[USB] no DMA for second HID iface\n");
-                break;
-              }
-              ep_ring_reset(v->ep0, v->ep0_phys, &v->ep0_idx, &v->ep0_cycle);
-              v->iface = iface;
-            }
-            if (parse_config_iface(v, u->cfg, u->cfg_len, v->iface) != 0 ||
-                v->hid_kind == 0u) {
-              /* This interface carries no boot report we understand. */
-              if (v != u) {
-                pmm_free_contig(v->ep0, XHCI_EP0_RING);
-                pmm_free_contig(v->hid_in, XHCI_BULK_RING);
-                pmm_free_contig(v->hid_buf, 1);
-              }
-              continue;
-            }
-            if (attach_hid_interface(v) == 0) {
-              kputs("[USB] HID interface ready\n");
-              g_ndev++;
-            } else if (v != u) {
-              pmm_free_contig(v->ep0, XHCI_EP0_RING);
-              pmm_free_contig(v->hid_in, XHCI_BULK_RING);
-              pmm_free_contig(v->hid_buf, 1);
-            }
-          }
-          continue;
-        }
-
-        /* Mass-storage (or non-HID device): register one block device per LUN. */
-        {
-          int max_lun = usb_max_lun(u);
-          int lun;
-
-          /* Bring up the bulk endpoints before any mass-storage commands. */
-          ep_ring_reset(u->ep_in, u->ep_in_phys, &u->ep_in_idx, &u->ep_in_cycle);
-          ep_ring_reset(u->ep_out, u->ep_out_phys, &u->ep_out_idx, &u->ep_out_cycle);
-          if (configure_endpoints(u) != 0) {
-            kputs("[USB] storage endpoint config failed\n");
-            continue;
-          }
-
-          for (lun = 0; lun <= max_lun; lun++) {
-            usb_disk_t *d;
-
-            if (g_usb_disks >= USB_MAX_DISKS) {
-              break;
-            }
-            u->lun = (UINT8)lun;
-            if (read_capacity(u) != 0) {
-              continue;
-            }
-            d = &g_usb_disks_ctx[g_usb_disks];
-            memset(d, 0, sizeof(*d));
-            d->u = u;
-            d->lun = (UINT8)lun;
-
-            d->name[0] = 'u'; d->name[1] = 's'; d->name[2] = 'b';
-            d->name[3] = (char)('0' + (g_usb_disks / 10));
-            d->name[4] = (char)('0' + (g_usb_disks % 10));
-            d->name[5] = '\0';
-
-            d->dev.name = d->name;
-            d->dev.sector_count = u->sectors;
-            d->dev.block_size = (u->dev.block_size == 0u) ? 512u : u->dev.block_size;
-            d->dev.flags = BLKDEV_FLAG_REMOVABLE;
-            /* The medium the system was booted from must never be a target.
-             * The boot stage publishes the USB port it came from; the port
-             * number in the device path and the xHCI root hub port can differ
-             * by one, so both are accepted. When several USB volumes were
-             * present the running one could not be identified, and every USB
-             * disk is refused instead of guessing. */
-            {
-              shared_mem_t *shm = shared_mem_get();
-
-              if (shm != NULL &&
-                  (shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB) != 0u) {
-                UINT32 raw = shm->boot_usb_port;
-
-                if ((shm->install_flags & SHM_INSTALL_FLAG_BOOT_USB_AMBIGUOUS)
-                        != 0u ||
-                    (UINT32)port == raw || (UINT32)port == raw + 1u) {
-                  d->dev.flags |= BLKDEV_FLAG_BOOT_ONLY;
-                  kputs("[USB] disk ");
-                  kputs(d->name);
-                  kputs(" is the boot medium\n");
-                }
-              }
-            }
-            d->dev.ctx = d;
-            d->dev.read = usb_read;
-            d->dev.write = usb_write;
-            d->dev.flush = usb_flush;
-            d->dev.powerdown = usb_powerdown;
-            if (blkdev_register(&d->dev) == 0) {
-              g_usb_disks++;
-              kputs("[USB] disk ");
-              kputs(d->name);
-              kputs(" capacity ");
-              kputs_hex(u->sectors);
-              kputs(" sectors\n");
-            }
-          }
-        }
-        g_ndev++;
+        (void)xhci_attach_port(hc, port, speed);
       }
     }
   }
@@ -2009,19 +2201,42 @@ int usb_init(void) {
 
 /* ---- enumeration for the device manager -------------------------------- */
 
-UINTN usb_device_count(void) { return g_ndev + uhci_device_count(); }
+UINTN usb_device_count(void) {
+  UINTN i;
+  UINTN live = 0;
+
+  for (i = 0; i < g_ndev; i++) {
+    if (g_dev[i].gone == 0u) {
+      live++;
+    }
+  }
+  return live + uhci_device_count();
+}
 
 int usb_device_info(UINTN index, usb_info_t *out) {
-  usb_t *u;
+  usb_t *u = NULL;
   UINTN  i;
+  UINTN  live = 0;
 
-  if (index >= g_ndev) {
-    return uhci_device_info(index - g_ndev, out);
+  /* A device that was unplugged keeps its slot (input source ids are slot
+   * numbers) but drops out of the list the device manager and the settings
+   * page read. */
+  for (i = 0; i < g_ndev; i++) {
+    if (g_dev[i].gone != 0u) {
+      continue;
+    }
+    if (live == index) {
+      u = &g_dev[i];
+      break;
+    }
+    live++;
   }
-  if (out == NULL || index >= g_ndev) {
+  if (u == NULL) {
+    return uhci_device_info(index - live, out);
+  }
+  if (out == NULL) {
     return -1;
   }
-  u = &g_dev[index];
   memset(out, 0, sizeof(*out));
   if (u->kind == USB_KIND_HID) {
     out->kind = (u->hid_kind == USB_HID_MOUSE) ? USB_INFO_MOUSE
