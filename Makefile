@@ -32,6 +32,10 @@
 #   make test-testapp verify the ISO contains every testapp file
 #   make disk-img     build a bootable disk image (out/novus-disk.img)
 #   make install      write that disk image to a device: DEVICE=/dev/sdX
+#   make check        fast source checks (syntax, generated drift, cargo check)
+#   make check-lint   clippy/rustfmt gate against the committed baseline
+#   make smoke        300 s bounded QEMU boot of the live ISO
+#   make pipeline     run check, check-lint, build and smoke in order
 #   make clean        remove build/, out/ and esp/
 #
 # The image targets (iso / run-iso / disk-img / install / novus-img) are
@@ -705,3 +709,6 @@ clean:
 # sees as the default, and 'all' must stay that target. The host rules
 # reuse CARGO, RUST_DIR and RUST_DEPS from the section above.
 include tools/tools.mk
+
+# Test pipeline: check / check-lint / smoke / pipeline (see tools/ci.mk).
+include tools/ci.mk
