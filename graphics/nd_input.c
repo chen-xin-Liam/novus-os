@@ -163,6 +163,44 @@ static UINT32 g_frame_dropped_keys;
 static UINT32 g_arb_moves; /* cumulative suppressed MOUSE_MOVE events */
 static UINT32 g_arb_keys;  /* cumulative suppressed KEY events */
 
+/* ---- permanent low-noise diagnostics -----------------------------------
+ * The input path has four stages that can each silently swallow a byte:
+ * the IRQ ring -> the decoders -> the arbitration frame -> the event queue.
+ * One summary line per stage, emitted only while something is moving, makes
+ * a regression point at the stage instead of requiring a rebuild. The first
+ * ND_DIAG_BURST occurrences are always logged (a cold boot produces few),
+ * then every ND_DIAG_PERIODth so an idle desktop stays quiet.
+ */
+#define ND_DIAG_BURST  4u
+#define ND_DIAG_PERIOD 300u
+
+static UINT32 g_diag_polls;   /* polls that drained at least one raw byte */
+static UINT32 g_diag_frames;  /* arbitration frames that carried movement */
+static UINT32 g_diag_pkt_ok;  /* complete PS/2 mouse packets decoded */
+static UINT32 g_diag_pkt_bad; /* resyncs: bytes that could not form a packet */
+static UINT32 g_diag_pop;     /* events handed to the consumer */
+static UINT32 g_diag_pop_types[8];
+
+static int nd_diag_show(UINT32 n) {
+  return n <= ND_DIAG_BURST || (n % ND_DIAG_PERIOD) == 0u;
+}
+
+static void ps2_dec(UINT32 v);
+
+static const char *nd_diag_src_name(UINT32 src) {
+  switch (src) {
+  case ND_INPUT_SRC_OTHER:     return "other";
+  case ND_INPUT_SRC_PS2_MOUSE: return "ps2-mouse";
+  case ND_INPUT_SRC_PS2_KBD:   return "ps2-kbd";
+  case ND_INPUT_SRC_VMWARE:    return "vmware";
+  case ND_INPUT_SRC_TOUCHPAD:  return "touchpad";
+  default:
+    return (src >= ND_INPUT_SRC_USB && src < ND_INPUT_SRC_USB + 16u)
+               ? "usb"
+               : "other";
+  }
+}
+
 typedef struct {
   UINT32 a, b, c, d;
 } vm_mouse_regs_t;
@@ -236,6 +274,43 @@ int nd_input_pop(nd_event_t *out) {
   }
   *out = g_queue[g_tail];
   g_tail = (g_tail + 1u) % ND_EVENT_QUEUE;
+  /* (c) What the consumer actually receives. Logging the first few in full
+   * separates "the decoder never queued anything" from "the router never
+   * popped it"; the periodic summary keeps a long run observable. */
+  g_diag_pop++;
+  if (out->type < (UINT8)(sizeof(g_diag_pop_types) /
+                          sizeof(g_diag_pop_types[0]))) {
+    g_diag_pop_types[out->type]++;
+  }
+  if (g_diag_pop <= ND_DIAG_BURST * 2u) {
+    kputs("[NDQ] pop#");
+    ps2_dec(g_diag_pop);
+    kputs(" type=");
+    ps2_dec(out->type);
+    kputs(" key=");
+    ps2_dec(out->key);
+    kputs(" at ");
+    ps2_dec((UINT32)(UINT16)out->x);
+    kputs(",");
+    ps2_dec((UINT32)(UINT16)out->y);
+    kputs(" btn=");
+    ps2_dec(out->button);
+    kputs("\n");
+  } else if ((g_diag_pop % 256u) == 0u) {
+    kputs("[NDQ] popped total=");
+    ps2_dec(g_diag_pop);
+    kputs(" move=");
+    ps2_dec(g_diag_pop_types[ND_EV_MOUSE_MOVE]);
+    kputs(" down=");
+    ps2_dec(g_diag_pop_types[ND_EV_MOUSE_DOWN]);
+    kputs(" up=");
+    ps2_dec(g_diag_pop_types[ND_EV_MOUSE_UP]);
+    kputs(" key=");
+    ps2_dec(g_diag_pop_types[ND_EV_KEY]);
+    kputs(" wheel=");
+    ps2_dec(g_diag_pop_types[ND_EV_WHEEL]);
+    kputs("\n");
+  }
   return 1;
 }
 
@@ -431,6 +506,19 @@ void nd_input_init(void) {
   g_frame_dropped_keys = 0u;
   g_arb_moves = 0u;
   g_arb_keys = 0u;
+  g_diag_polls = 0u;
+  g_diag_frames = 0u;
+  g_diag_pkt_ok = 0u;
+  g_diag_pkt_bad = 0u;
+  g_diag_pop = 0u;
+  {
+    UINT32 i;
+
+    for (i = 0; i < (UINT32)(sizeof(g_diag_pop_types) /
+                             sizeof(g_diag_pop_types[0])); i++) {
+      g_diag_pop_types[i] = 0u;
+    }
+  }
 
   {
     const nd_display_t *d = nd_display();
@@ -772,6 +860,7 @@ static void mouse_resync(const char *why) {
   g_mouse_bytes = 0;
   g_mouse_stall = 0;
   g_mouse_resync++;
+  g_diag_pkt_bad++;
   if (g_mouse_resync == 1u) {
     kputs("[PS2] mouse: packet resync (");
     kputs(why);
@@ -782,8 +871,13 @@ static void mouse_resync(const char *why) {
 }
 
 static void mouse_byte(UINT8 b) {
-  if (g_absolute_mouse) return; /* PS/2 packets only notify the absolute queue. */
-
+  /* Decode PS/2 packets even when an absolute pointer is also present.
+   * Dropping them here used to lose the pointer completely on machines that
+   * expose the VMware backdoor port (QEMU's vmport, enabled by default on
+   * pc/q35): the absolute device reports nothing for a PS/2-only setup, so
+   * neither source moved the cursor. Coexistence is the arbiter's job - a
+   * frame with an absolute report discards relative samples, a frame without
+   * one commits them. */
   if (g_mouse_bytes == 0u && (b & 0x08u) == 0u) {
     mouse_resync("stray byte"); /* out of sync: wait for a packet start */
     return;
@@ -794,6 +888,7 @@ static void mouse_byte(UINT8 b) {
     return;
   }
   g_mouse_bytes = 0;
+  g_diag_pkt_ok++;
   {
     UINT8  flags = g_mouse_packet[0];
     UINT8  buttons = (UINT8)(flags & 0x07u);
@@ -1008,6 +1103,8 @@ static void nd_arb_frame_end(void) {
   UINT32 i;
   UINT32 winner = ND_INPUT_SRC_COUNT;
   UINT32 best = 0u;
+  UINT32 commits = 0u;
+  UINT32 dropped = 0u;
   nd_src_moves_t *s;
 
   if (g_absolute_frame != 0) {
@@ -1037,6 +1134,7 @@ static void nd_arb_frame_end(void) {
 
   if (winner != ND_INPUT_SRC_COUNT) {
     s = &g_src_moves[winner];
+    commits = s->count;
     for (i = 0; i < s->count; i++) {
       nd_commit_move(s->move[i].dx, s->move[i].dy);
     }
@@ -1047,16 +1145,26 @@ static void nd_arb_frame_end(void) {
 
   g_arb_moves += g_frame_dropped_moves;
   g_arb_keys += g_frame_dropped_keys;
-  if (g_frame_dropped_moves != 0u || g_frame_dropped_keys != 0u) {
-    kputs("[ND] input arbitration: dropped ");
-    kputs_hex(g_frame_dropped_moves);
-    kputs(" move(s), ");
-    kputs_hex(g_frame_dropped_keys);
-    kputs(" key(s) this frame; total ");
-    kputs_hex(g_arb_moves);
-    kputs("/");
-    kputs_hex(g_arb_keys);
-    kputs("\n");
+  /* (b) One line per frame that actually carried movement or lost some.
+   * Idle frames stay silent, so this is safe to leave enabled forever. */
+  dropped = g_frame_dropped_moves;
+  if (commits != 0u || dropped != 0u) {
+    g_diag_frames++;
+    if (nd_diag_show(g_diag_frames)) {
+      kputs("[NDN] frame#");
+      ps2_dec(g_diag_frames);
+      kputs(" winner=");
+      kputs(winner != ND_INPUT_SRC_COUNT ? nd_diag_src_name(winner) : "none");
+      kputs(" commits=");
+      ps2_dec(commits);
+      kputs(" dropped=");
+      ps2_dec(dropped);
+      kputs(" abs=");
+      ps2_dec((UINT32)g_absolute_frame);
+      kputs(" total_dropped=");
+      ps2_dec(g_arb_moves);
+      kputs("\n");
+    }
   }
 }
 
@@ -1074,6 +1182,11 @@ void nd_input_arbitration_stats(UINT32 *moves, UINT32 *keys) {
  * the IRQ producer's critical path independent of keyboard/mouse handling. */
 void nd_input_poll(void) {
   UINT32 guard = ND_SCAN_LIMIT;
+  UINT32 drained = 0u;
+  UINT32 kbd_bytes = 0u;
+  UINT32 aux_bytes = 0u;
+  UINT32 pkt_before = g_diag_pkt_ok;
+  UINT32 bad_before = g_diag_pkt_bad;
 
   nd_arb_frame_begin();
   while (guard-- > 0) {
@@ -1090,6 +1203,7 @@ void nd_input_poll(void) {
     aux = g_raw[g_raw_tail].aux;
     gap = g_raw[g_raw_tail].gap;
     g_raw_tail = (g_raw_tail + 1u) % ND_RAW_QUEUE;
+    drained++;
     irq_restore(saved);
     if (gap != 0u) {
       /* A byte vanished before this one (ring full, parity or controller
@@ -1105,8 +1219,10 @@ void nd_input_poll(void) {
                  : "[ND] keyboard byte from IRQ queue\n");
     }
     if (aux != 0u) {
+      aux_bytes++;
       mouse_byte(data);
     } else {
+      kbd_bytes++;
       kbd_byte(data);
     }
   }
@@ -1121,6 +1237,31 @@ void nd_input_poll(void) {
     mouse_resync("stalled packet");
   } else {
     g_mouse_stall++;
+  }
+  /* (a) Bytes that reached the decoder and what they became. kbd=N without a
+   * matching (c) pop line means the decoder is fine and the queue side is
+   * not; aux=N with pkts=0 means a packet never completed. */
+  if (drained != 0u) {
+    g_diag_polls++;
+    if (nd_diag_show(g_diag_polls)) {
+      kputs("[NDI] poll#");
+      ps2_dec(g_diag_polls);
+      kputs(" drained=");
+      ps2_dec(drained);
+      kputs(" kbd=");
+      ps2_dec(kbd_bytes);
+      kputs(" aux=");
+      ps2_dec(aux_bytes);
+      kputs(" pkts=");
+      ps2_dec(g_diag_pkt_ok - pkt_before);
+      kputs(" bad=");
+      ps2_dec(g_diag_pkt_bad - bad_before);
+      kputs(" abs=");
+      ps2_dec((UINT32)g_absolute_mouse);
+      kputs(" ring_dropped=");
+      ps2_dec(g_raw_dropped);
+      kputs("\n");
+    }
   }
   vm_mouse_poll();
   usb_hid_poll();    /* collect USB keyboard/mouse reports, if any */

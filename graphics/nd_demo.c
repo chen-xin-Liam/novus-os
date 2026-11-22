@@ -1842,6 +1842,25 @@ int nd_demo_take_damage(nd_rect_t *out) {
 
 void nd_demo_paint(nd_rect_t clip) {
   if (g_demo_ready) {
+    static UINT32 paint_seq;
+
+    paint_seq++;
+    /* (d) The area this paint regenerates. A pointer move must produce a
+     * small clip around the arrow, not zero and not a swallowed rect; a WM
+     * menu focus change must produce the widget's rect. */
+    if (paint_seq <= 4u || (paint_seq % 60u) == 0u) {
+      kputs("[NDF] demo-paint#");
+      kputs_hex(paint_seq);
+      kputs(" ");
+      kputs_hex((UINT64)(UINT32)clip.x);
+      kputs(",");
+      kputs_hex((UINT64)(UINT32)clip.y);
+      kputs(" ");
+      kputs_hex((UINT64)(UINT32)clip.w);
+      kputs("x");
+      kputs_hex((UINT64)(UINT32)clip.h);
+      kputs("\n");
+    }
     ng_render(clip);
   }
 }
