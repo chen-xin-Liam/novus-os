@@ -27,4 +27,7 @@ UINTN acpi_scan_all(UINT64 mmap, UINT64 size, UINT64 stride,
 UINTN acpi_xapic_ids(UINT64 mmap, UINT64 size, UINT64 stride,
                      UINT8 *ids, UINTN capacity);
 
+
+/* PM timer I/O port from the FADT (0 when absent or not in system I/O). */
+UINT16 acpi_pm_timer_port(UINT64 mmap, UINT64 size, UINT64 stride);
 #endif

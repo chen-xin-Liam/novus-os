@@ -111,6 +111,8 @@ SRC := arch/x86_64/boot/main.c \
          kernel/nvme.c \
          kernel/ide.c \
          kernel/usb.c \
+         kernel/hid_boot.c \
+         kernel/uhci.c \
        kernel/gpt.c \
        kernel/nksym.c \
        graphics/nd_font.c \

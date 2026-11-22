@@ -852,6 +852,13 @@ static void cursor_overlay(void) {
   }
 }
 
+/* Forward declarations for the pointer diagnostics, which nd_present()
+ * reports but whose state lives with the cursor code below. */
+static nd_rect_t cursor_rect(void);
+static int        nd_diag_rate(UINT32 n, UINT32 period);
+static void       hal_dec(UINT32 v);
+static UINT32     g_diag_present_diag;
+
 void nd_present(nd_rect_t r) {
   nd_rect_t area;
   UINT64    t0;
@@ -895,6 +902,34 @@ void nd_present(nd_rect_t r) {
     g_present_stats.max_cycles = cycles;
   }
   g_present_seq++;
+  /* (d) Paint/present geometry. The arrow is composited only where this
+   * present covers it, so `cur_in=0` on a pointer move is the difference
+   * between "damage was eaten by the clip" and "the pointer was never
+   * composited". Full-screen presents and the first few partials are logged
+   * one by one; steady state every 60th. */
+  {
+    nd_rect_t cur = cursor_rect();
+    int in = !nd_rect_empty(nd_rect_intersect(area, cur));
+
+    g_diag_present_diag++;
+    if (full || nd_diag_rate(g_diag_present_diag, 60u)) {
+      kputs("[NDP] present#");
+      hal_dec(g_diag_present_diag);
+      kputs(" area=");
+      hal_dec((UINT32)area.w);
+      kputs("x");
+      hal_dec((UINT32)area.h);
+      kputs(" cur=");
+      hal_dec((UINT32)g_cx);
+      kputs(",");
+      hal_dec((UINT32)g_cy);
+      kputs(" cur_in=");
+      hal_dec((UINT32)in);
+      kputs(" visible=");
+      hal_dec((UINT32)g_cursor_visible);
+      kputs("\n");
+    }
+  }
   /* Whole-screen presents are the expensive ones (boot handover, theme
    * change, language change) and are logged one by one. Steady-state damage
    * presents are summarised every 60 frames instead of flooding COM1. */
@@ -1004,6 +1039,38 @@ static void cursor_touch(nd_rect_t r) {
   g_cursor_damage = nd_rect_union(g_cursor_damage, r);
 }
 
+/* ---- permanent pointer diagnostics -------------------------------------
+ * "The cursor does not move" has three distinct causes that look identical
+ * on the glass: nobody calls nd_cursor_set, the damage is consumed but the
+ * presented rectangle does not contain the arrow, or the arrow is not
+ * composited because it is still hidden. One line each time the pointer
+ * moves (throttled), plus a take-damage line, tells them apart without a
+ * rebuild. Quiet by construction: nothing is printed while the mouse is
+ * idle. */
+static UINT32 g_diag_cur_set;
+static UINT32 g_diag_cur_take;
+static UINT32 g_diag_cur_take_hit;
+
+static int nd_diag_rate(UINT32 n, UINT32 period) {
+  return n <= 4u || (n % period) == 0u;
+}
+
+/* Decimal, because cursor coordinates and areas are read as numbers. */
+static void hal_dec(UINT32 v) {
+  char buf[12];
+  int  i = 11;
+
+  buf[i] = 0;
+  if (v == 0u) {
+    buf[--i] = '0';
+  }
+  while (v != 0u && i > 0) {
+    buf[--i] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  kputs(&buf[i]);
+}
+
 void nd_cursor_hide(void) {
   if (!g_screen_ready || !g_cursor_visible) {
     return;
@@ -1034,10 +1101,22 @@ void nd_cursor_set(INT32 x, INT32 y) {
   if (x == g_cx && y == g_cy) {
     return;
   }
+  g_diag_cur_set++;
   cursor_touch(cursor_rect()); /* where it was: needs the scene back */
   g_cx = x;
   g_cy = y;
   cursor_touch(cursor_rect()); /* where it is now */
+  if (nd_diag_rate(g_diag_cur_set, 200u)) {
+    kputs("[NDC] cursor set#");
+    hal_dec(g_diag_cur_set);
+    kputs(" to ");
+    hal_dec((UINT32)x);
+    kputs(",");
+    hal_dec((UINT32)y);
+    kputs(" visible=");
+    hal_dec((UINT32)g_cursor_visible);
+    kputs("\n");
+  }
 }
 
 void nd_cursor_get(INT32 *x, INT32 *y) {
@@ -1061,12 +1140,36 @@ void nd_cursor_draw(void) {
 int nd_cursor_take_damage(nd_rect_t *out) {
   nd_rect_t d = g_cursor_damage;
 
+  g_diag_cur_take++;
   if (nd_rect_empty(d)) {
+    if (nd_diag_rate(g_diag_cur_take, 600u)) {
+      kputs("[NDC] take#");
+      hal_dec(g_diag_cur_take);
+      kputs(" empty (hits=");
+      hal_dec(g_diag_cur_take_hit);
+      kputs(")\n");
+    }
     return 0;
   }
+  g_diag_cur_take_hit++;
   g_cursor_damage = nd_rect(0, 0, 0, 0);
   if (out != 0) {
     *out = d;
+  }
+  if (nd_diag_rate(g_diag_cur_take_hit, 200u)) {
+    kputs("[NDC] take#");
+    hal_dec(g_diag_cur_take);
+    kputs(" damage ");
+    hal_dec((UINT32)d.x);
+    kputs(",");
+    hal_dec((UINT32)d.y);
+    kputs(" ");
+    hal_dec((UINT32)d.w);
+    kputs("x");
+    hal_dec((UINT32)d.h);
+    kputs(" visible=");
+    hal_dec((UINT32)g_cursor_visible);
+    kputs("\n");
   }
   return 1;
 }

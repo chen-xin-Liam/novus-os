@@ -49,6 +49,11 @@
  * that a window never feels unresponsive, long enough that the ease is
  * visible. */
 #define NWM_REVEAL_FRAMES 8u
+/* Ticks the focused window's title band pulses with the accent colour after
+ * each key. Clients that repaint on key input still show the pulse; ones that
+ * never submit a frame after a keystroke (blank content) at least show that
+ * the key reached the window, which is what the keyboard smoke test checks. */
+#define NWM_KEY_FLASH_FRAMES 96u
 
 typedef struct {
   UINT8     used;
@@ -114,6 +119,13 @@ static UINT32    g_full_log;
  * composes pinyin and forwards the committed codepoint. Ctrl+Space toggles
  * it; the shell's own text boxes keep their independent mode. */
 static int       g_ime_client;
+/* Keyboard feedback pulse: frames left, the window index that received the
+ * key (-1 = none) and the key itself (its low bit picks one of two tints, so
+ * consecutive different keys never leave an identical frame behind). See
+ * NWM_KEY_FLASH_FRAMES. */
+static UINT32    g_key_flash;
+static int       g_key_flash_win;
+static UINT32    g_key_flash_key;
 
 /* ---- small helpers ---------------------------------------------------- */
 
@@ -534,6 +546,22 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
    * in whole pixels and read as a spike at the corners. */
   title_bg = (g_focus >= 0 && &g_wins[g_focus] == w) ? t->win_title
                                                      : t->win_title_dim;
+  if (g_key_flash != 0u && g_key_flash_win == (int)(w - g_wins)) {
+    /* Key feedback: mix the title band towards a highlight colour, strongest
+     * on the tick the key arrived and fading out. Mixing the colour (instead
+     * of blending a rectangle) keeps the rounded corners intact. The tint
+     * depends on the key's low bit so two different keys never produce the
+     * same frame at the same point of the fade. */
+    nd_color_t kc = ((g_key_flash_key & 1u) != 0u)
+                        ? ND_RGB(0xFF, 0x8C, 0x00)
+                        : t->accent;
+    UINT32 k  = (g_key_flash * 200u) / NWM_KEY_FLASH_FRAMES;
+    UINT32 ik = 255u - k;
+
+    title_bg = ND_RGB((ND_RED(title_bg) * ik + ND_RED(kc) * k) / 255u,
+                      (ND_GREEN(title_bg) * ik + ND_GREEN(kc) * k) / 255u,
+                      (ND_BLUE(title_bg) * ik + ND_BLUE(kc) * k) / 255u);
+  }
   nd_surface_set_clip(s, nd_rect_intersect(
                             vis, nd_rect(w->rect.x, w->rect.y, w->rect.w,
                                          NWM_TITLE_H)));
@@ -1244,6 +1272,13 @@ static void deliver_key(nwm_window_t *w, const nd_event_t *ev) {
   kputs_hex(w->owner);
   kputs("\n");
   deliver(w->owner, NWM_EV_KEY, &m, sizeof(m));
+  /* Visible acknowledgement of the keystroke: pulse this window's title
+   * band. Some clients never submit a frame in response to a key, so a
+   * client-side redraw cannot be relied on for keyboard feedback. */
+  g_key_flash = NWM_KEY_FLASH_FRAMES;
+  g_key_flash_win = (int)(w - g_wins);
+  g_key_flash_key = ev->key;
+  damage(nd_rect(w->rect.x, w->rect.y, w->rect.w, NWM_TITLE_H));
 }
 
 /* 1..3 when the pointer is over one of this window's caption buttons. */
@@ -1672,6 +1707,16 @@ void nwm_tick(void) {
       damage(w->rect);
     }
   }
+  /* Advance the keyboard feedback pulse one frame, repainting the title band
+   * it tints until it fades out. */
+  if (g_key_flash != 0u) {
+    g_key_flash--;
+    if (g_key_flash_win >= 0 && g_wins[g_key_flash_win].used) {
+      nwm_window_t *w = &g_wins[g_key_flash_win];
+
+      damage(nd_rect(w->rect.x, w->rect.y, w->rect.w, NWM_TITLE_H));
+    }
+  }
   /* The shell owns the taskbar clock; the WM owns the tick. */
   nd_demo_idle();
 
@@ -1892,6 +1937,9 @@ void nwm_init(void) {
   g_events = 0;
   g_dropped = 0;
   g_liveness_tick = 0;
+  g_key_flash = 0;
+  g_key_flash_win = -1;
+  g_key_flash_key = 0;
 
   if (ipc_port_create(NWM_PORT_NAME, NWM_PID_SHELL, 0, &g_port) != IPC_OK) {
     kputs("[NWM] ERROR: no IPC port for the window manager\n");
