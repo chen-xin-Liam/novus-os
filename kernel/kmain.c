@@ -22,6 +22,7 @@
 #include "shared_mem.h"
 #include "pmm.h"
 #include "mm.h"
+#include "acpi.h"
 #include "ide.h"
 #include "heap.h"
 #include "lapic.h"
@@ -110,8 +111,9 @@ void kputs_hex(UINT64 v) {
 
 static UINT64 g_timeline_start;
 static UINT64 g_timeline_hz;
+static UINT16 g_pm_timer_port; /* from the FADT, 0 when none */
 
-#define PM_TIMER_PORT    0x608u
+#define PM_TIMER_PORT    0x608u /* only a fallback when the FADT says nothing */
 #define PM_TIMER_MASK    0x00FFFFFFu
 #define PM_TIMER_TARGET  200000u
 #define PM_TIMER_SPINS   20000000u
@@ -124,18 +126,24 @@ static UINT64 timeline_rdtsc(void) {
   return ((UINT64)hi << 32) | (UINT64)lo;
 }
 
-static UINT64 timeline_pm_timer_hz(void) {
-  UINT32 p0 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
-  UINT32 p1 = p0;
+static UINT64 timeline_pm_timer_hz(UINT16 port) {
+  UINT32 p0;
+  UINT32 p1;
   UINT32 delta = 0;
   UINT32 spins;
   UINT64 tsc0;
   UINT64 tsc1;
 
+  if (port == 0u) {
+    return 0u;
+  }
+  p0 = io_in32(port) & PM_TIMER_MASK;
+  p1 = p0;
+
   __asm__ volatile("lfence" : : : "memory");
   tsc0 = timeline_rdtsc();
   for (spins = 0; spins < PM_TIMER_SPINS; spins++) {
-    p1 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+    p1 = io_in32(port) & PM_TIMER_MASK;
     delta = (p1 - p0) & PM_TIMER_MASK;
     if (delta >= PM_TIMER_TARGET) {
       break;
@@ -169,7 +177,25 @@ static UINT64 timeline_probe_hz(void) {
       return (UINT64)a * 1000000ULL;
     }
   }
-  return timeline_pm_timer_hz();
+  {
+    /* FADT port first; the literals are the ones the firmware generations
+     * seen so far actually used, tried only when the table says nothing. */
+    UINT16 ports[3];
+    UINT64 hz;
+
+    ports[0] = g_pm_timer_port;
+    ports[1] = (UINT16)PM_TIMER_PORT;
+    ports[2] = (UINT16)0xB008u;
+    hz = timeline_pm_timer_hz(ports[0]);
+    if (hz != 0u) {
+      return hz;
+    }
+    hz = timeline_pm_timer_hz(ports[1]);
+    if (hz != 0u) {
+      return hz;
+    }
+    return timeline_pm_timer_hz(ports[2]);
+  }
 }
 
 void novus_timeline(const char *stage) {
@@ -330,6 +356,9 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   shared_mem_kernel_init();
   serial_init();
   vga_init();
+  /* The PM timer port comes from the FADT, which is the only place that says
+   * where it is; 0x608 is just what one firmware generation happened to use. */
+  g_pm_timer_port = acpi_pm_timer_port(mmap_addr, map_size, desc_size);
   novus_timeline("kmain start");
 
   /* The boot stage hands over either with the splash on the glass or with

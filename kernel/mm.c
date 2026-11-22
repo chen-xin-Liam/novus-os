@@ -41,6 +41,7 @@
 #include "pmm.h"
 #include "cpu.h"
 #include "msr.h"
+#include "acpi.h"
 
 /* PTE flag bits (x86_64 SDM Vol.3, chapter 4). */
 #define MM_PTE_PRESENT     0x0000000000000001ULL
@@ -342,8 +343,9 @@ static void mm_mark_mmio_descriptors(mm_table_t *pdpt, UINT64 mmap,
  * PM timer as a fallback. If neither source works, the log prints cycles
  * and says so rather than inventing milliseconds. */
 static UINT64 g_tsc_hz;
+static UINT16 g_pm_timer_port; /* FADT PM_TMR_BLK port, 0 when unknown */
 
-#define PM_TIMER_PORT    0x608u
+#define PM_TIMER_PORT    0x608u /* legacy fallback only */
 #define PM_TIMER_MASK    0x00FFFFFFu
 #define PM_TIMER_TARGET  200000u
 #define PM_TIMER_SPINS   20000000u
@@ -356,7 +358,8 @@ static UINT64 mm_rdtsc(void) {
 }
 
 static UINT64 mm_tsc_hz_from_pm_timer(void) {
-  UINT32 p0 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+  UINT16 port = g_pm_timer_port != 0u ? g_pm_timer_port : (UINT16)PM_TIMER_PORT;
+  UINT32 p0 = io_in32(port) & PM_TIMER_MASK;
   UINT32 p1 = p0;
   UINT32 delta = 0;
   UINT32 spins;
@@ -366,7 +369,7 @@ static UINT64 mm_tsc_hz_from_pm_timer(void) {
   __asm__ volatile("lfence" : : : "memory");
   tsc0 = mm_rdtsc();
   for (spins = 0; spins < PM_TIMER_SPINS; spins++) {
-    p1 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+    p1 = io_in32(port) & PM_TIMER_MASK;
     delta = (p1 - p0) & PM_TIMER_MASK;
     if (delta >= PM_TIMER_TARGET) {
       break;
@@ -462,6 +465,7 @@ void mm_init(UINT64 ram_top_bytes, UINT64 mmap_addr, UINT64 map_size,
   UINT64 n_pd;
 
   g_ram_top = ram_top_bytes;
+  g_pm_timer_port = acpi_pm_timer_port(mmap_addr, map_size, desc_size);
   g_tsc_hz = mm_tsc_hz_probe();
   kputs("[MM] tsc ");
   mm_puts_dec(g_tsc_hz);

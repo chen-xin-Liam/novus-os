@@ -58,18 +58,135 @@ static UINT64 timeline_rdtsc(void) {
   return ((UINT64)hi << 32) | (UINT64)lo;
 }
 
-static UINT64 timeline_pm_timer_hz(void) {
-  UINT32 p0 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
-  UINT32 p1 = p0;
-  UINT32 delta = 0;
+static EFI_SYSTEM_TABLE *g_st;
+
+typedef struct {
+  EFI_GUID guid;
+  VOID    *table;
+} timeline_cfg_t;
+
+static UINT32 timeline_read32(UINT64 addr) {
+  const UINT8 *p = (const UINT8 *)(UINTN)addr;
+  UINT32 v = 0u;
+  UINT32 i;
+
+  for (i = 0; i < 4u; i++) {
+    v |= (UINT32)p[i] << (8u * i);
+  }
+  return v;
+}
+
+static UINT64 timeline_read64(UINT64 addr) {
+  const UINT8 *p = (const UINT8 *)(UINTN)addr;
+  UINT64 v = 0u;
+  UINT32 i;
+
+  for (i = 0; i < 8u; i++) {
+    v |= (UINT64)p[i] << (8u * i);
+  }
+  return v;
+}
+
+/* The PM timer port is whatever the firmware said it was: the FADT carries a
+ * Generic Address Structure for PM_TMR_BLK, and chipsets put the block at
+ * different ports (0x608 on one generation, 0xB008 on the next). Walk the
+ * UEFI configuration table to the RSDP, then the root table to the FACP. */
+static UINT16 timeline_fadt_pm_port(void) {
+  UINT64 rsdp = 0u;
+  UINT64 root;
+  UINT64 length;
+  UINT64 entry_size;
+  UINT64 off;
+  UINT32 i;
+  const UINT8 *p;
+
+  if (g_st == 0 || g_st->ConfigurationTable == 0) {
+    return 0u;
+  }
+  for (i = 0; i < (UINT32)g_st->NumberOfTableEntries; i++) {
+    const timeline_cfg_t *c =
+        (const timeline_cfg_t *)g_st->ConfigurationTable + i;
+
+    if (c->guid.Data1 == 0x8868E871u && c->guid.Data2 == 0xE4F1u &&
+        c->guid.Data3 == 0x11D3u && c->guid.Data4[0] == 0xBCu &&
+        c->guid.Data4[1] == 0x22u && c->guid.Data4[2] == 0x00u &&
+        c->guid.Data4[3] == 0x80u && c->guid.Data4[4] == 0xC7u &&
+        c->guid.Data4[5] == 0x3Cu && c->guid.Data4[6] == 0x88u &&
+        c->guid.Data4[7] == 0x81u) {
+      rsdp = (UINT64)(UINTN)c->table;
+      break;
+    }
+  }
+  if (rsdp == 0u) {
+    return 0u;
+  }
+  p = (const UINT8 *)(UINTN)rsdp;
+  if (p[20] >= 2u) { /* RSDP revision: 2 has a 64-bit XSDT */
+    root = timeline_read64(rsdp + 24u);
+    entry_size = 8u;
+  } else {
+    root = timeline_read32(rsdp + 16u);
+    entry_size = 4u;
+  }
+  if (root == 0u) {
+    return 0u;
+  }
+  length = timeline_read32(root + 4u);
+  if (length < 36u || length > (16u << 20)) {
+    return 0u;
+  }
+  for (off = 36u; off + entry_size <= length; off += entry_size) {
+    UINT64 table = (entry_size == 8u) ? timeline_read64(root + off)
+                                      : (UINT64)timeline_read32(root + off);
+    const UINT8 *q;
+
+    if (table == 0u) {
+      continue;
+    }
+    q = (const UINT8 *)(UINTN)table;
+    if (q[0] == 'F' && q[1] == 'A' && q[2] == 'C' && q[3] == 'P') {
+      UINT64 port = 0u;
+      UINT32 fadt_len = timeline_read32(table + 4u);
+
+      if (fadt_len < 88u) {
+        return 0u;
+      }
+      /* ACPI 6.x: X_PM_TMR_BLK GAS at 208 (space id at 208, address at 212).
+       * Rev-1 FADTs only fill the legacy 32-bit I/O port at 76. */
+      if (fadt_len >= 220u && q[208] == 1u) {
+        port = timeline_read32(table + 212u);
+      }
+      if (port == 0u || port > 0xFFFFu) {
+        port = timeline_read32(table + 76u);
+      }
+      if (port == 0u || port > 0xFFFFu) {
+        return 0u;
+      }
+      return (UINT16)port;
+    }
+  }
+  return 0u;
+}
+
+static UINT64 timeline_pm_timer_hz(UINT16 port) {
+  UINT32 p0;
+  UINT32 p1 = 0u;
+  UINT32 delta = 0u;
   UINT32 spins;
   UINT64 tsc0;
   UINT64 tsc1;
 
+  if (port == 0u) {
+    return 0u;
+  }
+  p0 = io_in32(port) & PM_TIMER_MASK;
+  p1 = p0;
+  delta = 0u;
+
   __asm__ volatile("lfence" : : : "memory");
   tsc0 = timeline_rdtsc();
   for (spins = 0; spins < PM_TIMER_SPINS; spins++) {
-    p1 = io_in32(PM_TIMER_PORT) & PM_TIMER_MASK;
+    p1 = io_in32(port) & PM_TIMER_MASK;
     delta = (p1 - p0) & PM_TIMER_MASK;
     if (delta >= PM_TIMER_TARGET) {
       break;
@@ -103,12 +220,33 @@ static UINT64 timeline_probe_hz(void) {
       return (UINT64)a * 1000000ULL;
     }
   }
-  return timeline_pm_timer_hz();
+  {
+    /* The FADT is authoritative; the two literals are the ports the
+     * firmware generations seen so far actually used, tried only when the
+     * table is missing or describes a non-I/O block. */
+    UINT16 ports[3];
+    UINT64 hz;
+
+    ports[0] = timeline_fadt_pm_port();
+    ports[1] = (UINT16)PM_TIMER_PORT;
+    ports[2] = 0xB008u;
+    hz = timeline_pm_timer_hz(ports[0]);
+    if (hz != 0u) {
+      return hz;
+    }
+    hz = timeline_pm_timer_hz(ports[1]);
+    if (hz != 0u) {
+      return hz;
+    }
+    return timeline_pm_timer_hz(ports[2]);
+  }
 }
 
 static UINT64 timeline_ms(void) {
   if (g_timeline_start == 0u) {
     g_timeline_start = timeline_rdtsc();
+  }
+  if (g_timeline_hz == 0u) {
     g_timeline_hz = timeline_probe_hz();
   }
   if (g_timeline_hz == 0u) {
@@ -124,12 +262,26 @@ static UINT64 timeline_ms(void) {
 
 static void boot_serial_write(const CHAR16 *s);
 
+static UINT64 timeline_cycles(void) {
+  UINT64 now = timeline_rdtsc();
+
+  if (g_timeline_start == 0u) {
+    g_timeline_start = now;
+  }
+  return now >= g_timeline_start ? now - g_timeline_start : 0u;
+}
+
 static void boot_timeline(const char *stage) {
   CHAR16 buf[96];
   UINTN i = 0;
   UINTN n;
-  UINT64 ms = timeline_ms();
+  int in_cycles;
+  UINT64 ms = timeline_ms(); /* also probes the frequency on first call */
+  UINT64 value;
   CHAR16 rev[20];
+
+  in_cycles = (g_timeline_hz == 0u);
+  value = in_cycles ? timeline_cycles() : ms;
 
   buf[i++] = L'[';
   buf[i++] = L'T';
@@ -138,15 +290,24 @@ static void boot_timeline(const char *stage) {
   buf[i++] = L'+';
   n = 0;
   do {
-    rev[n++] = (CHAR16)(L'0' + (CHAR16)(ms % 10u));
-    ms /= 10u;
-  } while (ms != 0u && n < 20u);
+    rev[n++] = (CHAR16)(L'0' + (CHAR16)(value % 10u));
+    value /= 10u;
+  } while (value != 0u && n < 20u);
   while (n > 0u) {
     buf[i++] = rev[--n];
   }
-  buf[i++] = L'm';
-  buf[i++] = L's';
-  buf[i++] = L' ';
+  if (in_cycles) {
+    const char *suffix = "cyc (tsc hz unknown) ";
+    const char *s = suffix;
+
+    while (*s != '\0' && i + 2u < 96u) {
+      buf[i++] = (CHAR16)(UINT8)*s++;
+    }
+  } else {
+    buf[i++] = L'm';
+    buf[i++] = L's';
+    buf[i++] = L' ';
+  }
   if (stage != 0) {
     while (*stage != '\0' && i + 2u < 96u) {
       buf[i++] = (CHAR16)(UINT8)*stage++;
@@ -502,6 +663,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   g_con = SystemTable->ConOut;
   g_quiet = 0;
   g_bs = bs;
+  g_st = SystemTable;
   boot_serial_init();
   boot_timeline("efi_main start");
 

@@ -330,3 +330,41 @@ UINTN acpi_xapic_ids(UINT64 mmap, UINT64 size, UINT64 stride,
   }
   return count;
 }
+/* PM timer I/O port from the FADT's PM_TMR_BLK generic address structure.
+ * The block is a Generic Address Structure at offset 76: id, width, offset,
+ * access size, then the 64-bit address. Only legacy system I/O (id 1) is
+ * accepted; a memory-mapped or absent block returns 0 and the caller has to
+ * fall back to something else. */
+UINT16 acpi_pm_timer_port(UINT64 mmap, UINT64 size, UINT64 stride) {
+  const acpi_table_t *fadt = acpi_find_table(mmap, size, stride, "FACP");
+  const UINT8 *p;
+  UINT64 addr = 0u;
+  UINT32 i;
+
+  if (fadt == 0) {
+    return 0u;
+  }
+  if (fadt->length < 88u) {
+    return 0u;
+  }
+  p = (const UINT8 *)fadt;
+  /* ACPI 6.x puts X_PM_TMR_BLK (a GAS) at offset 208; the legacy field at
+   * offset 76 is a plain 32-bit I/O port, not a GAS. Firmware with a rev-1
+   * FADT only fills the legacy field. */
+  if (fadt->length >= 220u && p[208] == 1u) {
+    for (i = 0; i < 4u; i++) {
+      addr |= (UINT64)p[212u + i] << (8u * i);
+    }
+  }
+  if (addr == 0u || addr > 0xFFFFu) {
+    addr = 0u;
+    for (i = 0; i < 4u; i++) {
+      addr |= (UINT64)p[76u + i] << (8u * i);
+    }
+  }
+  if (addr == 0u || addr > 0xFFFFu) {
+    return 0u;
+  }
+  return (UINT16)addr;
+}
+
