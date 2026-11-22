@@ -86,6 +86,18 @@ isr32:
     pushq   $32
     jmp     isr_common
 
+/* PE32 (WOW) API gate: int 0x80 from the compatibility submode arrives via
+ * a DPL 3 interrupt gate. The CPU has already pushed a full 64-bit iret
+ * frame (the gate is a 64-bit one), so this stub only adds the uniform
+ * error-code/vector pair and reuses isr_common. The marker is not a real
+ * IDT vector: it tells trap_dispatch to interpret EAX as a Win32 API id
+ * and the 32-bit stack as stdcall arguments. */
+    .globl  isr_wow32
+isr_wow32:
+    pushq   $0
+    pushq   $0x101
+    jmp     isr_common
+
 /* The table idt.c walks to fill vectors 0..32. */
     .globl  isr_stub_table
     .align  8

@@ -688,6 +688,88 @@ fn cmd_mv(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i3
     status
 }
 
+/* WOW32: run a PE32 image straight from a VFS path. Unlike a bare app name
+ * this does not go through the built-in table, so any installed .exe works. */
+fn cmd_run(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    if cmd.argc < 2 {
+        puts(out, "run: missing PE32 path\n");
+        return 1;
+    }
+    let mut abs = [0u8; PATH_MAX];
+    let n = shell.abs_path(cmd.argv[1], &mut abs);
+    let path = to_str(&abs[..n]);
+    if fs::pe32_exec(path) {
+        0
+    } else {
+        puts(out, "run: cannot start '");
+        putb(out, cmd.argv[1]);
+        puts(out, "'\n");
+        1
+    }
+}
+
+/* Install a Windows executable into /Program Files/WinApps. The live ISO root
+ * is read-only, so a real install needs a persistent root (an installed
+ * system or a mounted writable volume); the copy failure is reported rather
+ * than claiming an install that will vanish at reboot. */
+fn cmd_install(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    if cmd.argc < 2 {
+        puts(out, "install: missing source .exe\n");
+        return 1;
+    }
+    let src_arg = cmd.argv[1];
+    let mut src_abs = [0u8; PATH_MAX];
+    let sn = shell.abs_path(src_arg, &mut src_abs);
+    let src_path = to_str(&src_abs[..sn]);
+    let mut i = src_arg.len();
+    while i > 0 && src_arg[i - 1] != b'/' { i -= 1; }
+    let leaf = &src_arg[i..];
+    if leaf.is_empty() {
+        puts(out, "install: bad source name\n");
+        return 1;
+    }
+    let _ = fs::mkdir("/Program Files/WinApps");
+    let mut dest = [0u8; PATH_MAX];
+    let dn = join_path(b"/Program Files/WinApps", leaf, &mut dest);
+    let dpath = to_str(&dest[..dn]);
+    let input = match fs::open(src_path, false) {
+        Some(fd) => fd,
+        None => {
+            puts(out, "install: cannot read '");
+            putb(out, src_arg);
+            puts(out, "'\n");
+            return 1;
+        }
+    };
+    let output = match fs::open(dpath, true) {
+        Some(fd) => fd,
+        None => {
+            fs::close(input);
+            puts(out, "install: destination is read-only\n");
+            return 1;
+        }
+    };
+    let mut buf = [0u8; 4096];
+    let mut total = 0u64;
+    loop {
+        let n = fs::read(input, &mut buf);
+        if n <= 0 { break; }
+        let n = n as usize;
+        if fs::write(output, &buf[..n]) <= 0 { break; }
+        total += n as u64;
+    }
+    fs::close(input);
+    fs::close(output);
+    puts(out, "installed ");
+    putb(out, leaf);
+    puts(out, " (");
+    put_dec(out, total);
+    puts(out, " bytes) -> ");
+    puts(out, dpath);
+    putc(out, b'\n');
+    0
+}
+
 fn cmd_stat(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
     if cmd.argc < 2 {
         puts(out, "stat: missing operand\n");
@@ -1445,4 +1527,6 @@ const BUILTINS: &[(&str, Bfn)] = &[
     ("nuomi", cmd_nuomi),
     ("update", cmd_update),
     ("novusd", cmd_novusd),
+    ("run", cmd_run),
+    ("install", cmd_install),
 ];

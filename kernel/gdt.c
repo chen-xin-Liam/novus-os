@@ -42,8 +42,9 @@ typedef struct {
   UINT64 base;
 } __attribute__((packed)) gdtr_t;
 
-/* Seven slots: the TSS descriptor is 16 bytes and occupies two. */
-static gdt_entry_t g_gdt[7];
+/* Nine slots: the TSS descriptor is 16 bytes and occupies two, and the
+ * last one is the DPL 3, L=0 code segment a PE32 (WOW) task runs in. */
+static gdt_entry_t g_gdt[9];
 static tss_t       g_tss;
 static gdtr_t      g_gdtr;
 
@@ -93,6 +94,11 @@ void gdt_init(void) {
   gdt_set(3, 0, 0xFFFFFu, 0xFAu, 0xA0u);           /* user code, 64-bit */
   gdt_set(4, 0, 0xFFFFFu, 0xF2u, 0xC0u);           /* user data */
   gdt_set_tss(5, (UINT64)(UINTN)&g_tss, (UINT32)sizeof(tss_t) - 1u);
+  /* 4 GiB flat code with D=1 and L=0: access 0xFA is present/DPL 3/code,
+   * gran 0xC0 is G=1 (4 KiB granularity) plus the D bit. The 64-bit entry
+   * above uses 0xA0 for L instead. Data/stack stay at selector 0x23, whose
+   * D bit is already set, so 32-bit pushes and calls use ESP. */
+  gdt_set(7, 0, 0xFFFFFu, 0xFAu, 0xC0u);
 
   g_gdtr.limit = (UINT16)(sizeof(g_gdt) - 1u);
   g_gdtr.base = (UINT64)(UINTN)g_gdt;

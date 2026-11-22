@@ -16,6 +16,7 @@
 #if CONFIG_NOVUS_WIN32
 #include "win32_blobs.h"
 #include "pe.h"
+#include "pe32.h"
 #endif
 
 typedef struct {
@@ -149,6 +150,10 @@ int apps_launch_name(const char *name) {
   if (w >= 0) {
     return apps_win32_launch((UINT32)w);
   }
+  w = apps_wow32_find(name);
+  if (w >= 0) {
+    return apps_wow32_launch((UINT32)w);
+  }
   return -1;
 }
 
@@ -268,6 +273,53 @@ int apps_win32_launch(UINT32 i) {
   return rc;
 }
 
+/* ---- PE32 images, executed by the WOW32 compatibility executor -------- */
+
+static const app_t g_wow32[] = {
+    {"wowdemo.exe", k_app_wowdemo32_exe, &k_app_wowdemo32_exe_len},
+};
+
+UINT32 apps_wow32_count(void) {
+  return (UINT32)(sizeof(g_wow32) / sizeof(g_wow32[0]));
+}
+
+const char *apps_wow32_name(UINT32 i) {
+  return (i < apps_wow32_count()) ? g_wow32[i].name : 0;
+}
+
+UINT32 apps_wow32_size(UINT32 i) {
+  return (i < apps_wow32_count()) ? *g_wow32[i].size : 0u;
+}
+
+int apps_wow32_find(const char *name) {
+  UINT32 i;
+
+  for (i = 0u; i < apps_wow32_count(); i++) {
+    if (name_is(g_wow32[i].name, name)) return (int)i;
+  }
+  return -1;
+}
+
+int apps_wow32_launch(UINT32 i) {
+  int rc;
+
+  if (i >= apps_wow32_count()) return -1;
+  if (!session_logged_in()) return APPS_EAUTH;
+  if (sched_find_name(g_wow32[i].name) != 0) return APPS_ERUNNING;
+  kputs("[APPS] launching PE32 ");
+  kputs(g_wow32[i].name);
+  kputs(" (");
+  kputs_hex(*g_wow32[i].size);
+  kputs(" bytes)\n");
+  rc = pe32_load(g_wow32[i].name, g_wow32[i].data, *g_wow32[i].size);
+  if (rc != 0) {
+    kputs("[APPS] WOW32 spawn failed: ");
+    kputs_hex((UINT64)(INT64)rc);
+    kputs("\n");
+  }
+  return rc;
+}
+
 #else /* !CONFIG_NOVUS_WIN32 */
 
 UINT32 apps_win32_count(void) { return 0; }
@@ -275,5 +327,10 @@ const char *apps_win32_name(UINT32 i) { (void)i; return 0; }
 UINT32 apps_win32_size(UINT32 i) { (void)i; return 0; }
 int apps_win32_find(const char *name) { (void)name; return -1; }
 int apps_win32_launch(UINT32 i) { (void)i; return -1; }
+UINT32 apps_wow32_count(void) { return 0; }
+const char *apps_wow32_name(UINT32 i) { (void)i; return 0; }
+UINT32 apps_wow32_size(UINT32 i) { (void)i; return 0; }
+int apps_wow32_find(const char *name) { (void)name; return -1; }
+int apps_wow32_launch(UINT32 i) { (void)i; return -1; }
 
 #endif /* CONFIG_NOVUS_WIN32 */

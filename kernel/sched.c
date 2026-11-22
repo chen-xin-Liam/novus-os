@@ -120,7 +120,9 @@ static void task_build_frame(task_t *t, UINT64 entry, UINT64 user_rsp) {
 
   memset(f, 0, sizeof(*f));
   f->rip = entry;
-  f->cs = GDT_SEL_UCODE;
+  /* The frame stays 64-bit (iretq), but a compatibility task gets CS.L=0.
+   * Its ESP is the low half of RSP; loaders must hand us a <4 GiB stack. */
+  f->cs = (t->abi == TASK_ABI_WOW32) ? GDT_SEL_UCODE32 : GDT_SEL_UCODE;
   f->rflags = 0x202u; /* IF, so the task can be preempted */
   f->rsp = user_rsp;
   f->ss = GDT_SEL_UDATA;

@@ -64,4 +64,12 @@ int apps_win32_find(const char *name);
  * as apps_launch(), plus the PE_E* codes from kernel/pe.h. */
 int apps_win32_launch(UINT32 i);
 
+/* ---- PE32 images on the WOW32 executor (M13) ------------------------- */
+/* A third table so neither the NUC indices above nor the PE32+ table move. */
+UINT32       apps_wow32_count(void);
+const char  *apps_wow32_name(UINT32 i);
+UINT32       apps_wow32_size(UINT32 i);
+int          apps_wow32_find(const char *name);
+int          apps_wow32_launch(UINT32 i);
+
 #endif /* NOVUS_APPS_H */

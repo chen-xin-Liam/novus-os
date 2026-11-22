@@ -13,7 +13,12 @@
  *   0x10 kernel data (DPL 0)
  *   0x18 user code   (64-bit, DPL 3)   -> ring 3 selector 0x1B
  *   0x20 user data   (DPL 3)           -> ring 3 selector 0x23
- *   0x28 TSS (16-byte descriptor)
+ *   0x28 TSS (16-byte descriptor, two slots: 0x28 and 0x30)
+ *   0x38 user code   (32-bit compat, DPL 3, L=0 D=1) -> 0x3B
+ *
+ * The last entry is what lets an iretq return into a PE32 image: long mode
+ * still uses the 64-bit trap frame, but CS.L=0 puts the processor in the
+ * compatibility submode, where the image's 32-bit code and stack ABI run.
  */
 
 #ifndef NOVUS_GDT_H
@@ -21,11 +26,12 @@
 
 #include "uefi.h"
 
-#define GDT_SEL_KCODE 0x08u
-#define GDT_SEL_KDATA 0x10u
-#define GDT_SEL_UCODE 0x1Bu /* RPL 3 */
-#define GDT_SEL_UDATA 0x23u /* RPL 3 */
-#define GDT_SEL_TSS   0x28u
+#define GDT_SEL_KCODE   0x08u
+#define GDT_SEL_KDATA   0x10u
+#define GDT_SEL_UCODE   0x1Bu /* RPL 3, 64-bit */
+#define GDT_SEL_UDATA   0x23u /* RPL 3, also usable as a 32-bit stack */
+#define GDT_SEL_TSS     0x28u
+#define GDT_SEL_UCODE32 0x3Bu /* RPL 3, compatibility submode */
 
 /* Install the GDT, reload the segment registers, load the task register.
  * Runs in ring 0 with interrupts off. */

@@ -33,6 +33,7 @@ static idtr_t      g_idtr;
  * timer stub. */
 extern UINT64 isr_stub_table[33];
 extern UINT64 irq_stub_table[223];
+extern UINT64 isr_wow32;
 
 static void idt_set(UINT32 vector, UINT64 handler) {
   g_idt[vector].off_lo = (UINT16)(handler & 0xFFFFu);
@@ -57,6 +58,12 @@ void idt_init(void) {
   for (i = 33u; i < 256u; i++) {
     idt_set(i, irq_stub_table[i - 33u]);
   }
+  /* The PE32 API gate is the one user-callable gate in the table. Keep its
+   * 64-bit interrupt-frame shape but lower DPL to 3 so 32-bit ring-3 code
+   * can execute `int 0x80`; the generic IRQ stub for this vector is replaced
+   * by one that marks the frame as a WOW32 call. */
+  idt_set(IDT_WOW32_VECTOR, (UINT64)(UINTN)&isr_wow32);
+  g_idt[IDT_WOW32_VECTOR].type = 0xEEu; /* present, DPL 3, 64-bit int gate */
 
   g_idtr.limit = (UINT16)(sizeof(g_idt) - 1u);
   g_idtr.base = (UINT64)(UINTN)g_idt;

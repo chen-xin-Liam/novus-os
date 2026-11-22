@@ -8,21 +8,24 @@
 # takes, which is the whole point of building an ISO rather than booting
 # the bare .EFI off a vvfat directory.
 #
-# Usage: scripts/run-iso.sh [MEM] [DISK]
+# Usage: scripts/run-iso.sh [MEM] [DISK] [ISO]
 #   MEM   guest memory size, defaults to 4G
 #   DISK  optional second drive, e.g. an install target image. Passed
 #         through as a raw virtio-blk device. Nothing is written to it
 #         unless the live menu's installer is told to.
+#   ISO   ISO to boot, defaults to out/novus-live.iso. The testapp build
+#         passes out/novus-testapp.iso here.
 
 set -euo pipefail
 
 MEM="${1:-4G}"
 DISK="${2:-}"
+ISO="${3:-out/novus-live.iso}"
 
 cd "$(dirname "$0")/.."
 
-if [ ! -f out/novus-live.iso ]; then
-    echo "out/novus-live.iso not found. Run 'make iso' first." >&2
+if [ ! -f "$ISO" ]; then
+    echo "$ISO not found. Run 'make iso' or 'make iso-testapp' first." >&2
     exit 1
 fi
 
@@ -52,6 +55,6 @@ fi
 exec qemu-system-x86_64 -machine q35 -smp 2 -m "$MEM" \
     -drive if=pflash,format=raw,readonly=on,file=/usr/share/OVMF/OVMF_CODE_4M.fd \
     -drive if=pflash,format=raw,file=out/OVMF_VARS.fd \
-    -cdrom out/novus-live.iso \
+    -cdrom "$ISO" \
     "${DISK_ARGS[@]}" \
     -serial stdio -no-reboot $DISPLAY_ARGS -net none

@@ -46,9 +46,12 @@ struct vfs_fs;
 
 /* Which user ABI the task was started under. NUC images get the full
  * syscall table; Win32 images are held to SYS_WIN32 and SYS_EXIT by the
- * dispatcher, which is the prototype's stand-in for a separate CAP group. */
+ * dispatcher, which is the prototype's stand-in for a separate CAP group.
+ * WOW32 is a PE32 image running in the long mode compatibility submode:
+ * 32-bit CS, 32-bit stack, and int 0x80 instead of the 64-bit syscall gate. */
 #define TASK_ABI_NUC   0
 #define TASK_ABI_WIN32 1
+#define TASK_ABI_WOW32 2
 
 typedef struct task {
   int      id;
@@ -73,6 +76,7 @@ typedef struct task {
   int      wait_err;      /* error to hand back when the task resumes */
   UINT8    abi;           /* TASK_ABI_*: what the task is allowed to call */
   UINT32   win32_last_error; /* Win32 GetLastError state */
+  UINT32   wow_tls[64];      /* WOW32 TlsAlloc slots (index 0 = allocated) */
   UINT64   win32_image_base; /* PE image base, for GetModuleHandleA */
   UINT64   teb_va;   /* Win32 TEB in the task's own space, installed as
                       * MSR_FS_BASE on every switch. Zero for a NUC task:

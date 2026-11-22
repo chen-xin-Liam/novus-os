@@ -6781,7 +6781,11 @@ void win32_syscall(trap_frame_t *f) {
   UINT32  api;
 
 
-  if (t == NULL || t->abi != TASK_ABI_WIN32) {
+  /* A WOW32 task reaches this table through wow32_syscall(), which builds a
+   * translated frame with the API id in R10. It uses the same handlers, so
+   * accept both compatibility ABIs here. */
+  if (t == NULL ||
+      (t->abi != TASK_ABI_WIN32 && t->abi != TASK_ABI_WOW32)) {
     f->rax = (UINT64)-1;
     return;
   }

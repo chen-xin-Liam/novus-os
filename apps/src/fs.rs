@@ -129,6 +129,14 @@ pub fn rename(from: &str, to: &str) -> bool {
     rc == 0
 }
 
+/* Run a PE32 (i386) image directly from the VFS through the WOW32 executor. */
+pub fn pe32_exec(path: &str) -> bool {
+    let bytes = match path_arg(path) { Some(value) => value, None => return false };
+    let rc = sys::call(41, bytes.as_ptr() as u64, 0, 0, 0);
+    let _keep_alive = bytes;
+    rc == 0
+}
+
 /* ---- mount points (calls 22-24, ABI mirrors kernel/mountcfg.h) -------- */
 
 pub const MOUNT_MAX: usize = 8;

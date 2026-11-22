@@ -18,6 +18,8 @@
 
 #define IDT_TIMER_VECTOR  32u
 #define IDT_SYSCALL_MARK  0x100u /* frame-only marker, never an IDT entry */
+#define IDT_WOW32_MARK    0x101u /* int 0x80 from a PE32 task */
+#define IDT_WOW32_VECTOR  0x80u
 
 /* One trap frame, laid out by trap.S. The order is the push order of the
  * stub reversed; do not reorder without changing the assembly. */

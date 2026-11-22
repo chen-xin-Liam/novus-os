@@ -447,6 +447,46 @@ $(ISO_IMG): $(MKISO) $(ESP_IMG) out/NOVUS.EFI $(NOVUS_IMG) $(ESP_TPL) | out
 	    --file SYSTEM.IMG $(NOVUS_IMG) \
 	    --file ESP.IMG $(ESP_TPL)
 
+# A live ISO that also publishes the host's testapp/ folder at /TESTAPP.
+# The files live in the ISO directory tree, not in the El Torito boot image,
+# so a 300 MiB installer does not have to fit in the 32 MiB ESP. The running
+# system sees them through its auto-mounted /media/cdrom0 (mountcfg).
+TESTAPP_DIR     ?= testapp
+TESTAPP_SRC     := $(wildcard $(TESTAPP_DIR)/*)
+TESTAPP_ISO     := out/novus-testapp.iso
+TESTAPP_ESP     := out/esp-testapp.img
+TESTAPP_ESP_MB  ?= 24
+TESTAPP_ISO_ARGS := $(foreach f,$(TESTAPP_SRC),--file testapp/$(notdir $(f)) $(f))
+
+.PHONY: iso-testapp test-testapp
+iso-testapp: $(TESTAPP_ISO)
+	@echo "iso-testapp: $(TESTAPP_ISO) ($(shell wc -c < $(TESTAPP_ISO) 2>/dev/null || echo 0) bytes)"
+
+# A trimmed live ESP: the regular one also embeds ESP.IMG (the install
+# template), which together with the current 5 MiB EFI and 8 MiB system image
+# no longer fits the 16 MiB template. The testapp disc is for running the
+# bundled installers, so the install template is not needed here. It still
+# stays under the El Torito 32 MiB limit.
+$(TESTAPP_ESP): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(WPKG_IMG) $(NKM_MOD) | out
+	$(MKFAT) $@ $(TESTAPP_ESP_MB) \
+	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
+	    $(NOVUS_IMG):SYSTEM.IMG \
+	    $(WPKG_IMG):WPAPERS.PKG \
+	    $(NKM_MOD):TEST.NKM \
+	    $(NUC_ESP_ARGS) $(CPPCC_ESP_ARGS)
+
+$(TESTAPP_ISO): $(MKISO) $(TESTAPP_ESP) out/NOVUS.EFI $(NOVUS_IMG) $(TESTAPP_SRC) | out
+	$(MKISO) $@ $(TESTAPP_ESP) NOVUS_TESTAPP \
+	    --file EFI/BOOT/BOOTX64.EFI out/NOVUS.EFI \
+	    --file SYSTEM.IMG $(NOVUS_IMG) \
+	    $(TESTAPP_ISO_ARGS)
+
+# Host-side structural check: the ISO really carries every source file at
+# /TESTAPP with the right size. No QEMU needed, so it is fast enough for a
+# normal `make test-testapp` after editing testapp/.
+test-testapp: $(TESTAPP_ISO)
+	python3 scripts/check_testapp_iso.py $(TESTAPP_ISO) $(TESTAPP_DIR)
+
 # Throw the ISO away and rebuild it whatever make thinks about timestamps.
 iso-force:
 	rm -f $(ISO_IMG)

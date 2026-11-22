@@ -31,6 +31,8 @@
 #include "session.h"
 #include "install.h"
 #include "win32.h"
+#include "wow32.h"
+#include "pe32.h"
 #if CONFIG_NOVUS_DWM
 #include "dwmsys.h"
 #endif
@@ -71,6 +73,7 @@
 #define SYS_UPDATE      25u   /* update service control ABI */
 #define SYS_HTTPS       26u   /* https client control ABI  */
 #define SYS_CONSOLE     27u   /* serial console read/write  */
+#define SYS_PE32_EXEC   41u   /* run a PE32 image from the VFS (WOW32) */
 
 #define FS_PATH_MAX 256u
 #define FS_IO_MAX 4096u
@@ -840,6 +843,29 @@ static void sys_exit_call(trap_frame_t *f) {
   f->rax = 0;
 }
 
+/* Run a PE32 executable directly from the VFS. The leaf name becomes the
+ * task name, so the task manager and a second-launch check see the file the
+ * caller asked for. Only signed-off FAT/NovusFS paths can reach this call:
+ * the same login and path checks as every other file syscall apply. */
+static void sys_pe32_exec(trap_frame_t *f) {
+  task_t *t = sched_current();
+  char path[FS_PATH_MAX];
+  char name[16];
+  UINT32 i, n = 0u;
+
+  if (t == NULL || !session_logged_in() || user_path(t, f->rdi, path) != 0) {
+    f->rax = (UINT64)-1;
+    return;
+  }
+  for (i = 0u; path[i] != '\0'; i++) {
+    if (path[i] == '/') n = 0u;
+    else if (n + 1u < sizeof(name)) name[n++] = path[i];
+  }
+  name[n] = '\0';
+  if (n == 0u) { f->rax = (UINT64)-1; return; }
+  f->rax = (pe32_load_path(name, path) == 0) ? 0u : (UINT64)-1;
+}
+
 typedef void (*sys_fn_t)(trap_frame_t *);
 
 typedef struct {
@@ -1092,6 +1118,7 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_UPDATE, "update", sys_update_call},
     {SYS_HTTPS, "https", sys_https_call},
     {SYS_CONSOLE, "console", sys_console},
+    {SYS_PE32_EXEC, "pe32_exec", sys_pe32_exec},
 #if CONFIG_NOVUS_DWM
     {SYS_VMEM_ALLOC, "vmem_alloc", dwm_sys_vmem_alloc},
     {SYS_VMEM_FREE, "vmem_free", dwm_sys_vmem_free},
@@ -1118,7 +1145,7 @@ static void syscall_dispatch(trap_frame_t *f) {
   /* A compatibility process is confined to its own gate: only SYS_WIN32 and
    * SYS_EXIT are reachable, so a PE image can never touch IPC, files, power
    * or the installer even if it learns the native syscall numbers. */
-  if (t != NULL && t->abi == TASK_ABI_WIN32 &&
+  if (t != NULL && (t->abi == TASK_ABI_WIN32 || t->abi == TASK_ABI_WOW32) &&
       (UINT32)f->rax != SYS_WIN32 && (UINT32)f->rax != SYS_EXIT) {
     if (g_abi_denials < 8u) {
       g_abi_denials++;
@@ -1182,6 +1209,8 @@ static void trap_exception(trap_frame_t *f) {
 UINT64 trap_dispatch(trap_frame_t *f) {
   if (f->vector == IDT_SYSCALL_MARK) {
     syscall_dispatch(f);
+  } else if (f->vector == IDT_WOW32_MARK) {
+    wow32_syscall(f);
   } else if (f->vector == IDT_TIMER_VECTOR) {
     /* Retire the LAPIC timer interrupt before running tick work; the
      * timer branch then shares the ordinary frame-return scheduler path.
