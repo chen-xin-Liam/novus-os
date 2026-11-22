@@ -122,8 +122,7 @@ UINT64 nd_tsc_khz(void) {
 
 /* Console-safe decimal writer: kputs_hex would make a cycle count unreadable
  * and a second serializer here would itself skew the measurement. */
-static void nd_dec(UINT64 v) {
-  char  buf[24];
+static void nd_dec(UINT64 v) {  char  buf[24];
   UINT32 i = sizeof(buf) - 1u;
 
   buf[i] = '\0';
@@ -132,6 +131,38 @@ static void nd_dec(UINT64 v) {
     v /= 10u;
   } while (v != 0u && i != 0u);
   kputs(&buf[i]);
+}
+
+/* Temporary boot-stage bisect: real milliseconds per capture phase. The
+ * clock comes from the boot stage through nd_boot_clock_set(); the kernel
+ * build never calls it, so the probe falls back to the guest TSC. */
+static UINT64 (*g_boot_clock)(void);
+
+void nd_boot_clock_set(UINT64 (*fn)(void)) {
+  g_boot_clock = fn;
+}
+
+static UINT64 cap_now(void) {
+  return g_boot_clock != 0 ? g_boot_clock() : 0u;
+}
+
+static void cap_ms(const char *tag, UINT64 t0) {
+  UINT64 now = cap_now();
+  UINT64 cyc = nd_tsc() - t0;
+  UINT64 khz = nd_tsc_khz();
+
+  kputs("[CAP] ");
+  kputs(tag);
+  kputs(" ");
+  if (now != 0u && now >= t0) {
+    nd_dec(now - t0);
+    kputs("ms real at ");
+    nd_dec(now);
+  } else {
+    nd_dec(khz != 0u ? cyc / khz : cyc);
+    kputs(khz != 0u ? "ms tsc\n" : "cyc\n");
+  }
+  kputs("\n");
 }
 
 void nd_frame_timing(const char *label, UINT64 t0, UINT64 t1,
@@ -331,6 +362,21 @@ static void gop_apply_preferred(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINT32 pw,
   if (pw == 0u || ph == 0u || gop->QueryMode == 0) {
     return;
   }
+  /* Already there? SetMode re-initialises the whole scanout (and on
+   * firmware that means a full mode set through the display controller),
+   * which is one of the most expensive calls in the boot stage. The
+   * firmware has usually picked the panel's preferred mode already, so
+   * comparing against the live mode first is the difference between
+   * hundreds of milliseconds and none. */
+  if (gop->Mode != 0 && gop->Mode->Info != 0 &&
+      gop->Mode->Info->HorizontalResolution == pw &&
+      gop->Mode->Info->VerticalResolution == ph) {
+    UINT32 bgr = 0;
+
+    if (mode_drawable(gop->Mode->Info, &bgr)) {
+      return;
+    }
+  }
   for (m = 0; m < gop->Mode->MaxMode; m++) {
     UINTN                                size = 0;
     EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info = NULL;
@@ -355,6 +401,9 @@ static void gop_apply_preferred(EFI_GRAPHICS_OUTPUT_PROTOCOL *gop, UINT32 pw,
 int nd_capture_boot(void *system_table) {
   EFI_SYSTEM_TABLE *st = (EFI_SYSTEM_TABLE *)system_table;
   novus_timeline("nd boot capture start");
+  UINT64            t_scan = 0;
+  UINT64            t_step;
+  UINT64            t_all = cap_now();
   EFI_GUID          gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
   EFI_HANDLE       *handles = NULL;
   UINTN             n = 0;
@@ -368,11 +417,16 @@ int nd_capture_boot(void *system_table) {
   if (st == 0 || st->BootServices == 0) {
     return 0;
   }
-
-  /* Every graphics output the firmware offers, not just the first one. */
-  if (!EFI_ERROR(st->BootServices->LocateHandleBuffer(AllHandles, &gop_guid,
+  t_step = cap_now();
+  /* Every graphics output the firmware offers, not just the first one. Ask
+   * for the protocol, not for every handle: walking the whole handle table
+   * and failing HandleProtocol on each non-display handle costs more than
+   * the display work itself on a firmware with a long device list. */
+  if (!EFI_ERROR(st->BootServices->LocateHandleBuffer(ByProtocol, &gop_guid,
                                                       NULL, &n, &handles)) &&
       handles != 0) {
+    cap_ms("locate handles", t_step);
+    t_step = cap_now();
     for (i = 0; i < n && count < ND_MAX_OUTPUTS; i++) {
       EFI_GRAPHICS_OUTPUT_PROTOCOL         *gop = NULL;
       EFI_GRAPHICS_OUTPUT_MODE_INFORMATION *info;
@@ -388,8 +442,28 @@ int nd_capture_boot(void *system_table) {
           gop == 0 || gop->Mode == 0 || gop->Mode->Info == 0) {
         continue;
       }
-      edid_preferred(st, handles[i], &pw, &ph, &digital);
+      /* The EDID block only has one job left: naming a better mode than the
+       * one the firmware already picked. A firmware mode of 1024x600 or more
+       * is a panel mode on every machine this has run on, so asking for the
+       * preferred timing there buys nothing and a failed protocol lookup on
+       * some firmwares costs seconds. Ask only when the mode on screen is
+       * clearly the fallback. */
+      if (gop->Mode->Info->HorizontalResolution >= 1024u &&
+          gop->Mode->Info->VerticalResolution >= 600u) {
+        pw = 0u;
+        ph = 0u;
+      } else {
+        edid_preferred(st, handles[i], &pw, &ph, &digital);
+      }
+      if (count == 0u) {
+        cap_ms("edid probe", t_step);
+      }
+      t_step = cap_now();
       gop_apply_preferred(gop, pw, ph);
+      if (count == 0u) {
+        cap_ms("apply preferred", t_step);
+      }
+      t_step = cap_now();
 
       info = gop->Mode->Info;
       if (!mode_drawable(info, &bgr)) {
@@ -424,6 +498,7 @@ int nd_capture_boot(void *system_table) {
     }
   }
   g_output_count = count;
+  cap_ms("output loop done", t_step);
   if (count == 0u) {
     return 0;
   }
@@ -437,7 +512,9 @@ int nd_capture_boot(void *system_table) {
      * physical address before the kernel's tables exist, so ask the live
      * boot tables whether it is reachable - and build the mapping when it
      * is not, instead of refusing every scanout above 4 GiB. */
+    t_scan = cap_now();
     boot_map = boot_scanout_map(st->BootServices, p->fb_phys, p->fb_size);
+    cap_ms("scanout map", t_scan);
     kputs("[ND] scanout ");
     kputs_hex(p->fb_phys);
     kputs((boot_map == BOOT_SCANOUT_PRESENT)
@@ -460,6 +537,8 @@ int nd_capture_boot(void *system_table) {
     g_disp.backend = (count > 1u) ? "GOP framebuffer, mirrored"
                                   : "GOP framebuffer";
   }
+  novus_timeline("nd boot capture done");
+  cap_ms("capture total", t_all);
   return 1;
 }
 

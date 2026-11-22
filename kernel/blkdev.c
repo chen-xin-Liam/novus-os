@@ -677,9 +677,16 @@ static int uefi_xfer(uefi_ctx_t *u, UINT64 sector, UINTN count, void *buf,
        * one call. This is the common case - a filesystem reads in block-sized
        * runs - and it is the fast one. Cap the request: some firmware /
        * controller pairs silently truncate or drop the tail of large transfers,
-       * so the first part succeeds while later sectors come back stale. 8 KiB
-       * is well under every real limit. */
-      UINTN cap_blocks = (UINTN)(8192ULL / block);
+       * so the first part succeeds while later sectors come back stale. The
+       * cap used to be 8 KiB, which turned every payload read into hundreds of
+       * small transfers and made a 8 MiB SYSTEM.IMG cost ~11 s on OVMF's IDE
+       * path. 256 KiB is the size the payload reader asks for; a firmware
+       * truncating that shows up immediately as a bad payload hash, not as a
+       * subtly corrupt kernel. */
+      UINTN cap_blocks = (UINTN)(262144ULL / block);
+      if (cap_blocks == 0u) {
+        cap_blocks = 1u;
+      }
       moved = (UINTN)((bytes - done) / block);
       if (moved > cap_blocks) {
         moved = cap_blocks;
