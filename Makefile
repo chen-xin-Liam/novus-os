@@ -443,6 +443,17 @@ $(BOOT_LOGO_H): $(BOOT_LOGO_PNG) tools/splash/mkbootlogo.py | build
 
 build/graphics_nd_boot.o: $(BOOT_LOGO_H)
 
+# EDK II splash: keep the PNG alpha channel for the standalone GOP app. This
+# header is an input to the EDK II build, not to the normal kernel build, so
+# it is generated on demand rather than pulled into $(OBJS).
+EFI_LOGO_H := edk2/NovusSplash/LogoPixels.h
+
+.PHONY: efi-logo
+efi-logo: $(EFI_LOGO_H)
+
+$(EFI_LOGO_H): $(BOOT_LOGO_PNG) tools/splash/mkefilogo.py
+	python3 tools/splash/mkefilogo.py $@
+
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the
 # embedded trampoline binary.
