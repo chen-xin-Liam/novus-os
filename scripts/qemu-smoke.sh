@@ -463,14 +463,24 @@ def check_usb(lines, scenario):
 # ---------------------------------------------------------------- screenshots
 
 def clock_rect(width, height):
-    """Dock clock block, derived from nd_demo.c (ND_DOCK_W/H/GAP)."""
+    """Dock clock block, derived from nd_demo.c's scaled dock geometry."""
     if width < 700 or height < 600:
         return (0, 0, 0, 0)
-    dock_w, dock_h, gap = 660, 56, 10
+    # nvgui.h: 1920x1080 reference, 70%..160% clamped per-mille scale.
+    scale = min(width * 1000 // 1920, height * 1000 // 1080)
+    scale = max(700, min(1600, scale))
+
+    def px(v):
+        return (v * scale + 500) // 1000
+
+    dock_w, dock_h, gap = px(660), px(56), px(10)
     tx = (width - dock_w) // 2
     ty = height - dock_h - gap
-    # Time at (tx + dock_w - 112, ty + 9, 96, 18); date at ty + 31. Pad 4 px.
-    return (max(0, tx + dock_w - 112 - 4), max(0, ty + 9 - 4), 96 + 8, 48)
+    # Time at (tx + dock_w - px(112), ty + px(9), px(96), px(18)); date at
+    # ty + px(31). Pad 4 px around the pair.
+    return (max(0, tx + dock_w - px(112) - 4),
+            max(0, ty + px(9) - 4), px(96) + 8,
+            px(31) - px(9) + px(18) + 8)
 
 
 def changed_mask(image):

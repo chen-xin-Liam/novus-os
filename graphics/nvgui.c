@@ -24,6 +24,10 @@ static ng_ctx_t    g_ctx;
 static ng_widget_t g_pool[NG_POOL_SIZE];
 static UINT32      g_used;
 static int         g_ready;
+/* 0 means "not resolved yet": callers that run before ng_init() (the WM
+ * clamps windows before the shell builds its desktop) still get a scale
+ * derived from the live framebuffer. */
+static INT32       g_ui_scale;
 
 /* ---- small helpers ---------------------------------------------------- */
 
@@ -182,6 +186,42 @@ void ng_layout(void) {
   layout_children(g_ctx.root, 0, 0, 0);
 }
 
+/* ---- resolution-independent metrics ----------------------------------- */
+
+void ng_ui_scale_from_screen(INT32 w, INT32 h) {
+  INT64 sx;
+  INT64 sy;
+  INT64 s;
+
+  if (w <= 0 || h <= 0) {
+    return;
+  }
+  sx = (INT64)w * 1000 / NG_UI_REF_W;
+  sy = (INT64)h * 1000 / NG_UI_REF_H;
+  s = (sx < sy) ? sx : sy;
+  if (s < NG_UI_SCALE_MIN) {
+    s = NG_UI_SCALE_MIN;
+  }
+  if (s > NG_UI_SCALE_MAX) {
+    s = NG_UI_SCALE_MAX;
+  }
+  g_ui_scale = (INT32)s;
+}
+
+INT32 ng_ui_scale(void) {
+  if (g_ui_scale == 0) {
+    nd_surface_t *s = nd_screen();
+
+    ng_ui_scale_from_screen(s != 0 ? s->w : NG_UI_REF_W,
+                            s != 0 ? s->h : NG_UI_REF_H);
+  }
+  return g_ui_scale;
+}
+
+INT32 ng_ui_px(INT32 px) {
+  return (INT32)(((INT64)px * (INT64)ng_ui_scale() + 500) / 1000);
+}
+
 /* ---- creation --------------------------------------------------------- */
 
 ng_ctx_t *ng_init(nd_surface_t *surf) {
@@ -193,6 +233,7 @@ ng_ctx_t *ng_init(nd_surface_t *surf) {
     return 0;
   }
   g_ctx.surf = surf;
+  ng_ui_scale_from_screen(surf->w, surf->h);
   g_ctx.damage = nd_rect(0, 0, 0, 0);
   theme_init(&g_ctx.theme);
   g_ready = 1;
@@ -712,7 +753,10 @@ static void draw_button(ng_widget_t *w) {
      * five-character name would need 160 px and still be clipped at 1280.
      * Small captions under a 24 px icon also keep the column uniform. */
     UINT32 scale = 1u;
-    INT32 icon_y = (w->abs.h >= 64) ? w->abs.y + 22 : w->abs.y + w->abs.h / 2;
+    INT32  glyph = ng_ui_px(24);
+    INT32  icon_y = (w->abs.h >= ng_ui_px(64))
+                        ? w->abs.y + ng_ui_px(22)
+                        : w->abs.y + (w->abs.h - glyph) / 2;
 
     if (hot) {
       nd_round_rect(s, nd_rect(w->abs.x + 2, w->abs.y + 2, w->abs.w - 4,
@@ -720,12 +764,12 @@ static void draw_button(ng_widget_t *w) {
                     (w->state & NG_ST_PRESSED) != 0u ? t->ctrl_border
                                                      : t->ctrl_hover);
     }
-    icon_glyph(s, w->abs.x + w->abs.w / 2, icon_y, 24, w->u.button.icon,
+    icon_glyph(s, w->abs.x + w->abs.w / 2, icon_y, glyph, w->u.button.icon,
                hot ? t->accent : t->text);
     if (w->u.button.text != 0 && w->u.button.text[0] != '\0') {
       tw = nd_text_width(w->u.button.text, scale);
-      ty = (w->abs.h >= 64) ? w->abs.y + w->abs.h - 24
-                            : w->abs.y + w->abs.h - 16;
+      ty = (w->abs.h >= ng_ui_px(64)) ? w->abs.y + w->abs.h - ng_ui_px(24)
+                                      : w->abs.y + w->abs.h - ng_ui_px(16);
       nd_text(s, w->abs.x + (w->abs.w - (INT32)tw) / 2, ty,
               w->u.button.text, t->text, scale);
     }

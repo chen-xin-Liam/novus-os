@@ -344,12 +344,12 @@ static void clamp_rect(nd_rect_t *r) {
   nd_surface_t *s = screen();
   INT32         sw = (s != 0) ? s->w : 1024;
   INT32         sh = (s != 0) ? s->h : 768;
-  /* The shell floats its taskbar pill over the bottom of the screen (56 px
-   * tall, 10 px above the edge). A window that reached the raw screen edge
-   * lost its last line behind the pill - the file manager's status hint and
-   * the settings window's footer both did. Keep NWM_BAR_H free so a window
-   * always ends above the bar. */
-  INT32 work_h = sh - NWM_BAR_H;
+  /* The shell floats its taskbar pill over the bottom of the screen. A
+   * window that reached the raw screen edge lost its last line behind the
+   * pill - the file manager's status hint and the settings window's footer
+   * both did. Keep the (resolution-scaled) bar free so a window always ends
+   * above it. */
+  INT32 work_h = sh - ng_ui_px(NWM_BAR_H);
 
   if (work_h < NWM_MIN_H) {
     work_h = NWM_MIN_H;

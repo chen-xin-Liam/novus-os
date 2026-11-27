@@ -56,6 +56,22 @@ struct nd_icon_s;
 #define NG_ROW_H    24
 #define NG_TEXT_SCALE 2u
 
+/* Shell geometry is authored at 1920x1080. At any other resolution the
+ * dock and the desktop icon grid are laid out through ng_ui_px() so a
+ * small panel keeps a usable icon and a 4K panel does not get a postage
+ * stamp. The scale is the smaller of the two axis ratios (per mille),
+ * clamped so extreme aspect ratios cannot distort the shell. */
+#define NG_UI_REF_W     1920
+#define NG_UI_REF_H     1080
+#define NG_UI_SCALE_MIN 700   /* 70% */
+#define NG_UI_SCALE_MAX 1600  /* 160% */
+
+/* Set from the surface passed to ng_init(); when called before any context
+ * exists the scale is derived from nd_screen(). Returns per mille. */
+INT32 ng_ui_scale(void);
+void  ng_ui_scale_from_screen(INT32 w, INT32 h);
+INT32 ng_ui_px(INT32 px);
+
 typedef enum {
   NG_DESKTOP = 0,
   NG_WINDOW,

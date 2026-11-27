@@ -33,8 +33,15 @@ pub const MSG_PING: u16 = 0x0305;
 
 /* Fixed mapping windows. The NUC image sits at 0x400000, the trampoline at
  * 0x90000000 and the stack top at 0xA0000000, so these are free low-half
- * regions. Each layer slot reserves 16 MiB (the vidmem object cap). */
+ * regions. Each layer slot reserves 16 MiB (the vidmem object cap).
+ *
+ * Two frame slots make the compositor double buffered: while the CRTC owns
+ * the front object, the next frame is composed into the back object. The
+ * slots are 4 MiB apart - larger than the 1280x720 frame cap (3.6 MiB) but
+ * inside the same low-half region, away from the addresses the loader and
+ * the kernel reserve for their own mappings. */
 const FRAME_VA: u64 = 0x0400_0000;
+const FRAME_B_VA: u64 = 0x0440_0000;
 const LAYER_VA_BASE: u64 = 0x1000_0000;
 const LAYER_VA_STRIDE: u64 = 0x0100_0000;
 
@@ -184,18 +191,40 @@ fn main_loop() -> ! {
     log(hex32(&mut buf, fh));
     log(b"\n");
 
-    // Allocate and map the compositor's front buffer as a vidmem object.
+    /* Double buffering: two scanout-capable vidmem objects, each mapped at
+     * its own fixed VA. The first slot is required; if the second cannot be
+     * allocated the compositor still runs with a single buffer, since a
+     * partially working desktop beats an idle compositor. */
     let frame_words = (fw as usize) * (fh as usize);
     let frame_size = (frame_words * 4) as u32;
-    let front = sys::vmem_alloc(frame_size, sys::VMEM_FLAG_SCANOUT);
-    if front == 0 || sys::vmem_map(front, FRAME_VA,
+    let frame_vas = [FRAME_VA, FRAME_B_VA];
+    let mut handles = [0u32; 2];
+    let mut buffers = [0usize; 2];
+    let mut count = 0usize;
+
+    for i in 0..2 {
+        let h = sys::vmem_alloc(frame_size, sys::VMEM_FLAG_SCANOUT);
+        if h == 0 || sys::vmem_map(h, frame_vas[i],
                                    sys::VM_PROT_WRITE | sys::VM_PROT_USER) < 0 {
-        log(b"[DWM] front buffer allocation failed; idling\n");
-        loop { sys::yield_now(); }
+            if i == 0 {
+                log(b"[DWM] front buffer allocation failed; idling\n");
+                loop { sys::yield_now(); }
+            }
+            if h != 0 { sys::vmem_free(h); }
+            break;
+        }
+        handles[i] = h;
+        buffers[i] = frame_vas[i] as usize;
+        count += 1;
     }
-    let frame = unsafe {
-        core::slice::from_raw_parts_mut(FRAME_VA as *mut u32, frame_words)
-    };
+    if count == 2 {
+        log(b"[DWM] double buffered: two scanout objects\n");
+    } else {
+        log(b"[DWM] single buffer fallback: second scanout object unavailable\n");
+    }
+    /* Which object the compositor writes next; the other one is the front
+     * the CRTC scanned out last. */
+    let mut back = 0usize;
 
     let port = ipc::lookup(PORT_NAME);
     let mut tree = Tree::new();
@@ -237,17 +266,25 @@ fn main_loop() -> ! {
             }
         }
 
-        let frame_layer = match compose_frame(&tree, frame, fw, fh, dpi, &mut maps) {
-            Some(l) => l,
-            None => {
-                // No v2 surfaces: leave the framebuffer to the kernel WM.
-                sys::yield_now();
-                continue;
+        /* Compose into the back object only. The object the CRTC presented
+         * last stays unchanged until the new layer list has been accepted. */
+        let frame_layer = {
+            let frame = unsafe {
+                core::slice::from_raw_parts_mut(buffers[back] as *mut u32,
+                                                frame_words)
+            };
+            match compose_frame(&tree, frame, fw, fh, dpi, &mut maps) {
+                Some(l) => l,
+                None => {
+                    // No v2 surfaces: leave the framebuffer to the kernel WM.
+                    sys::yield_now();
+                    continue;
+                }
             }
         };
 
         let mut out = frame_layer;
-        out.handle = front;
+        out.handle = handles[back];
         queue.stage(&[out]);
 
         if mode == sys::DWM_MODE_EXTEND {
@@ -262,6 +299,10 @@ fn main_loop() -> ! {
         } else {
             queue.present();
         }
+
+        /* The just-submitted object is the front buffer now; the next frame
+         * is composed into its partner. With one buffer this is a no-op. */
+        if count == 2 { back ^= 1; }
 
         sys::yield_now();
     }

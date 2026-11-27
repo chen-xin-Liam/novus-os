@@ -515,6 +515,47 @@ static nd_rect_t quick_power_rect(INT32 qx, INT32 qy) {
                  ND_QUICK_POWER, ND_QUICK_POWER);
 }
 
+/* One scaled layout for the floating dock. Both the painter
+ * (build_desktop) and the hit tester (on_menu_context) read it: keeping
+ * the two on separate literals is how a resized shell ends up with a
+ * right-click menu that no longer matches the icons on screen. */
+typedef struct {
+  INT32 x, y, w, h;     /* pill */
+  INT32 gap;
+  INT32 icon;           /* square icon box */
+  INT32 glyph;          /* icon image / vector glyph size */
+  INT32 step;           /* app icon pitch */
+  INT32 app_x;          /* first app icon, relative to pill */
+  INT32 start_x;
+  INT32 search_x;
+  INT32 tray_x;         /* right-click hit region, relative to pill */
+  INT32 tray_icon_x;    /* first tray image, relative to pill */
+  INT32 tray_icon;
+  INT32 clock_x;
+  INT32 clock_w;
+  INT32 clock_h;
+} nd_dock_geom_t;
+
+static void dock_geom(nd_dock_geom_t *g, INT32 screen_w, INT32 screen_h) {
+  g->w = ng_ui_px(ND_DOCK_W);
+  g->h = ng_ui_px(ND_DOCK_H);
+  g->gap = ng_ui_px(ND_DOCK_GAP);
+  g->x = (screen_w - g->w) / 2;
+  g->y = screen_h - g->h - g->gap;
+  g->icon = ng_ui_px(44);
+  g->glyph = ng_ui_px(24);
+  g->step = ng_ui_px(46);
+  g->app_x = ng_ui_px(116);
+  g->start_x = ng_ui_px(8);
+  g->search_x = ng_ui_px(56);
+  g->tray_x = g->w - ng_ui_px(ND_TRAY_W);
+  g->tray_icon_x = g->w - ng_ui_px(196);
+  g->tray_icon = ng_ui_px(36);
+  g->clock_x = g->w - ng_ui_px(112);
+  g->clock_w = ng_ui_px(96);
+  g->clock_h = ng_ui_px(18);
+}
+
 static ng_widget_t *g_dock[ND_DOCK_MAX];
 static nd_rect_t   g_dock_base[ND_DOCK_MAX];
 static INT32       g_dock_n;
@@ -732,18 +773,19 @@ static void status_text_refresh(const char *net_name, const char *vol_name) {
 static void status_refresh(void) {
   const char *nn = net_icon_name();
   const char *vn = volume_icon_name();
+  UINT32      icon_px = (UINT32)ng_ui_px(20);
 
   if (!same_name(g_net_icon_name, nn)) {
     copy_name(g_net_icon_name, sizeof(g_net_icon_name), nn);
     if (g_net_icon_w != 0) {
-      ng_icon_image(g_net_icon_w, nd_icon_get(g_net_icon_name, 20));
+      ng_icon_image(g_net_icon_w, nd_icon_get(g_net_icon_name, icon_px));
       ng_damage_widget(g_net_icon_w);
     }
   }
   if (!same_name(g_vol_icon_name, vn)) {
     copy_name(g_vol_icon_name, sizeof(g_vol_icon_name), vn);
     if (g_vol_icon_w != 0) {
-      ng_icon_image(g_vol_icon_w, nd_icon_get(g_vol_icon_name, 20));
+      ng_icon_image(g_vol_icon_w, nd_icon_get(g_vol_icon_name, icon_px));
       ng_damage_widget(g_vol_icon_w);
     }
   }
@@ -1111,6 +1153,7 @@ static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
   INT32 W;
   INT32 H;
   INT32 tx;
+  nd_dock_geom_t dg;
 
   if (w == 0 || c == 0) {
     return;
@@ -1135,14 +1178,15 @@ static void on_menu_context(ng_ctx_t *c, ng_widget_t *w) {
     }
     W = s->w;
     H = s->h;
-    tx = (W - ND_DOCK_W) / 2;
-    if (c->mouse_y >= H - ND_DOCK_H - ND_DOCK_GAP) {
-      if (c->mouse_x <= tx + 100) {
+    dock_geom(&dg, W, H);
+    tx = dg.x;
+    if (c->mouse_y >= dg.y) {
+      if (c->mouse_x <= tx + ng_ui_px(100)) {
         texts = task_text; values = task_ids; bits = task_flags; count = 3u;
-      } else if (c->mouse_x >= tx + 116 &&
-                 c->mouse_x <= tx + 116 + 6 * 46) {
+      } else if (c->mouse_x >= tx + dg.app_x &&
+                 c->mouse_x <= tx + dg.app_x + 6 * dg.step) {
         texts = task_text; values = task_ids; bits = task_flags; count = 3u;
-      } else if (c->mouse_x >= tx + ND_DOCK_W - ND_TRAY_W) {
+      } else if (c->mouse_x >= tx + dg.tray_x) {
         texts = tray_text; values = tray_ids; bits = tray_flags; count = 4u;
       } else {
         texts = task_text; values = task_ids; bits = task_flags; count = 3u;
@@ -1193,17 +1237,30 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   static const char *items[5] = {"创建进程", "映射页面", "检查 NX 保护",
                                  "切换 CR3", "退出码 0"};
   static ng_tnode_t nodes[7];
+  nd_dock_geom_t dg;
   INT32 W = screen->w;
   INT32 H = screen->h;
-  INT32 tw = ND_DOCK_W;
-  INT32 th = ND_DOCK_H;
-  INT32 tx = (W - tw) / 2;
-  INT32 ty = H - th - ND_DOCK_GAP;
-  INT32 mx = tx;
-  INT32 my = ty - 8 - 560;
-  INT32 qx = tx + tw - ND_QUICK_W;
-  INT32 qy = ty - ND_QUICK_GAP - ND_QUICK_H;
+  INT32 tw;
+  INT32 th;
+  INT32 tx;
+  INT32 ty;
+  INT32 mx;
+  INT32 my;
+  INT32 qx;
+  INT32 qy;
   INT32 i;
+
+  dock_geom(&dg, W, H);
+  tw = dg.w;
+  th = dg.h;
+  tx = dg.x;
+  ty = dg.y;
+  mx = tx;
+  my = ty - ng_ui_px(8) - 560;
+  /* The quick card and the start menu keep their authored size; only their
+   * anchoring follows the scaled pill. */
+  qx = tx + tw - ND_QUICK_W;
+  qy = ty - ng_ui_px(ND_QUICK_GAP) - ND_QUICK_H;
 
   if (my < 8) {
     my = 8;
@@ -1310,10 +1367,15 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
                                    on_launch_terminal, on_launch_devmgmt,
                                    on_launch_install};
     UINT32 n = install_available() ? 7u : 6u;
+    INT32  ix = W - ng_ui_px(112);
+    INT32  iy = ng_ui_px(24);
+    INT32  iw = ng_ui_px(96);
+    INT32  ih = ng_ui_px(88);
+    INT32  pitch = ng_ui_px(96);
 
     for (i = 0; i < (INT32)n; i++) {
-      ng_button_icon(ng_create(ctx->root, NG_BUTTON, W - 112,
-                               24 + i * 96, 96, 88),
+      ng_button_icon(ng_create(ctx->root, NG_BUTTON, ix,
+                               iy + i * pitch, iw, ih),
                      names[i], kinds[i], acts[i]);
     }
   }
@@ -1443,23 +1505,31 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
   }
 
   /* Taskbar: one floating pill. Centre apps, clock and quick settings on
-   * the right, search on the left. Running dots sit under their app. */
+   * the right, search on the left. Running dots sit under their app. Every
+   * offset comes from the scaled layout so hit regions stay aligned with
+   * the pixels after a resolution change. */
   {
     ng_widget_t *bar = ng_panel(ng_create(ctx->root, NG_PANEL, tx, ty, tw, th),
                                 ctx->theme.win_bg);
+    INT32        icon_y = ty + ng_ui_px(6);
+    INT32        tray_y = ty + ng_ui_px(10);
+    UINT32       glyph = (UINT32)dg.glyph;
+    UINT32       small = (UINT32)ng_ui_px(20);
 
     ng_panel_frame(bar, 1);
     dock_add(bar);
     {
       ng_widget_t *ic;
 
-      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + 8, ty + 6, 44, 44),
-                   NG_ICON_START, 24, on_start);
-      ng_icon_image(ic, nd_icon_get("start", 24));
+      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + dg.start_x, icon_y,
+                             dg.icon, dg.icon),
+                   NG_ICON_START, glyph, on_start);
+      ng_icon_image(ic, nd_icon_get("start", glyph));
       dock_add(ic);
-      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + 56, ty + 6, 44, 44),
-                   NG_ICON_SEARCH, 20, on_start);
-      ng_icon_image(ic, nd_icon_get("search", 20));
+      ic = ng_icon(ng_create(ctx->root, NG_ICON, tx + dg.search_x, icon_y,
+                             dg.icon, dg.icon),
+                   NG_ICON_SEARCH, small, on_start);
+      ng_icon_image(ic, nd_icon_get("search", small));
       dock_add(ic);
     }
 
@@ -1474,19 +1544,18 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
                               on_launch_terminal, on_launch_devmgmt};
 
       for (i = 0; i < 6; i++) {
+        INT32        ax = tx + dg.app_x + i * dg.step;
         ng_widget_t *ic = ng_icon(
-            ng_create(ctx->root, NG_ICON, tx + 116 + i * 46, ty + 6, 44, 44),
-            kinds[i], 24, acts[i]);
+            ng_create(ctx->root, NG_ICON, ax, icon_y, dg.icon, dg.icon),
+            kinds[i], glyph, acts[i]);
 
-        ng_icon_image(ic, nd_icon_get(icon_names[i], 24));
+        ng_icon_image(ic, nd_icon_get(icon_names[i], glyph));
         dock_add(ic);
-        if (i < 6) {
-          g_run_dot[i] = ng_panel(
-              ng_create(ctx->root, NG_PANEL, tx + 116 + i * 46 + 14, ty + th - 7,
-                        16, 3),
-              nd_theme_accent());
-          dock_add(g_run_dot[i]);
-        }
+        g_run_dot[i] = ng_panel(
+            ng_create(ctx->root, NG_PANEL, ax + ng_ui_px(14),
+                      ty + th - ng_ui_px(7), ng_ui_px(16), ng_ui_px(3)),
+            nd_theme_accent());
+        dock_add(g_run_dot[i]);
       }
     }
 
@@ -1497,23 +1566,25 @@ static void build_desktop(nd_surface_t *screen, ng_ctx_t *ctx) {
      * a vector shape. */
     {
       g_net_icon_w = ng_icon(
-          ng_create(ctx->root, NG_ICON, tx + tw - 196, ty + 10, 36, 36),
-          NG_ICON_WIFI, 20, on_quick);
+          ng_create(ctx->root, NG_ICON, tx + dg.tray_icon_x, tray_y,
+                    dg.tray_icon, dg.tray_icon),
+          NG_ICON_WIFI, small, on_quick);
       g_vol_icon_w = ng_icon(
-          ng_create(ctx->root, NG_ICON, tx + tw - 156, ty + 10, 36, 36),
-          NG_ICON_VOLUME, 20, on_volume);
+          ng_create(ctx->root, NG_ICON, tx + dg.tray_icon_x + ng_ui_px(40),
+                    tray_y, dg.tray_icon, dg.tray_icon),
+          NG_ICON_VOLUME, small, on_volume);
       dock_add(g_net_icon_w);
       dock_add(g_vol_icon_w);
     }
     /* Time over date, both at the same small size and right aligned, so
      * the pair reads as one block the way Windows 11 draws it. */
     g_clock_label = ng_label(
-        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 9, 96, 18), g_clock,
-        ctx->theme.text_dim, 1);
+        ng_create(ctx->root, NG_LABEL, tx + dg.clock_x, ty + ng_ui_px(9),
+                  dg.clock_w, dg.clock_h), g_clock, ctx->theme.text_dim, 1);
     g_clock_label->u.label.align = 2; /* right aligned */
     g_date_label = ng_label(
-        ng_create(ctx->root, NG_LABEL, tx + tw - 112, ty + 31, 96, 18), g_date,
-        ctx->theme.text_dim, 1);
+        ng_create(ctx->root, NG_LABEL, tx + dg.clock_x, ty + ng_ui_px(31),
+                  dg.clock_w, dg.clock_h), g_date, ctx->theme.text_dim, 1);
     g_date_label->u.label.align = 2;
     dock_add(g_clock_label);
     dock_add(g_date_label);
