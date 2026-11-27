@@ -204,16 +204,22 @@ static UINT64 nvme_bar0(const pci_dev_t *dev) {
   if (base == 0) {
     return 0;
   }
-  /* A 64-bit BAR above 4 GiB cannot be reached through the identity map, so
-   * carve a window into the high virtual region and hand back that pointer. */
-  if (base >= 0x100000000ULL) {
+  /* The controller's registers always get an uncacheable mapping, wherever
+   * the firmware put the BAR: through the identity map a cached copy of
+   * CAP/CC would answer with stale data, and on a machine whose BAR sits
+   * above 4 GiB the identity map does not cover it at all. mm_map_phys()
+   * rounds the base down to a 2 MiB boundary and returns that page, so the
+   * offset inside the page has to be added back - without it the CAP read
+   * lands megabytes away and the probe gives up with "unsupported queue
+   * depth". */
+  {
     void *m = mm_map_phys(base, 0x100000, MM_MAP_UC);
+
     if (m == NULL) {
       return 0;
     }
-    return (UINT64)(UINTN)m;
+    return (UINT64)(UINTN)m + (base & 0x1FFFFFULL);
   }
-  return base;
 }
 
 static int nvme_queue_init(nvme_ctrl_t *ctrl, nvme_queue_t *queue,
@@ -582,11 +588,56 @@ static int nvme_controller_init(const pci_dev_t *pci) {
   ctrl = &nvme_controllers[nvme_controller_count];
   memset(ctrl, 0, sizeof(*ctrl));
   ctrl->regs = (volatile UINT8 *)(UINTN)bar;
+  /* Decoding first, CAP second. While Memory Space Enable is clear every
+   * register reads back 0xFFFFFFFF, and that value has a nonsense MPSMIN
+   * field, so the report came out as "unsupported page size" when the real
+   * problem was that nothing was decoded at all. QEMU's firmware leaves the
+   * bit set by luck; a laptop's firmware need not. */
+  pci_enable_device(pci);
   ctrl->cap = nvme_read64(ctrl->regs, NVME_CAP);
   if ((ctrl->cap & 0xFFFFu) < NVME_QUEUE_DEPTH - 1u ||
       ((ctrl->cap >> 48) & 0xFu) != 0u ||
       (((ctrl->cap >> 37) & 1u) == 0u)) {
-    kputs("[NVMe] unsupported queue depth, page size, or command set\n");
+    /* Which of the three fields actually failed, and what came back: the
+     * single message above was true about all three possibilities but told
+     * us nothing about which one it was. */
+    {
+      static const char hx[] = "0123456789abcdef";
+      /* The seven fields below are 137 characters together; 96 was a stack
+       * overflow that only fired on the failure path (a machine that boots
+       * from USB still probes NVMe first and normally fails here). */
+      char msg[192];
+      int n = 0, i;
+      const char *pre = "[NVMe] cap=0x";
+      for (i = 0; pre[i]; i++) msg[n++] = pre[i];
+      for (i = 15; i >= 0; i--) msg[n++] = hx[(ctrl->cap >> (i * 4)) & 0xFu];
+      pre = " bar=0x";
+      for (i = 0; pre[i]; i++) msg[n++] = pre[i];
+      for (i = 15; i >= 0; i--) msg[n++] = hx[(bar >> (i * 4)) & 0xFu];
+      pre = " cfg10=0x";
+      for (i = 0; pre[i]; i++) msg[n++] = pre[i];
+      { UINT32 v = pci_read32(pci->bus, pci->dev, pci->func, 0x10u);
+        for (i = 7; i >= 0; i--) msg[n++] = hx[(v >> (i * 4)) & 0xFu]; }
+      pre = " cfg14=0x";
+      for (i = 0; pre[i]; i++) msg[n++] = pre[i];
+      { UINT32 v = pci_read32(pci->bus, pci->dev, pci->func, 0x14u);
+        for (i = 7; i >= 0; i--) msg[n++] = hx[(v >> (i * 4)) & 0xFu]; }
+      pre = " cfg00=0x";
+      for (i = 0; pre[i]; i++) msg[n++] = pre[i];
+      { UINT32 v = pci_read32(pci->bus, pci->dev, pci->func, 0x00u);
+        for (i = 7; i >= 0; i--) msg[n++] = hx[(v >> (i * 4)) & 0xFu]; }
+      pre = " cfg08=0x";
+      for (i = 0; pre[i]; i++) msg[n++] = pre[i];
+      { UINT32 v = pci_read32(pci->bus, pci->dev, pci->func, 0x08u);
+        for (i = 7; i >= 0; i--) msg[n++] = hx[(v >> (i * 4)) & 0xFu]; }
+      pre = " cmd=0x";
+      for (i = 0; pre[i]; i++) msg[n++] = pre[i];
+      { UINT32 v = pci_read32(pci->bus, pci->dev, pci->func, 0x04u);
+        for (i = 3; i >= 0; i--) msg[n++] = hx[(v >> (i * 4)) & 0xFu]; }
+      msg[n++] = '\n';
+      msg[n] = '\0';
+      kputs(msg);
+    }
     return -1;
   }
   doorbell_shift = 2u + (UINT32)((ctrl->cap >> 32) & 0xFu);
@@ -594,7 +645,6 @@ static int nvme_controller_init(const pci_dev_t *pci) {
     kputs("[NVMe] unsupported doorbell stride\n");
     return -1;
   }
-  pci_enable_device(pci);
   cc = nvme_read32(ctrl->regs, NVME_CC);
   if ((cc & NVME_CC_EN) != 0u) {
     nvme_write32(ctrl->regs, NVME_CC, cc & ~NVME_CC_EN);

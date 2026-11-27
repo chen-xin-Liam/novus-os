@@ -243,34 +243,20 @@ static void uhci_bind_ctl(uhci_hc_t *hc, uhci_dev_t *d) {
   d->td_phys = hc->ctl_phys[0];
 }
 
-/* Base-10 printer; see the note in usb.c. */
-static void put_dec(UINT32 v) {
-  char buf[12];
-  int i = 11;
-
-  buf[i] = '\0';
-  if (v == 0u) {
-    kputs("0");
-    return;
-  }
-  while (v != 0u && i > 0) {
-    buf[--i] = (char)('0' + (v % 10u));
-    v /= 10u;
-  }
-  kputs(&buf[i]);
-}
-
+/* Base-10 output comes from kputs_dec() (kmain.c); UHCI only prints small
+ * bus/port numbers, and one shared formatter keeps the log consistent with
+ * the xHCI side. */
 static void uhci_log_bdf(const char *name, const uhci_hc_t *hc, UINTN ports) {
   kputs("[USB] ");
   kputs(name);
   kputs(" ");
-  put_dec(hc->bus);
+  kputs_dec(hc->bus);
   kputs(":");
-  put_dec(hc->dev);
+  kputs_dec(hc->dev);
   kputs(".");
-  put_dec(hc->func);
+  kputs_dec(hc->func);
   kputs(" ports=");
-  put_dec((UINT32)ports);
+  kputs_dec((UINT32)ports);
   kputs("\n");
 }
 
@@ -417,7 +403,7 @@ static int uhci_port_reset(uhci_hc_t *hc, UINT8 port, UINT8 *low_out) {
   st = io_in16((UINT16)(hc->io + off));
   if ((st & U_PORT_CCS) == 0u) {
     kputs("[USB] uhci port ");
-    put_dec(port);
+    kputs_dec(port);
     kputs(" empty PORTSC=");
     kputs_hex(st);
     kputs("\n");
@@ -443,7 +429,7 @@ static int uhci_port_reset(uhci_hc_t *hc, UINT8 port, UINT8 *low_out) {
   }
   *low_out = (UINT8)((st & U_PORT_LSDA) != 0u ? 1u : 0u);
   kputs("[USB] uhci port ");
-  put_dec(port);
+  kputs_dec(port);
   kputs(" reset ok");
   if (*low_out != 0u) {
     kputs(" low-speed");
@@ -538,7 +524,7 @@ static void uhci_hub_scan(uhci_hc_t *hc, uhci_dev_t *hub, UINT32 depth) {
     low = (UINT8)((((UINT32)st[0] | ((UINT32)st[1] << 8)) &
                    HUB_PORT_STAT_LOWSPEED) != 0u ? 1u : 0u);
     kputs("[USB] uhci hub port ");
-    put_dec(p);
+    kputs_dec(p);
     kputs(" connected\n");
     uhci_probe_device(hc, (UINT8)p, low, depth + 1u);
   }
@@ -730,11 +716,11 @@ static void uhci_dump_ifaces(UINT8 port, const UINT8 *cfg, UINT32 len) {
   UINT32 i = 0;
 
   kputs("[USB] uhci port ");
-  put_dec(port);
+  kputs_dec(port);
   kputs(" cfg total=");
-  put_dec((UINT32)(cfg[2] | (cfg[3] << 8)));
+  kputs_dec((UINT32)(cfg[2] | (cfg[3] << 8)));
   kputs(" len=");
-  put_dec(len);
+  kputs_dec(len);
   while (i + 2u <= len) {
     UINT8 dlen = cfg[i];
 
@@ -743,7 +729,7 @@ static void uhci_dump_ifaces(UINT8 port, const UINT8 *cfg, UINT32 len) {
     }
     if (cfg[i + 1u] == 4u && dlen >= 9u) {
       kputs(" if");
-      put_dec(cfg[i + 2u]);
+      kputs_dec(cfg[i + 2u]);
       kputs("=cls");
       kputs_hex(cfg[i + 5u]);
       kputs("/sub");
@@ -845,7 +831,7 @@ static void uhci_probe_device(uhci_hc_t *hc, UINT8 port, UINT8 low,
           usb_find_hid_iface(cfg, total, 2u, &hif) != 0 &&
           usb_find_hid_iface(cfg, total, 0u, &hif) != 0) {
         kputs("[USB] uhci port ");
-        put_dec(port);
+        kputs_dec(port);
         kputs(" has no boot-protocol HID interface\n");
         uhci_dump_ifaces(port, cfg, total);
         return;

@@ -5,7 +5,38 @@
 #include "irq.h"
 #include "kernel.h"
 #include "sched.h"
+#include "nd.h"
 #include <stddef.h>
+
+/* Diagnosis-only framebuffer beacon (local, never shipped): power_init is the
+ * first place a real machine can stall without printing anything, so each
+ * step below drops one more block next to the main kbm() row. Slot numbers
+ * continue after kmain's 0..14. */
+static void pwr_bm(UINT32 slot, UINT8 r, UINT8 g, UINT8 b) {
+#if CONFIG_NOVUS_DISPLAY
+  const nd_display_t *d = nd_display();
+  UINT32 c, x, y;
+
+  if (d == 0 || d->fb_phys == 0u || d->pitch == 0u) {
+    return;
+  }
+  c = (UINT32)b | ((UINT32)g << 8) | ((UINT32)r << 16);
+  for (y = 0; y < 10u && y < d->height; y++) {
+    volatile UINT32 *row =
+        (volatile UINT32 *)(UINTN)(d->fb_phys + (UINT64)y * d->pitch * 4u);
+
+    for (x = 0; x < 10u; x++) {
+      UINT32 px = 6u + slot * 14u + x;
+
+      if (px < d->width) {
+        row[px] = c;
+      }
+    }
+  }
+#else
+  (void)slot; (void)r; (void)g; (void)b;
+#endif
+}
 
 #define FADT_DSDT 40u
 /* Two layouts, and which one applies is decided by the FADT revision, not
@@ -259,6 +290,79 @@ static int legacy_gas(UINT32 address, UINT8 width, power_gas_t *gas) {
   return 1;
 }
 
+/* A DSDT is only trustworthy when firmware says that range *is* ACPI
+ * reclaim/NVS memory. Walking an arbitrary physical address is what turns
+ * a bad FADT into a machine that stops answering: reads of an address the
+ * platform does not decode can wedge the bus, not fault. */
+static int fw_acpi_range(UINT64 mmap, UINT64 size, UINT64 stride,
+                         UINT64 address, UINT64 bytes) {
+  UINT64 offset;
+
+  if (mmap == 0u || stride < sizeof(EFI_MEMORY_DESCRIPTOR) || size < stride ||
+      address < 0x400u) {
+    return 0;
+  }
+  for (offset = 0; offset <= size - stride; offset += stride) {
+    const EFI_MEMORY_DESCRIPTOR *desc =
+        (const EFI_MEMORY_DESCRIPTOR *)(UINTN)(mmap + offset);
+    UINT64 start;
+    UINT64 end;
+
+    if (desc->Type != EfiACPIReclaimMemory &&
+        desc->Type != EfiACPIMemoryNVS) {
+      continue;
+    }
+    if (desc->Pages == 0u || desc->Pages > 8192u) {
+      continue;
+    }
+    start = desc->PhysicalStart;
+    end = start + desc->Pages * 4096u;
+    if (address >= start && bytes <= end - address) {
+      return 1;
+    }
+  }
+  return 0;
+}
+
+/* Same checks acpi_validate_table() makes, but split into two beacons and
+ * with the checksum walk capped, so a stall inside it is visible. */
+static const acpi_table_t *dsdt_probe(UINT64 mmap, UINT64 size, UINT64 stride,
+                                      UINT64 address) {
+  const acpi_table_t *t;
+  const UINT8 *p;
+  UINT32 len;
+  UINT32 i;
+  UINT8 sum = 0;
+
+  if (!fw_acpi_range(mmap, size, stride, address, 36u)) {
+    kputs("[POWER] DSDT address is outside the firmware ACPI ranges\n");
+    return NULL;
+  }
+  t = (const acpi_table_t *)(UINTN)address;
+  if (memcmp(t->signature, "DSDT", 4) != 0) {
+    return NULL;
+  }
+  len = t->length;
+  if (len < 36u || len > 0x40000u || !fw_acpi_range(mmap, size, stride,
+                                                  address, len)) {
+    kputs("[POWER] DSDT header length ");
+    kputs_hex(len);
+    kputs(" rejected\n");
+    return NULL;
+  }
+  pwr_bm(19u, 0xFFu, 0x00u, 0x80u); /* rose: DSDT header readable */
+  p = (const UINT8 *)t;
+  for (i = 0; i < len; i++) {
+    sum = (UINT8)(sum + p[i]);
+  }
+  pwr_bm(20u, 0x80u, 0xFFu, 0x80u); /* light green: checksum walked */
+  if (sum != 0u) {
+    kputs("[POWER] DSDT checksum mismatch\n");
+    return NULL;
+  }
+  return t;
+}
+
 void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   const acpi_table_t *fadt;
   const acpi_table_t *dsdt;
@@ -273,8 +377,9 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   memset(&pm1a, 0, sizeof(pm1a));
   memset(&pm1b, 0, sizeof(pm1b));
   memset(&reset_reg, 0, sizeof(reset_reg));
+  kputs("[POWER] FADT lookup\n");
   fadt = acpi_find_table(mmap, size, stride, "FACP");
-  if (fadt == NULL || fadt->length < FADT_PM1A_CNT_REV2 + 4u) {
+  pwr_bm(15u, 0xC8u, 0x00u, 0x40u); /* crimson: FADT walk returned */  if (fadt == NULL || fadt->length < FADT_PM1A_CNT_REV2 + 4u) {
     kputs("[POWER] ACPI FADT unavailable\n");
     return;
   }
@@ -314,7 +419,13 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
   if (dsdt_address == 0 && fadt->length >= FADT_DSDT + 4u) {
     dsdt_address = read_le32(raw + FADT_DSDT);
   }
-  dsdt = acpi_validate_table(dsdt_address, "DSDT");
+  pwr_bm(16u, 0xC0u, 0xC0u, 0xFFu); /* pale blue: FADT decoded */
+  kputs("[POWER] DSDT at ");
+  kputs_hex(dsdt_address);
+  kputs(", range check\n");
+  dsdt = dsdt_probe(mmap, size, stride, dsdt_address);
+  pwr_bm(17u, 0xFFu, 0xE0u, 0x80u); /* pale yellow: DSDT accepted */
+  kputs("[POWER] _S5_ scan\n");
   if (dsdt == NULL || !find_s5(dsdt, &slp_typ_a, &slp_typ_b)) {
     kputs("[POWER] valid ACPI _S5_ sleep types unavailable");
     if (dsdt != NULL) {
@@ -326,6 +437,7 @@ void power_init(UINT64 mmap, UINT64 size, UINT64 stride) {
     return;
   }
   power_ready = 1;
+  pwr_bm(18u, 0x00u, 0xC0u, 0x40u); /* green-ish: _S5_ found */
   /* Everything a real-machine report needs is on this one line: which FADT
    * was found (revision and length decide which layout is legal), which
    * path supplied the control block, and the sleep types the DSDT's own

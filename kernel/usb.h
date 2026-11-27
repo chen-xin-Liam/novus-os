@@ -17,9 +17,27 @@
  * registered. */
 int usb_init(void);
 
+/* Enumerate the root ports: reset each one and walk the descriptor chain of
+ * whatever sits on it. usb_init() only initialises the controller and takes
+ * one look at every port (the way Linux's xhci_pci_probe does); this pass
+ * carries the per-device work and runs after the first frame, so a port that
+ * will not answer costs nobody a boot. Idempotent: the second call returns
+ * immediately. */
+void usb_hub_probe_all(void);
+
+/* Advance the port pass for at most budget_ms (0 = unbounded) and return 1
+ * while ports remain, 0 when the pass is finished. The input tick feeds it
+ * with a small budget, which is the single-threaded stand-in for the
+ * workqueue Linux runs hub_event on. */
+int usb_hub_step(UINT32 budget_ms);
+
 /* Poll attached USB HID devices (keyboard/mouse) for new reports. Non-blocking:
  * call it from the input tick. A no-op build provides an empty stub. */
 void usb_hid_poll(void);
+
+/* Pointer diagnosis: how many HID mice are enumerated right now and how many
+ * mouse reports the interrupt-IN polling has delivered so far. */
+void usb_hid_stats(UINT32 *mice, UINT32 *reports);
 
 /* ---- enumeration for the device manager (M12) ------------------------- */
 
@@ -41,6 +59,11 @@ typedef struct {
 
 /* Read-only: the number of attached devices and one snapshot of a device.
  * usb_device_info() returns 0 on success, -1 for a bad index. */
+/* Compact xHCI chain report for the boot strip: see usb.c. */
+void usb_banner(char *out, UINT32 cap);
+/* Multi-line raw dump (scan count, per-controller id/hcc, per-port PORTSC
+ * low 16 bits) for the boot diagnostic page. Contains '\n' between lines. */
+void usb_port_dump(char *out, UINT32 cap);
 UINTN usb_device_count(void);
 int   usb_device_info(UINTN index, usb_info_t *out);
 

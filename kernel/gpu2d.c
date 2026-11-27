@@ -189,6 +189,12 @@ void gpu2d_init(void) {
   if (g_ops != 0) {
     return;
   }
+  /* Install the CPU backend before probing anything. Vendor bring-up prints,
+   * and a print can reach the framebuffer, which calls back into a span -
+   * with g_ops still null that recursion re-enters gpu2d_lazy forever. The
+   * soft backend is also the answer whenever no vendor probe succeeds, so
+   * there is nothing to undo afterwards. */
+  g_ops = &g_backend_soft;
   /* Order matters: a real engine always wins over the CPU when it says it
    * can drive the hardware. */
   for (i = 0; i < sizeof(g_vendors) / sizeof(g_vendors[0]); i++) {
@@ -196,7 +202,6 @@ void gpu2d_init(void) {
 
     (void)rc;
   }
-  g_ops = &g_backend_soft;
   kputs("[GPU2D] backend=");
   kputs(g_ops->name);
   kputs(" (64-bit span stores; no vendor engine wired up)\n");

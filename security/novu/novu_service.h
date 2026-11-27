@@ -15,6 +15,11 @@
 #define NOVU_TICK_INTERVAL 40u
 /* Retry a failed job up to 3 times before marking it incompatible. */
 #define NOVU_MAX_RETRY 3u
+/* A check that nothing ever answers is a failure, not a state to sit in.
+ * 1200 scheduler ticks: the 10 ms tick makes that 12 s, longer than a DHCP
+ * lease wait plus one HTTPS index fetch, short enough that a user who
+ * pressed the button sees a verdict instead of "checking" forever. */
+#define NOVU_CHECK_TIMEOUT 1200u
 
 typedef struct {
     UINT8  state;      /* NOVU_SVC_*                          */

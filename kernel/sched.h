@@ -135,6 +135,11 @@ int sched_kill(UINT64 pid);
 /* Give up the rest of the slice (SYS_YIELD). */
 void sched_yield(void);
 
+/* 1 when the calling task is "idle" and no other task is READY: a yield then
+ * has nowhere to go, so the caller parks until the next tick instead of
+ * bouncing back into ring 3 at full speed (B-34). */
+int sched_yield_is_idle_only(void);
+
 /* Park the running task on `port` until a message arrives (or the timeout
  * expires). The switch happens on the way out of the trap, so the caller
  * must also rewind the frame it wants re-executed. */

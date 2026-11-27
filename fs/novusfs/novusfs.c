@@ -72,7 +72,11 @@ void novusfs_set_root_persistent(novusfs_fs_t *fs) {
 /* Small console helpers (no libc)                                     */
 /* ------------------------------------------------------------------ */
 
-static void kputs_dec(UINT64 v) {
+/* This file is also compiled for the host-side mkfsnovus tool, which links
+ * without kmain.c and therefore has no kernel kputs_dec(); the local
+ * formatter carries its own name so it cannot shadow the kernel-wide one
+ * declared in kernel.h. */
+static void nvfs_put_dec(UINT64 v) {
   char buf[24];
   UINTN pos = 23;
 
@@ -159,7 +163,7 @@ int novusfs_mount(novusfs_fs_t *fs, blkdev_t *dev) {
   replayed = wal_recover(fs);
   if (replayed != 0) {
     kputs("[NOVS] wal: replayed ");
-    kputs_dec(replayed);
+    nvfs_put_dec(replayed);
     kputs(" entries\n");
   }
   return 0;
@@ -679,7 +683,7 @@ int novusfs_selftest(void) {
     return -1;
   }
   kputs("[NOVS] ramdisk: ");
-  kputs_dec(dev->sector_count);
+  nvfs_put_dec(dev->sector_count);
   kputs(" sectors\n");
 
   /* 2. Format. */
@@ -749,9 +753,9 @@ int novusfs_selftest(void) {
   fails += check("wal used > 0", used > 0);
   fails += check("wal entries verify (CRC-32)", valid > 0 && !fs->wal_corrupt);
   kputs("[NOVS] wal: used=");
-  kputs_dec(used);
+  nvfs_put_dec(used);
   kputs(" bytes, entries=");
-  kputs_dec(valid);
+  nvfs_put_dec(valid);
   kputs("\n");
 
   /* 9. Remount: everything must survive, and recovery replays cleanly. */
@@ -803,9 +807,9 @@ int novusfs_selftest(void) {
   fails += check("merkle verify after build",
                  novusfs_merkle_verify(fs, NULL) == NOVUSFS_MERKLE_OK);
   kputs("[NOVS] merkle: leaves=");
-  kputs_dec(fs->sb.merkle_leaf_count);
+  nvfs_put_dec(fs->sb.merkle_leaf_count);
   kputs(" height=");
-  kputs_dec(fs->sb.merkle_height);
+  nvfs_put_dec(fs->sb.merkle_height);
   kputs("\n");
 
   /* 12. A committed transaction must drop the stored root's validity:

@@ -191,6 +191,12 @@ static int wal_make_room(novusfs_fs_t *fs, UINT64 size) {
       fs->wal_corrupt = 1;
       return -1;
     }
+    if (fs->wal_active_txid != 0 && e.txid == fs->wal_active_txid) {
+      /* These bytes belong to the transaction that is still being
+       * written. Its redo has not run yet, so reclaiming them would drop
+       * the blocks it carried - the caller has to fail instead. */
+      return -1;
+    }
     esz = wal_entry_size(e.data_len);
     fs->sb.wal_tail_ptr = (tail + esz) % fs->wal_bytes;
 
@@ -320,13 +326,17 @@ static int wal_apply_record(novusfs_fs_t *fs, const wal_entry_t *e,
 /* ------------------------------------------------------------------ */
 
 UINT64 wal_begin(novusfs_fs_t *fs) {
+  UINT64 txid;
+
   if (fs == NULL || !fs->mounted) {
     return 0;
   }
   if (fs->next_txid == 0) {
     fs->next_txid = 1;
   }
-  return fs->next_txid++;
+  txid = fs->next_txid++;
+  fs->wal_active_txid = txid;
+  return txid;
 }
 
 int wal_log_block(novusfs_fs_t *fs, UINT64 txid, UINT64 blk,
@@ -368,6 +378,7 @@ int wal_commit(novusfs_fs_t *fs, UINT64 txid) {
   }
   /* Commit marker: payload-less record carrying the transaction id. */
   if (wal_append_entry(fs, txid, NOVUSFS_TX_COMMIT, 0, NULL, 0) != 0) {
+    fs->wal_active_txid = 0;
     return -1;
   }
   /* The marker is what makes the transaction durable at recovery, and it
@@ -376,6 +387,7 @@ int wal_commit(novusfs_fs_t *fs, UINT64 txid) {
    * transaction whose records were never stored, or drop one that was
    * already applied. */
   if (blkdev_flush(fs->dev) != 0) {
+    fs->wal_active_txid = 0;
     return -1;
   }
   /* Ordering is marker (now durable), block redo, then the superblock
@@ -388,6 +400,9 @@ int wal_commit(novusfs_fs_t *fs, UINT64 txid) {
    * stops a later mount from accepting a stale root as valid; it is
    * persisted by the flush below, not by a second flush of its own. */
   novusfs_merkle_invalidate(fs);
+  /* Every record of the transaction has been redone, so the ring no
+   * longer has to protect it. */
+  fs->wal_active_txid = 0;
   /* Persist the ring pointers together with the rest of the superblock. */
   return novusfs_super_flush(fs);
 }
@@ -396,7 +411,9 @@ void wal_abort(novusfs_fs_t *fs, UINT64 txid) {
   /* M2 records are only ever applied at commit time, so aborting is a
    * no-op beyond leaving the records un-applied (they stay in the ring
    * until the tail advances past them). */
-  (VOID)fs;
+  if (fs != NULL && fs->wal_active_txid == txid) {
+    fs->wal_active_txid = 0;
+  }
   (VOID)txid;
 }
 

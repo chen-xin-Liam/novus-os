@@ -4,6 +4,10 @@
 /* Boot choice set by the boot menu. 0 = desktop (default), 1 = shell only.
  * Declared here so kmain can branch on it after the menu resolves. */
 extern int g_boot_no_desktop;
+/* 1 once a session has handed the framebuffer to the kernel text console
+ * (the shell build). Keeps the later no-desktop block from clearing the
+ * screen it already owns. */
+extern int g_console_session;
 
 /* Show the boot menu on the framebuffer, read the keyboard and count down.
  * Defaults to the desktop after five seconds with no key press. Requires the

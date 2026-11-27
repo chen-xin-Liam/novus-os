@@ -52,6 +52,9 @@
 /* M11: the live menu's "no desktop" choice - the kernel skips the graphical
  * boot menu and launches the shell terminal directly. */
 #define SHM_BOOT_MODE_NO_DESKTOP 2
+/* 3: the image itself is the desktop build (DESKTOP.YES on its ESP).
+ * Like 2 it means "no menu"; unlike 2 it is not a user choice. */
+#define SHM_BOOT_MODE_DESKTOP  3
 
 /* M3: module-loading outcome. Modules are verified in the boot stage
  * too, because they are read off the ESP with the firmware's FAT driver
@@ -133,7 +136,17 @@ typedef struct {
   volatile UINT32 boot_log_head;   /* 0x3B4: next write index */
   UINT8  boot_log[4096];           /* 0x3B8: chronological byte ring */
 
-  UINT8  reserved[7248u - 8u - 4096u]; /* 0x13B8: pad to 8 KiB */
+  /* ---- Firmware's own view of the USB roots, recorded by the boot stage
+   * from the device paths it finds before ExitBootServices. The kernel prints
+   * it beside its xHCI reading: on a machine with no serial port, a photo of
+   * both numbers says whether the ports are really idle or whether the two
+   * stacks disagree about which port the device sits on.
+   * Carved out of the reserved tail only: no field above moves. ---- */
+  UINT32 fw_usb_n;                 /* 0x13B8: valid entries in fw_usb[] */
+  UINT32 fw_usb[8];                /* 0x13BC: (bdf << 8) | port,
+                                    *        bdf = bus << 16 | dev << 8 | fn */
+
+  UINT8  reserved[7248u - 8u - 4096u - 4u - 32u]; /* 0x13DC: pad to 8 KiB */
 } shared_mem_t;
 
 #define SHM_INSTALL_FLAG_PAYLOADS 0x00000001u /* ESP and system images staged */
@@ -174,7 +187,11 @@ _Static_assert(__builtin_offsetof(shared_mem_t, boot_log_len) == 0x3B0,
                "shared_mem frozen layout drift: boot_log_len");
 _Static_assert(__builtin_offsetof(shared_mem_t, boot_log) == 0x3B8,
                "shared_mem frozen layout drift: boot_log");
-_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x13B8,
+_Static_assert(__builtin_offsetof(shared_mem_t, fw_usb_n) == 0x13B8,
+               "shared_mem frozen layout drift: fw_usb_n");
+_Static_assert(__builtin_offsetof(shared_mem_t, fw_usb) == 0x13BC,
+               "shared_mem frozen layout drift: fw_usb");
+_Static_assert(__builtin_offsetof(shared_mem_t, reserved) == 0x13DC,
                "shared_mem frozen layout drift: reserved");
 
 /* Boot stage (pre-ExitBootServices): zero the loader-owned handoff copy

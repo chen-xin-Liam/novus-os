@@ -96,10 +96,22 @@ static int mm_cpu_has_pat(void) {
 
 int mm_pat_available(void) { return g_pat_ok; }
 
+/* B-18: why the late PAT pass ended the way it did, kept so the verdict can
+ * be printed late in the boot. The log medium loses its first tens of KiB
+ * (the RAM copy drops the head while no device accepts writes), so a verdict
+ * printed at +700 ms is a verdict nobody can read.
+ *   0 = not run yet, 1 = scanout write-combining, 2 = CPUID has no PAT,
+ *   3 = scanout window not in the identity map, 4 = mapping did not answer. */
+static UINT32 g_pat_late;
+
 /* One page table / directory: 512 entries x 8 bytes = one 4 KiB page. */
 typedef struct {
   UINT64 e[512];
 } mm_table_t;
+
+/* The identity map's PDPT, kept so the late PAT pass (B-12) can repaint the
+ * scanout leaves after CR3 has been switched to our own tables. */
+static mm_table_t *g_id_pdpt;
 
 /* Install the entire hierarchy before vm_space_create() clones the PML4.
  * Static tables avoid allocating page-table pages in a low-memory rollback. */
@@ -528,6 +540,7 @@ void mm_init(UINT64 ram_top_bytes, UINT64 mmap_addr, UINT64 map_size,
   if (pdpt == 0) {
     return;
   }
+  g_id_pdpt = pdpt; /* the late PAT pass repaints the scanout through this */
   pml4->e[0] = MM_PTE_PRESENT | MM_PTE_WRITE | (pdpt_phys & MM_PTE_ADDR4K_MASK);
 
   t0 = mm_rdtsc();
@@ -714,6 +727,23 @@ void mm_init(UINT64 ram_top_bytes, UINT64 mmap_addr, UINT64 map_size,
   __asm__ volatile("wbinvd" ::: "memory");
   t_flush = mm_rdtsc() - t0;
 
+  /* B-13: the scanout is still PCD (uncached) on firmware that left CR4.PAT
+   * clear, which costs a bus transaction per pixel store. Now that our own
+   * tables are live, PAT can be turned on safely and the scanout repainted
+   * write-combining; mm_enable_pat_late() verifies it and backs out on its
+   * own if the mapping does not answer.
+   *
+   * Off by default. Turning CR4.PAT on is a standard move for an OS (Windows
+   * and Linux both do it), but no emulator here can test it: QEMU's qemu64
+   * model advertises PAT in CPUID and then refuses the CR4 write, and the
+   * boot stops on that instruction. Until this has run once on the EliteBook,
+   * the shipped image keeps the uncached scanout, which the widened stores of
+   * B-12 already make 16x cheaper. Build with -DNOVUS_PAT_LATE=1 to enable it
+   * on a machine that has been checked. */
+#if defined(NOVUS_PAT_LATE) && NOVUS_PAT_LATE
+  mm_enable_pat_late(fb_phys, fb_size);
+#endif
+
   kputs("[MM] paging enabled, CR3=");
   kputs_hex(mm_get_cr3());
   kputs("\n");
@@ -867,13 +897,11 @@ void mm_enable_pat(void) {
   kputs_hex(cr4);
   kputs("\n");
   if ((cr4 & CR4_PAT) == 0u) {
-    /* Leave CR4 alone. Setting PAT from here is legal on paper but hung the
-     * firmware's own page tables on the reference VM, and firmware that
-     * leaves CR4.PAT clear is firmware that also leaves the PAT MSR at reset,
-     * so the PTE route buys nothing on such a machine that an MTRR range
-     * does not: mm_mtrr_wc_cover() below turns the framebuffer into a WC
-     * range instead. The machines that matter - laptops whose firmware does
-     * set CR4.PAT - take the PTE route with IA32_PAT entry 4 = WC below. */
+    /* Leave CR4 alone. Setting PAT from here hung the firmware's own page
+     * tables on the reference VM (the boot stops right after this line), and
+     * firmware that leaves CR4.PAT clear is firmware that also leaves the PAT
+     * MSR at reset, so the MTRR route below is the only one that can be
+     * trusted here. */
     kputs("[MM] firmware left CR4.PAT clear: PTE write-combining off, "
           "using an MTRR WC range instead\n");
     return;
@@ -888,7 +916,101 @@ void mm_enable_pat(void) {
   }
   g_pat_ok = 1;
   kputs("[MM] PAT enabled: CR4.PAT set, IA32_PAT entry 4 = write-combining\n");
-}/* ---- write-combining without PAT: an MTRR WC range -----------------------
+}
+
+/* ---- the scanout, write-combining, enabled late (B-12) -------------------
+ *
+ * Firmware on the EliteBook leaves CR4.PAT clear, so mm_enable_pat() refuses
+ * to touch it and the scanout ends up PCD (strongly uncached). Every pixel
+ * store then leaves the CPU as its own bus transaction: one full-screen
+ * present measured 1.34 s on that machine, and the desktop's first compose
+ * 23.6 s.
+ *
+ * The MTRR route cannot help: 0x4000000000 sits inside the firmware's
+ * write-back RAM range, and MTRR types intersect, so a WC range over the
+ * framebuffer would resolve back to WB or UC rather than combine.
+ *
+ * So PAT is turned on here instead - but *after* the CR3 switch, when the
+ * tables being walked are ours. That is the whole reason this is a second
+ * pass: enabling PAT while the firmware's tables are live changes the meaning
+ * of bits that firmware set for its own reasons, and that is the step that
+ * stopped the reference VM dead. Once our own tables are loaded, the only
+ * leaves that carry the PAT bit are the scanout's, and the rest of the map
+ * keeps working because entry 0 is still WB and entry 2 (PCD) is still
+ * uncacheable.
+ *
+ * Nothing is left to chance: the new type is proven by a write/read on the
+ * first pixel, and a mapping that does not answer is put back to uncached.
+ */
+void mm_enable_pat_late(UINT64 fb_phys, UINT64 fb_size) {
+  UINT64 cr4;
+  UINT64 pages;
+
+  if (g_pat_ok != 0 || fb_size == 0u || g_id_pdpt == 0) {
+    return;
+  }
+  if (mm_cpu_has_pat() == 0) {
+    g_pat_late = 2u;
+    kputs("[MM] PAT late: CPUID says this CPU has no PAT, staying uncached\n");
+    return;
+  }
+  kputs("[MM] PAT late: enabling CR4.PAT with our own tables live\n");
+  __asm__ volatile("mov %%cr4,%0" : "=r"(cr4));
+  cr4 |= CR4_PAT;
+  __asm__ volatile("mov %0,%%cr4" : : "r"(cr4) : "memory");
+  /* Entry 4 becomes WC; every other entry keeps the value it had, so an
+   * existing PCD leaf still means uncached (index 2). */
+  msr_write(IA32_PAT_MSR, IA32_PAT_WC_PA4);
+
+  pages = mm_map_window_bits(g_id_pdpt, fb_phys,
+                             fb_phys + fb_size, MM_PTE_PAT);
+  if (pages == 0u) {
+    g_pat_late = 3u;
+    kputs("[MM] PAT late: scanout window not in the identity map, "
+          "staying uncached\n");
+    return;
+  }
+  /* The leaves just changed type while lines for them may still be cached,
+   * and the panel's address must not keep a stale translation. */
+  {
+    UINT64 p = fb_phys & ~0xFFFULL;
+    UINT64 end = (fb_phys + fb_size + 0xFFFULL) & ~0xFFFULL;
+
+    for (; p < end; p += 0x1000ULL) {
+      MM_INVALIDATE(p);
+    }
+  }
+  __asm__ volatile("wbinvd" ::: "memory");
+
+  {
+    volatile UINT32 *fb = (volatile UINT32 *)(UINTN)fb_phys;
+    UINT32           keep = fb[0];
+    UINT32           probe = 0x5A5A5A5Au;
+
+    fb[0] = probe;
+    /* SFENCE is the one that flushes write-combining buffers; MFENCE only
+     * orders. The read below must see the combined write. */
+    __asm__ volatile("sfence\n\tmfence" ::: "memory");
+    if (fb[0] != probe) {
+      g_pat_late = 4u;
+      kputs("[MM] PAT late: scanout did not answer under write-combining, "
+            "put back to uncached\n");
+      fb[0] = keep;
+      (void)mm_map_window_bits(g_id_pdpt, fb_phys, fb_phys + fb_size,
+                               MM_PTE_PCD);
+      __asm__ volatile("wbinvd" ::: "memory");
+      return;
+    }
+    fb[0] = keep;
+    __asm__ volatile("sfence" ::: "memory");
+  }
+  g_pat_ok = 1;
+  g_pat_late = 1u;
+  kputs("[MM] PAT late: scanout is write-combining, ");
+  kputs_hex(pages << 21);
+  kputs(" bytes\n");
+}
+/* ---- write-combining without PAT: an MTRR WC range -----------------------
  *
  * Memory type is the intersection of the MTRR type and the page attributes.
  * A cacheable (WB) page inside an MTRR range marked WC therefore behaves as
@@ -997,6 +1119,141 @@ static int mm_mtrr_wc_cover(UINT64 lo, UINT64 hi) {
   return 1;
 }
 
+static int g_wc_fell_back;
+
+/* ---- what the scanout really is (B-18) ------------------------------------ *
+ * A present of 1920x1080 still cost 586 ms in the first boot with B-14..B-17,
+ * against 1339 ms with plain byte stores. That is 2.3x, and write-combining
+ * alone should be 20x or more - so either the repaint did not take, or the
+ * MTRRs underneath it do not allow WC and the paging attribute is being
+ * intersected away. Both are facts, not opinions, and both are readable from
+ * the MSR and page-table state. Printed here, late enough in the boot that
+ * the log medium keeps it.
+ *
+ * The type a pixel store actually gets is the intersection of the page
+ * attribute and the MTRR: UC if either says UC, and WC only when the page says
+ * WC over an MTRR that says write-back. So "page=WC" is not the verdict. */
+static void mm_put_type(UINT32 t) {
+  switch (t) {
+  case 0u: kputs("UC"); break;
+  case 1u: kputs("WC"); break;
+  case 4u: kputs("WT"); break;
+  case 5u: kputs("WP"); break;
+  case 6u: kputs("WB"); break;
+  default: kputs("??"); break;
+  }
+}
+
+/* The MTRR type covering `phys`: the variable range that holds it, else the
+ * default from MTRRdefType. */
+static UINT32 mm_mtrr_type_at(UINT64 phys) {
+  UINT64 cap = msr_read(MM_MSR_MTRRCAP);
+  UINT32 vcnt = (UINT32)(cap & 0xFFu);
+  UINT32 i;
+
+  for (i = 0; i < vcnt && i < 16u; i++) {
+    UINT64 m = msr_read(MM_MSR_MTRR_PHYSMASK + 2ULL * i);
+
+    if ((m & MM_MTRR_PHYSMASK_VALID) == 0u) {
+      continue;
+    }
+    {
+      UINT64 b = msr_read(MM_MSR_MTRR_PHYSBASE + 2ULL * i);
+      UINT64 rbase = b & MM_MTRR_MASK_ADDR;
+      UINT64 rsize = mm_mtrr_range_size(m);
+
+      if (rsize != 0u && phys >= rbase && phys < rbase + rsize) {
+        return (UINT32)(b & MM_MTRR_PHYSBASE_TYPE);
+      }
+    }
+  }
+  return (UINT32)(msr_read(MM_MSR_MTRR_DEF_TYPE) & 0xFFu);
+}
+
+/* The page attribute of the 2 MiB leaf that describes `phys`, read back out of
+ * the live identity map rather than remembered: the point is to see what the
+ * CPU sees. */
+static UINT64 mm_leaf_for(UINT64 phys) {
+  UINT64 pde_phys;
+
+  if (g_id_pdpt == 0 || (phys >> 30) >= 512ULL) {
+    return 0;
+  }
+  pde_phys = g_id_pdpt->e[(phys >> 30) & 0x1FFu];
+  if ((pde_phys & MM_PTE_PRESENT) == 0u || (pde_phys & MM_PTE_HUGE) != 0u) {
+    return 0;
+  }
+  {
+    mm_table_t *pd = (mm_table_t *)(UINTN)(pde_phys & MM_PTE_ADDR4K_MASK);
+
+    return pd->e[(phys >> 21) & 0x1FFu];
+  }
+}
+
+void mm_report_scanout(UINT64 phys, UINT64 size) {
+  UINT64 leaf;
+  UINT32 page;
+  UINT32 mtrr;
+  UINT64 cap;
+  UINT64 def;
+  UINT32 vcnt;
+  UINT32 i;
+  UINT32 used = 0u;
+
+  if (size == 0u) {
+    return;
+  }
+  leaf = mm_leaf_for(phys);
+  if ((leaf & MM_PTE_PRESENT) == 0u) {
+    page = 0u;
+  } else if ((leaf & MM_PTE_PAT) != 0u && (leaf & MM_PTE_PCD) == 0u) {
+    page = 1u; /* PAT entry 4 = write-combining */
+  } else if ((leaf & MM_PTE_PCD) != 0u) {
+    page = 0u; /* uncached */
+  } else if ((leaf & 0x8u) != 0u) {
+    page = 4u; /* PWT: write-through */
+  } else {
+    page = 6u; /* write-back */
+  }
+  mtrr = mm_mtrr_type_at(phys);
+
+  kputs("[MM] scanout type: page=");
+  mm_put_type(page);
+  kputs(" mtrr=");
+  mm_put_type(mtrr);
+  kputs(" leaf=0x");
+  kputs_hex(leaf);
+  kputs(" pat_late=");
+  switch (g_pat_late) {
+  case 0u: kputs("not-yet"); break;
+  case 1u: kputs("ok"); break;
+  case 2u: kputs("cpuid"); break;
+  case 3u: kputs("no-window"); break;
+  default: kputs("no-answer"); break;
+  }
+  cap = msr_read(MM_MSR_MTRRCAP);
+  vcnt = (UINT32)(cap & 0xFFu);
+  for (i = 0; i < vcnt && i < 16u; i++) {
+    if ((msr_read(MM_MSR_MTRR_PHYSMASK + 2ULL * i) & MM_MTRR_PHYSMASK_VALID) != 0u) {
+      used++;
+    }
+  }
+  def = msr_read(MM_MSR_MTRR_DEF_TYPE);
+  kputs(" mtrr_slots=");
+  kputs_hex(used);
+  kputs("/");
+  kputs_hex(vcnt);
+  kputs(" mtrr_def=");
+  mm_put_type((UINT32)(def & 0xFFu));
+  kputs(((def & MM_MTRR_DEF_ENABLE) != 0u) ? " fix=1\n" : " fix=0\n");
+}
+
+/* Non-zero when the last MM_MAP_WC request could not be honoured and the
+ * range ended up uncached. A full-screen copy is an order of magnitude
+ * slower in that state, so a caller about to animate can ask first.
+ */
+int mm_wc_fell_back(void) { return g_wc_fell_back; }
+
 void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags) {
   UINT64 base = g_devmap_next;
   UINT64 cur = base;
@@ -1028,10 +1285,14 @@ void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags) {
       cache_bits = 0u;
     } else {
       cache_bits = MM_PTE_PCD;
+      g_wc_fell_back = 1;
     }
   }
+  if ((flags & MM_MAP_WC) == 0u) {
+    g_wc_fell_back = 0;
+  }
   for (i = 0; i < n; i++) {
-    UINT64 p = (phys & ~0x1FFFFFu) + ((UINT64)i << 21);
+    UINT64 p = (phys & ~0x1FFFFFULL) + ((UINT64)i << 21);
     UINT64 v = cur + ((UINT64)i << 21);
     mm_table_t *pd = mm_dev_pd(v);
     UINT32 pdi;
