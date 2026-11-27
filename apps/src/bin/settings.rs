@@ -168,11 +168,45 @@ fn nav(w: &mut wm::Win, s: &State) {
     }
 }
 
+/* Which output the compositor scans out: the row the kernel marked primary,
+ * or output 0 when nothing carries the mark (mirrored setups), or None when
+ * the kernel reports no display at all. Both the "display" row and the
+ * "outputs" card below need the same answer, so it lives here once. */
+fn primary_output(s: &State) -> Option<sinfo::DisplayOut> {
+    if s.displays.count == 0 {
+        return None;
+    }
+    let mut i = 0u32;
+
+    while i < s.displays.count && i < 4 {
+        let o = s.displays.out[i as usize];
+
+        if o.primary() {
+            return Some(o);
+        }
+        i += 1;
+    }
+    Some(s.displays.out[0])
+}
+
 fn page_system(w: &mut wm::Win, s: &State) {
     card(w, CONTENT_X, 80, CONTENT_W, 150, "设备");
     kv(w, CONTENT_X + 14, 116, "名称", "Novus 虚拟机");
     kv(w, CONTENT_X + 14, 142, "架构", "x86_64 · 64 位");
-    kv(w, CONTENT_X + 14, 168, "显示", "1280 × 800 · 32 位色");
+    /* B-50: the current mode, not a fixed string - the kernel's display
+     * reply already carries it, and a hard-coded panel size contradicts
+     * the "outputs" card on the same page. */
+    let mut show = ui::Buf::new();
+
+    match primary_output(s) {
+        None => {
+            show.s("未检测到");
+        }
+        Some(o) => {
+            show.num(o.width).s(" × ").num(o.height).s(" · 32 位色");
+        }
+    }
+    kv(w, CONTENT_X + 14, 168, "显示", show.str());
     kv(w, CONTENT_X + 14, 194, "输入", "PS/2 键盘与鼠标");
 
     /* Install entry: only meaningful on a live medium, where the boot
@@ -747,7 +781,12 @@ pub extern "C" fn _start() -> ! {
                 draw(&mut win, &s, &menu);
             }
         }
-        sys::yield_now();
+        /* B-36: one tick per iteration, so the `idle >= 40` refresh above
+         * really is the 0.4 s it was written to be. With yield_now() the
+         * counter measured loop iterations - the window re-read sysinfo and
+         * repainted itself hundreds of times a second and swamped the WM's
+         * queue with shape and text messages. */
+        sys::sleep_ticks(1);
     }
 }
 

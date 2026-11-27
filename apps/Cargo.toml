@@ -37,6 +37,10 @@ path = "src/bin/devmgmt.rs"
 name = "dwm"
 path = "src/bin/dwm.rs"
 
+# Demo: the smallest GUI app, documented in docs/应用图形化开发指南.md.
+[[bin]]
+name = "hello"
+path = "src/bin/hello.rs"
 [profile.release]
 panic = "abort"
 opt-level = "s"

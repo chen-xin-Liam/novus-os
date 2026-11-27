@@ -506,7 +506,9 @@ fn console_mode() -> ! {
         'line: loop {
             let n = sys::console_read(&mut buf) as usize;
             if n == 0 {
-                sys::yield_now();
+                /* B-39: no bytes this poll -- park for a tick (10 ms) so an
+                 * idle shell prompt stops burning a core. */
+                sys::sleep_ticks(1);
                 continue;
             }
             for k in 0..n {
@@ -807,7 +809,11 @@ fn window_mode() -> ! {
                 }
             }
             Some(wm::Ev::Other(_)) => {}
-            None => sys::yield_now(),
+            /* B-39: no event pending -- wait for the next tick rather than
+             * re-polling at ring3 speed. */
+            None => {
+                sys::sleep_ticks(1);
+            }
         }
     }
 }

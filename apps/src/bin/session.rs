@@ -70,6 +70,27 @@ fn erase(buf: &mut [u8], len: &mut usize) {
 /* The session operation travels as a fixed-size syscall request, while the
  * username/password buffers stay owned by this process. The syscall copies
  * the request before returning, so these stack buffers need no shared memory. */
+/* B-42: one place that performs the session call and maps its return code to
+ * the line under the buttons. It used to be copy-pasted into the context menu
+ * and into the button handler, which is how Enter ended up with no submit
+ * path at all: with the pointer dead (the reason this window exists as the
+ * session bootstrap service) a keyboard-only user could never log in, because
+ * Enter only toggled focus between the two fields. */
+fn attempt(op: u8, username: &[u8; 32], user_len: usize, password: &[u8; 64],
+           pass_len: usize) -> (i64, &'static str) {
+    let rc = sys::session(op, username, user_len, password, pass_len);
+    let note = match rc {
+        0 => {
+            if op == 1 { "账户已创建并登录" } else { "登录成功" }
+        }
+        -2 => "账户已存在或尚未创建",
+        -3 => "尝试次数过多，请稍后再试",
+        -4 => "需要可写持久 NovusFS 磁盘才能创建账户",
+        _ => "登录失败：检查用户名和密码",
+    };
+    (rc, note)
+}
+
 fn session_menu(menu: &mut ui::Menu, x: i32, y: i32, logged: bool) {
     if logged {
         menu.set(&[
@@ -154,23 +175,14 @@ pub extern "C" fn _start() -> ! {
                                     note = "已注销";
                                 } else {
                                     let op = if setup { 1 } else { 2 };
-                                    let rc = sys::session(op, &username, user_len, &password, pass_len);
+                                    let (rc, msg) = attempt(op, &username, user_len, &password, pass_len);
                                     if rc == 0 {
                                         logged = true;
                                         setup = false;
-                                        note = if op == 1 { "账户已创建并登录" } else { "登录成功" };
-                                        pass_len = 0;
-                                        password = [0; 64];
-                                    } else {
-                                        note = match rc {
-                                            -2 => "账户已存在或尚未创建",
-                                            -3 => "尝试次数过多，请稍后再试",
-                                            -4 => "需要可写持久 NovusFS 磁盘才能创建账户",
-                                            _ => "登录失败：检查用户名和密码",
-                                        };
-                                        pass_len = 0;
-                                        password = [0; 64];
                                     }
+                                    note = msg;
+                                    pass_len = 0;
+                                    password = [0; 64];
                                 }
                             }
                             4 => { let _ = sys::power_off(); }
@@ -208,23 +220,14 @@ pub extern "C" fn _start() -> ! {
                             note = "已注销";
                         } else if !logged && m.x >= 112 && m.x < 224 {
                             let op = if setup { 1 } else { 2 };
-                            let rc = sys::session(op, &username, user_len, &password, pass_len);
+                            let (rc, msg) = attempt(op, &username, user_len, &password, pass_len);
                             if rc == 0 {
                                 logged = true;
                                 setup = false;
-                                note = if op == 1 { "账户已创建并登录" } else { "登录成功" };
-                                pass_len = 0;
-                                password = [0; 64];
-                            } else {
-                                note = match rc {
-                                    -2 => "账户已存在或尚未创建",
-                                    -3 => "尝试次数过多，请稍后再试",
-                                        -4 => "需要可写持久 NovusFS 磁盘才能创建账户",
-                                    _ => "登录失败：检查用户名和密码",
-                                };
-                                pass_len = 0;
-                                password = [0; 64];
                             }
+                            note = msg;
+                            pass_len = 0;
+                            password = [0; 64];
                         }
                     } else if m.y >= 192 && m.y < 222 {
                         if m.x >= 112 && m.x < 208 { let _ = sys::power_off(); }
@@ -233,7 +236,21 @@ pub extern "C" fn _start() -> ! {
                     draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
                 }
                 wm::Ev::Key(key, _mods) => {
-                    if key == KEY_ENTER || key == wm::KEY_TAB {
+                    /* B-42: Enter is the submit key, not just a focus switch.
+                     * In the password field it behaves exactly like pressing
+                     * 登录; in the username field it still moves to the
+                     * password. Tab keeps cycling. */
+                    if key == KEY_ENTER && focus == 1 && !logged {
+                        let op = if setup { 1 } else { 2 };
+                        let (rc, msg) = attempt(op, &username, user_len, &password, pass_len);
+                        if rc == 0 {
+                            logged = true;
+                            setup = false;
+                        }
+                        note = msg;
+                        pass_len = 0;
+                        password = [0; 64];
+                    } else if key == KEY_ENTER || key == wm::KEY_TAB {
                         focus = 1 - focus;
                     } else if key == KEY_BACK {
                         if focus == 0 { erase(&mut username, &mut user_len); }
@@ -251,6 +268,7 @@ pub extern "C" fn _start() -> ! {
         if sys_port != 0 && ui::poll(sys_port) {
             draw(&mut win, &username, user_len, pass_len, focus, setup, logged, note, &menu);
         }
-        sys::yield_now();
+        /* B-39: block for a tick between event polls instead of spinning. */
+        sys::sleep_ticks(1);
     }
 }

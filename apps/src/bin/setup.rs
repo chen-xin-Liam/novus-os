@@ -981,6 +981,12 @@ pub extern "C" fn _start() -> ! {
         if app.sys_port != 0 && ui::poll(app.sys_port) {
             draw(&mut app);
         }
-        sys::yield_now();
+        /* B-39: this loop used to yield_now() every pass, i.e. spin at ring3
+         * speed with nothing to do. While the installer is actually running
+         * `install::step()` is the work and must not be throttled, so only
+         * rest when no step is in flight. */
+        if !app.started {
+            sys::sleep_ticks(1);
+        }
     }
 }
