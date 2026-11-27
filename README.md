@@ -1,536 +1,161 @@
-# Novus OS V1.6 完整技术规范文档（冻结正式版 · 共19部分）
-> 项目名称：Novus OS
-> 目标平台：x86_64 UEFI
-> 开源协议：GPLv2
-> 最低内存：2GiB；推荐内存：8GiB
-> 编译体系：借鉴Linux Kbuild/Makefile，模块化可选编译
-> 开发语言：内核主体C，部分模块Rust；用户态C++98、MicroPython
-> 约束：**不依赖任何外部开源项目**，全部自研
-> 可执行原生格式：`.nuc`，内核原生支持；M4 NUC loader 将 x86_64 原生机器码映射到 ring 3 执行，无独立 nucvm
-> 图形：自研NovusDisplay图形栈，VGA兜底 + DP高清输出；Novus-WM窗口管理器，配套IPC协议
-> 文件系统：NovusFS，带WAL事务日志、Merkle树完整性校验、fsck工具
-> 安全：NKM内核模块签名（Ed25519），CAP权限模型
-> 兼容层：自研Win32兼容层，支持EXE加载、注册表模拟
-> 内置应用：GUI桌面、命令行终端、任务管理器、磁盘管理器、系统设置（仿Windows设置）、文件管理器、计数器等，源码存放于`system/`目录
-> AP核修正：SMP两阶段启动。A核=BSP，负责早期硬件自检、Merkle树校验；自检完成后A核休眠；B核=AP，加载并运行主内核；用户高级设置可控制关闭A核。
+# Novus OS
+
+**一个从零自研的 x86_64 UEFI 桌面操作系统。**
+
+内核、文件系统、图形栈、窗口管理器、可执行格式、模块签名、更新体系——全部自研，不依赖外部开源项目。GPLv2 开源。
+
+> 当前基线：**V1.6-FinalSpec（冻结正式版）** · 开发阶段：M0–M12 已铺开，部分能力仍在演进
+> 最低 2 GiB 内存（推荐 4–8 GiB） · QEMU/OVMF 可运行 · 详细状态见 [ROADMAP.md](ROADMAP.md)
 
 ---
 
-### 运行图片：
+## 为什么关注 Novus OS
 
-![引导](\docs\pic\image-20261024193249509.png)
-
-![桌面](\docs\pic\image-20261024192858114.png)
-
-![设置](\docs\pic\image-20261024193146582.png)
-
-![网络管理器](\docs\pic\image-20261024193225826.png)
-
-![文件管理器](\docs\pic\image-20261024193441675.png)
-
-## 第1部分 项目概述与顶层需求
-
-### 1.1 项目定位
-从零自研x86_64 UEFI操作系统Novus OS，目标媲美主流桌面操作系统。自研内核、自研文件系统、自研图形栈、自研窗口管理器、原生`.nuc`可执行程序，配套Win32兼容层运行Windows EXE。
-模块化设计，Make+Kbuild体系，可选择性编译模块，多人协作开发，GPLv2开源。
-
-### 1.2 硬件规格冻结
-- 架构：x86_64，UEFI启动
-- 最低内存：2GiB（低于2GiB拒绝启动）
-- 内存模式自动判定：
-  - 2GiB ~ 6GiB：LowMem低内存模式，关闭部分图形特效，限制后台进程数量
-  - ≥6GiB：Full满血模式，全部图形、多线程、全部子系统启用
-  - 运行时不可动态切换图形模式
-- 显示输出：VGA作为兜底输出，DP支持高分辨率输出，自研NovusDisplay图形子系统
-- 存储（M3，冻结）：所有设备经UEFI Block I/O抽象，不区分控制器——IDE、AHCI/SATA、
-  NVMe（含4Kn，即4096字节逻辑块）、USB与光驱均走同一`blkdev_t`接口；上层一律按
-  512字节扇区寻址，块大小不同的设备由后端自行切分
-- 启动介质（M3，冻结）：ISO 9660 + El Torito，内嵌ESP作为UEFI标准的no-emulation启动
-  镜像；同一ESP的内容另以目录树发布在ISO中（/EFI/BOOT/BOOTX64.EFI、/SYSTEM.IMG、
-  /ESP.IMG），固件与挂载镜像的人都能直接看到引导路径；ISO系统区内置isohybrid分区表，
-  因此同一镜像写入U盘后亦可被固件识别启动
-
-- 应用工具链（Mochi → NUC）：`user/mochi`子模块提供Lisp风格语言Mochi与其NUC原生
-  格式工具链，由`CONFIG_USER_MOCHI`控制；构建期把`.mochi`源码编译为NUC应用并即时
-  校验，产物随live ESP打包为`APPS/DEMO.NUC`。格式见
-  `docs/NUC 可执行二进制格式规范 V1.0.md`。M4内核NUC加载器已实现；M7的
-  `user/cppcc` 可由 `CONFIG_USER_CPPCC` 启用并构建 C++98 smoke 程序。
-
-- 调度器与进程（M4）：GDT/TSS + IDT（0-31异常向量，32=LAPIC定时器），每任务独立
-  页表与64 KiB内核栈；时钟中断驱动的时间片轮转（默认4 tick/片），不主动让出的纯计算
-  任务同样会被抢占；系统调用经x86_64 `syscall`门（EFER.SCE/STAR/LSTAR/FMASK），已提供
-  yield/write/exit；NUC加载器按规范§9映射段、重定位并进入ring3，用户态异常只终止该
-  进程、内核继续运行。由`CONFIG_NOVUS_SCHED`控制
-
-### 1.3 顶层功能清单
-1. 两阶段SMP启动（A核BSP自检，完成休眠；B核AP主内核）
-2. 内存管理、虚拟内存、OOM内存保护
-3. NovusFS自研文件系统（WAL日志、Merkle完整性校验、fsck）
-4. NKM内核模块机制，Ed25519签名校验
-5. CAP细粒度权限模型（128位权限掩码）
-6. `.nuc`原生可执行格式，内核加载器映射并运行 x86_64 原生机器码
-7. 系统调用ABI，用户态/内核态隔离
-8. Novus-WM窗口管理器 + 自研IPC通信协议
-9. NovusDisplay图形栈，GUI渲染、窗口特效
-10. 终端命令行CLI，原生GUI桌面
-11. 内置系统套件：文件管理器、任务管理器、磁盘管理器、系统设置（仿Windows）、计数器
-12. Win32兼容层：支持EXE加载、模拟Windows注册表
-13. 用户态运行环境：C++98、MicroPython支持
-14. 模块化编译系统，Kbuild+Make，按需编译模块
-15. 驱动子系统（VGA/DP、存储、PCI）
-16. 多线程、多进程调度器
-17. 错误容错机制：程序bug隔离，异常捕获，报错自动展示，内核核心崩溃保护
-18. 开机引导、自定义开机Logo
-19. 应用打包与软件安装体系，自研应用API
-
-### 1.4 约束规则
-1. 所有底层代码自研，不引入外部开源项目内核/库
-2. 模块解耦，依赖关系严格单向，禁止循环依赖
-3. 二进制规范、数据结构全部冻结，ABI稳定，同一主版本向下兼容
-4. 所有磁盘存储结构、哈希、签名规则统一（已修正NKM哈希冲突）
+| 亮点 | 说明 |
+|---|---|
+| **完全自研的内核态到用户态** | C 内核 + Rust `no_std` 内置应用；抢占调度、每进程独立页表、系统调用 ABI 冻结 |
+| **自己的文件系统** | NovusFS：预写日志（WAL）、Merkle 完整性校验、双超级块、fsck 修复优先级 |
+| **自己的图形栈** | NovusDisplay：UEFI GOP 多输出、离屏合成、全 Unicode 字形、中文拼音输入法、Fluent 主题 |
+| **自己的窗口协议** | Novus-WM 2.0：窗口管理、IPC 消息、Mini-DWM 表面重定向与零拷贝 flip |
+| **自己的可执行格式** | NUC：直接映射 x86_64 原生机器码到 ring 3，无虚拟机、无字节码解释器 |
+| **签名与更新体系** | NKM 内核模块 Ed25519 签名 + novu 分级增量更新（全量/热修/NPA/应用补丁） |
+| **兼容层原型** | Win32 PE32+ 加载器 + 141 条 API + 模拟注册表，可运行自包含 Windows 样例 |
+| **开发者友好** | 三条扩展模板（GUI 应用 / shell 命令 / Nuomi 脚本），改 2–4 处即可接入 |
 
 ---
 
-## 第2部分 SMP AP双核两阶段启动架构
-### 2.1 架构定义（冻结）
-- A核 = BSP（引导处理器）：开机第一核，负责UEFI基础初始化、硬件自检、Merkle树根哈希校验、内存探测。自检全部通过后，A核进入休眠。
-- B核 = AP（应用处理器）：A核唤醒B核，B核加载主内核，接管全部系统运行；用户高级设置中可配置关闭A核（自检直接跳过A核阶段）。
-- 共享内存区域：A核与B核通信、传递硬件信息、自检结果、Merkle树根哈希。共享内存区域固定预留，不受普通内存分配器管理。
+## 运行截图
 
-### 2.2 启动时序
-1. UEFI固件初始化，交出控制权到Novus引导程序
-2. A核（BSP）启动：内存扫描、硬件基础自检、读取NovusFS超级块、Merkle树校验系统分区
-3. 自检结果写入共享内存；发现严重错误，直接输出VGA报错界面，停止启动
-4. 无严重错误 → 唤醒B核(AP)
-5. B核加载主内核，初始化内存管理器、中断、调度器
-6. B核完成内核初始化，发送休眠指令给A核，A核进入休眠
-7. 后续所有任务、进程、中断全部由B核处理；若用户在高级设置关闭A核：跳过A核自检，B核直接启动内核
+| 引导 | 桌面 |
+|---|---|
+| ![引导](docs/pic/image-20261024193249509.png) | ![桌面](docs/pic/image-20261024192858114.png) |
 
-### 2.3 共享内存规范
-共享内存页预先保留，存放：硬件信息结构体、自检状态码、Merkle根哈希、用户A核开关配置标志、日志缓冲区。
-共享内存加自旋锁，多核访问保护，带锁超时与死锁兜底策略。
+| 设置 | 网络管理器 |
+|---|---|
+| ![设置](docs/pic/image-20261024193146582.png) | ![网络管理器](docs/pic/image-20261024193225826.png) |
+
+| 文件管理器 |
+|---|
+| ![文件管理器](docs/pic/image-20261024193441675.png) |
 
 ---
 
-## 第3部分 内存管理子系统
-### 3.1 内存分区
-物理内存划分为：
-1. 内核预留区：内核镜像、全局数据、共享内存
-2. Merkle树磁盘缓存区
-3. WAL日志内存缓存区
-4. 内核堆
-5. 用户态进程虚拟地址空间
-6. 设备MMIO映射区域
-
-### 3.2 内存模式策略
-- 2GiB ≤ RAM <6GiB：LowMem模式
-  - 缩减图形缓存
-  - 限制最大并发进程数量
-  - 禁用部分GUI特效
-  - OOM更早触发，优先杀掉用户应用，保护内核不崩溃
-- RAM ≥6GiB：Full满血模式，全部功能启用
-
-### 3.3 虚拟内存 & 内存保护
-x86_64 分页机制；内核态/用户态地址空间隔离。用户态程序内存错误不会直接崩溃内核。
-OOM管理器：内存耗尽时按进程优先级回收内存，弹窗提示用户内存不足。
-
-### 3.4 锁机制与死锁兜底
-多级自旋锁、互斥锁；自旋循环设置最大上限。
-锁超时策略：达到自旋上限，不再无限等待；可降级为单写者模式，避免死锁；严重死锁时输出内核错误日志，不直接panic（尽可能保持系统运行）。
-
----
-
-## 第4部分 NovusFS 自研文件系统
-### 4.1 核心能力
-WAL预写日志，事务原子性；Merkle树完整性校验；fsck文件系统检查修复；inode管理、目录项、块分配器。
-系统源码目录固定：`system/`，存放系统内置应用源代码。
-
-### 4.2 磁盘分区布局
-分区头部：超级块 → WAL日志区 → Merkle树存储区 → 数据块区。
-
-#### 4.2.1 WAL日志区（冻结规范）
-- 固定大小日志循环缓冲区
-- 日志条目头部魔数、TXID事务ID、事务类型、块号、数据长度、校验和
-- 循环覆盖判定：`wal_write_ptr == wal_tail_ptr`代表日志区已满
-- 日志满策略：推进`wal_tail_ptr`至**完整事务边界**，不截断事务
-- 日志区损坏判定：校验失败；日志严重损坏时系统拒绝进入Full满血模式，仅LowMem可用
-
-#### 4.2.2 Merkle树磁盘存储（冻结）
-> 修正：`tree_height = ceil(log2(leaf_count)) +1`
-- 节点大小固定64字节，连续存放
-- 每磁盘块存放64个Merkle节点
-- `node_to_block(idx)`：
-```
-块号 = merkle_start_block + idx / 64
-块内偏移 = (idx % 64) * 64
-```
-- 叶子节点、中间节点对齐规则；奇数叶子节点补齐填充。
-- 根哈希保存在NovusFS超级块；根哈希更新采用超级块双副本+版本计数器。事务失败时，回滚至旧超级块副本，保证原子写入。
-
-#### 4.2.3 fsck修复优先级
-1. 超级块损坏：尝试加载备份超级块，无法恢复则标记分区只读
-2. WAL日志损坏：放弃未提交事务，回滚到上一个稳定状态
-3. Inode损坏：隔离损坏inode，保留其余可用文件，输出错误报告
-
-### 4.3 文件系统API
-内核VFS抽象层，统一文件操作接口（open/read/write/close/stat/mkdir等），用户态通过系统调用访问VFS。
-
----
-
-## 第5部分 NKM 内核模块与Ed25519签名体系（已修复哈希冲突）
-> 【重要修订：统一哈希规则】
-NKM模块校验：SHA256哈希**排除头部内32B hash字段 + 64B sig签名字段**。
-校验前将hash[32]与sig[64]置0，计算模块剩余全部字节SHA256，与头部hash字段比对。
-
-### 5.1 NKM头部字段
-魔数、版本号、ABI版本、段数量、段表数组、符号表偏移、重定位表偏移、栈大小、compile_flag枚举。
-compile_flag标记模块编译选项（调试/发布、CPU特性、内存模式）。
-
-### 5.2 Ed25519签名规范
-- 签名算法：Ed25519
-- 内核内置多根公钥，支持密钥轮换
-- 加载NKM模块流程：读取NKM头部 → 清零hash与sig → 计算SHA256 → 比对头部hash → 验证Ed25519签名 → 校验通过才加载内核模块
-
-### 5.3 NKM模块生命周期
-加载 → 初始化 → 运行 → 卸载；模块异常捕获，模块崩溃不直接panic整个内核。
-
----
-
-## 第6部分 CAP权限校验模型
-CAP为128位权限掩码。前32位作为标准基础权限定义，剩余96位扩展权限。
-`cap_check()`系统调用，用于校验进程是否拥有指定权限。
-示例权限：文件系统原始访问、内核模块加载、图形驱动控制、修改系统设置、进程管理等。
-用户普通应用默认最小权限，系统内置应用拥有更高CAP权限。
-
----
-
-## 第7部分 NUC原生可执行文件格式
-`.nuc`是 Novus OS 的原生可执行文件格式，内核按冻结规范解析并加载其中的 x86_64 原生机器码。
-> 编译链路：受限 C++98 源码（可包含 cppcc 内置 `<novus/syscall.h>`）→ Rust 主机工具 cppcc → `app.nuc`
-> cppcc 流程：预处理 → 词法分析 → 语法分析 → 语义检查 → 带类型 AST → x86_64 codegen → nucgen
-> NUC loader 在用户地址空间映射段、应用镜像内重定位后进入 ring 3；没有独立用户态 nucvm 或字节码解释器。
-> 当前集成执行路径：boot-stage 从 ESP 固定路径 `APPS/DEMO.NUC` 暂存程序，内核 `kmain` 调用 `nuc_load`。通用 shell `./app.nuc` 执行路径尚未实现。
-
-M7 cppcc 主机工具由 `CONFIG_USER_CPPCC` 控制：`make cppcc` 构建编译器，
-`make cppcc-demo` 生成 `out/cppcc/hello.nuc`。`make run` 会将 smoke 程序
-复制到 vvfat ESP 的 `APPS/DEMO.NUC` 后启动 QEMU；boot-stage 会把它暂存到
-shared memory，再由 `kernel/kmain.c` 调用 NUC loader。端到端说明见
-`docs/cppcc 构建与端到端验证.md`。
-
-### 7.1 NUC头部冻结字段
-- 魔数标识
-- ABI版本号
-- entry_point：`.text`段内**字节偏移**；虚拟地址 `VA = text.vaddr + entry_point`
-- seg_count：段数量
-- 段表：每段包含段类型、虚拟地址、文件偏移、长度、权限
-- 符号表偏移、符号表长度
-- 重定位表偏移、重定位表长度
-- 栈大小
-- compile_flag 枚举标记
-
-### 7.2 NUC执行流程
-1. UEFI boot-stage 在 ExitBootServices 前读取 ESP 固定路径 `APPS/DEMO.NUC`
-2. boot-stage 将镜像复制到 reserved pages，并把地址/大小写入 shared memory
-3. `kernel/kmain.c` 在 scheduler 初始化后读取 shared memory 并调用 `nuc_load`
-4. loader 校验 `NUC!`、ABI 主版本、表边界、段与重定位
-5. 建立用户地址空间，映射 x86_64 原生机器码/数据段并应用镜像内 relocation
-6. 按 `entry_rip = text.vaddr + entry_point` 进入 ring 3；Hello `_start` 最终以 `SYS_EXIT` 退出
-
-通用 shell `exec` 任意 NUC 文件的路径尚未实现；当前自动加载点是 boot-stage 的固定 demo 文件。
-
----
-
-## 第8部分 系统调用ABI
-定义用户态与内核态交互标准ABI，x86_64 syscall/sysret入口。
-包含系统调用编号、参数传参规则、返回值、错误码规范。
-错误码统一定义，所有子系统复用同一套错误码枚举。
-系统调用权限前置校验，调用前执行CAP检查。
-
-当前实现保留既有编号 1-7 与 60；文件、目录、电源和会话调用只追加新编号：
-8 `open`、9 `read`、10 `fs_write`、11 `close`、12 `stat`、13 `opendir`、
-14 `readdir`、15 `mkdir`、16 `power_off`、17 `reboot`、18 `session`。
-编号 2 `write` 仍是串口日志输出，不改变旧语义。详细参数和结构见
-[`docs/用户会话与文件API.md`](docs/用户会话与文件API.md)。
-
----
-
-## 第9部分 进程、线程与调度器
-- 支持多进程、多线程，抢占式调度
-- 进程隔离：独立虚拟地址空间
-- 线程：共享进程地址空间，独立栈与上下文
-- 进程异常处理：用户态程序发生内存越界、非法指令，内核捕获异常，弹出报错窗口，可终止进程，**不崩溃内核**（满足需求：bug下继续运行，自动展示问题）
-- 任务管理器读取进程列表、CPU占用、内存占用、进程状态，通过系统调用获取信息。
-
----
-
-## 第10部分 Novus-WM 窗口管理器 & IPC协议完整定义
-### 10.1 Novus-WM定位
-Novus OS原生窗口管理器，GUI桌面的核心，管理窗口、层叠、焦点、渲染区域，与NovusDisplay图形栈交互。
-使用自研IPC协议，用户GUI程序与WM之间通信，无外部依赖。
-
-### 10.2 IPC协议概述
-点对点消息通信，内核辅助IPC消息队列。消息由头部+载荷+校验和构成。
-消息类型：窗口创建、窗口销毁、重绘请求、鼠标事件、键盘事件、窗口大小调整、焦点变更、GUI特效指令。
-
-### 10.3 IPC消息头部伪代码
-```
-struct IpcMsgHeader {
-  uint32_t magic;
-  uint16_t msg_type;
-  uint16_t flags;
-  uint64_t sender_pid;
-  uint64_t target_pid;
-  uint32_t payload_len;
-  uint32_t checksum;
-}
-```
-消息支持同步/异步两种模式。IPC队列有长度上限，防止消息洪水攻击。
-
-### 10.4 窗口管理能力
-窗口移动、缩放、最小化、最大化、置顶、窗口透明特效；窗口裁剪，避免窗口越界渲染。
-
-> M6 已实现：内核 IPC（端口/有界队列/校验和/阻塞接收）与 Novus-WM
-> （窗口表、Z序、焦点、输入路由、双缓冲合成、协议服务端）。
-> 具体调用号、消息类型、载荷布局与错误码见
-> `docs/Novus-WM 与 IPC 协议规范 V1.0.md`，代码在 `kernel/ipc.c`
-> 与 `wm/novus-wm/`。
-
----
-
-## 第11部分 NovusDisplay 自研图形子系统
-### 11.1 硬件后端
-- VGA：最低兜底显示，任何显卡都可以输出开机自检、报错界面
-- DP：高分辨率高清输出，现代显卡主显示通道
-- 硬件抽象层HAL：统一显卡驱动接口，隔离VGA/DP硬件差异
-
-### 11.2 图形渲染栈分层
-1. 内核图形HAL层：直接操作帧缓冲、显卡寄存器
-2. NovusDisplay核心渲染器：2D基础绘制、矩形、线条、文字、位图
-3. GUI控件库（用户态）：窗口、按钮、文本框、滑块、列表、树形控件
-4. 应用层：应用调用GUI API绘制界面
-
-### 11.3 图形API支持
-自研原生GUI API；完整支持 OpenGL、OpenCL、Vulkan、DX11、DX12（驱动层适配）。
-内置GUI动画特效：窗口淡入淡出、窗口阴影、平滑缩放。
-
-### 11.4 开机画面
-UEFI引导后，显示自定义开机Logo，进度条，自检状态文字；自检失败切换VGA报错界面。
-
----
-
-## 第12部分 终端CLI + 用户态运行环境
-1. Novus Shell 命令行解释器，内置基础命令（ls、cd、cat、mkdir等）
-2. 用户态语言支持：
-   - C++98：cppcc编译器编译输出.nuc原生程序
-   - MicroPython：用户态MicroPython运行时，可编写脚本应用，可调用Novus原生GUI API
-3. 应用两种形态：编译后的`.nuc`原生二进制；MicroPython脚本应用。
-4. 内置安全守护 `novusd`（源码 `user/novusd`）：常驻后台，提供 EICAR 签名检测、按需/定时扫描、隔离、增量更新与目录快照监控；在 nsh 中用 `novusd status|selftest|scan <path> [--quarantine]|quarantine ...|update <pkg>|schedule <path> <ms>|monitor [ms]|sandbox <app>` 调用。命令经 `/temp/novusd/req.bin`、`rsp.bin` 传递（内核 spawn 无 argv）。安全日志写入 `/Novus/logs/security/novusd.log`，详见 `docs/NovusDefender 内置应用.md`。
-
----
-
-## 第13部分 系统内置GUI应用套件
-源码统一存放于源码树 `system/` 文件夹，全部基于Novus GUI API开发。
-目录细分：
-```
-system/
-├── counter/        # 计数器
-├── settings/       # 系统设置（仿Windows设置）
-├── taskmgr/        # 任务管理器
-├── diskmgr/        # 磁盘管理器
-├── filemgr/        # 文件管理器
-├── terminal/       # 图形终端
-└── common_ui/      # 内置应用共用UI组件
-```
-#### 13.1 任务管理器
-- 查看全部进程、线程列表
-- CPU使用率、内存占用、磁盘IO统计
-- 结束进程、查看进程详细报错信息
-- 进程树展示
-
-#### 13.2 磁盘管理器
-- 查看分区、文件系统状态
-- NovusFS检查、格式化、挂载/卸载分区
-- 磁盘健康信息、容量占用可视化
-
-#### 13.3 系统设置（仿Windows设置）
-分类页面：
-- 系统：内存模式、A核开关、系统信息、日志查看
-- 显示：分辨率、刷新率、图形特效开关
-- 存储：磁盘管理入口
-- 安全：签名校验、权限管理
-- 开发者选项：内核调试、日志输出、模块加载开关
-
-#### 13.4 文件管理器
-目录浏览、复制、移动、删除、重命名，预览图片文本，挂载存储设备。
-
-#### 13.5 计数器
-简单GUI计数工具，演示原生GUI应用开发范例。
-
----
-
-## 第14部分 Win32兼容子系统
-独立用户态模块，**不依赖Wine等外部项目**，完全自研。
-目标：加载Windows `.exe`程序，模拟Windows注册表、Win32 API子集。
-1. EXE解析器：解析PE文件头，映射到Novus地址空间
-2. Win32 API模拟层：实现基础窗口、文件、内存API
-3. 注册表模拟：NovusFS上存储注册表键值，提供注册表读写API
-4. 限制：仅支持目标子集API；不保证全部Windows软件可运行。
-5. 与原生Novus应用隔离，兼容层应用拥有独立CAP权限组。
-
----
-
-## 第15部分 驱动子系统
-模块化PCI、存储、VGA、DP驱动。驱动编译为NKM内核模块，按需加载。
-驱动抽象层，统一硬件接口；驱动故障隔离，单个驱动崩溃不宕机内核。
-
----
-
-## 第16部分 构建系统（Makefile + Kbuild，借鉴Linux）
-### 16.1 核心思想
-模块化，**可选编译**。每个模块拥有Kconfig配置项，打开/关闭对应模块。
-顶层Makefile递归调用子目录Makefile；仅编译选中模块，缩减最终内核镜像大小。
-
-### 16.2 源码目录总结构（简化树）
-```
-novus-os/
-├── arch/x86_64/        # x86_64架构相关汇编、启动代码
-├── kernel/             # 内核核心：调度、内存、SMP、系统调用
-├── fs/novusfs/         # NovusFS、WAL、Merkle树、标准根目录树
-├── fs/fat/             # 只读 FAT12/16/32 卷（ESP / U 盘）
-├── fs/iso9660/         # 只读 ISO9660 + Joliet 卷（光盘）
-├── fs/vfs_mount.c      # 多挂载点表与跨卷路径解析
-├── security/           # CAP权限、NKM签名校验
-├── drivers/            # VGA/DP、PCI、存储驱动
-├── graphics/           # NovusDisplay图形栈
-├── wm/novus-wm/        # 窗口管理器+IPC
-├── lib/                # 内核通用库（C/Rust混合）
-├── tools/              # 主机端镜像工具（mkfat/mkiso/mkfsnovus/mkdisk/nkmgen）
-├── apps/               # 用户态内置应用（Rust no_std，编进内核镜像）
-├── templates/          # 开发模板：GUI 应用 / nsh 内建命令 / Nuomi 脚本
-├── user/
-│   ├── shell/          # novus shell
-│   ├── cppcc/          # C++98编译器（Rust编写，主机端工具）
-│   ├── micropython/    # MicroPython用户态运行时
-│   ├── win32compat/    # Win32兼容层
-│   └── system/         # 系统内置应用（任务管理器/设置等）
-├── scripts/            # Kbuild脚本、工具链脚本
-├── configs/            # 默认配置文件（lowmem.config / full.config）
-├── Makefile            # 顶层Makefile
-└── Kconfig             # 全局模块配置
-```
-
-### 16.3 编译工作流
-1. `make menuconfig`：图形化配置，勾选需要编译的模块
-2. 生成`.config`配置文件
-3. make开始编译，仅编译启用模块
-4. 输出：UEFI引导镜像 + 内核 + 内置应用 + NKM模块
-5. `make iso` 生成三套镜像后，`make check-rootfs` 校验 ISO（主描述符 + Joliet）、ESP（FAT 8.3）与系统盘（NovusFS）的目录树、字体路径和 `.novusfs` 元数据
-
-### 16.4 语言混合编译规则
-C代码、Rust代码分开编译，通过FFI边界交互；Rust代码集中在图形、驱动、编译器模块。
-编译产出物统一打包到系统镜像。
-
----
-
-## 第17部分 错误容错与日志子系统
-核心目标：应用bug尽量不宕机内核，自动展示问题。
-1. 用户态异常捕获：非法访问内存、除零、非法指令，内核捕获，生成错误报告
-2. 错误弹窗GUI展示：程序崩溃弹窗，显示错误类型、调用栈、进程信息
-3. 全局日志系统：内核环形日志缓冲区，日志持久化写入NovusFS日志分区
-4. 内核轻微错误不触发panic；严重内核错误才触发panic并输出VGA崩溃页面
-
----
-
-## 第18部分 安全模型与威胁边界
-1. NKM模块Ed25519签名，未签名内核模块禁止加载
-2. CAP最小权限原则，进程默认权限受限
-3. Merkle树校验系统分区，检测文件篡改
-4. 用户态应用不能直接访问内核内存
-5. A核自检阶段检测系统文件完整性，篡改直接停止启动
-
----
-
-## 第19部分 开发里程碑与多人协作规范
-### 19.1 里程碑M0~M10
-- M0：最小UEFI引导，A核BSP基础启动，VGA文本输出🆗
-- M1：基础内存管理器、分页、SMP唤醒B核🆗
-- M2：NovusFS最小版本，WAL基础实现🆗
-- M3：Merkle树校验，NKM模块加载基础框架🆗
-- M4：基础调度器、进程创建、基础系统调用🆗
-- M5：NovusDisplay基础2D图形，GUI控件基础库🆗
-- M6：Novus-WM窗口管理器，IPC协议完整实现🆗
-- M7：cppcc C++98 子集前端与 x86_64/NUC 后端已实现；构建入口和 Hello 样例见 `docs/cppcc 构建与端到端验证.md`
-- M8：内置系统应用（文件管理器、任务管理器、设置面板）🆗
-
-> M9 的 Win11 桌面/中文部分已实现：桌面改为 Windows 11 风格（圆角窗口、居中悬浮任务栏、开始菜单、
-> 桌面磁贴），界面全中文，文本框支持拼音输入法。字形与字典由
-> `tools/fontgen` / `tools/imegen` 离线生成并提交为 C 源码，构建不依赖宿主
-> 字体。说明见 `docs/中文支持与 Win11 桌面.md`。
->
-> M8 已实现：内置应用为 Rust 程序（`apps/`），编译成扁平 NUC 镜像内嵌
-> 进内核；会话管理器先启动，登录后再启动桌面应用，任务栏可再拉起；数据来自内核 sysinfo 服务
-> （端口 `"sys"`），窗口内容走 Novus-WM 协议 1.1 的显示列表
-> （CLEAR/SHAPE/TEXT，最后必须 INVALIDATE 才会提交整帧）。说明见 `docs/M8 内置系统应用.md`。M7 编译器在 M8 开发当时暂缓，现已补齐 cppcc。
->
-> M10 已实现：Novus Fluent 统一令牌（浅色 / 深色 / 跟随时间）、圆角显示列表图元，
-> 壳层与全部内置应用适配；安装菜单进入内核图形环境后运行六页安装向导
-> （磁盘判定、二次确认、分步进度、Merkle 校验）。设计见
-> `docs/Novus UI 设计语言规范 V1.0.md`，流程与 ABI 见
-> `docs/图形安装向导设计与实现.md`。
->
-> M11 阶段 1 已实现：live 启动免登录、安装后首次建账户；中英双语即时切换与
-> 持久化；安装器扩展为语言 / 协议 / 磁盘 / 方案 / 确认 / 进度七页。说明与
-> 未完成项（USB 批量传输、多显示器镜像）见
-> `docs/多语言、会话与 M11 输入输出.md`。
->
-> M9 Win32 兼容层原型已实现：PE32+ 加载器把 .exe 映射到 `0x50000000`，应用
-> DIR64 基址重定位并按名称填充 IAT；每个 API 是一条 32 字节 `syscall` thunk
-> （系统调用号 40），只放行 `SYS_WIN32` 与 `SYS_EXIT`。首批 15 个 API 覆盖
-> 控制台输出、计时、`Sleep` 与模拟注册表（持久化到
-> `/Novus/wincompat/system32/registry.cfg`）。样例
-> `hello.exe` 由 `make` 交叉编译并内嵌，文件管理器 `/exe` 标签可选中运行。
-> 说明见 `docs/M9 Win32 兼容层原型.md`。
-- M9：Win32兼容层原型 🆗
-- M10：全系统整合，镜像打包，系统稳定性测试
-
-
-
-#### 启动与交互回归
+## 快速开始
 
 ```sh
-bash scripts/display-selftest.sh
-python3 -m unittest discover -s scripts -p qemu_smoke_test.py
-make disk-img
-bash scripts/qemu-smoke.sh
-bash scripts/qemu-smoke.sh --no-root --output out/qemu-smoke-no-root
+# 依赖（Ubuntu/Debian）
+sudo apt install -y build-essential gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64 \
+  binutils-mingw-w64-x86-64 mingw-w64 qemu-system-x86 ovmf python3 xxd
+rustup target add x86_64-pc-windows-msvc
+rustup target add x86_64-unknown-none
+
+# 构建并启动
+make
+make run
 ```
 
-QEMU 冒烟需要 Python 3.8+、QEMU 和 OVMF，客体分配 2 核、3 GiB 内存。
-可用 `QEMU_BIN`、`OVMF_CODE`、
-`OVMF_VARS`（或 `--qemu`、`--code`、`--vars`）指定路径。测试使用临时固件变量和
-`-snapshot`，不会修改源磁盘镜像或保存测试账户。VNC 仅监听 `127.0.0.1:5901`
-（可用 `--vnc-display` 调整）；端口占用会直接报错，不会连接别人的虚拟机。
-部分 Windows QEMU 发行版不识别中文文件路径：可用 `subst` 挂载 ASCII 盘符，
-从该盘符启动脚本，并给固件、镜像和可写临时目录使用 ASCII 路径；脚本会保留盘符。
-
-脚本检查 ND / HEAP 自检、live root 和壁纸启动标记，以及内核 fault / 自检失败；
-无系统分区模式改查字体降级标记。客体启用 VMware mouse 绝对坐标协议后，
-还必须收到 RFB 绝对指针能力，才执行建账户、磁贴、开始菜单、应用启动与键盘输入。
-会话 / 文件管理器 / 任务管理器 / 设置 / 网络 / 终端截图和串口日志写入输出目录。
-
-基线在 `scripts/baselines/qemu/{disk,no-root}`；缺失或不匹配均失败，不会自动放行。
-首次建立或有意更新 UI 时使用 `--update-baseline`，检查输出截图后再提交基线；
-普通回归不得携带该选项。比较只覆盖固定布局区域，排除时钟、进程计数等动态内容，
-默认允许每通道差值 8、最多 0.2% 像素变化；`--tolerance` / `--max-changed`
-可明确调整。只接受脚本生成的无损 RGB PNG 基线。
-
-内存与资源降级：`kmalloc` 在共享的 256 MiB 虚拟窗口中按需映射独立物理页，
-映射失败会回收已分配页，释放后虚拟范围可复用；DMA 缓冲仍须显式走 PMM。
-构建从已有字体数据提取界面用字，内嵌一个最小字模；没有系统分区时仍可显示
-界面中文与默认配色桌面，完整 Unicode 字库随后可从系统分区加载。
-壁纸采用三项 LRU 的屏幕尺寸 surface 缓存，模式切换清空缓存，失败保留原图。
-
-### 19.3 开源规则
-GPLv2协议；提交者保留版权，项目遵循GPLv2条款分发；所有修改源码必须开源。
+看到 `[ND] demo desktop painted` 和 `[HALT] entering the scheduler` 就算启动成功。
+完整环境、目标列表与故障排查见 [BUILD.md](BUILD.md)。
 
 ---
+
+## 文档地图（按目的阅读）
+
+| 我想… | 去这里 |
+|---|---|
+| 了解系统怎么分层、数据怎么流 | [ARCHITECTURE.md](ARCHITECTURE.md) |
+| 知道哪些功能已完成、哪些还没做 | [ROADMAP.md](ROADMAP.md) |
+| 查某个术语/缩写/模块名是什么意思 | [GLOSSARY.md](GLOSSARY.md) |
+| 查已实现的 ABI（系统调用、NUC、NKM、IPC） | [ABI.md](ABI.md) |
+| 查硬件/格式/语言兼容性矩阵 | [COMPATIBILITY.md](COMPATIBILITY.md) |
+| 查版本变更与 **ABI BREAK 高亮** | [CHANGELOG.md](CHANGELOG.md) |
+| 学会构建、打包、运行与验证 | [BUILD.md](BUILD.md) |
+| 开始贡献代码 | [CONTRIBUTING.md](CONTRIBUTING.md) |
+| 查代码风格（C/Rust） | [CODESTYLE.md](CODESTYLE.md) |
+| 了解社区行为准则 | [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) |
+| 报告安全问题 / 查安全边界 | [SECURITY.md](SECURITY.md) |
+| 查冻结格式规范（NUC/NKM/NUP/INS/IPC/更新） | [docs/](docs/) |
+
+> **给新人**：建议顺序为 [GLOSSARY.md](GLOSSARY.md) → [ARCHITECTURE.md](ARCHITECTURE.md) → [BUILD.md](BUILD.md) → [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+---
+
+## 当前状态一览
+
+| 里程碑 | 主题 | 状态 |
+|---|---|---|
+| M0–M6 | 引导、内存、文件系统、Merkle、调度、图形、IPC/WM | 已完成 |
+| M7 | cppcc C++ 子集编译器 | 已完成基础，C++11 核心补全进行中 |
+| M8 | 内置系统应用（文件/任务/设置/网络/会话/终端） | 已完成 |
+| M9 | Win32 兼容层原型 + Win11 中文桌面 | 原型完成，能力边界见文档 |
+| M10 | Fluent 主题 + 图形安装向导 | 已实现 |
+| M11 | 多语言、会话分流、USB/显示 I/O | 阶段 1 完成 |
+| M12 | 设备管理器 + Mini-DWM | 已实现 |
+
+**重要边界**（详见 [ROADMAP.md §4](ROADMAP.md) 与 [SECURITY.md §5](SECURITY.md)）：
+
+- 不是 Secure Boot；CAP 最小权限、端口强鉴权、硬件 TRNG 仍是规范目标。
+- 单 TCP 会话、DNS 单事务、无线仅识别；无硬件 2D、无 vblank 中断。
+- 通用 `./app.nuc` exec 尚未实现，当前只有 boot-stage 固定 demo。
+
+---
+
+## 架构一瞥
+
+```mermaid
+flowchart TB
+    APP["用户态（ring 3）<br/>内置应用 · nsh · Nuomi · cppcc · novusd"]
+    ABI["syscall ABI · IPC 端口"]
+    KERN["内核（ring 0）<br/>调度 · 内存 · NovusFS/VFS · 网络 · 图形 · Win32"]
+    FW["UEFI 固件<br/>GOP / Block I/O / 内存表"]
+    HW["x86_64 硬件"]
+    APP --> ABI --> KERN --> HW
+    FW --> KERN
+```
+
+完整分层、启动顺序、数据流与镜像结构见 [ARCHITECTURE.md](ARCHITECTURE.md)。
+
+---
+
+## 设计原则
+
+1. **全部自研**：不引入外部开源内核/库（Unifont 字形数据是已记录例外）。
+2. **单向依赖**：模块解耦，禁止循环依赖；驱动与协议分层清晰。
+3. **ABI 冻结**：NUC/NKM/NUP/INS/IPC 等格式字段与版本冻结，同主版本向下兼容。
+4. **故障降级**：用户程序 bug 不拖垮内核；轻微错误 WARN 继续运行，不轻易 panic。
+5. **诚实记录**：未完成项、已知限制、文档与代码冲突都要写明，不把规范目标说成已实现。
+
+---
+
+## 目录结构速览
+
+```text
+arch/x86_64/   UEFI 入口、引导阶段、AP 跳板、汇编桩
+kernel/        调度、syscall、内存、驱动、网络、Win32/PE、安装
+fs/            VFS、NovusFS、FAT、ISO9660、ext4
+security/      NKM 签名、TLS、更新校验、CA bundle
+graphics/      NovusDisplay、控件库、桌面、字体、主题、IME
+wm/novus-wm/   窗口管理器与协议服务端
+apps/          Rust no_std 内置应用、nsh、Nuomi
+user/          Nuomi_pl、cppcc、win32compat、novusd
+tools/         主机端镜像/打包/签名/生成器
+scripts/       自检、QEMU 测试、镜像检查、本地 CI
+docs/          设计与冻结格式规范
+```
+
+根目录没有 `system/`、`drivers/`、`user/shell/`——那是早期规划，真实布局以 [CONTRIBUTING.md §1.2](CONTRIBUTING.md) 为准。
+
+---
+
+## 参与贡献
+
+- 先读 [CONTRIBUTING.md](CONTRIBUTING.md)：环境、验证矩阵、PR 规范。
+- 新人可从 [templates/](templates/) 的三条扩展路径入手，不必先读内核。
+- 代码风格见 [CODESTYLE.md](CODESTYLE.md)；社区规范见 [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md)。
+- 安全问题**不要**公开贴细节，按 [SECURITY.md](SECURITY.md) 私下报告。
+
+---
+
+## 许可
+
+GPLv2。提交者保留版权，所有修改源码按项目条款开源。详见 [LICENSE](LICENSE) 与 [COPYING](COPYING)。
