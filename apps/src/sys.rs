@@ -288,3 +288,63 @@ pub fn dwm_query(q: &mut DwmQuery) -> i64 {
 pub fn set_mode(mode: u32) -> i64 {
     call(SYS_SET_MODE, mode as u64, 0, 0, 0)
 }
+
+/* ---- Simple 3D engine (kernel/gfx3d.h, syscalls 38-39) ---------------- */
+
+pub const SYS_GFX3D_DRAW: u64 = 38;
+pub const SYS_GFX3D_QUERY: u64 = 39;
+
+pub const GFX3D_F_CLEAR: u32 = 0x01;
+pub const GFX3D_F_DEPTH: u32 = 0x02;
+pub const GFX3D_F_CULL: u32 = 0x04;
+pub const GFX3D_F_SHADE: u32 = 0x08;
+
+/// One 16.16 fixed-point vertex. Colours are 0xAARRGGBB.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct Gfx3dVertex {
+    pub x: i32,
+    pub y: i32,
+    pub z: i32,
+    pub color: u32,
+}
+
+/// Triangle batch descriptor mirroring the kernel ABI.
+#[repr(C)]
+pub struct Gfx3dCmd {
+    pub target: u32,
+    pub flags: u32,
+    pub x: u32,
+    pub y: u32,
+    pub w: u32,
+    pub h: u32,
+    pub vertices_va: u32,
+    pub count: u32,
+    pub matrix: [i32; 16],
+    pub light: [i32; 3],
+    pub clear: u32,
+    pub pad: u32,
+}
+
+#[repr(C)]
+pub struct Gfx3dQuery {
+    pub available: u32,
+    pub intel_ready: u32,
+    pub intel_gen: u32,
+    pub max_vertices: u32,
+    pub max_pixels: u32,
+    pub backend: u32,
+    pub triangles: u32,
+    pub reserved: u32,
+}
+
+/// Rasterise `cmd.count / 3` triangles into the vidmem object `cmd.target`.
+/// Returns the number of triangles submitted, or a negative error code.
+pub fn gfx3d_draw(cmd: &Gfx3dCmd) -> i64 {
+    call(SYS_GFX3D_DRAW, cmd as *const Gfx3dCmd as u64, 0, 0, 0)
+}
+
+pub fn gfx3d_query(q: &mut Gfx3dQuery) -> i64 {
+    call(SYS_GFX3D_QUERY, q as *mut Gfx3dQuery as u64,
+         core::mem::size_of::<Gfx3dQuery>() as u64, 0, 0)
+}

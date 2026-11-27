@@ -35,6 +35,7 @@
 #include "pe32.h"
 #if CONFIG_NOVUS_DWM
 #include "dwmsys.h"
+#include "gfx3d.h"
 #endif
 #include "novu_format.h"
 #include "novu_service.h"
@@ -1130,6 +1131,8 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_SET_CURSOR, "set_cursor", dwm_sys_set_cursor},
     {SYS_DWM_QUERY, "dwm_query", dwm_sys_query},
     {SYS_SET_MODE, "set_mode", dwm_sys_set_mode},
+    {SYS_GFX3D_DRAW, "gfx3d_draw", gfx3d_sys_draw},
+    {SYS_GFX3D_QUERY, "gfx3d_query", gfx3d_sys_query},
 #endif
 };
 

@@ -76,7 +76,9 @@
 #include "lang.h"
 #include "sysinfo.h"
 #include "gpu.h"
+#include "gpu_intel.h"
 #include "gpu2d.h"
+#include "gfx3d.h"
 #include "vidmem.h"
 #include "crtc.h"
 #include "net.h"
@@ -865,11 +867,18 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
        * GOP framebuffer; this puts the chip where the settings page and
        * the boot log can show it. */
       gpu_init();
+      /* Claim an Intel integrated controller if the probe found one. This
+       * maps its MMIO/aperture windows but leaves GOP in charge of scanout,
+       * so the desktop is never blanked by a register rewrite. */
+      intel_gpu_init();
       /* 2D engine seam: decide who performs spans and blits before the
        * first window is painted. The software path runs on the CPU over the
        * firmware framebuffer; a vendor engine plugs in here when it exists. */
       gpu2d_init();
-      kputs("[BOOT] gpu and 2d ready\n");
+      /* Simple 3D engine: transform and z-buffer triangles into vidmem
+       * objects that the display controller scans out. */
+      gfx3d_init();
+      kputs("[BOOT] gpu, 2d and 3d ready\n");
       /* Mini-DWM display base: video-memory objects and the CRTC/scanout
        * abstraction sit on top of the bound display stack. They are inert
        * until a compositor submits a present; the existing nwm keeps drawing

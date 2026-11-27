@@ -154,7 +154,9 @@ SRC := arch/x86_64/boot/main.c \
        kernel/rtc.c \
        kernel/pci.c \
        kernel/gpu.c \
+       kernel/gpu_intel.c \
        kernel/gpu2d.c \
+       kernel/gfx3d.c \
        kernel/vidmem.c \
        kernel/crtc.c \
        kernel/dwmsys.c \

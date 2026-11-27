@@ -11,6 +11,7 @@ use super::{to_str, Cmd, MAX_ARGS, PATH_MAX, Shell, Sink};
 use super::update::cmd_update;
 use crate::fs;
 use crate::sinfo;
+use crate::sys;
 
 /* ---- output helpers ---------------------------------------------------- */
 
@@ -1493,6 +1494,59 @@ pub fn run(shell: &mut Shell, cmd: &Cmd, stdin: &[u8], out: &mut dyn Sink) -> i3
     127
 }
 
+/* Report the 3D engine and optionally rasterise a small triangle into a
+ * vidmem object. The object is never presented, so this cannot disturb the
+ * desktop; it exercises the whole syscall path end to end. */
+fn cmd_gfx3d(_shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -> i32 {
+    let mut q = sys::Gfx3dQuery {
+        available: 0, intel_ready: 0, intel_gen: 0, max_vertices: 0,
+        max_pixels: 0, backend: 0, triangles: 0, reserved: 0,
+    };
+    if sys::gfx3d_query(&mut q) < 0 {
+        puts(out, "gfx3d: syscall unavailable (kernel built without DWM)\n");
+        return 1;
+    }
+    puts(out, "gfx3d: engine=");
+    put_dec(out, q.available as u64);
+    puts(out, " intel=");
+    put_dec(out, q.intel_ready as u64);
+    puts(out, " gen=");
+    put_dec(out, q.intel_gen as u64);
+    puts(out, " last_triangles=");
+    put_dec(out, q.triangles as u64);
+    puts(out, "\n");
+    if cmd.argc < 2 || to_str(cmd.argv[1]) != "demo" {
+        puts(out, "usage: gfx3d demo\n");
+        return 0;
+    }
+    let one = 1i32 << 16;
+    let handle = sys::vmem_alloc(32 * 32 * 4, 0);
+    if handle == 0 {
+        puts(out, "gfx3d: vidmem allocation failed\n");
+        return 1;
+    }
+    let v = [
+        sys::Gfx3dVertex { x: -12 * one, y: -10 * one, z: 0, color: 0xFFFF0000 },
+        sys::Gfx3dVertex { x:  12 * one, y: -10 * one, z: 0, color: 0xFFFF0000 },
+        sys::Gfx3dVertex { x:  0,        y:  12 * one, z: 0, color: 0xFFFF0000 },
+    ];
+    let mut g = sys::Gfx3dCmd {
+        target: handle, flags: sys::GFX3D_F_CLEAR | sys::GFX3D_F_DEPTH,
+        x: 0, y: 0, w: 32, h: 32, vertices_va: v.as_ptr() as u32, count: 3,
+        matrix: [0; 16], light: [0; 3], clear: 0xFF000000, pad: 0,
+    };
+    g.matrix[0] = one;
+    g.matrix[5] = one;
+    g.matrix[10] = one;
+    g.matrix[15] = one;
+    let rc = sys::gfx3d_draw(&g);
+    puts(out, "gfx3d demo: triangles=");
+    put_dec(out, if rc < 0 { 0 } else { rc as u64 });
+    puts(out, "\n");
+    sys::vmem_free(handle);
+    if rc < 0 { 1 } else { 0 }
+}
+
 const BUILTINS: &[(&str, Bfn)] = &[
     ("ls", cmd_ls),
     ("cd", cmd_cd),
@@ -1525,6 +1579,7 @@ const BUILTINS: &[(&str, Bfn)] = &[
     ("mount", cmd_mount),
     ("umount", cmd_umount),
     ("nuomi", cmd_nuomi),
+    ("gfx3d", cmd_gfx3d),
     ("update", cmd_update),
     ("novusd", cmd_novusd),
     ("run", cmd_run),
