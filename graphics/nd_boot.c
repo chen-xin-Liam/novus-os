@@ -95,6 +95,9 @@ static struct {
   nd_surface_t scratch; /* used only before nd_init() */
 } g_splash __attribute__((section(".data")));
 
+/* B-53: kernel-side spin frames painted, see nd_boot_spin_ticks(). */
+static UINT32 g_spin_drawn;
+
 /* Allocated in .bss: kernel_entry clears it on the way in, and the first
  * kernel-stage nd_boot_stage() repaints the panel from the inherited ring. */
 static char  g_log_snap[SPLASH_LOG_SNAP];
@@ -483,6 +486,39 @@ void nd_boot_spin(UINT32 tick) {
                   SPLASH_BAR_SPIN_TAIL);
   }
 }
+
+/* B-53: the same comet, driven from the kernel side.
+ *
+ * Between the boot hand-off and the scheduler the kernel spends seconds inside
+ * drivers that block (USB port walks, reset settles, AHCI/NVMe waits) and the
+ * rail's percentage does not move at all - the one stretch where a spinner is
+ * genuinely the only honest indicator. There is no timer to call us back yet,
+ * so instead the drivers' own wait loops tick this: it self-clocks off
+ * cpu_uptime_us() and repaints at most every 16 ms, which keeps a 40 kHz poll
+ * loop from turning into a 40 kHz redraw. */
+void nd_boot_spin_tick(void) {
+  static UINT64 last_us;
+  static UINT32 tick;
+  static UINT32 drawn;
+  UINT64        now;
+
+  if (!g_splash.active) {
+    last_us = 0u;
+    return;
+  }
+  now = cpu_uptime_us();
+  if (last_us != 0u && now >= last_us && (now - last_us) < 16000u) {
+    return;
+  }
+  last_us = now;
+  nd_boot_spin(tick++);
+  g_spin_drawn = ++drawn;
+}
+
+/* How many frames this hook has actually painted. The boot's screenshot cannot
+ * prove motion (the compositor hands out stale surfaces), so the count is what
+ * a timeline line reports instead. */
+UINT32 nd_boot_spin_ticks(void) { return g_spin_drawn; }
 
 /* Repaint only the widgets whose value actually changed. Nothing here touches
  * the mark: the framebuffer holds it until something paints over it, and the

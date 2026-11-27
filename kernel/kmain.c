@@ -323,6 +323,10 @@ void cpu_delay_us(UINT32 us) {
       if (((now - start) & PM_TIMER_MASK) >= ticks) {
         return;
       }
+      /* B-53: drivers use this for every settle (AHCI/NVMe/IDE reset, touchpad
+       * probe); ticking the splash here means the boot's long stages animate
+       * without a timer existing yet. */
+      nd_boot_spin_tick();
       __asm__ volatile("pause");
     }
   }
@@ -983,6 +987,12 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
   kbm(12u, 0x00u, 0x80u, 0xFFu); /* sky: IDE probed */
   novus_timeline("power storage probes");
   kputs("[BOOT] power and storage probed\n");
+  /* B-53: the rail is driven from the drivers' own waits while this stage runs,
+   * and this is the only place its frames can be counted - a screenshot of a
+   * directly written scanout proves a frame, not motion. */
+  kputs("[BA] stage spin ticks=");
+  kputs_dec(nd_boot_spin_ticks());
+  kputs("\n");
   /* Storage power: arm the idle timer explicitly instead of trusting the
    * static initialiser in blkdev.c - the kernel's .data is laid out behind
    * the boot-stage handoff block, so a default that lives there is not

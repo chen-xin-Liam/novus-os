@@ -1611,3 +1611,21 @@ switch 内原分支保留作兜底。
 - 只验证了 QEMU；真机（尤其慢 U 盘、SATA 盘）的观感与 ticks 计数还没有读数，笔记本当前离线。
 - 没有给“进入内核”之后的**内核侧**阶段（`nd_boot_stage(92…99)`，即探测磁盘/USB/显示、挂载文件系统那几秒）加转圈：那段才是真机上最长且百分比不动的地方，但内核侧此刻还没有稳定的周期性重绘钩子（调度器要到 97% 才起来），要做得先引入一个启动期 tick 源，本轮没动。
 - 没改动画的 7 帧时间表（仍是 720 ms），也没动 logo 缩放/淡入曲线。
+
+## B-53 — 内核侧的长阶段也转起来：没有定时器，就让驱动的等待循环去 tick
+
+**为什么还要做** B-52 只覆盖了 UEFI 侧“进入内核”那段（几十毫秒）。真机上真正让人以为死机的是内核侧的 92%～96%：探测 AHCI/NVMe/USB/IDE、挂载文件系统，这一段进度条**百分比一动不动**，日志里那台笔记本的 `usb hub done` 一直拖到 +32 s。而此刻调度器还没起来（`唤醒多核` 是 97%），内核没有任何周期性回调可以借。
+
+**做法：把 tick 借给已经在等的循环。** `graphics/nd_boot.c` 新增 `nd_boot_spin_tick()`，自计时（`cpu_uptime_us()`），16 ms 之内重复调用直接返回，所以一个 40 kHz 的轮询循环不会变成 40 kHz 重绘。挂三个点：
+1. `kernel/kmain.c` 的 `cpu_delay_us()`（PM timer 分支）——AHCI/NVMe/IDE 复位、触控板探测这些“等一个固定时长”的地方全走它。
+2. `kernel/usb.c` 的 `usb_delay_ms()`（TSC 分支）——端口复位后的 settle 时间。
+3. `kernel/usb.c` 的 `ep0_wait_stopped()`——每 16 次轮询 tick 一次，这是整段启动里最长的单次等待（一笔不完成的控制传输可以吃满 1000 ms 预算）。
+
+**可验证性** 内核侧另给一行 `[BA] stage spin ticks=N`（在 `power and storage probed` 之后打印 `nd_boot_spin_ticks()`）。这是唯一能区分“画了一帧”和“一直在动”的证据：QEMU 在客户机直写扫描帧缓冲期间会返回过期画面。
+
+**验证** 构建 `exit=0`。镜像 `0E933CD15879F39B` / iso `25F67460CA6960BC`（QEMU，GPT 日志盘）：`[BA] handoff spin ticks=4`、`[BA] stage spin ticks=1`、`usb mice=1`、桌面（设置 + 任务管理器 + 文件管理器）正常，阶段时间线 `power init done +169 ms`、`ahci probe done +193 ms` 与 B-52 那版一致（这条 tick 没有把探测拖慢）。
+
+**未做/未验证**
+- 只有 QEMU 读数：QEMU 的 USB 探测几乎不花时间，所以 `stage spin ticks=1` 只是“证明通路打通了”，真机那 30 s 会长出几百帧；观感与帧数要等明天真机。
+- 覆盖有边界：不经过 `cpu_delay_us()` / `usb_delay_ms()` / `ep0_wait_stopped()` 的纯寄存器轮询（例如个别 AHCI 忙等）仍然不会 tick。
+- 没有动 PIT/LAPIC 定时器与 IDT：加一个启动期定时源能覆盖全部阶段，但那是动中断基础设施，风险明显高于收益，本轮只做了“借等待循环”。

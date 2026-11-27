@@ -800,6 +800,10 @@ static void usb_delay_ms(UINT32 ms) {
       if (now >= start && now - start >= target) {
         return;
       }
+      /* B-53: the splash rail follows along while a reset settles, so the boot
+       * does not look stopped exactly when a device is slow to answer. The
+       * tick self-clocks and repaints at most every 16 ms. */
+      nd_boot_spin_tick();
       __asm__ volatile("pause");
     }
     return;
@@ -1186,6 +1190,11 @@ static int ep0_wait_stopped(usb_t *u, UINT32 budget_ms) {
     UINT32 el = 0u;
 
     usb_pace(i);
+    if ((i & 15u) == 0u) {
+      /* B-53: a command that never completes is the longest wait in the boot;
+       * let the rail show it is being waited on rather than stopped. */
+      nd_boot_spin_tick();
+    }
     if ((i & 15u) == 0u && usb_wait_over(t0, budget_ms, &el) != 0) {
       return 0;
     }

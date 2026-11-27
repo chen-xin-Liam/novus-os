@@ -355,6 +355,16 @@ void nd_boot_anim_frame(UINT32 logo_scale, UINT8 logo_alpha, UINT32 bar,
  * increasing value works, and the caller owns the pace. Whole rail only. */
 void nd_boot_spin(UINT32 tick);
 
+/* B-53: nd_boot_spin() for the kernel side, where there is no timer yet.
+ * Call it from a driver's own wait loop: it self-clocks off cpu_uptime_us()
+ * and repaints at most once per 16 ms, so a tight poll loop costs a call and
+ * a compare. No-op once the splash is gone. */
+void nd_boot_spin_tick(void);
+
+/* Frames the kernel-side hook above has painted. Diagnostics only: a screenshot
+ * proves a frame was drawn, not that it moved. */
+UINT32 nd_boot_spin_ticks(void);
+
 /* The closing move: dim the boot screen to black while the mark stays
  * opaque, leaving the exact frame the desktop transition starts from. Call
  * it immediately before nd_boot_transition(); it is the last thing the boot
