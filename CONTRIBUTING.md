@@ -2,7 +2,9 @@
 
 感谢参与 Novus OS 开发。
 
-Novus OS 是 x86_64 UEFI 桌面操作系统：内核主体为 C，内置应用为 Rust `no_std`，并包含自研 NovusFS、NovusDisplay、Novus-WM、NUC 可执行格式、NKM 内核模块格式与 Win32 兼容层。项目采用 GPLv2，最低内存 4 GiB，推荐 8 GiB，并坚持“不依赖外部开源项目、全部自研”的约束。
+Novus OS 是 x86_64 UEFI 桌面操作系统：内核主体为 C，内置应用为 Rust `no_std`，并包含自研 NovusFS、NovusDisplay、Novus-WM、NUC 可执行格式、NKM 内核模块格式与 Win32 兼容层。项目采用 GPLv2，最低内存 2 GiB（引导拒绝线），推荐 4–8 GiB（早期文档以 4 GiB 为工作线），并坚持“不依赖外部开源项目、全部自研”的约束。
+
+本文按“先跑起来 → 再理解结构 → 然后动手 → 最后验证”的顺序组织。新手建议先读 [§2.2 第一次构建](#22-第一次构建逐步走通)，再按改动类型查 [§10 常见开发任务配方](#10-常见开发任务配方recipes)；遇到启动失败或测试不过时查 [§11 故障排查手册](#11-故障排查手册troubleshooting)。
 
 > **规范优先级**：遇到文档与代码不一致时，以当前源码、冻结格式规范和实际构建结果为准。`README.md` 的部分章节保留了历史规划，例如 `system/`、`drivers/`、`user/shell/`、`user/micropython/` 和 `make menuconfig`，这些与当前工作树并不一致。若修正文档或发现冲突，请在 PR 中说明。
 
@@ -49,6 +51,27 @@ docs/              设计与冻结格式规范
 ```
 
 注意：根目录没有 `system/`、`drivers/`、`user/shell/`、`user/micropython/`；内置应用位于 `apps/src/bin/`，shell 位于 `apps/src/shell/`，网卡等驱动位于 `kernel/`。MicroPython 目前只在 README 中作为路线图出现，没有实现源码或构建目标，贡献前必须先讨论设计。
+
+### 1.3 文档导航：按任务读什么
+
+仓库文档较多且部分保留历史规划。下表是**按目的**的最短阅读路径，避免一上来通读 100 KB 规范：
+
+| 你想做的事 | 先读 | 再读 |
+|---|---|---|
+| 理解系统怎么分层、数据怎么流 | [ARCHITECTURE.md](ARCHITECTURE.md) | [Novus-WM 与 IPC 协议规范](<docs/Novus-WM 与 IPC 协议规范 V1.0.md>) |
+| 知道哪些功能已完成、哪些还没做 | [ROADMAP.md](ROADMAP.md) §2/§4 | [changes.md](changes.md) |
+| 判断某个"功能"是不是真的实现了 | [SECURITY.md](SECURITY.md) §5 + 相应源码 | [ROADMAP.md](ROADMAP.md) §0.3 漂移清单 |
+| 改启动/驱动/中断 | [ARCHITECTURE.md](ARCHITECTURE.md) §2 | [中断体系](<docs/中断体系.md>)、[Debug 级接口手册](<docs/Novus OS Debug 级接口手册 V1.0.md>) |
+| 改 GUI 应用/主题 | [templates/README.md](templates/README.md) | [Novus UI 设计语言规范](<docs/Novus UI 设计语言规范 V1.0.md>) |
+| 改 nsh 命令 | [终端与命令解释器设计](<docs/终端与命令解释器设计.md>) | [templates/shell-command/README.md](templates/shell-command/README.md) |
+| 改编译器/语言 | [user/cppcc/README.md](user/cppcc/README.md)、[M7 cppcc 实现说明](<docs/M7 cppcc 实现说明.md>) | [C++11 支持矩阵](<docs/C++11 支持矩阵.md>) |
+| 准备 PR | 本文 [§9](#9-代码风格与提交规范) | 本文 [§13 PR 描述模板](#13-pr-描述模板) |
+
+三类文档要区别对待：
+
+1. **冻结格式规范**（NUC/NKM/NUP/INS/IPC/更新）：字段与版本不可私改，改则升版本并同步六件套。
+2. **设计说明文档**（`docs/` 下大部分）：描述已实现的行为，若与代码冲突应提交勘误，而不是修改代码去迁就旧文档。
+3. **工程过程资料**（`.codebuddy/`、`.trae/`）：记录当时的计划与决策，不是规范；其中的 pending 项可能早已完成。
 
 ---
 
@@ -98,6 +121,60 @@ source "$HOME/.cargo/env"
 ```
 
 交叉工具链前缀不同时可用 `make CROSS=<prefix>` 覆盖。
+
+### 2.2 第一次构建：逐步走通
+
+以下命令在干净工作树上依次执行。每一步都有可观察的"成功标志"，任一步失败就停在那里排查，不要跳到下一步。
+
+```sh
+# ① 确认工具齐全（缺哪个装哪个）
+x86_64-w64-mingw32-gcc --version
+rustc --version && cargo --version
+rustup target list --installed | grep -E 'x86_64-pc-windows-msvc|x86_64-unknown-none'
+qemu-system-x86_64 --version
+
+# ② 主机侧快速自检：不依赖 QEMU，先排除工具链问题
+bash scripts/display-selftest.sh
+bash scripts/irq-selftest.sh
+
+# ③ 内核与应用构建
+make
+# 成功标志：out/NOVUS.EFI 存在，链接无 undefined symbol
+
+# ④ 镜像结构与目录树校验
+make check-rootfs
+# 成功标志：ISO 主描述符/Joliet、ESP 8.3 名、字体与 .novusfs 元数据全部通过
+
+# ⑤ 启动到桌面（headless，串口日志写到终端）
+make run
+# 成功标志见下方"启动日志关键标记"
+```
+
+`make run` 启动后，串口应依次出现这些标记（VNC 只监听 `127.0.0.1:5901`）：
+
+```text
+[BOOT] UEFI boot started
+[SHM] shared memory verified (NVSH v1.1)
+[BOOT] display bound
+[BOOT] power and storage probed
+[BOOT] device table built
+[BOOT] ipc ready
+[BOOT] filesystem selftests done
+[BOOT] mounts applied
+[M3] integrity: PASS        （live 无系统分区时可能是 NOT BUILT）
+[NW] NCSI connected         （需要 QEMU 用户态网络）
+[SESSION] live session: no account required
+[ND] demo desktop painted
+[HALT] entering the scheduler
+```
+
+如果串口没有输出，先确认 `CONFIG_NOVUS_DEBUG_SERIAL=y` 且 QEMU 没把串口重定向到别处；如果画面停在启动 splash，看最后一条 `nd_boot_stage` 文案定位卡在哪一步。更系统的排查见 [§11](#11-故障排查手册troubleshooting)。
+
+**首次改动推荐的最短闭环**（不要一上来改内核）：
+
+1. 用 `templates/gui-app/` 单独编译一个窗口应用，确认工具链正常。
+2. 按 [§10.1](#101-加一条-nsh-内建命令) 加一条 `nsh` 命令，`make` 后在终端里执行它。
+3. 按 [§10.2](#102-新增一个-gui-应用) 把应用接进系统，跑一次完整 QEMU 冒烟。
 
 ---
 
@@ -250,6 +327,34 @@ QEMU 冒烟支持 `QEMU_BIN`、`OVMF_CODE`、`OVMF_VARS` 或 `--qemu`、`--code`
 
 `qtest.sh` 依次测试 IDE、AHCI、NVMe、USB xHCI，失败不会中断脚本；必须人工查看 `/tmp/b_*.log` 中的 `[MOUNT]` 标记。仓库没有 CI，未执行的检查必须在 PR 描述中明确说明。
 
+### 4.4 日志、标记与调试入口
+
+内核没有 `log_print` 分级接口（见 Debug 手册 12.0 差异声明），实际输出是 `kputs()` 同时镜像到 VGA、COM1、启动日志环和（可选）framebuffer 控制台。所以**串口日志就是主要调试手段**。
+
+常见日志前缀与含义：
+
+| 前缀 | 来源 | 看什么 |
+|---|---|---|
+| `[BOOT]` | `kernel/kmain.c` | 初始化阶段信标；最后一条信标就是卡住的调用 |
+| `[SHM]` / `[M3]` / `[MRKL]` | 共享内存 / Merkle | 交接区校验、系统分区完整性结论 |
+| `[ND]` / `[CRTC]` | NovusDisplay | 帧缓冲绑定、合成器、回扫探测、自检 |
+| `[NOVS]` / `[WAL]` | NovusFS | 超级块、事务与校验告警（多为 WARN 降级） |
+| `[BLK]` / `[USB]` / `[NET]` / `[DNS]` / `[NCSI]` | 驱动与网络 | 设备枚举、链路、DHCP/DNS/联网检测 |
+| `[SMP]` / `[PMM]` / `[HEAP]` | 调度/物理内存/内核堆 | AP 唤醒、页分配告警、重复释放 |
+| `[APP]` | `apps/` 用户态 | `no_std` 应用的 panic 与分段落点 |
+| `#PF` / `fault` | trap 处理 | 用户态异常；单次 nxprobe 自测属预期 |
+
+调试手段按侵入性从低到高：
+
+1. **串口日志分段落点**：用户态用 `sys::write(b"...\n")`，内核用 `kputs()`/`kputs_hex()`。
+2. **启动阶段日志面板**：splash 直接读共享内存 4 KiB 环，可在图形界面出现前看到固件日志。
+3. **主机自检**：`display-selftest.sh`、`irq-selftest.sh`、`dwm-selftest.sh` 把内核源码编到宿主上跑，适合定位纯算法问题。
+4. **QEMU monitor / HMP**：`qemu-smoke.sh` 用 HMP 截屏并抓串口；`ci_smoke.py` 输出结构化 JSON。
+5. **VNC 交互**：`127.0.0.1:5901`；headless 下 `mouse_move` 不驱动客户机光标、`sendkey` 不可靠，交互验收优先用 QMP/绝对路径指针协议。
+6. **生成器 `--check`**：主题/语言/字体生成物过期时先重生成，别在生成文件里直接改。
+
+> 不要在公开日志里输出内核地址、栈回溯、密钥材料或可复现攻击 payload（[SECURITY.md](SECURITY.md) §6）。
+
 ---
 
 ## 5. 内核、驱动与底层开发
@@ -325,7 +430,7 @@ AP trampoline 是特例：16 位裸二进制必须小于 4 KiB、无重定位，
 | NUC | ABI major 1；字段/语义变化需 ABI 变更评审并升版本 |
 | NKM | 格式与签名算法冻结；同步静态断言、签名工具、规范和文档 |
 | NUP / INS | 任何格式扩展必须升 Version |
-| Novus-WM IPC | 当前 `NWM_PROTO_VERSION 0x00010001`；版本、消息号、载荷布局不得私自改动 |
+| Novus-WM IPC | 代码常量为 `NWM_PROTO_VERSION 0x00020000`（2.0，surface redirection / Mini-DWM；文档标题仍写 V1.0）；版本、消息号、载荷布局不得私自改动 |
 | Debug 接口 | 参数级与错误码级冻结 |
 | 更新补丁体系 | 三大补丁体系永久冻结 |
 | 根目录布局 | 以 `fs/novusfs/rootfs_layout.h` 为准，改布局要同步所有镜像校验 |
@@ -471,5 +576,178 @@ fn cmd_xxx(shell: &mut Shell, cmd: &Cmd, stdin: &[u8], out: &mut dyn Sink) -> i3
 [ ] 无构建产物、私钥、机器绝对路径或未说明的临时改动
 [ ] PR 描述列出实际执行命令；未执行的检查已明确说明
 ```
+
+## 10. 常见开发任务配方（Recipes）
+
+每节都是"照做即可"的最短路径。完成后回到 [§4.1](#41-必跑与按类型追加) 找对应的必跑检查。
+
+### 10.1 加一条 nsh 内建命令
+
+1. 在 `apps/src/shell/cmds.rs` 的其它 `cmd_*` 之后、`BUILTINS` 之前写函数：
+
+   ```rust
+   fn cmd_hello(shell: &mut Shell, cmd: &Cmd, stdin: &[u8], out: &mut dyn Sink) -> i32 {
+       let _ = (shell, stdin);
+       out.write(b"hello\n");
+       0
+   }
+   ```
+
+2. 在 `BUILTINS` 注册：`("hello", cmd_hello)`。`help`、`which`、管道和重定向会自动生效。
+3. 约定：输出只能走 `out.write()`（用 `println!` 会丢管道）；返回值即 `$?`；启动应用用 `sinfo::spawn_name()`，没有 fork/exec。
+4. 验证：`make`，在 QEMU 终端里执行 `hello`、`hello | cat`、`$(hello)` 三条路径。
+5. 参考实现见 [templates/shell-command/](templates/shell-command/README.md)。
+
+### 10.2 新增一个 GUI 应用
+
+1. 复制 `templates/gui-app/` 的 `src/main.rs`，按 [模板说明](templates/README.md) 改 4 处：
+   `apps/src/bin/<name>.rs`、`apps/Cargo.toml` 的 `[[bin]]`、`Makefile` 的 `APPS_NAMES`、`kernel/apps.c` 的 `g_apps[]`。
+2. `g_apps[]` 只能在**末尾**追加：旧版 sysinfo `/apps` 与客户端复用数组索引，插到中间会让所有应用错位；新代码优先用 `apps_launch_name()`。
+3. 名字只能是字母、数字、下划线；含 `-` 会生成非法 C 标识符 `k_app_<name>`。
+4. 每帧以 `CLEAR` 开始、`SHAPE`/`TEXT` 填充、以 `INVALIDATE` 结束；`IPC_EBUSY` 必须重试；空闲时 `sys::yield_now()`。
+5. 文本宽度用 `ui::width()`，颜色用语义令牌，不要写字面色值。
+6. 验证：`out/apps/<name>.bin` < 128 KiB；`make` + 完整 QEMU 冒烟 + `scripts/wm-churn.sh 4G 20`。
+
+### 10.3 新增 C 源、驱动或块/网卡设备
+
+1. 把 `.c` 加入顶层 `Makefile` 的 `SRC`（汇编进 `ASM_SRC`，新目录进 `INC`）——没有自动发现。
+2. 新配置开关同步改 `Kconfig`、`configs/novus_defconfig`、代码 `#if CONFIG_NOVUS_*`、文档四处。
+3. 按设备类型接入：
+   - 块设备：`blkdev_register()`，对象为静态存储且注册后常驻；对外统一 512 B 扇区。
+   - 网卡：`net_register()`，探测函数加入 `net_init()` 的 probe 集合；首个 UP 的设备成为活动链路。
+   - 中断：`irq_register(line, flags, isr, device, name)`；每 GSI 最多 4 个 handler，共享线路触发属性必须一致。
+4. ISR 只清自己的中断源；禁止 `sti`、睡眠、调度、分配、协议栈调用和打印日志，EOI 由框架统一处理。
+5. 在 `kmain()` 按硬件类别插入初始化调用点；只加源文件不会生效。
+6. 若模块需要调用内核内部函数，符号必须进 `nksym_table`（取地址同时防止链接器丢弃）。
+7. 验证：`make`、`bash qtest.sh` 人工看 `[MOUNT]`、`scripts/irq-selftest.sh`。
+
+### 10.4 新增系统调用
+
+1. 在 `kernel/trap.c` 分配**新编号**（只追加，不复用/重排），加入 `g_syscalls[]` 并实现 `sys_*`。
+2. 用户指针不得直接解引用，按任务 CR3 逐页复制；长度与边界显式检查。
+3. 同步用户侧头文件 `user/Nuomi_pl/include/novus_syscall.h` 与 `apps/src/sys.rs`，不要让工具链长期写裸数字。
+4. 若涉及权限，先确认 [SECURITY.md](SECURITY.md) §5 的能力状态——CAP 目前是规范目标而非已落地实现。
+5. 验证：`kernel/trap.c` 的未知编号告警不出现；新增拒绝非法输入的回归用例；`docs/Novus OS Debug 级接口手册 V1.0.md` 同步。
+
+### 10.5 新增 IPC 端口服务
+
+1. 端口名写在服务端与客户端共用头文件；内核 IPC 端口表静态 16 项，任务收件箱端口等于 pid。
+2. 消息头 32 B、magic `0x4E495043`、FNV-1a checksum、载荷 ≤ 128 B、队列 8 条；超过 `IPC_PAYLOAD_MAX` 的内容改用 v2 surface 句柄，不要拆包。
+3. 阻塞接收依赖 `syscall; ret` 的指令布局（返回帧 RIP 回退 2 字节重放），改 ABI 前先确认这条假设仍成立。
+4. 当前没有端口强鉴权，不要把新端口当作安全边界；涉及安全的能力先开 Issue。
+5. 验证：服务端 selftest + 一个跨进程客户端用例 + `scripts/wm-churn.sh`（若与窗口生命周期相关）。
+
+### 10.6 修改生成物（主题/语言/字体/IME/壁纸）
+
+1. 改源文件（`tools/themegen/theme.toml`、`tools/langgen/strings*.toml`、`tools/imegen/pinyin.txt` 等），**不要直接编辑生成文件**。
+2. 重新生成并提交产物，例如 `make theme`、`python3 tools/langgen/langgen.py`、`make wpkg-img`。
+3. 用 `--check` 确认无漂移；新增中文文案通常需要重生成字体数据，否则只能显示回退字形。
+4. 验证：`scripts/font_smoke.sh` + QEMU 截图人工核验（中英混排、码点边界、主题明暗）。
+
+### 10.7 新增 NKM 内核模块
+
+1. 用 `tools/nkmgen` 生成模块；格式 `NKM!`、ABI major 1、208 B 头、1–16 segment、deps ≤ 8、符号 ≤ 64、重定位 ≤ 256、模块 ≤ 16、根公钥 ≤ 4。
+2. 签名覆盖"除 `[0x50,0xB0)` 置零外"的整文件 SHA-256；只允许 64 位绝对重定位，PC32 会被拒绝。
+3. 加载顺序固定：边界检查 → digest → signature → dependencies → map → relocate → init。
+4. `nkm_exit()` 必须释放内存、IRQ 与设备注册；被其它模块依赖时拒绝卸载。
+5. 验证：`make nkm-test-module`、`(cd tools/nkmgen && cargo run --quiet -- selftest)`；不要提交 `NKM_SEED` 轮换产生的私有材料。
+
+---
+
+## 11. 故障排查手册（Troubleshooting）
+
+| 症状 | 最可能的原因 | 先做什么 |
+|---|---|---|
+| `make` 报 `undefined symbol k_app_*` | 应用加了 `[[bin]]` 但没进 `APPS_NAMES` 或 `g_apps[]` | 按 [§10.2](#102-新增一个-gui-应用) 核对四处注册 |
+| `out/apps/*.bin` 超过 128 KiB | 引入 `Vec/String` 或大静态缓冲 | 回到固定数组；检查 `apps.stamp` 是否触发重建 |
+| 启动停在 splash、最后一条是"映射内存" | 页表/帧缓冲映射失败或帧缓冲在 4 GiB 以上 | 看 `[ND]` 行；确认 `mm_map_phys(..., MM_MAP_UC)` 路径 |
+| 串口无任何输出 | `CONFIG_NOVUS_DEBUG_SERIAL=n` 或 QEMU 串口重定向 | 确认 defconfig 与 `scripts/run.sh` |
+| 桌面出现白/黑横带、半帧闪烁 | 显示列表缺 `INVALIDATE`，或自绘绕开合成缓冲 | 帧尾补 `INVALIDATE`；只画 `nd_canvas()` |
+| 中文显示方框 | 字模未包含该码点，或生成物过期 | 重生成字体数据；检查路径是否按码点边界截断 |
+| `check-rootfs` 报目录数不符 | `rootfs_layout.h` 与 `fsinfo`/`check_rootfs.py` 计数漂移 | 以 `rootfs_layout.h` 为真源同步（见 ROADMAP §0.3） |
+| QEMU 网卡拿不到地址 | 网卡模型不匹配，或 DHCP 超时重发循环状态未清零 | 用 `NOVUS_NIC=e1000/e1000e/virtio-net/rtl8139` 逐个试；`igb` 在 QEMU 下不置 LU 属已知行为 |
+| `[MRKL] MISMATCH` | Merkle 根与系统分区不一致，或运行期回写了 `mounts.json` | 检查是否改动受保护元数据；看 A 核自检日志 |
+| QEMU 冒烟基线不匹配 | UI 有意变更未更新基线，或截图含动态内容 | 普通回归**不要**带 `--update-baseline`；有意变更后逐张人工核验再提交 |
+| `make check-lint` 新增告警 | 本地 clippy/rustfmt 与基线不一致 | 只修新增项；不要整体重格式化 |
+| `qtest.sh` 看似通过但磁盘没挂上 | 脚本用 `|| true` 吞掉失败 | 人工 grep `/tmp/b_*.log` 的 `[MOUNT]` 标记 |
+| 生成器 `--check` 报 stale | 改了 TOML 没重生成，或生成文件被手改 | 重生成并提交；不要手改生成文件 |
+| Win32 样例退出码 0 但无输出 | thunk/API 白名单未覆盖该调用 | 查 `kernel/win32.c` 的 API 表与 `SYS_WIN32` 白名单 |
+| `nuomi` 报 `out of memory` | bump arena 用尽（循环里反复 `cons`） | 减少数据量或改写为尾递归/就地更新 |
+
+**定位顺序建议**：主机自检 → `make` → `make check-rootfs` → QEMU 串口 → QEMU 截图 → 交互脚本。越靠前越快，不要在镜像没过校验时就去查 UI。
+
+---
+
+## 12. 常见问题（FAQ）
+
+**Q：为什么 `apps/` 不能用 `Vec`、`String`、`Box`？**
+A：内置应用是 `no_std` 无分配器的扁平 NUC 镜像，直接编进内核。所有缓冲开在栈或静态区；`panic` 只向 COM1 打印并 `exit(3)`，没有回溯。
+
+**Q：为什么 nsh 的管道不是并行的？**
+A：第一阶段有意简化：没有 fork/exec，管道是顺序捕获（≤8 段，4 KiB 缓冲）。这是已知限制，升级为真正并发管道需要进程模型增强，见 ROADMAP Phase 1。
+
+**Q：为什么没有 `make menuconfig`？**
+A：`Kconfig` 是声明式占位，真正被 `Makefile` 读取的是 `configs/novus_defconfig`；`y/n` 只转 C 宏 `1/0`，`depends on` 不会自动校验，需要人工保证（如 `IRQ → SCHED`、`GUI → DISPLAY`）。完整解析器是后续里程碑。
+
+**Q：为什么 README 说有 `system/`、`drivers/`，实际没有？**
+A：README 保留了早期规范规划。当前真实源码地图见 [§1.2](#12-真实源码地图)；遇到冲突按 [§0 规范优先级](#novus-os-贡献指南) 处理，并欢迎提交勘误 PR。
+
+**Q：QEMU 通过就代表真机没问题吗？**
+A：不代表。已知的 QEMU/真机差异包括：帧缓冲缓存属性（WB/UC 别名导致真机花屏）、JPEG 解码器工具链相关 UB、igb 在 QEMU 下不置 `STATUS.LU`。涉及显示/解码/网卡的改动必须说明真机验证情况。
+
+**Q：为什么不能随便 `--update-baseline`？**
+A：截图基线是回归门禁。普通回归更新基线等于把回归变成"自证清白"；只有 UI 有意变更时才允许，且必须逐张人工检查脚本生成的无损 RGB PNG。
+
+**Q：为什么不直接把规范里的 CAP/Secure Boot 当成已实现来写代码？**
+A：[SECURITY.md](SECURITY.md) §5 明确列出当前能力边界：CAP 最小权限模型、Secure Boot、端口强鉴权、密钥轮换、硬件 TRNG 都是规范目标。以规范文本替代实现会形成虚假安全承诺。
+
+**Q：为什么有些自检是 WARN 而不是 ERROR？**
+A：项目原则是"轻微错误不 panic"。NovusFS/VFS/ext4 自检失败、Merkle 结论异常都会降级继续启动。但**降级不等于通过**——PR 描述里必须写明日志里出现过哪些 WARN。
+
+**Q：贡献者需要跑完所有测试吗？**
+A：按 [§4.1](#41-必跑与按类型追加) 的改动矩阵跑最小必跑项。仓库没有托管 CI，未执行的检查必须在 PR 中明确说明；不要假装跑过。
+
+---
+
+## 13. PR 描述模板
+
+仓库没有 PR 模板，请按下面的结构填写。中英文均可，但每一项都要有内容。
+
+````markdown
+## 动机
+修改前的具体问题是什么？关联 Issue / ROADMAP 缺口 ID（如 G-F02）。
+
+## 实现方式
+- 改了哪些文件、关键函数与数据流（路径级，不要只写"优化了 GUI"）
+- 是否新增/修改了 ABI、配置开关、冻结格式？
+
+## 兼容性影响
+- [ ] 无 ABI/协议/磁盘格式变化
+- [ ] 有变化：已升版本并同步规范、内核、宿主工具、测试夹具、版本号、兼容性说明
+- [ ] 启动顺序 / 挂载规则 / 签名链 / g_apps[] 索引未受影响
+
+## 测试方法
+实际执行过的命令（逐条列出，含参数）：
+```
+make
+make check-rootfs
+bash scripts/irq-selftest.sh
+...
+```
+验证结果（日志标记、截图路径、JSON 报告）：
+
+## 未执行的检查
+明确列出没跑的项与原因（缺硬件、缺工具、环境不匹配等）。
+
+## 文档
+- [ ] README / docs / changes.md 已按真实实现更新
+- [ ] 若修正了旧文档冲突，说明以哪份文件为准
+- [ ] 生成物已由源文件重新生成，`--check` 无漂移
+
+## 仓库卫生
+- [ ] 无 build/out/esp/target/*.o、私钥、机器绝对路径或临时改动
+````
+
+**提交粒度**：一个 PR 只做一件事。"顺手修个拼写"和"新增系统调用"请分开，否则回滚与审查都会变困难。
 
 本项目采用 GPLv2：提交者保留版权，所有修改源码必须按 GPLv2 条款开源。详见 [LICENSE](LICENSE) 与 [COPYING](COPYING)。
