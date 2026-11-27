@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/ARCHITECTURE.md](docs/en/ARCHITECTURE.md)
+
 # Novus OS 架构文档（ARCHITECTURE）
 
 > 版本：v1.0（基于 2026-11-27 工作树）

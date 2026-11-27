@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/BUILD.md](docs/en/BUILD.md)
+
 # Novus OS 构建指南（BUILD）
 
 > 版本：v1.0（基于 2026-11-27 工作树）

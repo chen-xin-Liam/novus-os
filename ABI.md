@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/ABI.md](docs/en/ABI.md)
+
 # Novus OS ABI 参考（已实现部分）
 
 > 本文只列**已经开发完毕并冻结**的 ABI；规划中、原型或未落地的能力不列入。

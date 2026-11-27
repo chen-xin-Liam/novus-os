@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/CONTRIBUTING.md](docs/en/CONTRIBUTING.md)
+
 # Novus OS 贡献指南
 
 感谢参与 Novus OS 开发。

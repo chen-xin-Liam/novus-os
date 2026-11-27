@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/CODE_OF_CONDUCT.md](docs/en/CODE_OF_CONDUCT.md)
+
 # Novus OS 行为准则（CODE OF CONDUCT）
 
 > 版本：v1.0（2026-11-27）

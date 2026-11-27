@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/GLOSSARY.md](docs/en/GLOSSARY.md)
+
 # Novus OS 术语表（GLOSSARY）
 
 > 版本：v1.0（2026-11-27）

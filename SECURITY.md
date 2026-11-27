@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/SECURITY.md](docs/en/SECURITY.md)
+
 # Novus OS 安全政策
 
 本文档说明 Novus OS 的安全边界、已知限制、漏洞报告方式和贡献者必须遵守的安全规则。它与 [CONTRIBUTING.md](CONTRIBUTING.md) 配套使用；涉及实现细节时，以当前源码和冻结格式规范为准。

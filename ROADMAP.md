@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/ROADMAP.md](docs/en/ROADMAP.md)
+
 # Novus OS 路线图（ROADMAP）
 
 > 文档版本：v1.0（基于 2026-11-27 工作树全量盘点）

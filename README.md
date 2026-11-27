@@ -4,6 +4,16 @@
 
 内核、文件系统、图形栈、窗口管理器、可执行格式、模块签名、更新体系——全部自研，不依赖外部开源项目。GPLv2 开源。
 
+<div align="center">
+
+| [中文](README.md) | [English](docs/en/README.md) |
+| :---: | :---: |
+| **当前版本** | 点击切换 |
+
+[全部英文文档索引](docs/en/INDEX.md)
+
+</div>
+
 > 当前基线：**V1.6-FinalSpec（冻结正式版）** · 开发阶段：M0–M12 已铺开，部分能力仍在演进
 > 最低 2 GiB 内存（推荐 4–8 GiB） · QEMU/OVMF 可运行 · 详细状态见 [ROADMAP.md](ROADMAP.md)
 

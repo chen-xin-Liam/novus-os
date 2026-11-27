@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/CHANGELOG.md](docs/en/CHANGELOG.md)
+
 # Novus OS 变更日志（CHANGELOG）与发布说明
 
 > 文档版本：v1.0（整理于 2026-11-27）

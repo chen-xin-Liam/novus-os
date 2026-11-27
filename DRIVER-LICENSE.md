@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/DRIVER-LICENSE.md](docs/en/DRIVER-LICENSE.md)
+
 # Novus OS 闭源驱动许可例外（Driver License Exception）
 
 > 版本：v1.0（2026-11-27）

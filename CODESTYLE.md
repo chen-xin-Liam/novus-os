@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/CODESTYLE.md](docs/en/CODESTYLE.md)
+
 # Novus OS 代码规范（CODESTYLE）
 
 > 版本：v1.0（基于 2026-11-27 工作树）

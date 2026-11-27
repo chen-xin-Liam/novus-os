@@ -1,3 +1,5 @@
+> 英文版本：[docs/en/COMPATIBILITY.md](docs/en/COMPATIBILITY.md)
+
 # Novus OS 兼容性矩阵（COMPATIBILITY）
 
 > 版本：v1.0（基于 2026-11-27 工作树）
