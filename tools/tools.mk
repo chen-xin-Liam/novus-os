@@ -75,7 +75,15 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # 16 bits in 512-byte units, so exactly 32 MiB would wrap to zero and fail
 # mkiso's catalog check. The live ESP also carries the signed test module
 # and the demo NUC, which pushed 31 MiB past what the FAT and the 512-byte
-# cluster rounding can hold; 31.5 MiB leaves headroom without crossing it.
+# cluster rounding can hold.
+#
+# B-46: 31.5 MiB stopped being enough once the wallpaper package grew to
+# 3.8 MiB - the live ESP holds NOVUS.EFI (4.0), SYSTEM.IMG (8), ESP.IMG
+# (16) and WPAPERS.PKG (3.8) plus the module and the demo, which is 31.84
+# MiB and the ISO target failed with "out of clusters". 31.99 MiB is the
+# largest value that still leaves the El Torito field a real sector count
+# (65516 of 65535), so the headroom is now ~0.15 MiB: the next thing that
+# grows here needs a structural answer, not a bigger number.
 #
 # Both images also carry the wallpaper package (WPAPERS.PKG, about
 # 3.7 MiB), which is what keeps the photos out of the loader: the boot stage
@@ -84,7 +92,7 @@ RUST_HOST_LIB := build/rust-host/release/libnovuslib_rs.a
 # the template - so it is the term that sets these two numbers.
 SYS_SIZE_MB     ?= 8
 ESP_TPL_SIZE_MB ?= 16
-ESP_SIZE_MB     ?= 31.5
+ESP_SIZE_MB     ?= 31.99
 
 ESP_TPL   := out/esp-tpl.img
 ESP_IMG   := out/esp.img
@@ -92,6 +100,17 @@ NOVUS_IMG := out/novus.img
 ISO_IMG   := out/novus-live.iso
 NKM_TEST_H := security/nkm/nkm_test_module.h
 DISK_IMG  := out/novus-disk.img
+
+# The two sessions ship as two images, not as one image with a prompt. Each
+# split ESP carries a marker file that the boot stage reads before it draws
+# anything: DESKTOP.YES boots into the desktop, SHELL.YES into the shell
+# alone. The marker is a build-time fact - the same kernel serves both.
+ESP_DESKTOP      := out/esp-desktop.img
+ESP_SHELL        := out/esp-shell.img
+DISK_DESKTOP     := out/novus-desktop.img
+DISK_SHELL       := out/novus-shell.img
+MODE_DESKTOP_MARK := out/DESKTOP.YES
+MODE_SHELL_MARK   := out/SHELL.YES
 NKM_MOD   := out/test.nkm
 WPKG_IMG  := out/wallpapers.pkg
 
@@ -384,7 +403,7 @@ FONT_PUT := $(foreach f,$(FONT_SRC),--put $(f) /Novus/font/$(notdir $(f)))
 # fixed 8 MiB, so the EFI shrinks while the FAT images do not grow. The
 # kernel reads /font.bin during the boot-stage mount window and caches it.
 $(NOVUS_IMG): $(MKFSNOVUS) graphics/nd_font_data.bin $(FONT_SRC) | out
-	$(MKFSNOVUS) $@ $(SYS_SIZE_MB) --put graphics/nd_font_data.bin /Novus/fonts/font.bin $(FONT_PUT)
+	MSYS2_ARG_CONV_EXCL='*' $(MKFSNOVUS) $@ $(SYS_SIZE_MB) --put graphics/nd_font_data.bin /Novus/fonts/font.bin $(FONT_PUT)
 
 esp: $(ESP_IMG)
 
@@ -399,6 +418,35 @@ $(ESP_TPL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(WPKG_IMG) \
 	    $(NOVUS_IMG):SYSTEM.IMG \
 	    $(WPKG_IMG):WPAPERS.PKG \
 	    $(NUC_ESP_ARGS) $(CPPCC_ESP_ARGS)
+
+# The marker files. One line of content each, so the image is self-describing
+# when its ESP is mounted on a host; the boot stage only tests for presence.
+$(MODE_DESKTOP_MARK): | out
+	@printf 'Novus OS: this image boots the desktop session\n' > $@
+
+$(MODE_SHELL_MARK): | out
+	@printf 'Novus OS: this image boots the shell session only\n' > $@
+
+# The two session images. Same payload as the installer's ESP template, plus
+# the marker that names the session, so a stick written with either one boots
+# straight in without a prompt.
+$(ESP_DESKTOP): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(WPKG_IMG) \
+			$(NUC_ESP_DEPS) $(CPPCC_ESP_DEPS) $(MODE_DESKTOP_MARK) | out
+	$(MKFAT) $@ $(ESP_TPL_SIZE_MB) \
+	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
+	    $(NOVUS_IMG):SYSTEM.IMG \
+	    $(WPKG_IMG):WPAPERS.PKG \
+	    $(NUC_ESP_ARGS) $(CPPCC_ESP_ARGS) \
+	    $(MODE_DESKTOP_MARK):DESKTOP.YES
+
+$(ESP_SHELL): $(MKFAT) out/NOVUS.EFI $(NOVUS_IMG) $(WPKG_IMG) \
+			$(NUC_ESP_DEPS) $(CPPCC_ESP_DEPS) $(MODE_SHELL_MARK) | out
+	$(MKFAT) $@ $(ESP_TPL_SIZE_MB) \
+	    out/NOVUS.EFI:EFI/BOOT/BOOTX64.EFI \
+	    $(NOVUS_IMG):SYSTEM.IMG \
+	    $(WPKG_IMG):WPAPERS.PKG \
+	    $(NUC_ESP_ARGS) $(CPPCC_ESP_ARGS) \
+	    $(MODE_SHELL_MARK):SHELL.YES
 
 # The live ESP. BOOTX64.EFI is the firmware's default fallback path;
 # NOVUS/SYSTEM.IMG is the live root; NOVUS/ESP.IMG is the install
@@ -504,10 +552,18 @@ run-iso: iso
 # A complete bootable disk: GPT, ESP and the NovusFS system partition,
 # the same layout the live installer writes. Built here so a device or an
 # image file can be seeded without a running Novus.
-disk-img: $(DISK_IMG)
+disk-img: $(DISK_DESKTOP) $(DISK_SHELL)
 
 $(DISK_IMG): $(MKDISK) $(ESP_TPL) $(NOVUS_IMG) | out
 	$(MKDISK) $@ $(DISK_SIZE_MB) $(ESP_TPL) $(NOVUS_IMG)
+
+# The deliverables: one disk image per session. Writing either to a stick
+# gives a machine that boots into that session and stays there.
+$(DISK_DESKTOP): $(MKDISK) $(ESP_DESKTOP) $(NOVUS_IMG) | out
+	$(MKDISK) $@ $(DISK_SIZE_MB) $(ESP_DESKTOP) $(NOVUS_IMG)
+
+$(DISK_SHELL): $(MKDISK) $(ESP_SHELL) $(NOVUS_IMG) | out
+	$(MKDISK) $@ $(DISK_SIZE_MB) $(ESP_SHELL) $(NOVUS_IMG)
 
 # Write a prepared disk image to a device or to a file. Refuses to touch
 # anything that is not explicitly named on the command line.

@@ -190,6 +190,17 @@ blkdev_t *blkdev_get_by_name(const char *name);
 UINTN     blkdev_count(void);
 blkdev_t *blkdev_get_at(UINTN index);
 
+/* 1 when this device's medium accepts writes (B-47). A boot stage that
+ * writes a breadcrumb sector must ask this before it touches the boot
+ * medium: a read-only CD has a WriteBlocks entry point that only faults. */
+int       blkdev_medium_writable(const blkdev_t *dev);
+
+/* The whole-disk device a partition view was carved from, or NULL when
+ * `dev` is already a medium of its own. A caller that needs to address
+ * sectors outside the partition (the boot beacon lives past the GPT) has
+ * to climb to this device first. */
+blkdev_t *blkdev_partition_parent(const blkdev_t *dev);
+
 /* Drop every BLKDEV_FLAG_BOOT_ONLY device. The boot stage must call
  * this before ExitBootServices: firmware protocol pointers are invalid
  * afterwards and a call through them would fault rather than fail. */

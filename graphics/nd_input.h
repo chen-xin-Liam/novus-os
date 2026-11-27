@@ -74,6 +74,20 @@ void nd_input_init(void);
 /* Decode the ISR byte queue, without reading hardware. Bounded per call. */
 void nd_input_poll(void);
 
+/* Print one line with the PS/2 statistics the pointer diagnosis needs:
+ * bytes delivered from the AUX (mouse) and keyboard sources, completed
+ * packets, discarded packets, committed moves. */
+void nd_input_report(void);
+
+/* 1 when nothing in the machine looks like a pointer at all: no PS/2 mouse
+ * answered its reset and no USB HID mouse is enumerated. Callers use it to
+ * keep the diagnostic line on the glass long enough to read. */
+int nd_input_pointer_missing(void);
+
+/* Compact one-line pointer verdict, for a status label that outlives the
+ * splash: "输入 ps2 aux=1 rst=1 dev=0 byt=0 usb=0 rep=0". */
+void nd_input_banner(char *out, UINT32 cap);
+
 int nd_input_pop(nd_event_t *out);
 void nd_input_push(const nd_event_t *ev);
 
