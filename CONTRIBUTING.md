@@ -751,3 +751,5 @@ bash scripts/irq-selftest.sh
 **提交粒度**：一个 PR 只做一件事。"顺手修个拼写"和"新增系统调用"请分开，否则回滚与审查都会变困难。
 
 本项目采用 GPLv2：提交者保留版权，所有修改源码必须按 GPLv2 条款开源。详见 [LICENSE](LICENSE) 与 [COPYING](COPYING)。
+
+第三方设备驱动可按 [DRIVER-LICENSE.md](DRIVER-LICENSE.md) 以闭源方式分发（GPLv2 第 10 节额外权限），但不覆盖对项目源码的修改；闭源驱动同样必须通过 NKM 签名校验、只使用冻结 ABI，且不免除安全要求。

@@ -68,6 +68,7 @@ make run
 | 查某个术语/缩写/模块名是什么意思 | [GLOSSARY.md](GLOSSARY.md) |
 | 查已实现的 ABI（系统调用、NUC、NKM、IPC） | [ABI.md](ABI.md) |
 | 查硬件/格式/语言兼容性矩阵 | [COMPATIBILITY.md](COMPATIBILITY.md) |
+| 编写闭源/专有设备驱动 | [DRIVER-LICENSE.md](DRIVER-LICENSE.md) |
 | 查版本变更与 **ABI BREAK 高亮** | [CHANGELOG.md](CHANGELOG.md) |
 | 学会构建、打包、运行与验证 | [BUILD.md](BUILD.md) |
 | 开始贡献代码 | [CONTRIBUTING.md](CONTRIBUTING.md) |
@@ -159,3 +160,5 @@ docs/          设计与冻结格式规范
 ## 许可
 
 GPLv2。提交者保留版权，所有修改源码按项目条款开源。详见 [LICENSE](LICENSE) 与 [COPYING](COPYING)。
+
+第三方可以**闭源方式**分发设备驱动：项目依据 GPLv2 第 10 节授予额外权限，条件与边界见 [DRIVER-LICENSE.md](DRIVER-LICENSE.md)（驱动仍须签名并只使用冻结 ABI）。

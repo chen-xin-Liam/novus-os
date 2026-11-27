@@ -60,6 +60,7 @@
 ### Added
 
 - 新增统一工程文档：`ROADMAP.md`、`ARCHITECTURE.md`、`COMPATIBILITY.md`、`CODESTYLE.md`、`CODE_OF_CONDUCT.md`、`BUILD.md`、`CHANGELOG.md（本文件）`。
+- 新增 `DRIVER-LICENSE.md`：依据 GPLv2 第 10 节授予额外权限，允许第三方以闭源方式分发设备驱动；驱动仍须签名、只使用冻结 ABI，且不覆盖项目源码的 GPLv2 义务。
 - 新增 `templates/`：GUI 应用、nsh 命令、Nuomi 脚本三条扩展路径的骨架模板。
 - 新增 `apps/src/nuomi.rs`：Nuomi 语言的 `no_std` 无堆内置解释器，注册为 nsh 的 `nuomi` 命令。
 - 新增 `kernel/klog.c/h`：跨引导阶段与内核阶段的日志环，启动 splash 直接显示固件日志。
