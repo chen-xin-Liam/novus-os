@@ -18,6 +18,7 @@
 #include "nd_input.h"
 #include "irq.h"
 #include "usb.h"
+#include "i2c_hid.h"
 
 #define PS2_DATA   0x60
 #define PS2_STATUS 0x64
@@ -174,7 +175,24 @@ static UINT32 g_arb_keys;  /* cumulative suppressed KEY events */
 #define ND_DIAG_BURST  4u
 #define ND_DIAG_PERIOD 300u
 
-static UINT32 g_diag_polls;   /* polls that drained at least one raw byte */
+static UINT32 g_diag_polls;
+static UINT32 g_stat_aux;
+static UINT32 g_stat_kbd;
+/* What the bring-up found, kept so the one diagnostic the splash shows last
+ * can say it without a serial port: 0 = unknown, 1 = pass/yes, 2 = fail,
+ * 3 = no reply. */
+static UINT8  g_ps2_ctl;      /* an 8042 answered at 0x64 */
+static UINT8  g_ps2_aux;      /* 0xA9 aux port test */
+static UINT8  g_ps2_reset;    /* 0xFF mouse reset acknowledged */
+static UINT8  g_ps2_devid;    /* device id read after the reset, 0xFF unknown */
+static UINT8  g_ps2_cfg;      /* controller config byte actually written */
+static UINT8  g_ps2_irq;      /* IRQ1/IRQ12 handlers registered */
+static UINT8  g_ps2_enable;   /* 0xF4 enable-reporting was acknowledged */
+/* B-45: 0 = the keyboard never answered its own 0xF4, 1 = it did, 2 = it
+ * answered with something other than 0xFA. Distinct from `g_ps2_irq` and from
+ * `g_stat_kbd`: "the interface is enabled and no byte ever arrived" is the
+ * shape a scanning-disabled keyboard has, and it needs its own bit. */
+static UINT8  g_ps2_kbd_enable;
 static UINT32 g_diag_frames;  /* arbitration frames that carried movement */
 static UINT32 g_diag_pkt_ok;  /* complete PS/2 mouse packets decoded */
 static UINT32 g_diag_pkt_bad; /* resyncs: bytes that could not form a packet */
@@ -510,6 +528,13 @@ void nd_input_init(void) {
   g_diag_frames = 0u;
   g_diag_pkt_ok = 0u;
   g_diag_pkt_bad = 0u;
+  g_ps2_ctl = 0u;
+  g_ps2_aux = 0u;
+  g_ps2_reset = 0u;
+  g_ps2_devid = 0xFFu;
+  g_ps2_cfg = 0xFFu;
+  g_ps2_irq = 0u;
+  g_ps2_enable = 0u;
   g_diag_pop = 0u;
   {
     UINT32 i;
@@ -537,10 +562,13 @@ void nd_input_init(void) {
    * whole sequence instead of burning time on timeouts; USB HID and the
    * absolute pointer are unaffected. */
   if (io_in8(PS2_STATUS) == 0xFFu) {
+    g_ps2_ctl = 2u;
     kputs("[PS2] no 8042 controller; PS/2 input skipped\n");
   } else {
     UINT8 b = 0;
     int aux_test = 0;
+
+    g_ps2_ctl = 1u;
     /* This function runs again for the desktop after the boot menu already
      * armed IRQ1/12. With the lines live, the handler would pull an ACK out
      * of the output buffer into the ring and the read below would time out,
@@ -570,9 +598,11 @@ void nd_input_init(void) {
     ps2_cmd(PS2_CMD_ENABLE_M);
     ps2_cmd(PS2_CMD_TEST_AUX);
     if (ps2_read_byte(&b, 0u, PS2_TMO_CMD) == 0) {
+      g_ps2_aux = 3u;
       ps2_log("aux port test", "no reply", 0u, 0);
     } else {
       aux_test = (b == PS2_AUX_TEST_PASS) ? 1 : 0;
+      g_ps2_aux = (UINT8)(aux_test != 0 ? 1u : 2u);
       ps2_log("aux port test", aux_test != 0 ? "pass" : "FAIL", b, 1);
     }
 
@@ -586,8 +616,13 @@ void nd_input_init(void) {
     } else {
       UINT8 raw = cfg;
 
-      cfg = (UINT8)((cfg | 0x40u) & 0xCCu);
+      /* Canonical 0x44: both clocks ON (bits 3/4/5 clear), translation on,
+       * the system flag bit 2 set - firmware that left the aux clock gated is
+       * exactly why an HP touchpad acknowledged every command and then never
+       * sent a single report. */
+      cfg = (UINT8)((cfg | 0x44u) & 0xC7u);
       cfg_valid = 1;
+      g_ps2_cfg = cfg;
       ps2_log("config read", "value", raw, 1);
       ps2_cmd(PS2_CMD_WRITE_CFG);
       ps2_write(cfg);
@@ -598,6 +633,7 @@ void nd_input_init(void) {
      * BAT (0xAA) and the device id (0x00 = plain 3-byte mouse). */
     if (ps2_mouse_byte("mouse reset (0xFF)", PS2_DEV_RESET, PS2_TMO_CMD) !=
         PS2_ACK) {
+      g_ps2_reset = 2u;
       if (aux_test == 0) {
         kputs("[PS2] aux port did not answer; mouse programming skipped\n");
       } else {
@@ -605,15 +641,18 @@ void nd_input_init(void) {
       }
     } else {
       mouse_ok = 1;
+      g_ps2_reset = 1u;
       if (ps2_read_byte(&b, 1u, PS2_TMO_BAT) == 0) {
         ps2_log("mouse self-test", "no reply (still probing)", 0u, 0);
       } else if (b == 0xAAu) {
         ps2_log("mouse self-test", "pass", b, 1);
         if (ps2_read_byte(&b, 1u, PS2_TMO_CMD) != 0) {
+          g_ps2_devid = b;
           ps2_log("mouse device id", b == 0x00u ? "plain 3-byte" : "id", b, 1);
         }
       } else {
         /* No BAT byte: this device went straight to the id. */
+        g_ps2_devid = b;
         ps2_log("mouse device id", "id", b, 1);
       }
     }
@@ -636,20 +675,45 @@ void nd_input_init(void) {
                            PS2_TMO_CMD);
       /* Streaming on. This is the last byte that returns an ACK; packets
        * begin with the next movement. */
-      (void)ps2_mouse_byte("enable reporting (0xF4)", PS2_DEV_ENABLE,
-                           PS2_TMO_CMD);
+      if (ps2_mouse_byte("enable reporting (0xF4)", PS2_DEV_ENABLE,
+                         PS2_TMO_CMD) == PS2_ACK) {
+        g_ps2_enable = 1u;
+      }
     }
 
     ps2_cmd(PS2_CMD_ENABLE_K);
+    /* B-45: enabling the 8042's keyboard *interface* (0xAE) says nothing to
+     * the keyboard itself. A device that firmware left at 0xF5 keeps scanning
+     * off and never sends a byte - on the board that reported
+     * "aux_bytes=0 kbd_bytes=0 pkts=0" that is indistinguishable from a
+     * keyboard that is not there, because every 8042 command still ACKs.
+     * Linux's atkbd sends 0xF4 for exactly this reason after its own
+     * self-test. */
+    ps2_write(PS2_DEV_ENABLE);
+    {
+      UINT8 ack = 0u;
+
+      if (ps2_read_byte(&ack, 0u, PS2_TMO_CMD) == 0) {
+        ps2_log("keyboard enable (0xF4)", "no reply", 0u, 0);
+        g_ps2_kbd_enable = 0u;
+      } else if (ack == PS2_ACK) {
+        ps2_log("keyboard enable (0xF4)", "ACK", ack, 1);
+        g_ps2_kbd_enable = 1u;
+      } else {
+        ps2_log("keyboard enable (0xF4)", "unexpected", ack, 1);
+        g_ps2_kbd_enable = 2u;
+      }
+    }
     ps2_flush(); /* drop reports queued while the interrupt lines were off */
 
     if (cfg_valid != 0 &&
         irq_register(1u, 0u, ps2_irq, NULL, "ps2-keyboard") >= 0 &&
         irq_register(12u, 0u, ps2_irq, NULL, "ps2-mouse") >= 0) {
-      cfg = (UINT8)((cfg | 0x43u) & 0xCFu);
+      cfg = (UINT8)((cfg | 0x47u) & 0xC7u);
       ps2_cmd(PS2_CMD_WRITE_CFG);
       ps2_write(cfg);
       ps2_log("IRQ enable", "config", cfg, 1);
+      g_ps2_irq = 1u;
       kputs("[PS2] keyboard IRQ1 + mouse IRQ12 enabled\n");
     } else {
       (void)irq_unregister(1u, ps2_irq, NULL);
@@ -1177,6 +1241,124 @@ void nd_input_arbitration_stats(UINT32 *moves, UINT32 *keys) {
   }
 }
 
+/* One line that says whether any byte reached the decoder at all. A pointer
+ * that will not move is either a source that never delivered (aux=0) or a
+ * decoder that received and discarded (aux>0, pkts=0), and those are two
+ * completely different bugs. */
+void nd_input_report(void) {
+  UINT32 mice = 0u;
+  UINT32 reports = 0u;
+
+  kputs("[INP] ps2 ctl=");
+  ps2_dec(g_ps2_ctl);
+  kputs(" aux=");
+  ps2_dec(g_ps2_aux);
+  kputs(" reset=");
+  ps2_dec(g_ps2_reset);
+  kputs(" id=");
+  kputs_hex((UINT64)g_ps2_devid);
+  kputs(" cfg=");
+  kputs_hex((UINT64)g_ps2_cfg);
+  kputs(" irq=");
+  ps2_dec(g_ps2_irq);
+  kputs("\n");
+  kputs("[INP] ps2 aux_bytes=");
+  ps2_dec(g_stat_aux);
+  kputs(" kbd_bytes=");
+  ps2_dec(g_stat_kbd);
+  kputs(" pkts=");
+  ps2_dec(g_diag_pkt_ok);
+  kputs(" bad=");
+  ps2_dec(g_diag_pkt_bad);
+  kputs(" moves=");
+  ps2_dec(g_arb_moves);
+  kputs("\n");
+  usb_hid_stats(&mice, &reports);
+  kputs("[INP] usb mice=");
+  ps2_dec(mice);
+  kputs(" reports=");
+  ps2_dec(reports);
+  kputs(" i2c=");
+  ps2_dec((UINT32)(i2c_hid_state() < 0 ? 3u : (UINT32)i2c_hid_state()));
+  kputs("\n");
+}
+
+int nd_input_pointer_missing(void) {
+  UINT32 mice = 0u;
+
+  usb_hid_stats(&mice, 0);
+  return (g_ps2_reset != 1u && mice == 0u) ? 1 : 0;
+}
+
+static char *ban_lit(char *p, const char *s) {
+  while (*s != '\0') {
+    *p++ = *s++;
+  }
+  return p;
+}
+
+static char *ban_num(char *p, UINT32 v) {
+  char   tmp[10];
+  UINT32 n = 0u;
+
+  if (v == 0u) {
+    *p++ = '0';
+    return p;
+  }
+  while (v != 0u && n < 9u) {
+    tmp[n++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  while (n != 0u) {
+    *p++ = tmp[--n];
+  }
+  return p;
+}
+
+/* One compact line for the desktop's status label, so the pointer verdict
+ * stays readable after the splash is gone. */
+void nd_input_banner(char *out, UINT32 cap) {
+  char   buf[128];
+  char  *p = buf;
+  UINT32 mice = 0u;
+  UINT32 reports = 0u;
+  UINT32 i;
+
+  usb_hid_stats(&mice, &reports);
+  p = ban_lit(p, "in ps2 aux=");
+  p = ban_num(p, g_ps2_aux);
+  p = ban_lit(p, " rst=");
+  p = ban_num(p, g_ps2_reset);
+  p = ban_lit(p, " dev=");
+  p = ban_num(p, g_ps2_devid);
+  p = ban_lit(p, " byt=");
+  p = ban_num(p, g_stat_aux);
+  p = ban_lit(p, " en=");
+  p = ban_num(p, (UINT32)g_ps2_enable);
+  p = ban_lit(p, " ke=");
+  p = ban_num(p, (UINT32)g_ps2_kbd_enable);
+  p = ban_lit(p, " kb=");
+  p = ban_num(p, g_stat_kbd);
+  p = ban_lit(p, " irq=");
+  p = ban_num(p, (UINT32)g_ps2_irq);
+  p = ban_lit(p, " usb=");
+  p = ban_num(p, mice);
+  p = ban_lit(p, " rep=");
+  p = ban_num(p, reports);
+  p = ban_lit(p, " i2c=");
+  p = ban_num(p, (UINT32)(i2c_hid_state() < 0 ? 3u : (UINT32)i2c_hid_state()));
+  p = ban_lit(p, " bus=");
+  p = ban_num(p, (UINT32)i2c_hid_buses());
+  *p = '\0';
+  if (out == 0 || cap == 0u) {
+    return;
+  }
+  for (i = 0u; buf[i] != '\0' && i + 1u < cap; i++) {
+    out[i] = buf[i];
+  }
+  out[i] = '\0';
+}
+
 /* Copy and release each raw slot with interrupts briefly masked, then
  * restore them before decoding or publishing higher-level events. This keeps
  * the IRQ producer's critical path independent of keyboard/mouse handling. */
@@ -1189,6 +1371,17 @@ void nd_input_poll(void) {
   UINT32 bad_before = g_diag_pkt_bad;
 
   nd_arb_frame_begin();
+  /* Drain the controller here as well as in the IRQ handler. On a laptop
+   * whose touchpad sits behind the embedded controller, bytes can arrive
+   * without IRQ12 ever being raised (the line is shared with the EC and
+   * nothing routes it to the IOAPIC), which left the pointer frozen while
+   * the keyboard - IRQ1 - kept working. This is the same drain the handler
+   * does, serialised against it by masking interrupts. */
+  {
+    UINT64 poll_flags = irq_save();
+    ps2_irq(NULL);
+    irq_restore(poll_flags);
+  }
   while (guard-- > 0) {
     UINT64 saved = irq_save();
     UINT8 data;
@@ -1220,9 +1413,11 @@ void nd_input_poll(void) {
     }
     if (aux != 0u) {
       aux_bytes++;
+      g_stat_aux++;
       mouse_byte(data);
     } else {
       kbd_bytes++;
+      g_stat_kbd++;
       kbd_byte(data);
     }
   }
@@ -1265,5 +1460,6 @@ void nd_input_poll(void) {
   }
   vm_mouse_poll();
   usb_hid_poll();    /* collect USB keyboard/mouse reports, if any */
+  i2c_hid_poll();    /* the laptop touchpad behind the PCH's I2C block */
   nd_arb_frame_end(); /* one cursor move per source: arbitrate the frame */
 }

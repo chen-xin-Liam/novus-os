@@ -325,6 +325,9 @@ pub extern "C" fn _start() -> ! {
             n = sinfo::net(sys_port).unwrap_or(n);
             draw(&mut win, &n, note, &menu);
         }
-        sys::yield_now();
+        /* B-39: the 0.4 s refresh cadence above only means 0.4 s if this
+         * loop actually blocks; with yield_now() `idle >= 40` was hit in
+         * microseconds. */
+        sys::sleep_ticks(1);
     }
 }

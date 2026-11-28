@@ -8,6 +8,15 @@
 
 static novu_service_t g_svc;
 
+/* B-41: the CHECKING arm. Set when a check is requested, consumed by the
+ * first sampling tick (which stamps the deadline), cleared as soon as the
+ * state machine leaves CHECKING. Without it a machine with no network sat
+ * in "检查中" for ever: request_check() is the only writer of that state and
+ * the transport layer is the only thing that could leave it, so a probe that
+ * never started (no DHCP lease) left the panel claiming work in progress. */
+static UINT8  g_check_armed;
+static UINT32 g_check_deadline;
+
 #if NOVUS_HTTPS_E2E_PROBE
 /* One-shot kernel-side HTTPS end-to-end probe (gated by the E2E make flag).
  * Driven by the scheduler tick after DHCP binds and the cabundle is loaded,
@@ -106,6 +115,22 @@ void novu_service_tick(UINT32 now) {
      * transport layer; the state machine itself only bounds the rate. */
     if (g_svc.state == NOVU_SVC_IDLE) {
         /* idle: nothing to do this sample */
+    } else if (g_svc.state == NOVU_SVC_CHECKING) {
+        /* B-41: bound the wait. Armed on the first sample after the request,
+         * then failed if nothing in the transport reported back in time. */
+        if (!g_check_armed) {
+            g_check_armed = 1;
+            g_check_deadline = now + NOVU_CHECK_TIMEOUT;
+        } else if (now >= g_check_deadline) {
+            g_check_armed = 0;
+            /* ERROR, not IDLE: "0 updates queued" would tell the user the
+             * system is up to date, which a check that never ran cannot
+             * know. The press is retryable from ERROR (see
+             * novu_service_request_check). */
+            g_svc.retry = NOVU_MAX_RETRY;
+            g_svc.state = NOVU_SVC_ERROR;
+            kputs("[NOVU] check timed out, no answer from the update transport\n");
+        }
     } else if (g_svc.state == NOVU_SVC_INSTALL) {
         if (g_svc.progress < 1000u) {
             g_svc.progress += 100u;
@@ -117,9 +142,15 @@ void novu_service_tick(UINT32 now) {
 }
 
 void novu_service_request_check(void) {
-    if (g_svc.state == NOVU_SVC_IDLE) {
+    /* B-41: a press has to be able to retry after a failure. Refusing
+     * outside IDLE meant that once the service had reached ERROR the button
+     * on the update page was dead until the machine rebooted. */
+    if (g_svc.state == NOVU_SVC_IDLE || g_svc.state == NOVU_SVC_ERROR) {
         g_svc.state = NOVU_SVC_CHECKING;
         g_svc.progress = 0;
+        g_svc.retry = 0;
+        g_check_armed = 0;
+        kputs("[NOVU] check requested\n");
     }
 }
 
@@ -129,12 +160,14 @@ void novu_service_begin(const UINT8 *uuid, UINT8 level) {
     g_svc.retry = 0;
     g_svc.step = 0;
     g_svc.progress = 0;
+    g_check_armed = 0;
     g_svc.state = NOVU_SVC_DOWNLOAD;
 }
 
 void novu_service_set_state(UINT8 state) {
     g_svc.state = state;
     g_svc.progress = 0;
+    g_check_armed = 0;
 }
 
 void novu_service_advance(UINT32 progress) {
@@ -146,6 +179,7 @@ void novu_service_advance(UINT32 progress) {
 }
 
 void novu_service_fail(void) {
+    g_check_armed = 0;
     g_svc.retry++;
     if (g_svc.retry >= NOVU_MAX_RETRY) {
         g_svc.state = NOVU_SVC_ERROR;

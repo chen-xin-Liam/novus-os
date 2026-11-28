@@ -70,6 +70,16 @@ int    gpu_mmio_is_64bit(void);
 UINT64 gpu_stolen_phys(void);
 UINT64 gpu_stolen_bytes(void);
 
+/* Hardware acceleration, P1: the graphics generation the controller
+ * reports (GMD_ID, or the PCI family fallback) and whether its register
+ * window is mapped and readable. A driver may only touch the controller
+ * when gpu_intel_ready() is non-zero; otherwise everything stays on the
+ * software 2D path. gpu_probe_line() is a short "intel gen=12" string for
+ * the on-screen status, never NULL, empty on non-Intel machines. */
+int         gpu_intel_gen(void);
+int         gpu_intel_ready(void);
+const char *gpu_probe_line(void);
+
 /* Non-zero once a display controller was located. */
 int gpu_present(void);
 

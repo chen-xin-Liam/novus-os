@@ -34,6 +34,7 @@ void boot_menu_finish(void) {}
 #else
 
 int g_boot_no_desktop = 0;
+int g_console_session = 0;
 
 /* The tick is calibrated to 10 ms (sched_init -> lapic_timer_calibrate), so
  * 200 ticks is a ~2 s countdown. Kept in ticks rather than milliseconds so
@@ -264,6 +265,10 @@ void boot_menu_select(void) {
   }
 
   g_boot_no_desktop = (chosen == 1u) ? 1 : 0;
+  /* The menu covered the boot frame, mark and all. Everything after this
+   * paints on the splash again, so mark it for one repaint instead of
+   * leaving the board logo off the screen for the rest of the boot. */
+  nd_boot_splash_mark_dirty();
   kputs("[BOOT] menu: selection=");
   kputs_hex(chosen);
   kputs(" no_desktop=");

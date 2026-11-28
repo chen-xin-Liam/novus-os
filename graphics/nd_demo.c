@@ -378,6 +378,7 @@ void nd_selftest(void) {
 
 #ifndef ND_SELFTEST_ONLY
 static int          g_demo_ready;
+
 static char         g_status[80];
 static char         g_slider_text[24];
 static char         g_input[48];
@@ -394,6 +395,97 @@ static void set_status(const char *s) {
   if (g_status_label != 0) {
     g_status_label->u.label.text = g_status;
     ng_damage_widget(g_status_label);
+  }
+}
+
+/* Public hook for a one-off status line, used by the pointer diagnosis so the
+ * verdict stays on the desktop instead of vanishing with the splash. */
+void nd_demo_status(const char *s) { set_status(s); }
+
+/* A one-off strip across the top of the desktop. The status label sits in the
+ * corner where a window will happily cover it, so a pointer that is missing
+ * altogether also gets a bar nobody can hide, held only as long as the text
+ * needs to be read. */
+void nd_demo_banner(const char *text, UINT32 hold_ms) {
+  nd_surface_t *c = nd_canvas();
+  nd_rect_t     r;
+  char          one[192];
+  const char   *two = 0;
+  UINT32        i = 0u;
+
+  if (c == 0 || text == 0) {
+    return;
+  }
+  /* Two lines, split on the first newline: a real machine reports more
+   * verdicts than fit across one 1080p strip. */
+  while (text[i] != '\0' && text[i] != '\n' && i + 1u < sizeof(one)) {
+    one[i] = text[i];
+    i++;
+  }
+  one[i] = '\0';
+  if (text[i] == '\n') {
+    two = text + i + 1u;
+  }
+  r = nd_rect(0, 0, c->w, (two != 0) ? 60 : 36);
+  nd_blend_rect(c, r, ND_RGB(0x0B, 0x14, 0x20), 240u);
+  nd_text_limit(c, 16, 8, one, (UINT32)(c->w - 32),
+                ND_RGB(0xFF, 0xFF, 0xFF), 1u);
+  if (two != 0) {
+    nd_text_limit(c, 16, 32, two, (UINT32)(c->w - 32),
+                  ND_RGB(0xFF, 0xFF, 0xFF), 1u);
+  }
+  nd_present(r);
+  if (hold_ms != 0u) {
+    nd_wait_ms(hold_ms);
+  }
+  nd_demo_paint(r);
+  nd_present(r);
+}
+
+/* Full-screen boot report: dark page, a title, the hint that says the
+ * machine may now be switched off, and the caller's lines underneath. Held
+ * for `hold_ms` and then the caller's next paint covers it. */
+void nd_demo_report_draw(const char *text) {
+  nd_surface_t *c = nd_canvas();
+  nd_rect_t     r;
+  INT32         y;
+  UINT32        at = 0u;
+
+  if (c == 0 || text == 0) {
+    return;
+  }
+  r = nd_rect(0, 0, c->w, c->h);
+  nd_fill_rect(c, r, ND_RGB(0x07, 0x0B, 0x12));
+  nd_fill_rect(c, nd_rect(0, 0, c->w, 6u), ND_RGB(0x2E, 0x9E, 0xFF));
+  nd_text(c, 24, 20, "Novus OS · 启动诊断", ND_RGB(0xA8, 0xD8, 0xFF), 2u);
+  nd_text(c, 24, 56, "把这一屏拍下来（或抄下数字），然后就可以关机了。",
+          ND_RGB(0xFF, 0xD4, 0x66), 1u);
+
+  y = 92;
+  while (text[at] != '\0' && y + (INT32)(ND_CJK_H) < (INT32)c->h - 24) {
+    char   line[128];
+    UINT32 n = 0u;
+    UINT32 max_px = (UINT32)(c->w - 48);
+
+    while (text[at] != '\0' && text[at] != '\n' && n + 1u < sizeof(line)) {
+      line[n++] = text[at++];
+    }
+    line[n] = '\0';
+    if (text[at] == '\n') {
+      at++;
+    }
+    nd_text_limit(c, 24, y, line, max_px, ND_RGB(0xE6, 0xEE, 0xF8), 1u);
+    y += (INT32)ND_CJK_H + 6;
+  }
+  nd_text_limit(c, 24, (INT32)c->h - 40, "日志若已写入，读卡即可；未写入就靠这一屏。",
+                (UINT32)(c->w - 48), ND_RGB(0x8F, 0xA6, 0xBF), 1u);
+  nd_present(r);
+}
+
+void nd_demo_report(const char *text, UINT32 hold_ms) {
+  nd_demo_report_draw(text);
+  if (hold_ms != 0u) {
+    nd_wait_ms(hold_ms);
   }
 }
 
@@ -1690,102 +1782,110 @@ void nd_boot_transition(void) {
   nd_surface_t *canvas = nd_canvas();
   nd_surface_t *screen = nd_screen();
   nd_rect_t     full;
-  nd_rect_t     logo;
+  nd_rect_t     band;
   INT32         span;
   INT32         i;
-  int           has_logo;
-  /* The two phases share one black veil. The logo fades out over the first
-   * ten frames while the desktop comes up underneath it; the dock rises
-   * over the next twelve. Because the veil never returns to opaque between
-   * the phases, the hand-over is a crossfade instead of a cut to black and
-   * back. 20/24 ms steps keep the whole move under half a second. */
-  const INT32   out_frames = 10;
-  const INT32   in_frames = 12;
-  const INT32   total_frames = out_frames + in_frames;
+  /* The hand-over used to be a 23-frame full-screen crossfade. A full-screen
+   * present copies the whole scanout into write-combining framebuffer memory;
+   * on the real machine that copy costs longer than a refresh interval, so
+   * twenty-three of them read as a frame being painted in downwards one row
+   * after another, seconds long. Now the desktop appears in a single present
+   * and only the dock band - the only pixels that still move - is repainted
+   * while it rises. Total cost: one full copy plus a dozen slivers of the
+   * bottom fifty-odd rows. */
+  const INT32   rise_frames = 10;
 
   if (canvas == 0 || screen == 0) {
     return;
   }
   full = nd_rect(0, 0, canvas->w, canvas->h);
   span = nd_dock_span();
-  has_logo = nd_boot_logo_rect(&logo);
 
   /* The boot animation ends here, not at ExitBootServices: the rail has just
    * been filled to 100% by the caller, and this closes it out by dimming the
-   * splash to black with the mark still on it. Frame zero below is then
-   * pixel-identical to what is already on the glass - black, with the
-   * machine's mark in the same rectangle - so the desktop rises out of the
-   * boot screen instead of cutting to a black frame first. */
+   * splash to black with the mark still on it. Frame zero below is then the
+   * desktop, which rises out of the black boot screen instead of out of a
+   * frame's worth of rubbish. */
   nd_boot_anim_close();
 
   /* Phase one: the finished desktop is already on the canvas - nd_demo_init()
-   * composed it before calling here - so paint it first, cover it with the
-   * veil, then draw the splash logo above the veil. The logo lifts the last
-   * 32 px and dissolves while the veil thins just enough to reveal the
-   * scene forming underneath. */
+   * composed it before calling here - with the dock parked off the bottom
+   * edge, and one present puts it on the glass. */
+  /* Phase one: the desk crossfades up out of the boot screen. The finished
+   * desktop is already on the canvas - nd_demo_init() composed it before
+   * calling here - and the boot field is laid over it at falling opacity, so
+   * the mark dims and the picture behind it brightens in the same frames.
+   * Five full presents at the cost of a memcpy each: the copy is the one
+   * place a slow present is still visible, which is why it is done here and
+   * not six times behind a dimmed screen. */
   nd_dock_shift(span);
-  for (i = 0; i <= out_frames; i++) {
-    UINT32 p = ((UINT32)i * 1000u) / (UINT32)out_frames;
-    /* ease_out() works on a 0..1000 scale and the renderer's alpha is
-     * 0..255: convert before subtracting, or the fade wraps at every step
-     * past the first and the mark flickers instead of dissolving. */
-    UINT32 fade = (ease_out(p) * 255u) / 1000u;
-    INT32  lift = -((i * 32) / out_frames);
-    UINT8  veil = (UINT8)(255u - ((255u * (UINT32)i) /
-                                  (UINT32)total_frames));
-    UINT64 t0 = nd_tsc();
+  {
+    /* One present of the whole desk, and that is the whole hand-over. The
+     * earlier version re-stamped the splash's mark over the finished
+     * desktop and then dissolved it, which on the glass read as the logo
+     * still sitting on the wallpaper after the picture had come up and
+     * vanishing a frame later. nd_boot_anim_close() has already faded that
+     * mark to black on black, so there is nothing left to dissolve: the
+     * desktop simply arrives complete, dock still parked below the edge. */
+    UINT64 t0;
 
     nd_surface_reset_clip(canvas);
     nd_demo_paint(full);
-    nd_blend_rect(canvas, full, ND_RGB(0, 0, 0), veil);
-    /* The logo sits above the veil: at frame zero the desktop is fully
-     * covered and the splash looks exactly as it did before the handover. */
-    if (has_logo) {
-      nd_boot_logo_draw(canvas, nd_rect(logo.x, logo.y + lift, logo.w,
-                                         logo.h),
-                        (UINT8)(255u - fade));
-    }
+    t0 = nd_tsc();
+    nd_present(full);
+    nd_frame_timing("fade", t0, nd_tsc(), (UINT32)full.w, (UINT32)full.h);
+    /* Let the glass settle on the still picture before the only moving
+     * band starts, so a slow full-screen copy cannot be read as the dock
+     * flashing in and out of the first rise frames. */
+    nd_wait_ms(40);
+  }
+  nd_surface_reset_clip(canvas);
+  nd_demo_paint(full);
+  {
+    UINT64 t0 = nd_tsc();
+
     nd_present(full);
     nd_frame_timing("frame-out", t0, nd_tsc(),
                     (UINT32)full.w, (UINT32)full.h);
-    nd_wait_ms(20);
   }
 
-  /* Phase two: no more logo, just the dock rising into place while the same
-   * veil finishes opening. The last frame is painted with veil = 0, so the
-   * final nd_present() below is a no-op rather than a visible snap. */
-  for (i = 1; i <= in_frames; i++) {
-    UINT32 p = ease_out(((UINT32)i * 1000u) / (UINT32)in_frames);
+  /* Phase two: the dock rises through the bottom band, and nothing above that
+   * band changes between frames, so each frame presents the band alone -
+   * the pill plus the distance it travels - rather than the whole screen. */
+  band = nd_rect(0, full.h - span, full.w, span);
+  if (band.y < 0) {
+    band.y = 0;
+    band.h = full.h;
+  }
+  for (i = 1; i <= rise_frames; i++) {
+    UINT32 p = ease_out(((UINT32)i * 1000u) / (UINT32)rise_frames);
     INT32  dy = span - (INT32)(((UINT64)span * p) / 1000u);
-    UINT8  veil = (UINT8)(255u - ((255u * (UINT32)(out_frames + i)) /
-                                  (UINT32)total_frames));
     UINT64 t0 = nd_tsc();
 
     nd_dock_shift(dy);
-    nd_demo_paint(full);
-    nd_blend_rect(canvas, full, ND_RGB(0, 0, 0), veil);
-    nd_present(full);
+    nd_demo_paint(band);
+    nd_present(band);
     nd_frame_timing("frame-in", t0, nd_tsc(),
-                    (UINT32)full.w, (UINT32)full.h);
-    nd_wait_ms(24);
+                    (UINT32)band.w, (UINT32)band.h);
+    nd_wait_ms(16);
   }
   {
     UINT64 t0 = nd_tsc();
 
     nd_dock_shift(0);
-    nd_demo_paint(full);
-    nd_present(full);
+    nd_demo_paint(band);
+    nd_present(band);
     nd_frame_timing("frame-final", t0, nd_tsc(),
-                    (UINT32)full.w, (UINT32)full.h);
+                    (UINT32)band.w, (UINT32)band.h);
   }
-  /* The frame above was painted with veil = 0, so it is the desktop itself,
-   * pixel for pixel - the same picture nd_demo_init() is about to log as
-   * painted. That is the contract the boot animation ends on: its last frame
-   * is the desktop's first frame, which is why nothing can jump or flash
-   * between the two. Reported on the log with the frame count and the TSC
-   * stamp of the hand-over so a smoke run can check the ordering. */
+  /* The frame above is the desktop itself, pixel for pixel - the same picture
+   * nd_demo_init() is about to log as painted. That is the contract the boot
+   * animation ends on: its last frame is the desktop's first frame, which is
+   * why nothing can jump or flash between the two. Reported on the log with
+   * the frame count and the TSC stamp of the hand-over so a smoke run can
+   * check the ordering. */
   kputs("[BA] timeline end frames=");
-  kputs_hex((UINT64)total_frames + 1u);
+  kputs_hex((UINT64)rise_frames + 2u);
   kputs(" veil=0 last=desktop tsc=");
   kputs_hex(nd_tsc());
   kputs("\n");
@@ -1795,6 +1895,7 @@ void nd_demo_init(void) {
   nd_surface_t *screen = nd_screen();
   nd_surface_t *frame = nd_canvas();
   ng_ctx_t     *ctx;
+  nd_rect_t     full;
 
   novus_timeline("demo init start");
   g_demo_ready = 0;
@@ -1838,13 +1939,66 @@ void nd_demo_init(void) {
    * stood in for it on a machine without a splash gives the screen up in
    * the same instant. */
   fbcon_end();
-  /* Hand over from the splash with motion rather than with a cut: the
-   * machine's logo lifts out of the frame while the dock rises and the
-   * desktop comes up. Runs before nd_boot_splash_end() so the splash still
-   * reports the logo rectangle it drew. */
-  nd_boot_transition();
+  /* The hand-over, with every frame a complete one.
+   *
+   * It used to be a logo that faded over the wallpaper plus a dock lifted
+   * through eight band-only presents. Every partial copy on this laptop's
+   * scanout lands as a visible step, so the logo appeared to sit on the
+   * finished wallpaper and then blink out, and the dock arrived, vanished
+   * and arrived again. The animation is kept, but each frame now composes
+   * the whole desktop into the off-screen buffer and presents all of it:
+   * the screen only ever shows finished pictures, so nothing can flicker
+   * whatever the scanout costs.
+   *
+   * On a machine with no off-screen buffer every paint is a direct scanout
+   * write and a full-frame animation would be seen as the picture being
+   * drawn a row at a time - that machine gets the cut instead.
+   * Runs before nd_boot_splash_end() so the splash still reports the logo
+   * rectangle it drew. */
+  full = nd_rect(0, 0, frame->w, frame->h);
+  if (nd_canvas_buffered() && nd_framebuffer_is_wc()) {
+    /* B-24: four steps, not eight. The rise is cosmetic and it sits between
+     * "the machine has finished booting" and "the desktop accepts input" -
+     * every step is a whole-screen compose plus a whole-screen present plus
+     * an 18 ms wait. Measured in QEMU, one step is ~20 ms of paint and ~15 ms
+     * of present on top of the wait, so halving the count hands back roughly
+     * a tenth of a second on every machine and more wherever a present is not
+     * free. The motion still reads as a rise (ease_out over four frames),
+     * which is the whole point of keeping any of it. */
+    const INT32 rise_steps = 4;
+    INT32       i;
+    INT32       span = nd_dock_span();
+
+    /* Wallpaper, one present: the first finished frame IS the desktop,
+     * with no veil and no partial passes. The dimming ramp that used to
+     * run here was four whole-screen copies on a scanout that can be
+     * uncached - on the laptop it was slow enough to watch the picture
+     * come up row by row, which is worse than no animation at all. */
+    nd_dock_shift(span);
+    for (i = 1; i <= rise_steps; i++) {
+      UINT64 t0 = nd_tsc();
+      UINT32 p = ease_out(((UINT32)i * 1000u) / (UINT32)rise_steps);
+
+      nd_dock_shift(span - (INT32)(((UINT64)span * (UINT64)p) / 1000u));
+      nd_surface_reset_clip(frame);
+      nd_demo_paint(full);
+      nd_present(full);
+      nd_frame_timing("rise", t0, nd_tsc(), (UINT32)full.w, (UINT32)full.h);
+      nd_wait_ms(18);
+    }
+    nd_dock_shift(0);
+    kputs("[BA] handover: wallpaper in one frame, dock rise\n");
+  } else {
+    /* Uncached scanout or no off-screen buffer: every frame is expensive
+     * and visibly drawn, so the desktop appears in a single present. */
+    kputs("[BA] handover: single present (slow scanout)\n");
+  }
+  /* The last frame is the desktop at rest, whichever path ran. */
+  nd_dock_shift(0);
+  nd_surface_reset_clip(frame);
+  nd_demo_paint(full);
+  nd_present(full);
   nd_boot_splash_end();
-  nd_present(nd_rect(0, 0, screen->w, screen->h));
   kputs("[ND] demo desktop painted\n");
   {
     nd_frame_stats_t st;

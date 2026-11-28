@@ -68,7 +68,11 @@ fn hex32(out: &mut [u8; 8], v: u32) -> &[u8] {
     let mut i = out.len();
     loop {
         i -= 1;
-        out[i] = b'0' + (x & 0xF) as u8;
+        let d = (x & 0xF) as u8;
+        // B-48: digits above 9 were written as '0'+d, which lands on ':'..'?'
+        // and turned every value with an A-F nibble into punctuation
+        // ("primary w=400 h=2=0" instead of 0x300).
+        out[i] = if d < 10 { b'0' + d } else { b'a' + (d - 10) };
         x >>= 4;
         if x == 0 { break; }
     }
@@ -176,7 +180,7 @@ fn main_loop() -> ! {
     };
     if sys::dwm_query(&mut q) < 0 || q.count == 0 {
         log(b"[DWM] no outputs; idling\n");
-        loop { sys::yield_now(); }
+        loop { sys::sleep_ticks(1); }
     }
     let mut fw = q.out[0].width;
     let mut fh = q.out[0].height;
@@ -208,7 +212,10 @@ fn main_loop() -> ! {
                                    sys::VM_PROT_WRITE | sys::VM_PROT_USER) < 0 {
             if i == 0 {
                 log(b"[DWM] front buffer allocation failed; idling\n");
-                loop { sys::yield_now(); }
+                // B-39: the front buffer is gone, so there is nothing to
+                // present ever again - park instead of spinning at full
+                // speed for the rest of the session.
+                loop { sys::sleep_ticks(1); }
             }
             if h != 0 { sys::vmem_free(h); }
             break;
@@ -277,7 +284,11 @@ fn main_loop() -> ! {
                 Some(l) => l,
                 None => {
                     // No v2 surfaces: leave the framebuffer to the kernel WM.
-                    sys::yield_now();
+                    // B-37: park for a tick. A yield here is a full-speed spin -
+                    // on a desktop whose windows are all v1 this loop has
+                    // nothing to compose, so it ran millions of iterations a
+                    // second and was the task the scheduler sampled most.
+                    sys::sleep_ticks(1);
                     continue;
                 }
             }
@@ -304,7 +315,10 @@ fn main_loop() -> ! {
          * is composed into its partner. With one buffer this is a no-op. */
         if count == 2 { back ^= 1; }
 
-        sys::yield_now();
+        // B-37: one tick per frame. Presenting in a yield loop let the
+        // compositor push frames as fast as the CPU allowed (no vsync on
+        // this hardware) and starved every client behind it.
+        sys::sleep_ticks(1);
     }
 }
 

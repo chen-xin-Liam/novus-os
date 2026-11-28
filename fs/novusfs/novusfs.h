@@ -211,6 +211,11 @@ typedef struct novusfs_fs {
   UINTN     mounted;             /* 0 == not mounted */
   novusfs_super_t sb;            /* cached superblock */
   UINT64    wal_bytes;           /* wal_blocks * block_size */
+  UINT64    wal_active_txid;     /* transaction being logged, 0 == none.
+                                  * Its records must never be reclaimed: the
+                                  * redo that makes them durable only runs
+                                  * at commit, so dropping one mid-flight
+                                  * loses the blocks it carried. */
   UINT64    data_start;          /* first data block (derived) */
   UINT64    data_blocks;         /* number of data blocks (derived) */
 

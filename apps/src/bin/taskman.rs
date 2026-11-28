@@ -468,6 +468,13 @@ pub extern "C" fn _start() -> ! {
             draw(&mut win, &rows, n, total, page, selected, tab, cpu, &history, history_count, history_head, accent, message, &menu);
             redraw = false;
         }
-        sys::yield_now();
+        /* B-39: one tick per iteration. With yield_now() the `idle >= 40`
+         * sampling counter above counted loop iterations, so the window
+         * re-read the task table and repainted the whole list thousands of
+         * times a second - the graph and every row are shapes and text
+         * runs, so each repaint pushed ~100 IPC messages at a WM that
+         * serves ~640/s, and the surplus showed up as 13k IPC_EBUSY
+         * refusals per second in the kernel's counters. */
+        sys::sleep_ticks(1);
     }
 }

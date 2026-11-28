@@ -259,6 +259,27 @@ static void bounded_copy(char *dst, const char *src, UINTN cap) {
   dst[i] = '\0';
 }
 
+/* /Novus is the system tree: programs may read it, run what is in it, and
+ * the installer (writing through the filesystem directly, not through this
+ * layer) may populate it. What they may not do is remove or move parts of
+ * it - the built-in applications and the kernel's own files live there, and
+ * a desktop where a mis-click in the file manager can delete the file
+ * manager is not one worth shipping. */
+static int path_is_system(const char *p) {
+  static const char sys[] = "/Novus";
+  UINT32 i;
+
+  if (p == NULL) {
+    return 0;
+  }
+  for (i = 0u; sys[i] != '\0'; i++) {
+    if (p[i] != sys[i]) {
+      return 0;
+    }
+  }
+  return (p[i] == '\0' || p[i] == '/') ? 1 : 0;
+}
+
 int vfs_mount_unlink_path(const char *path) {
   char            copy[VFS_PATH_MAX];
   vfs_fs_t       *fs;
@@ -269,7 +290,8 @@ int vfs_mount_unlink_path(const char *path) {
   UINT16          mode = 0;
   mount_emp_ctx_t emp;
 
-  if (path == NULL || vfs_mount_find_path(path) != NULL) {
+  if (path == NULL || vfs_mount_find_path(path) != NULL ||
+      path_is_system(path)) {
     return -1;
   }
   bounded_copy(copy, path, sizeof(copy));
@@ -302,6 +324,7 @@ int vfs_mount_rename_path(const char *old_path, const char *new_path) {
   char     *nleaf;
 
   if (old_path == NULL || new_path == NULL ||
+      path_is_system(old_path) || path_is_system(new_path) ||
       vfs_mount_find_path(old_path) != NULL ||
       vfs_mount_find_path(new_path) != NULL) {
     return -1;

@@ -49,7 +49,7 @@
  * the firmware stage's lines are already on screen when splash first paints. */
 #define SPLASH_LOG_MAX_W    900
 #define SPLASH_LOG_MAX_H    320
-#define SPLASH_LOG_LINE_H   16
+#define SPLASH_LOG_LINE_H   18
 #define SPLASH_LOG_MAX_LINES 20
 #define SPLASH_LOG_SNAP     4096
 #define SPLASH_LOG_PAD      10
@@ -63,6 +63,10 @@
 #define SPLASH_BAR_MAX_W 520
 #define SPLASH_BAR_TRACK 0x1E2A3Cu
 #define SPLASH_BAR_FILL  0x5B9BFFu
+/* B-52: the progress part sits under the indeterminate comet, so it is a
+ * dimmer blue; the comet's tail is dimmer than its head. */
+#define SPLASH_BAR_TRACK_FILL 0x2E4570u
+#define SPLASH_BAR_SPIN_TAIL  0x3D6FB8u
 
 /* .data, not .bss: the boot stage paints the splash before ExitBootServices
  * and kernel_entry zeroes .bss on its way into kmain, which would otherwise
@@ -72,6 +76,7 @@ static struct {
   UINT8        active;
   UINT8        percent;  /* bar fill, monotonic across both halves of boot */
   UINT8        has_mark; /* 1 = a mark (vendor or baked) is on the glass */
+  UINT8        log_owned;/* 1 = the text console owns the log panel */
   char         label[SPLASH_LABEL_MAX];
   nd_rect_t    mark;
   nd_rect_t    logo;    /* where the vendor logo sits, when there is one */
@@ -79,8 +84,19 @@ static struct {
   nd_rect_t    status;
   nd_rect_t    log;     /* boot-log panel, between logo and status */
   UINT32       log_seen; /* klog version the panel was last painted with */
+  /* What is on the glass right now, so a repaint can skip what did not
+   * change. The mark in particular is a still picture on a persistent
+   * framebuffer: redrawing it because a log line arrived was the single
+   * most expensive thing the splash did. */
+  UINT32       logo_scale;   /* 0 = the mark is not on the glass */
+  UINT8        logo_alpha;   /* its opacity */
+  UINT32       bar_pct;      /* rail fill drawn, 0xFFFFFFFF = not drawn yet */
+  char         status_seen[SPLASH_LABEL_MAX]; /* label already painted */
   nd_surface_t scratch; /* used only before nd_init() */
 } g_splash __attribute__((section(".data")));
+
+/* B-53: kernel-side spin frames painted, see nd_boot_spin_ticks(). */
+static UINT32 g_spin_drawn;
 
 /* Allocated in .bss: kernel_entry clears it on the way in, and the first
  * kernel-stage nd_boot_stage() repaints the panel from the inherited ring. */
@@ -128,26 +144,26 @@ nd_surface_t *splash_surface(void) {
   return &g_splash.scratch;
 }
 
-/* Vertical gradient, recomputed for whichever band has to be repainted.
- * Row by row because the renderer has no gradient-with-clip form and the
- * splash only ever repaints a small band. */
+/* Pure black backdrop. The boot screen's whole job is to look like the
+ * machine's own power-on screen: a black field, the board's logo, and the
+ * log along the bottom. Anything that shades the field - a gradient, a
+ * vignette - reads as an OS advertisement instead of the board's firmware
+ * screen, which is exactly what this is trying not to be. */
 static void splash_backdrop(nd_surface_t *s, nd_rect_t r) {
-  INT32 y;
-
   r = nd_rect_intersect(r, nd_rect(0, 0, s->w, s->h));
   if (nd_rect_empty(r)) {
     return;
   }
-  for (y = r.y; y < r.y + r.h; y++) {
-    UINT32     t = (s->h > 1) ? ((UINT32)y * 255u) / (UINT32)(s->h - 1) : 0u;
-    UINT32     inv = 255u - t;
-    nd_color_t c = ND_RGB(
-        (ND_RED(SPLASH_TOP) * inv + ND_RED(SPLASH_BOTTOM) * t) / 255u,
-        (ND_GREEN(SPLASH_TOP) * inv + ND_GREEN(SPLASH_BOTTOM) * t) / 255u,
-        (ND_BLUE(SPLASH_TOP) * inv + ND_BLUE(SPLASH_BOTTOM) * t) / 255u);
-
-    nd_fill_rect(s, nd_rect(r.x, y, r.w, 1), c);
-  }
+  /* A machine whose firmware splash is a full-screen picture holds no badge
+   * to crop, and cropping it anyway would paste a squashed screenshot into
+   * the mark's slot. Using that picture wholesale was tried and removed: it
+   * carries whatever the firmware printed before us - POST text, its own
+   * console - and re-scaling it puts a ghost of the firmware's screen behind
+   * our rail instead of a boot screen. The vendor mark is used when it is
+   * recognisable; otherwise the field is black and the splash draws its own
+   * mark, which is a clean screen on every machine. */
+  (void)nd_oem_frame_available();
+  nd_fill_rect(s, r, ND_RGB(0, 0, 0));
 }
 
 static void splash_log_layout(nd_surface_t *s);
@@ -189,16 +205,25 @@ static void splash_layout(nd_surface_t *s) {
     lw = (lw * max_h + lh / 2) / lh;
     lh = max_h;
   }
-  logo_top = (s->h * 26) / 100 - lh / 2;
+  logo_top = (s->h * 34) / 100 - lh / 2;
   if (logo_top < 24) {
     logo_top = 24;
   }
-  status_y = s->h - (s->h / 5) - SPLASH_STATUS_H / 2;
-  if (status_y < logo_top + lh + 32) {
-    status_y = logo_top + lh + 32;
-  }
   g_splash.mark = nd_rect((s->w - lw) / 2, logo_top, lw, lh);
   g_splash.logo = g_splash.mark;
+
+  /* Bottom block, measured from the bottom edge up: the log panel is what
+   * the user asked to have at the bottom, so it owns the edge, and the
+   * status line with its rail sits directly above it. */
+  splash_log_layout(s);
+  {
+    INT32 log_top = (g_splash.log.h > 0) ? g_splash.log.y : (s->h - 24);
+
+    status_y = log_top - 10 - SPLASH_STATUS_H;
+    if (status_y < logo_top + lh + 24) {
+      status_y = logo_top + lh + 24;
+    }
+  }
   g_splash.status = nd_rect(0, status_y, s->w, SPLASH_STATUS_H);
   {
     /* The rail is sized from the panel, not from the logo: a wide panel
@@ -229,17 +254,20 @@ static void splash_layout(nd_surface_t *s) {
   splash_log_layout(s);
 }
 
-/* The log panel is an overlay in the literal sense: the logo and the status
- * line keep their rectangles, and the log fills the gap between them. It is
- * bottom-aligned so the newest line sits just above the status band, the way
- * a console scrolls. */
+/* The log panel is anchored to the bottom edge: the newest line sits just
+ * above the bottom margin, the way a console scrolls, and the block grows
+ * upwards into the space under the logo. The status line is placed after
+ * this one, above the panel. */
 static void splash_log_layout(nd_surface_t *s) {
-  INT32 logo_bottom = (g_splash.logo.h > 0)
-                          ? g_splash.logo.y + g_splash.logo.h
-                          : (s->h * 20) / 100;
-  INT32 top = logo_bottom + 16;
-  INT32 bottom = (g_splash.status.h > 0) ? g_splash.status.y - 12 : s->h - 24;
-  INT32 h = bottom - top;
+  /* The on-screen log is switched off: a cold boot no longer needs a panel
+   * narrating itself, the stage line says where the boot is, and the log is
+   * kept in the ring for the serial port and the USB copy. */
+#define SPLASH_SHOW_LOG 0
+#if !SPLASH_SHOW_LOG
+  (void)s;
+  g_splash.log = nd_rect(0, 0, 0, 0);
+  return;
+#else
   INT32 w = s->w - 96;
 
   if (h > SPLASH_LOG_MAX_H) {
@@ -248,11 +276,12 @@ static void splash_log_layout(nd_surface_t *s) {
   if (w > SPLASH_LOG_MAX_W) {
     w = SPLASH_LOG_MAX_W;
   }
-  if (h < SPLASH_LOG_LINE_H * 2 || w < 240) {
+  if (h < SPLASH_LOG_LINE_H * 3 || w < 240) {
     g_splash.log = nd_rect(0, 0, 0, 0);
     return;
   }
-  g_splash.log = nd_rect((s->w - w) / 2, bottom - h, w, h);
+  g_splash.log = nd_rect((s->w - w) / 2, s->h - 24 - h, w, h);
+#endif /* SPLASH_SHOW_LOG */
 }
 
 /* Copy the baked logo. At 1:1 with no fade nd_blit handles clipping and the
@@ -271,13 +300,20 @@ static void splash_logo_at(nd_surface_t *s, nd_rect_t r, UINT8 alpha) {
    * drew - the firmware's capture or the baked one - and not just when a
    * vendor logo happened to be on the scanout. */
   g_splash.has_mark = 1;
-  /* The firmware's own mark wins when the boot stage caught one: the point
-   * of showing it is that the screen looks like this machine's boot screen
-   * and not like an advertisement for an operating system. */
+  /* The board's own mark is preferred: whatever the firmware painted on the
+   * scanout reads as "this machine starting", which is what a boot screen is
+   * for. Machines whose firmware left no mark (or replaced it before we
+   * looked) fall back to the baked Novus logo, so the same code covers both. */
+#define SPLASH_USE_OEM_LOGO 1
+#if SPLASH_USE_OEM_LOGO
   if (nd_oem_logo_available()) {
     nd_oem_logo_draw(s, r, alpha);
     return;
   }
+  /* A captured first frame is reported in the boot log but deliberately not
+   * used as the splash field: it is the firmware's whole screen, console text
+   * and all, and rescaling it reads as a ghost rather than as a boot screen. */
+#endif
   if (r.w == BOOT_LOGO_W && r.h == BOOT_LOGO_H && alpha == 255u) {
     img.px = (UINT32 *)(UINTN)g_boot_logo;
     img.w = BOOT_LOGO_W;
@@ -395,32 +431,154 @@ static void splash_bar(nd_surface_t *s) {
                 (fill < r.h) ? fill / 2 : r.h / 2, SPLASH_BAR_FILL);
 }
 
-/* Everything the animation repaints: the mark's whole travel range (the
- * resting rectangle, which every scale fits inside), the rail and the
- * status line. Repainting only this strip is what keeps a fade from
- * rebuilding the backdrop of the entire panel on every frame. */
-static nd_rect_t splash_marks_band(nd_surface_t *s) {
-  nd_rect_t band = nd_rect(0, 0, 0, 0);
+/* B-52: indeterminate motion on the same rail.
+ *
+ * The last stretch of the boot ("entering the kernel") runs work whose length
+ * is not known in advance, so a percentage would lie. Instead a short comet
+ * runs along the rail: pure geometry, no bitmap and no glyph, which is also
+ * why it costs a handful of rounded rects per frame. The already-filled
+ * portion stays drawn underneath, so the boot still shows where it got to.
+ * `tick` only has to increase; the caller owns the frame rate. */
+void nd_boot_spin(UINT32 tick) {
+  nd_surface_t *s;
+  nd_rect_t     r = g_splash.bar;
+  INT32         seg;
+  INT32         span;
+  INT32         pos;
 
-  if (g_splash.logo.w > 0) {
-    band = nd_rect_union(band, nd_rect(g_splash.logo.x - 4,
-                                       g_splash.logo.y - 4,
-                                       g_splash.logo.w + 8,
-                                       g_splash.logo.h + 8));
+  if (!g_splash.active) {
+    return;
   }
-  if (g_splash.bar.w > 0) {
-    band = nd_rect_union(band, nd_rect(g_splash.bar.x - 4,
-                                       g_splash.bar.y - 6,
-                                       g_splash.bar.w + 8,
-                                       g_splash.bar.h + 12));
+  s = splash_surface();
+  if (s == 0 || r.w <= 0 || r.h <= 0) {
+    return;
   }
-  if (g_splash.status.w > 0) {
-    band = nd_rect_union(band, nd_rect(g_splash.status.x,
-                                       g_splash.status.y - 4,
-                                       g_splash.status.w,
-                                       g_splash.status.h + 8));
+  nd_surface_reset_clip(s);
+  nd_round_rect(s, r, r.h / 2, SPLASH_BAR_TRACK);
+  {
+    INT32 fill = (INT32)(((UINT64)r.w * (UINT64)g_splash.percent) / 100u);
+
+    if (fill > 0) {
+      if (fill > r.w) {
+        fill = r.w;
+      }
+      nd_round_rect(s, nd_rect(r.x, r.y, fill, r.h),
+                    (fill < r.h) ? fill / 2 : r.h / 2, SPLASH_BAR_TRACK_FILL);
+    }
   }
-  return nd_rect_intersect(band, nd_rect(0, 0, s->w, s->h));
+  seg = r.w / 4;
+  if (seg < 12) {
+    seg = 12;
+  }
+  span = r.w - seg;
+  if (span < 1) {
+    return;
+  }
+  /* 40 stops per revolution: at the boot's frame rate that is about one sweep
+   * per 0.6 s, and even the two or three frames this usually gets to draw
+   * move the head far enough to read as motion. */
+  pos = (INT32)((tick % 40u) * (UINT32)span / 40u);
+  /* Head brightest, tail dim: a single rect would read as a second progress
+   * chunk instead of motion. */
+  nd_round_rect(s, nd_rect(r.x + pos, r.y, seg, r.h), r.h / 2, SPLASH_BAR_FILL);
+  if (pos > 6) {
+    nd_round_rect(s, nd_rect(r.x + pos - 6, r.y, 6, r.h), r.h / 2,
+                  SPLASH_BAR_SPIN_TAIL);
+  }
+}
+
+/* B-53: the same comet, driven from the kernel side.
+ *
+ * Between the boot hand-off and the scheduler the kernel spends seconds inside
+ * drivers that block (USB port walks, reset settles, AHCI/NVMe waits) and the
+ * rail's percentage does not move at all - the one stretch where a spinner is
+ * genuinely the only honest indicator. There is no timer to call us back yet,
+ * so instead the drivers' own wait loops tick this: it self-clocks off
+ * cpu_uptime_us() and repaints at most every 16 ms, which keeps a 40 kHz poll
+ * loop from turning into a 40 kHz redraw. */
+void nd_boot_spin_tick(void) {
+  static UINT64 last_us;
+  static UINT32 tick;
+  static UINT32 drawn;
+  UINT64        now;
+
+  if (!g_splash.active) {
+    last_us = 0u;
+    return;
+  }
+  now = cpu_uptime_us();
+  if (last_us != 0u && now >= last_us && (now - last_us) < 16000u) {
+    return;
+  }
+  last_us = now;
+  nd_boot_spin(tick++);
+  g_spin_drawn = ++drawn;
+}
+
+/* How many frames this hook has actually painted. The boot's screenshot cannot
+ * prove motion (the compositor hands out stale surfaces), so the count is what
+ * a timeline line reports instead. */
+UINT32 nd_boot_spin_ticks(void) { return g_spin_drawn; }
+
+/* Repaint only the widgets whose value actually changed. Nothing here touches
+ * the mark: the framebuffer holds it until something paints over it, and the
+ * only thing that ever paints over it is a fade this function is told about.
+ *
+ * This used to rebuild the backdrop of the mark's whole travel range and blit
+ * the mark again for every log line and every stage, which on a cache-disabled
+ * framebuffer showed as the boot screen being rewritten a band at a time. */
+static void splash_refresh(nd_surface_t *s, UINT32 logo_scale, UINT8 logo_alpha) {
+  if (logo_scale != g_splash.logo_scale || logo_alpha != g_splash.logo_alpha) {
+    nd_rect_t oldr = splash_logo_scaled(g_splash.logo_scale);
+    nd_rect_t newr = splash_logo_scaled(logo_scale);
+    nd_rect_t d = nd_rect_union(oldr, newr);
+
+    /* Erase both rectangles, then lay the mark down once at the new size and
+     * opacity. Scaling happens about the centre, so the union is the only
+     * region either position can have touched. */
+    d = nd_rect(d.x - 2, d.y - 2, d.w + 4, d.h + 4);
+    splash_backdrop(s, d);
+    g_splash.logo_scale = logo_scale;
+    g_splash.logo_alpha = logo_alpha;
+    splash_logo_at(s, newr, logo_alpha);
+  }
+  if (g_splash.bar_pct != (UINT32)g_splash.percent) {
+    g_splash.bar_pct = (UINT32)g_splash.percent;
+    splash_bar(s);
+  }
+  {
+    UINT32 i;
+
+    for (i = 0u; i + 1u < SPLASH_LABEL_MAX; i++) {
+      if (g_splash.status_seen[i] != g_splash.label[i]) {
+        break;
+      }
+    }
+    if (i + 1u < SPLASH_LABEL_MAX || g_splash.label[i] != '\0') {
+      for (i = 0u; i + 1u < SPLASH_LABEL_MAX; i++) {
+        g_splash.status_seen[i] = g_splash.label[i];
+        if (g_splash.label[i] == '\0') {
+          break;
+        }
+      }
+      splash_backdrop(s, g_splash.status);
+      splash_status(s);
+    }
+  }
+}
+
+/* Record the line that is on the glass, so a later stage repaints it only
+ * when the text really changes. */
+static void splash_status_seen_mark(void) {
+  UINT32 i;
+
+  for (i = 0u; i + 1u < SPLASH_LABEL_MAX; i++) {
+    g_splash.status_seen[i] = g_splash.label[i];
+    if (g_splash.label[i] == '\0') {
+      return;
+    }
+  }
+  g_splash.status_seen[SPLASH_LABEL_MAX - 1u] = '\0';
 }
 
 /* Paint the splash backdrop and lay the empty frame out: rail at zero, no
@@ -430,6 +588,10 @@ static int splash_open(nd_surface_t *s) {
   g_splash.active = 1;
   g_splash.percent = 0;
   g_splash.label[0] = '\0';
+  g_splash.status_seen[0] = '\0';
+  g_splash.logo_scale = 0;
+  g_splash.logo_alpha = 0;
+  g_splash.bar_pct = 0xFFFFFFFFu;
   splash_layout(s);
   nd_surface_reset_clip(s);
   /* The firmware drew its logo and its console through its own cacheable
@@ -459,7 +621,13 @@ int nd_boot_anim_begin(void) {
   if (!splash_open(s)) {
     return 0;
   }
+  kputs("[ND] firmware logo: ");
+  kputs(nd_oem_logo_reason());
+  kputs(nd_oem_logo_available() ? " (mark)" : " (no mark)");
+  kputs(nd_oem_frame_available() ? ", first frame kept\n"
+                                 : ", first frame absent\n");
   splash_bar(s);
+  g_splash.bar_pct = (UINT32)g_splash.percent;
   return 1;
 }
 
@@ -491,10 +659,10 @@ void nd_boot_anim_frame(UINT32 logo_scale, UINT8 logo_alpha, UINT32 bar,
     g_splash.label[i] = '\0';
   }
   nd_surface_reset_clip(s);
-  splash_backdrop(s, splash_marks_band(s));
-  splash_logo_at(s, splash_logo_scaled(logo_scale), logo_alpha);
-  splash_bar(s);
-  splash_status(s);
+  /* Only the mark's own scale and opacity here: a frame carrying the same
+   * numbers as the last one costs nothing, which is the common case once the
+   * intro has landed on its resting size. */
+  splash_refresh(s, logo_scale, logo_alpha);
 }
 
 /* The one line: whatever the boot is doing right now, centred, no
@@ -571,6 +739,12 @@ static void splash_log_paint(nd_surface_t *s) {
     return;
   }
   g_splash.log_seen = klog_version();
+  /* Once the kernel's own text console owns this band, the panel must stop
+   * repainting it: a snapshot taken from the ring would erase the live
+   * console's scrolled text and the two would fight on every stage change. */
+  if (g_splash.log_owned) {
+    return;
+  }
   count = splash_log_lines();
   visible = (UINT32)((r.h - 2 * SPLASH_LOG_PAD) / SPLASH_LOG_LINE_H);
   if (visible > count) {
@@ -589,8 +763,54 @@ static void splash_log_paint(nd_surface_t *s) {
                     (INT32)((visible - i) * SPLASH_LOG_LINE_H);
 
     nd_text_limit(s, r.x + SPLASH_LOG_PAD, y, line,
-                  (UINT32)(r.w - 2 * SPLASH_LOG_PAD), SPLASH_DIM, 1u);
+                  (UINT32)(r.w - 2 * SPLASH_LOG_PAD), SPLASH_TEXT, 1u);
   }
+}
+
+/* Repaint the panel from the ring on demand. The kernel calls this once per
+ * finished log line, so the log on the glass is live instead of a snapshot
+ * that freezes at the call which hung - which is the whole point of having a
+ * log panel on a machine that has no serial port. */
+/* A finished log line used to repaint the whole panel straight away. That
+ * panel is a band of the real scanout, and on the laptop its repaint (a
+ * backdrop fill, a blend and every visible line of text) costs tens of
+ * milliseconds per line: the boot log itself became the longest phase of the
+ * boot, not the drivers it was reporting. Coalesce instead - five lines or
+ * thirty milliseconds, whichever comes first - and let the stage repaints
+ * that already exist catch the remainder, so a burst of eighty lines costs
+ * about sixteen panel repaints instead of eighty. A machine that hangs can
+ * leave at most four finished lines off the glass; the copy on the stick is
+ * written per line and still has them. */
+#define SPLASH_LOG_REFRESH_US   30000u
+#define SPLASH_LOG_MAX_PENDING  5u
+
+void nd_boot_log_refresh(void) {
+  static UINT8  g_painting;
+  static UINT8  g_pending;
+  static UINT64 g_last_us;
+  nd_surface_t *s;
+
+  if (!g_splash.active || g_splash.log_owned || g_painting) {
+    return;
+  }
+  s = splash_surface();
+  if (s == 0) {
+    return;
+  }
+  if (g_pending < SPLASH_LOG_MAX_PENDING) {
+    g_pending++;
+  }
+  if (g_pending < SPLASH_LOG_MAX_PENDING &&
+      (cpu_uptime_us() - g_last_us) < SPLASH_LOG_REFRESH_US) {
+    return;
+  }
+  /* Painting emits log lines of its own (the lazily built 2D backend says
+   * so on its first span), and those would call straight back in here. */
+  g_painting = 1u;
+  splash_log_paint(s);
+  g_painting = 0u;
+  g_pending = 0u;
+  g_last_us = cpu_uptime_us();
 }
 
 void nd_boot_splash_end(void) { g_splash.active = 0; }
@@ -600,13 +820,48 @@ void nd_boot_splash_end(void) { g_splash.active = 0; }
  * continuous movement rather than as two screens that happen to share a
  * colour. Answers for both marks: the firmware's capture, and the baked
  * one on machines that had no vendor logo to capture. */
-int nd_boot_logo_rect(nd_rect_t *out) {
-  if (out == 0 || !g_splash.has_mark || g_splash.mark.w <= 0) {
+/* Somebody painted over the splash - the pre-desktop menu does, with its own
+ * full-screen card. The mark is not on the glass any more, so the next stage
+ * repaint lays it back down, once. */
+void nd_boot_splash_mark_dirty(void) {
+  g_splash.logo_scale = 0;
+  g_splash.logo_alpha = 0;
+  g_splash.bar_pct = 0xFFFFFFFFu;
+  g_splash.status_seen[0] = '\0';
+}
+
+/* Which picture the splash took, in three letters: the firmware's own mark
+ * (mk), its whole first frame (fw), or the baked fallback (none). The desktop
+ * shows this in its status line - one short word is the only on-screen
+ * report, and it says at a glance whether the board logo was found. */
+const char *nd_boot_logo_tag(void) {
+  if (g_splash.mark.w <= 0 && !g_splash.has_mark) {
+    return nd_oem_frame_available() ? "fw" : "none";
+  }
+  return nd_oem_logo_available() ? "mk" : "bak";
+}
+
+int nd_boot_logo_rect(nd_rect_t *out) {  if (out == 0 || !g_splash.has_mark || g_splash.mark.w <= 0) {
     return 0;
   }
   *out = g_splash.mark;
   return 1;
 }
+
+/* The rectangle the boot-log panel occupies. The kernel's text console takes
+ * this band over so the log on the glass is the live kputs() stream rather
+ * than a snapshot that stops at the call that hung. */
+int nd_boot_log_rect(nd_rect_t *out) {
+  if (out == 0 || g_splash.log.w <= 0 || g_splash.log.h <= 0) {
+    return 0;
+  }
+  *out = g_splash.log;
+  return 1;
+}
+
+/* Announce that the text console owns the panel, so the splash stops painting
+ * its snapshot over it. */
+void nd_boot_splash_log_off(void) { g_splash.log_owned = 1; }
 
 /* Draw the splash's own mark into any surface, at any rectangle, with a
  * fade. The desktop transition needs exactly this: the mark the user has
@@ -627,31 +882,56 @@ void nd_boot_logo_draw(nd_surface_t *s, nd_rect_t r, UINT8 alpha) {
  * in one step. Runs in the kernel, right before nd_boot_transition(). */
 void nd_boot_anim_close(void) {
   nd_surface_t *s = splash_surface();
-  const INT32   steps = 5;
+  nd_rect_t     full;
+  nd_rect_t     mark;
   INT32         i;
 
   if (!g_splash.active || s == 0) {
     return;
   }
   nd_surface_reset_clip(s);
-  for (i = 1; i <= steps; i++) {
-    UINT8 veil = (UINT8)((255 * i) / steps);
+  full = nd_rect(0, 0, s->w, s->h);
+  mark = g_splash.has_mark ? g_splash.mark : nd_rect(0, 0, 0, 0);
 
-    nd_blend_rect(s, nd_rect(0, 0, s->w, s->h), ND_RGB(0, 0, 0), veil);
-    /* Over the dimmed backdrop, opaque: the screen the transition starts
-     * from is black with the machine's mark on it. */
-    if (g_splash.has_mark) {
-      splash_logo_at(s, g_splash.mark, 255);
+  /* One present takes the field to black, then only the mark's own
+   * rectangle is rewritten as it fades. The screen is a cache-disabled
+   * mapping on this laptop, so a full-screen write costs real milliseconds
+   * and doing it once per fade step is what read as the whole picture being
+   * redrawn over and over. */
+  nd_fill_rect(s, full, ND_RGB(0, 0, 0));
+  nd_present(full);
+  nd_wait_ms(18);
+
+  if (mark.w > 0) {
+    const INT32 steps = 5;
+
+    for (i = 1; i <= steps; i++) {
+      UINT8     alpha = (UINT8)(255u - (255u * (UINT32)i) / (UINT32)steps);
+      nd_rect_t r = nd_rect(mark.x - 2, mark.y - 2, mark.w + 4, mark.h + 4);
+
+      nd_fill_rect(s, r, ND_RGB(0, 0, 0));
+      splash_logo_at(s, mark, alpha);
+      nd_present(r);
+      nd_wait_ms(22);
     }
-    /* One line per step so the hand-over is on the record with the same
-     * detail as the UEFI frames: a smoke run can then check that the splash
-     * dimmed in steps instead of cutting to black. */
-    kputs("[BA] close step=");
-    kputs_hex((UINT64)i);
-    kputs(" veil=");
-    kputs_hex((UINT64)veil);
-    kputs(" mark=opaque\n");
-    nd_wait_ms(24);
+  }
+  kputs("[BA] close faded\n");
+}
+
+/* One frame of the splash-to-desktop crossfade, drawn over the composed
+ * desktop: the splash field at `veil` opacity, with the mark at the same
+ * opacity so the two fade as one picture instead of the mark blinking out
+ * before the background. Called only while the desktop canvas is being
+ * handed over; `veil` 0 draws nothing. */
+void nd_boot_handover_frame(nd_surface_t *dst, nd_rect_t r, UINT8 veil) {
+  if (dst == 0 || dst->px == 0 || veil == 0u) {
+    return;
+  }
+  if (g_splash.has_mark) {
+    nd_blend_rect(dst, r, ND_RGB(0, 0, 0), veil);
+    splash_logo_at(dst, g_splash.mark, veil);
+  } else {
+    nd_blend_rect(dst, r, ND_RGB(0, 0, 0), veil);
   }
 }
 
@@ -671,17 +951,58 @@ int nd_boot_splash(void) {
   if (!splash_open(s)) {
     return 0;
   }
+  /* One line that names which picture the splash ended up with, and why the
+   * firmware's mark was refused when it was. A machine that shows no logo
+   * has to be diagnosable from a log read on another computer. */
+  kputs("[ND] firmware logo: ");
+  kputs(nd_oem_logo_reason());
+  kputs(nd_oem_logo_available() ? " (mark)" : " (no mark)");
+  kputs(nd_oem_frame_available() ? ", first frame kept\n"
+                                 : ", first frame absent\n");
   splash_logo(s);
   /* The firmware stage's lines are already in the handoff ring, so the very
    * first splash frame carries the whole boot log collected so far. */
   splash_log_paint(s);
   splash_bar(s);
+  g_splash.logo_scale = 100u;
+  g_splash.logo_alpha = 255u;
+  g_splash.bar_pct = (UINT32)g_splash.percent;
+  splash_status_seen_mark();
+  return 1;
+}
+
+/* The kernel's second visit to the splash. By this point the kernel has
+ * bound the framebuffer to its own page tables and the text console has
+ * painted a black box over the boot stage's picture, so the old frame is
+ * gone. Recompute the layout against the bound surface and paint the whole
+ * thing again - black field, the board's mark, the rail, the status line and
+ * the bottom log - so the hand-over does not show as a black screen. */
+int nd_boot_splash_rebind(void) {
+  nd_surface_t *s = splash_surface();
+
+  if (s == 0) {
+    return 0;
+  }
+  if (!g_splash.active) {
+    return nd_boot_splash();
+  }
+  nd_surface_reset_clip(s);
+  __asm__ volatile("wbinvd" ::: "memory");
+  splash_layout(s);
+  splash_backdrop(s, nd_rect(0, 0, s->w, s->h));
+  splash_logo(s);
+  splash_log_paint(s);
+  splash_bar(s);
+  splash_status(s);
+  g_splash.logo_scale = 100u;
+  g_splash.logo_alpha = 255u;
+  g_splash.bar_pct = (UINT32)g_splash.percent;
+  splash_status_seen_mark();
   return 1;
 }
 
 void nd_boot_stage(UINT32 percent, const char *text) {
   nd_surface_t *s;
-  nd_rect_t     dirty;
   int           changed = 0;
   UINT32        i;
 
@@ -724,16 +1045,14 @@ void nd_boot_stage(UINT32 percent, const char *text) {
    * were measured against the boot stage's view of the panel. */
   splash_layout(s);
   nd_surface_reset_clip(s);
-  /* Only the rail, the status band and the log panel are touched; the lockup
-   * above them is already correct on the glass, and rebuilding it on every
-   * stage change would be the flicker this screen exists to avoid. */
-  dirty = nd_rect_union(g_splash.bar, g_splash.status);
-  dirty = nd_rect(dirty.x, dirty.y - 8, dirty.w, dirty.h + 16);
-  splash_backdrop(s, dirty);
-  if (changed) {
-    splash_bar(s);
-    splash_status(s);
-  }
+  /* Only the widgets this stage owns are repainted, and only when they
+   * changed: the rail if a percentage arrived, the line if its text did, the
+   * log panel if a line landed. The full-screen fill this used to do was
+   * eight megabytes of uncached stores per log line, which on a real laptop
+   * is a band of the screen visibly rewriting itself - one of the two "the
+   * boot draws itself line by line" reports. The firmware's leftovers are
+   * already gone: splash_open() cleared the whole panel once. */
+  splash_refresh(s, g_splash.logo_scale, g_splash.logo_alpha);
   if (klog_version() != g_splash.log_seen) {
     splash_log_paint(s);
   }

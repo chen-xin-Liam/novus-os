@@ -27,6 +27,12 @@
  * firmware's own mapping. */
 int fbcon_begin(void);
 
+/* Same console, placed inside an arbitrary rectangle of the panel. The splash
+ * reserves the bottom band for the boot log; once the kernel owns that band,
+ * the log keeps scrolling there in real text instead of a rendered snapshot,
+ * which is what makes a machine without a serial port debuggable. */
+int fbcon_begin_box(UINT32 x, UINT32 y, UINT32 w, UINT32 h);
+
 /* The console needs no pause around mm_init(): mm_init() keeps the
  * framebuffer identity-mapped, uncached, before it switches CR3, so the
  * raw physical pointer this console draws through stays valid and the log

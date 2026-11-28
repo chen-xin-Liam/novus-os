@@ -99,6 +99,8 @@ struct Shape {
     w: i16,
     h: i16,
     color: u32,
+    seq: u16,   /* assigned by the WM; the client always sends 0 */
+    pad3: u16,
 }
 
 #[repr(C)]
@@ -110,6 +112,8 @@ struct Text {
     len: u8,
     color: u32,
     text: [u8; TEXT_MAX],
+    seq: u16,   /* assigned by the WM; the client always sends 0 */
+    pad3: u16,
 }
 
 /* v2 surface-redirection payloads (wm/novus-wm/nwm_proto.h). */
@@ -217,14 +221,29 @@ pub struct Win {
 /// Send, retrying while the WM's queue is full. A repaint is a burst of
 /// messages; without the retry a burst longer than the queue would leave
 /// the frame half drawn.
+///
+/// B-40: the first retries yield, which is right when the queue is merely
+/// one message short and the WM is about to drain. After eight in a row
+/// this task is the one holding the queue full, and a bare yield then spins
+/// at ring-3 speed against the WM's one-drain-per-tick rate: measured at
+/// 13k refused sends per second on QEMU. Sleeping a tick hands the slice
+/// to the WM, which drains 32 messages in it, so the retry succeeds on the
+/// next attempt instead of burning the interval.
 fn send(port: u64, ty: u16, flags: u16, payload: &[u8]) -> i64 {
+    let mut spins: u32 = 0;
+
     loop {
         let rc = ipc::send(port, ty, flags, payload);
 
         if rc != ipc::EBUSY {
             return rc;
         }
-        crate::sys::yield_now();
+        spins = spins.saturating_add(1);
+        if spins <= 8 {
+            crate::sys::yield_now();
+        } else {
+            crate::sys::sleep_ticks(1);
+        }
     }
 }
 
@@ -322,6 +341,8 @@ impl Win {
             w,
             h,
             color,
+            seq: 0,
+            pad3: 0,
         };
 
         self.shapes = self.shapes.saturating_add(1);
@@ -364,6 +385,8 @@ impl Win {
             len: 0,
             color,
             text: [0u8; TEXT_MAX],
+            seq: 0,
+            pad3: 0,
         };
         let src = fit_bytes(s, TEXT_MAX - 1);
         let n = src.len();

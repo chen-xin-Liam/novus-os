@@ -300,6 +300,31 @@ static blkdev_t blkpart_dev[BLKDEV_MAX_DEVICES];
 static char blkpart_name[BLKDEV_MAX_DEVICES][16];
 static UINTN blkpart_used;
 
+/* Which static slot a device lives in, or -1. The firmware devices and the
+ * partition views are both fixed pools, and every caller that has to reach
+ * a backend's own context needs the same arithmetic; keeping it in two
+ * helpers means the pointer-range comparison is written once per pool.
+ *
+ * The UEFI pool is declared here rather than next to its probe so this
+ * predicate can see it; its contexts (uefi_ctx_t) live with the probe. */
+static blkdev_t uefi_devs[BLKDEV_MAX_DEVICES];
+
+static int uefi_slot(const blkdev_t *dev) {
+  if (dev == NULL || dev < &uefi_devs[0] ||
+      dev >= &uefi_devs[BLKDEV_MAX_DEVICES]) {
+    return -1;
+  }
+  return (int)(dev - &uefi_devs[0]);
+}
+
+static int blkpart_slot(const blkdev_t *dev) {
+  if (dev == NULL || dev < &blkpart_dev[0] ||
+      dev >= &blkpart_dev[BLKDEV_MAX_DEVICES]) {
+    return -1;
+  }
+  return (int)(dev - &blkpart_dev[0]);
+}
+
 static int blkpart_read(void *ctx, UINT64 sector, UINTN count, void *buf) {
   blkpart_ctx_t *part = (blkpart_ctx_t *)ctx;
   if (part == NULL || sector > part->sector_count ||
@@ -398,14 +423,16 @@ int blkdev_release(blkdev_t *dev) {
   /* Partition views live in a bump-allocated static pool. Freeing the
    * newest one restores the bump pointer; older ones are detached and
    * unusable until the next boot. */
-  if (dev >= &blkpart_dev[0] && dev < &blkpart_dev[BLKDEV_MAX_DEVICES]) {
-    UINTN idx = (UINTN)(dev - &blkpart_dev[0]);
+  {
+    int idx = blkpart_slot(dev);
 
-    memset(&blkpart_ctx[idx], 0, sizeof(blkpart_ctx[idx]));
-    memset(blkpart_name[idx], 0, sizeof(blkpart_name[idx]));
-    memset(&blkpart_dev[idx], 0, sizeof(blkpart_dev[idx]));
-    if (idx + 1u == blkpart_used) {
-      blkpart_used = idx;
+    if (idx >= 0) {
+      memset(&blkpart_ctx[idx], 0, sizeof(blkpart_ctx[idx]));
+      memset(blkpart_name[idx], 0, sizeof(blkpart_name[idx]));
+      memset(&blkpart_dev[idx], 0, sizeof(blkpart_dev[idx]));
+      if ((UINTN)idx + 1u == blkpart_used) {
+        blkpart_used = (UINTN)idx;
+      }
     }
   }
   return 0;
@@ -616,7 +643,7 @@ typedef struct {
 } uefi_ctx_t;
 
 static uefi_ctx_t uefi_ctxs[BLKDEV_MAX_DEVICES];
-static blkdev_t   uefi_devs[BLKDEV_MAX_DEVICES];
+/* uefi_devs is declared above, where uefi_slot() can see it. */
 
 static const char *const uefi_names[BLKDEV_MAX_DEVICES] = {
     "uefi0",  "uefi1",  "uefi2",  "uefi3",  "uefi4",  "uefi5",
@@ -865,4 +892,41 @@ int blkdev_uefi_probe(EFI_SYSTEM_TABLE *st, EFI_HANDLE image) {
 
   st->BootServices->FreePool(handles);
   return (int)registered;
+}
+
+/* B-47: whether a write to this device can be attempted at all.
+ *
+ * The flag word is not enough. OVMF publishes BlockIo handles whose Media
+ * says ReadOnly for a pressed optical disc, and a boot stage that wrote to
+ * one of those took the machine down with #GP before the kernel ever
+ * started. So ask the backend that owns the medium: the firmware record for
+ * a UEFI device, the parent's record for a partition view, and the flags
+ * only for backends that have no medium record of their own. */
+int blkdev_medium_writable(const blkdev_t *dev) {
+  int slot;
+
+  if (dev == 0 || dev->write == 0) {
+    return 0;
+  }
+  slot = uefi_slot(dev);
+  if (slot >= 0) {
+    uefi_ctx_t *u = &uefi_ctxs[slot];
+
+    return (u->bio != 0 && u->bio->Media != 0 &&
+            u->bio->Media->ReadOnly == 0) ? 1 : 0;
+  }
+  slot = blkpart_slot(dev);
+  if (slot >= 0) {
+    return blkdev_medium_writable(blkpart_ctx[slot].parent);
+  }
+  return ((dev->flags & BLKDEV_FLAG_READONLY) == 0) ? 1 : 0;
+}
+
+blkdev_t *blkdev_partition_parent(const blkdev_t *dev) {
+  int slot = blkpart_slot(dev);
+
+  if (slot < 0) {
+    return 0;
+  }
+  return blkpart_ctx[slot].parent;
 }

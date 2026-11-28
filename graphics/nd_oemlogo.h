@@ -52,4 +52,13 @@ const char *nd_oem_logo_reason(void);
  * is no heap and no off-screen surface to scale into. */
 void nd_oem_logo_draw(nd_surface_t *dst, nd_rect_t dst_rect, UINT8 fade);
 
+/* Fallback for the machine whose firmware splash fills the screen instead of
+ * holding a badge: the whole first frame is kept, reduced to a coarse grid so
+ * it costs a third of a megabyte, and painted as a backdrop. `dim` scales the
+ * brightness (255 keeps it as captured), `fade` blends it over what is under
+ * it. Returns 1 when a frame was captured. */
+int  nd_oem_frame_available(void);
+void nd_oem_frame_draw(nd_surface_t *dst, nd_rect_t dst_rect, UINT8 fade,
+                       UINT8 dim);
+
 #endif /* NOVUS_ND_OEMLOGO_H */

@@ -24,6 +24,12 @@ void nwm_init(void);
 /* Timer tick: input routing, IPC server pump, composite. */
 void nwm_tick(void);
 
+/* Compose the whole screen on the next tick, ignoring damage tracking. Use
+ * after any writer other than the WM has painted the glass (the boot report
+ * page, a text console): damage tracking is exact, so an outside writer
+ * otherwise leaves visible holes in the desktop. */
+void nwm_repaint_all(void);
+
 /* The shutdown the user sees: windows fade and collapse, the dock drops
  * out of the bottom edge, the wallpaper fades to black, then the platform
  * is asked for S5. Played by nwm_tick(), one frame per tick. */

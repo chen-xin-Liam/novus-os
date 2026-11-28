@@ -35,6 +35,53 @@
 
 static const char *const g_hex_digits = "0123456789abcdef";
 static int g_dsdt_seen;
+/* The slave address carried by the first I2C Serial Bus Connection Descriptor
+ * in the firmware's tables; 0 when none parsed. */
+static UINT8 g_slave_addr;
+static int   g_slave_valid;
+
+static void put_hex8(UINT8 v);
+
+int touchpad_slave_addr(void) {
+  return (g_slave_valid != 0) ? (int)g_slave_addr : -1;
+}
+
+/* ACPI 5.0 §6.4.3.7.1: Large item 0x8E whose body is
+ *   [0] type (0x01 = I2C), [1] flags, [2] type-specific flags,
+ *   [3] type-specific revision (0x01), [4..5] type-specific data length (6),
+ *   [6..9] connection speed, [10..11] slave address.
+ * Parsed forward by that layout instead of guessing from the surrounding
+ * strings: the address has to be right the first time, because it is used to
+ * poke a real bus. */
+static void extract_serial_bus(const UINT8 *p, UINT32 len) {
+  UINT32 i;
+
+  for (i = 4u; i + 14u < len; i++) {
+    const UINT8 *b = p + i + 3u;
+    UINT32 dlen = (UINT32)p[i + 1u] | ((UINT32)p[i + 2u] << 8);
+    UINT32 tslen;
+    UINT8  addr;
+
+    if (p[i] != 0x8Eu || b[0] != 0x01u || b[3] != 0x01u) {
+      continue;
+    }
+    tslen = (UINT32)b[4] | ((UINT32)b[5] << 8);
+    if (tslen != 6u || dlen < 14u) {
+      continue;
+    }
+    addr = b[10];
+    if (addr == 0u || addr >= 0x80u) {
+      continue;
+    }
+    if (g_slave_valid == 0) {
+      g_slave_addr = addr & 0x7Fu;
+      g_slave_valid = 1;
+      kputs("[TP] I2C serial bus: slave=0x");
+      put_hex8(g_slave_addr);
+      kputs("\n");
+    }
+  }
+}
 
 static void put_hex8(UINT8 v) {
   char text[3];
@@ -79,6 +126,11 @@ static void dump_window(const UINT8 *base, UINT32 hit, UINT32 len,
   kputs("\n");
 }
 
+static UINT32 g_tp_tables;
+static UINT32 g_tp_tables_hit;
+static UINT32 g_tp_serial_total;
+static UINT32 g_tp_pnp_total;
+
 static void scan_table(const acpi_table_t *t, const char *name) {
   const UINT8 *p;
   UINT32 len;
@@ -102,12 +154,40 @@ static void scan_table(const acpi_table_t *t, const char *name) {
     return;
   }
   p = (const UINT8 *)t;
+  /* Count first, print second. A per-table banner for each of the tables this
+   * laptop publishes (24 SSDTs plus the DSDT, all of them empty of HID-over-
+   * I2C descriptors) was 2.6 KB of the boot log, and a printed character costs
+   * about 1.2 ms here - the banner alone was worth more than the scan it
+   * announced. A table that carries nothing now says nothing. */
+  g_tp_tables++;
+  for (i = 0; i + 16u < len; i++) {
+    if (matches_at(p + i, "I2cSerialBus", 11u)) {
+      serial++;
+    } else if (matches_at(p + i, "PNP0C50", 7u)) {
+      pnp++;
+    }
+  }
+  if (serial == 0u && pnp == 0u) {
+    g_tp_serial_total += serial;
+    extract_serial_bus(p, len);
+    return;
+  }
+  g_tp_tables_hit++;
+  g_tp_serial_total += serial;
+  g_tp_pnp_total += pnp;
+
   kputs("[TP] ACPI ");
   kputs(name);
   kputs(" ");
   kputs_hex(len);
-  kputs(" bytes\n");
+  kputs(" bytes: serialbus=");
+  kputs_hex(serial);
+  kputs(" hid-over-i2c=");
+  kputs_hex(pnp);
+  kputs("\n");
 
+  serial = 0;
+  pnp = 0;
   for (i = 0; i + 16u < len; i++) {
     if (matches_at(p + i, "I2cSerialBus", 11u)) {
       serial++;
@@ -139,14 +219,7 @@ static void scan_table(const acpi_table_t *t, const char *name) {
       dump_window(p, i, len, 12u, 36u);
     }
   }
-
-  kputs("[TP] ");
-  kputs(name);
-  kputs(": serialbus=");
-  kputs_hex(serial);
-  kputs(" hid-over-i2c=");
-  kputs_hex(pnp);
-  kputs("\n");
+  extract_serial_bus(p, len);
 }
 
 static void probe_pci(void) {
@@ -249,8 +322,19 @@ void touchpad_probe(UINT64 mmap, UINT64 size, UINT64 stride) {
   }
 
   visited = acpi_scan_all(mmap, size, stride, tp_visit_table, NULL);
+  /* One aggregate line in place of a banner per table: visited is what the
+   * root table listed, scanned also counts the DSDT reached through the FADT,
+   * with-hits is how many of them actually carried an I2C-HID descriptor. */
   kputs("[TP] acpi tables visited=");
   kputs_hex(visited);
+  kputs(" scanned=");
+  kputs_hex((UINT64)g_tp_tables);
+  kputs(" with-hits=");
+  kputs_hex((UINT64)g_tp_tables_hit);
+  kputs(" serialbus=");
+  kputs_hex((UINT64)g_tp_serial_total);
+  kputs(" hid-over-i2c=");
+  kputs_hex((UINT64)g_tp_pnp_total);
   kputs("\n");
   if (!g_dsdt_seen) {
     kputs("[TP] DSDT: not reachable through FADT\n");

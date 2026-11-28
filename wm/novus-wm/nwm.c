@@ -28,6 +28,7 @@
 #include "nd_ime.h"
 #include "nvgui.h"
 #include "nwm.h"
+#include "usblog.h"
 #include "nwm_proto.h"
 #include "power.h"
 #if CONFIG_NOVUS_DWM
@@ -120,9 +121,22 @@ static int       g_ready;
 static int       g_focus;   /* index, -1 = the shell */
 static int       g_drag;    /* index being dragged by its title bar */
 static int       g_capture; /* index that received the press */
+/* A press on a caption button (close / maximize / minimize) is fully
+ * consumed by the WM: it acts on the press, so the release that follows
+ * belongs to nobody. Without this latch the release falls through
+ * hit_test() - the window is already gone by then - and lands on the
+ * desktop, where it counts as a click on whatever icon sits underneath:
+ * closing a window also launched the app behind the X. */
+static UINT8     g_swallow_up;
+
 static INT32     g_drag_dx;
 static INT32     g_drag_dy;
 static nd_rect_t g_damage;
+/* Set by nwm_repaint_all(): the next tick composes the whole screen instead of
+ * the damage rectangles, because something other than the WM last touched the
+ * glass (the boot report page, a text console). Damage tracking is otherwise
+ * exact, which is precisely why an outside writer leaves visible holes. */
+static UINT8 g_repaint_all;
 static UINT32    g_requests;
 static UINT32    g_events;
 static UINT32    g_dropped;
@@ -516,6 +530,98 @@ static void restore_corners(nd_surface_t *s, nd_rect_t vis, nd_rect_t r,
   nd_surface_set_clip(s, vis);
 }
 
+/* Temporary instrument, kept until the real machine paints a window again:
+ * the caption carries what the client delivered (s = shapes, t = text runs,
+ * a = legacy draw commands). A window that still looks empty then says on
+ * its own face whether the list never arrived at the WM or arrived and was
+ * lost while composing, which are two very different bugs. */
+static char *cap_lit(char *p, const char *s) {
+  while (*s != '\0') {
+    *p++ = *s++;
+  }
+  return p;
+}
+
+static char *cap_num(char *p, UINT32 v) {
+  char   tmp[10];
+  UINT32 n = 0u;
+
+  if (v == 0u) {
+    *p++ = '0';
+    return p;
+  }
+  while (v != 0u && n < 9u) {
+    tmp[n++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  while (n != 0u) {
+    *p++ = tmp[--n];
+  }
+  return p;
+}
+
+/* Totals of every display list the WM is holding, pushed to the desktop's
+ * status label. A window that comes up empty is then either a client that
+ * never delivered (s=0 t=0) or a compositor that delivered and lost it
+ * (s>0 t>0), and one photograph of the corner settles which. */
+static void publish_totals(void) {
+  static char last[48] __attribute__((section(".data")));
+  char        buf[48];
+  char       *p = buf;
+  UINT32      wins = 0u, sh = 0u, tx = 0u, dw = 0u;
+  UINT32      i;
+  UINT8       same = 1u;
+
+  for (i = 0u; i < NWM_MAX_WINDOWS; i++) {
+    const nwm_window_t *w = &g_wins[i];
+
+    if (w->used == 0u) {
+      continue;
+    }
+    wins++;
+    sh += w->shape_n;
+    tx += w->text_n;
+    dw += w->draw_n;
+  }
+  p = cap_lit(p, "wm w=");
+  p = cap_num(p, wins);
+  p = cap_lit(p, " s=");
+  p = cap_num(p, sh);
+  p = cap_lit(p, " t=");
+  p = cap_num(p, tx);
+  p = cap_lit(p, " a=");
+  p = cap_num(p, dw);
+  *p = '\0';
+  /* The stick is the report when it is mounted: the totals go to the boot
+   * log (rate limited) and the desktop stays clean. Only a machine whose
+   * log never landed keeps the on-screen label. */
+  {
+    static UINT32 dbg_n __attribute__((section(".data")));
+
+    if (dbg_n < 24u) {
+      dbg_n++;
+      kputs("[NWM] totals ");
+      kputs(buf);
+      kputs("\n");
+    }
+  }
+  for (i = 0u; i <= (UINT32)(p - buf); i++) {
+    if (buf[i] != last[i]) {
+      same = 0u;
+      break;
+    }
+  }
+  if (same != 0u) {
+    return;
+  }
+  for (i = 0u; i <= (UINT32)(p - buf) && i + 1u < sizeof(last); i++) {
+    last[i] = buf[i];
+  }
+  /* The status label belongs to the boot verdict and to the shell's own
+   * messages: the totals live in the log, and overwriting that label with
+   * them only hides the boot diagnostic the log could not deliver. */
+}
+
 static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   nd_surface_t     *s = target();
   const ng_theme_t *t;
@@ -591,6 +697,7 @@ static void paint_window(nwm_window_t *w, nd_rect_t clip) {
   ng_draw_caption(s, w->rect, t, caption_hover(w),
                   (w->modal != 0u) ? 1 : 3);
 
+
   (void)i;
 
   /* Client area. The clip narrows to it, so no command can spill into the
@@ -662,6 +769,17 @@ static void paint(nd_rect_t clip) {
   ng_render_overlay(clip);
   nd_surface_reset_clip(dst);
 
+  /* Top-right HUD with the display-list totals the WM is holding. The status
+   * label at the bottom left is the first thing a window covers, and this
+   * machine has no serial port: one photograph of the corner then says
+   * whether a client never delivered its list (s=0 t=0) or delivered it and
+   * the compositor lost it (s>0 t>0). Presented in its own tiny rectangle
+   * because the frame's clip does not reach this corner. */
+  /* Nothing is measured on the glass any more. The window counters used to
+   * be painted into this corner and handed to the boot verdict one frame
+   * later; both now live in the log file only, so a screenshot stops being
+   * evidence and the desktop stops carrying a diagnostic badge.
+   */
   /* One present per composed frame. The display layer copies this
    * rectangle to the glass (phased to the vertical blank when the hardware
    * exposes one), refreshes the mirror outputs from the same buffer, and
@@ -985,12 +1103,19 @@ static void req_shape(const ipc_msg_t *m) {
   nwm_shape_t   s;
   nwm_window_t *w;
   int           st = NWM_OK;
+  UINT16        have = m->hdr.len;
 
-  if (m->hdr.len < sizeof(s)) {
+  /* Accept the older client payload too. A shape used to be 16 bytes; the
+   * v1.3 client sends 20 (seq/pad3, stamped here). Requiring the full
+   * struct made every draw from a stale client a silent bad-payload, and
+   * the window came up as background only. Everything past the fields the
+   * client actually sent stays zero, and seq is assigned below anyway. */
+  memset(&s, 0, sizeof(s));
+  if (have < 16u) {
     ack(m, 0, NWM_EBADPAY);
     return;
   }
-  memcpy(&s, m->payload, sizeof(s));
+  memcpy(&s, m->payload, (have < (UINT16)sizeof(s)) ? have : (UINT16)sizeof(s));
   w = win_get(s.win);
   if (!owned_by(w, m->hdr.sender, &st)) {
     ack(m, s.win, st);
@@ -1021,12 +1146,17 @@ static void req_text(const ipc_msg_t *m) {
   nwm_window_t *w;
   int           st = NWM_OK;
   UINT32        len;
+  UINT16        have = m->hdr.len;
 
-  if (m->hdr.len < sizeof(t)) {
+  /* Same tolerance as req_shape: a text run is 14 bytes up to its colour,
+   * plus the string and the two ordering fields. An older client stops
+   * before those, and rejecting it left every label in the window blank. */
+  memset(&t, 0, sizeof(t));
+  if (have < 14u) {
     ack(m, 0, NWM_EBADPAY);
     return;
   }
-  memcpy(&t, m->payload, sizeof(t));
+  memcpy(&t, m->payload, (have < (UINT16)sizeof(t)) ? have : (UINT16)sizeof(t));
   w = win_get(t.win);
   if (!owned_by(w, m->hdr.sender, &st)) {
     ack(m, t.win, st);
@@ -1079,6 +1209,19 @@ static void req_invalidate(const ipc_msg_t *m) {
     return;
   }
   first = w->shape_n == 0 && w->text_n == 0;
+  /* An idle client re-opens a frame - CLEAR, nothing drawn, INVALIDATE -
+   * and committing that empty list erases a window it had already
+   * published. That is exactly what "the window is blank" looks like: the
+   * content goes up once and the next idle frame wipes it. A frame with
+   * nothing in it is therefore a refresh of the list already on screen; a
+   * client that really wants an empty window sends a full-area fill, which
+   * is how blanking is spelled everywhere else in this protocol. */
+  if (w->frame_open && w->pend_shape_n == 0u && w->pend_text_n == 0u &&
+      (w->shape_n != 0u || w->text_n != 0u)) {
+    w->frame_open = 0;
+    ack(m, w->id, NWM_OK);
+    return;
+  }
   /* End of frame: the list built since CLEAR becomes the one the
    * compositor replays, in one step. */
   if (w->frame_open) {
@@ -1097,6 +1240,30 @@ static void req_invalidate(const ipc_msg_t *m) {
   damage(client_rect(w));
   if (first && (w->shape_n != 0 || w->text_n != 0)) {
     log_request("first frame", w->id, w->owner);
+  }
+  publish_totals();
+  /* Bounded sample of what each commit actually carried: a window whose
+   * content never reaches the compositor is either an empty list here or a
+   * list this log never sees at all. Stops after 24 lines. */
+  {
+    static UINT32 dbg_n __attribute__((section(".data")));
+
+    if (dbg_n < 24u) {
+      dbg_n++;
+      kputs("[NWM] commit win=");
+      kputs_hex(w->id);
+      kputs(" s=");
+      kputs_hex((UINT64)w->shape_n);
+      kputs(" t=");
+      kputs_hex((UINT64)w->text_n);
+      kputs(" a=");
+      kputs_hex((UINT64)w->draw_n);
+      kputs(" rc=");
+      kputs_hex((UINT64)w->rect.w);
+      kputs("x");
+      kputs_hex((UINT64)w->rect.h);
+      kputs("\n");
+    }
   }
   ack(m, w->id, NWM_OK);
 }
@@ -1538,6 +1705,19 @@ static void route(const nd_event_t *ev) {
   g_mouse_x = ev->x;
   g_mouse_y = ev->y;
 
+  /* B-33 (second half): a release whose press was consumed by a caption
+   * button belongs to nobody, and that has to be decided before anything
+   * else looks at it. The first version of this latch sat inside the event
+   * switch, so the overlay test below - which forwards the event straight
+   * to the shell and returns - ran first. Whenever a desktop icon sat under
+   * the X, or its hover card did, the release never reached the switch:
+   * the window closed and the app behind the X launched anyway. */
+  if (ev->type == ND_EV_MOUSE_UP && g_swallow_up != 0u) {
+    g_swallow_up = 0u;
+    g_capture = -1;
+    return;
+  }
+
   /* An open start menu (or any overlay card) takes the pointer before the
    * windows do: it is drawn above them, so it must be clicked above them
    * too. Dragging a window keeps priority so a drag cannot be swallowed.
@@ -1592,8 +1772,7 @@ static void route(const nd_event_t *ev) {
     }
     break;
 
-  case ND_EV_MOUSE_DOWN:
-    idx = hit_test(ev->x, ev->y);
+  case ND_EV_MOUSE_DOWN:    idx = hit_test(ev->x, ev->y);
     if (idx < 0) {
       if (modal < 0) {
         focus_set(-1);
@@ -1604,6 +1783,7 @@ static void route(const nd_event_t *ev) {
     z_raise(idx);
     focus_set(idx);
     damage_frame(g_wins[idx].rect);
+    g_swallow_up = 0u;
     if (ev->y < g_wins[idx].rect.y + NWM_TITLE_H) {
       UINT8 b;
 
@@ -1619,7 +1799,13 @@ static void route(const nd_event_t *ev) {
         break;
       }
       g_capture = idx;
-      b = title_button(&g_wins[idx], ev->x, ev->y);
+      b = title_button(&g_wins[idx], ev->x, ev->y);      if (b != 0u) {
+        /* The press is the whole click for a caption button (see
+         * g_swallow_up); the window may not exist any more by the time the
+         * release arrives, so no capture is kept for it. */
+        g_capture = -1;
+        g_swallow_up = 1u;
+      }
 
       if (b == 1u) {
         UINT32    id = g_wins[idx].id;
@@ -1664,6 +1850,13 @@ static void route(const nd_event_t *ev) {
     break;
 
   case ND_EV_MOUSE_UP:
+    if (g_swallow_up != 0u) {
+      /* The paired press closed / maximized / minimized a window: the
+       * release must not reach the desktop behind it. */
+      g_swallow_up = 0u;
+      g_capture = -1;
+      break;
+    }
     if (g_drag >= 0) {
       if (g_wins[g_drag].used) {
         damage_frame(g_wins[g_drag].rect);
@@ -1686,8 +1879,7 @@ static void route(const nd_event_t *ev) {
     g_capture = -1;
     if (idx >= 0) {
       deliver_mouse(&g_wins[idx], ev);
-    } else if (modal < 0) {
-      nd_demo_dispatch(ev);
+    } else if (modal < 0) {      nd_demo_dispatch(ev);
     }
     break;
 
@@ -1740,8 +1932,11 @@ static void pump(void) {
   UINT32    n = 0;
 
   /* Bounded work per tick: a client cannot make the scheduler spend the
-   * whole slice inside the WM. */
-  while (n < 8u && ipc_try_recv(g_port, &msg) >= 0) {
+   * whole slice inside the WM. 32, not 8 (B-35): at 8 the drain rate (8 per
+   * 10 ms tick) was below what a single window repaint sends, so clients
+   * spent their slices retrying IPC_EBUSY instead of drawing. 32 keeps the
+   * bound while letting one repaint finish inside a couple of ticks. */
+  while (n < 32u && ipc_try_recv(g_port, &msg) >= 0) {
     handle_request(&msg);
     n++;
   }
@@ -1873,6 +2068,16 @@ static UINT32 g_sh_power_hold;
  * the sleep register. */
 #define NWM_SH_POWER_HOLD_TICKS 2u
 
+/* Ask for one whole-screen compose on the next tick. Used after any other
+ * writer has put pixels on the glass: the boot report page paints directly
+ * into the frame buffer for its 45 s hold, and the desktop that starts
+ * afterwards must not inherit "the areas I never damaged still show the old
+ * page" (this laptop photographed exactly that: window chrome and title band
+ * painted, client areas left as something the WM never composed). */
+void nwm_repaint_all(void) {
+  g_repaint_all = 1u;
+}
+
 void nwm_tick(void) {
   nd_event_t ev;
   nd_rect_t  d;
@@ -1880,6 +2085,19 @@ void nwm_tick(void) {
 
   if (!g_ready) {
     return;
+  }
+  /* A whole-screen repaint was asked for (see nwm_repaint_all): the glass is
+   * believed to hold something that is not ours - a boot page, a text
+   * console, another framebuffer writer - so every pixel has to be composed
+   * again instead of the usual damage rectangles. */
+  if (g_repaint_all != 0u) {
+    nd_surface_t *s = screen();
+
+    g_repaint_all = 0u;
+    if (s != 0 && s->px != 0) {
+      damage(nd_rect(0, 0, s->w, s->h));
+      kputs("[NWM] full repaint requested by an outside writer\n");
+    }
   }
   if (g_sh_req) {
     g_sh_req = 0;
@@ -2611,6 +2829,7 @@ int nwm_owner_rect(UINT32 win, INT32 *x, INT32 *y, INT32 *w, INT32 *h) {
 
 void nwm_init(void) {}
 void nwm_tick(void) {}
+void nwm_repaint_all(void) {}
 int nwm_selftest(void) { return 1; }
 int nwm_activate_owner(UINT64 owner) { (void)owner; return 0; }
 int nwm_owner_create(UINT64 owner, const char *title, INT32 x, INT32 y,

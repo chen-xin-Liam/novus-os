@@ -29,6 +29,14 @@ pub fn yield_now() {
     call(1, 0, 0, 0, 0);
 }
 
+/// Park the task for `ticks` timer ticks (10 ms each). Window applications
+/// pace their periodic refresh with this; `yield_now()` only gives up the
+/// slice, so a loop that counted yields was counting microseconds and
+/// repainted far faster than any clock the app meant to follow (B-36).
+pub fn sleep_ticks(ticks: u64) -> i64 {
+    call(38, ticks, 0, 0, 0)
+}
+
 pub fn exit(code: u64) -> ! {
     call(60, code, 0, 0, 0);
     loop {

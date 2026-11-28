@@ -24,6 +24,8 @@
 #include "novu_service.h"
 #include "nuc.h"
 #include "win32.h"
+/* Local test aid: the boot USB log (usblog.c). */
+#include "usblog.h"
 #if CONFIG_NOVUS_DWM
 #include "vidmem.h"
 #include "crtc.h"
@@ -278,6 +280,9 @@ static void sched_kernel_idle(void) {
     if (sched_ticks() - last_sweep >= 100u) {
       last_sweep = sched_ticks();
       blkdev_idle_sweep(0);
+      /* Local test aid: nothing is runnable, so this is the safe moment to
+       * push the rest of the kernel log onto the boot USB stick. */
+      usblog_flush(0);
     }
   }
 }
@@ -551,6 +556,32 @@ void sched_tick(void) {
   g_ticks++;
   sched_expire_waiters();
 
+  /* One-shot port table dump three seconds in: by then every service and
+   * window exists, and any "[IPC] full target=0x…" line above can be
+   * resolved against the names in it. */
+  if (g_ticks == 300u || g_ticks == 1200u) {
+    ipc_dump_ports();
+  }
+  /* Two samples of the IPC counters, 9 s apart: a burst at start-up shows
+   * as a big number at 300 that does not move by 1200, while a client that
+   * keeps a queue full grows by thousands per second and needs a client-side
+   * fix, not a larger queue. */
+  if (g_ticks == 300u || g_ticks == 1200u) {
+    const ipc_stats_t *st = ipc_stats();
+
+    kputs("[IPC] stats @");
+    kputs_hex(g_ticks);
+    kputs(" ticks: sent=");
+    kputs_hex(st->sent);
+    kputs(" delivered=");
+    kputs_hex(st->delivered);
+    kputs(" dropped=");
+    kputs_hex(st->dropped);
+    kputs(" bad=");
+    kputs_hex(st->bad);
+    kputs("\n");
+  }
+
   /* Reap tasks that were killed while they were not the running one:
    * their pages are still mapped and their slot is still taken. Doing it
    * here is safe - this runs on the current task's stack, with its CR3. */
@@ -677,6 +708,35 @@ void sched_yield(void) {
     g_current->slice = 0;
   }
   g_need_resched = 1;
+}
+
+/* B-34: the idle task's program is `mov $SYS_YIELD, %eax; syscall; jmp $-9`,
+ * an endless yield. When it is the only task that can run, the yield is
+ * answered by the scheduler picking it again, so the core runs a ring-3 /
+ * ring-0 ping-pong at full speed for the whole session: 100 % CPU, the fan
+ * on the laptop, and an IPC storm from every client that gets a slice out
+ * of it (measured: 303 383 queue-full drops in 9 s). Parking the idle task
+ * until the next timer tick hands the CPU to the kernel idle context
+ * (sti; hlt), which is what a desktop is supposed to do when nobody has
+ * anything to do. */
+int sched_yield_is_idle_only(void) {
+  UINT32      i;
+  const char *n;
+
+  if (g_current == NULL) {
+    return 0;
+  }
+  n = g_current->name;
+  if (!(n[0] == 'i' && n[1] == 'd' && n[2] == 'l' && n[3] == 'e' &&
+        n[4] == '\0')) {
+    return 0;
+  }
+  for (i = 0; i < SCHED_MAX_TASKS; i++) {
+    if (&g_tasks[i] != g_current && g_tasks[i].state == TASK_READY) {
+      return 0;
+    }
+  }
+  return 1;
 }
 
 void sched_park(UINT64 port, UINT32 timeout_ticks) {

@@ -17,6 +17,14 @@
  * "queue length limit against message floods". No allocation happens on
  * the send path at all; the port table is static.
  *
+ * 32 slots, not 8 (B-35): a window repaint is a burst of shape and text
+ * messages, and the WM drains a bounded number per tick. With 8 slots the
+ * client's retry loop spent its whole slice re-attempting EBUSY sends -
+ * measured 35 000 refused sends per second against 670 delivered - which
+ * both wasted the CPU the WM needed and made every frame take far longer
+ * than the messages did. 32 slots are 80 KB of static BSS across the whole
+ * port table, which is nothing next to the round trips they save.
+ *
  * Blocking: ipc_recv(block=1) parks the calling task on the port and
  * returns IPC_ERETRY. The syscall layer rewrites the return frame's RIP to
  * point back at the `syscall` instruction, so the task re-executes the
@@ -32,7 +40,7 @@
 #define IPC_MAGIC       0x4E495043u /* "NIPC" */
 #define IPC_HDR_SIZE    32u
 #define IPC_PAYLOAD_MAX 128u
-#define IPC_QUEUE_LEN   8u
+#define IPC_QUEUE_LEN   32u
 #define IPC_MAX_PORTS   16u
 #define IPC_NAME_MAX    16u
 
@@ -114,6 +122,9 @@ int ipc_recv(UINT64 port, ipc_msg_t *out, int block);
 int ipc_try_recv(UINT64 port, ipc_msg_t *out);
 
 const ipc_stats_t *ipc_stats(void);
+
+/* Dump every live port (index, id, owner, queued, name) to the log once. */
+void ipc_dump_ports(void);
 void ipc_selftest(void);
 
 #endif /* NOVUS_IPC_H */

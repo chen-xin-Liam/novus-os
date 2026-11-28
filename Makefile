@@ -87,6 +87,7 @@ SRC := arch/x86_64/boot/main.c \
        arch/x86_64/boot/stage3.c \
        arch/x86_64/boot/scanout.c \
        kernel/kmain.c \
+       kernel/usblog.c \
        kernel/fbcon.c \
        kernel/klog.c \
        kernel/vga.c \
@@ -104,6 +105,8 @@ SRC := arch/x86_64/boot/main.c \
         kernel/irq.c \
         kernel/acpi.c \
         kernel/touchpad.c \
+        kernel/i2c_hid.c \
+        kernel/hda.c \
         kernel/hid.c \
         kernel/power.c \
     kernel/trap.c \
@@ -146,6 +149,7 @@ SRC := arch/x86_64/boot/main.c \
        graphics/nd_demo.c \
        kernel/ipc.c \
        kernel/apps.c \
+kernel/sysapps.c \
        kernel/install.c \
        kernel/lang.c \
        kernel/mountcfg.c \
@@ -266,6 +270,8 @@ CFLAGS += -DCONFIG_NOVUS_A_CORE_DISABLE=$(if $(filter y,$(CONFIG_NOVUS_A_CORE_DI
           -DCONFIG_NOVUS_NTP=$(if $(filter y,$(CONFIG_NOVUS_NTP)),1,0) \
           -DCONFIG_NOVUS_WIN32=$(if $(filter y,$(CONFIG_NOVUS_WIN32)),1,0) \
           -DNOVUS_HTTPS_E2E_PROBE=$(E2E) \
+          -DNOVUS_HDA_SELFTEST=$(if $(filter 1,$(HDA)),1,0) \
+          -DNOVUS_PAT_LATE=$(if $(filter 0,$(PATLATE)),0,1) \
           $(if $(filter 1,$(E2E)),-DTLS13_KERN_DEBUG=1,)
 
 # Link as a PE32+ EFI application: subsystem 10 = EFI application,
@@ -485,7 +491,7 @@ $(RUST_LIB): $(RUST_DEPS)
 APPS_DIR    := apps
 APPS_TARGET := $(CURDIR)/build/rust-apps
 APPS_STAMP  := build/apps.stamp
-APPS_NAMES  := fileman taskman settings netman session setup nsh devmgmt novusd dwm
+APPS_NAMES  := fileman taskman settings netman session setup nsh devmgmt novusd dwm hello
 APPS_BINS   := $(addprefix out/apps/,$(addsuffix .bin,$(APPS_NAMES)))
 APPS_BLOB_H := build/apps_blobs.h
 APPS_DEPS   := $(shell find $(APPS_DIR)/src -type f 2>/dev/null) \

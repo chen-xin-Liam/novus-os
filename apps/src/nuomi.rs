@@ -1742,10 +1742,13 @@ impl<'a> Interp<'a> {
             Nat::Home | Nat::ShowCursor | Nat::Key => Ok(Val::Nil),
             Nat::Sleep => {
                 let ms = if a.is_empty() { 0.0 } else { num(a[0])? };
-                let spins = (ms as u64 / 5).min(200);
+                /* B-39: this used to yield_now() ms/5 times, so a script's
+                 * sleep() returned in microseconds instead of sleeping. One
+                 * tick is 10 ms; cap at 200 ticks (2 s) as before. */
+                let ticks = ((ms as u64 / 10).min(200)) as u32;
 
-                for _ in 0..spins {
-                    sys::yield_now();
+                for _ in 0..ticks {
+                    sys::sleep_ticks(1);
                 }
                 Ok(Val::Nil)
             }

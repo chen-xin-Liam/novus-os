@@ -1438,7 +1438,11 @@ fn cmd_novusd(shell: &mut Shell, cmd: &Cmd, _stdin: &[u8], out: &mut dyn Sink) -
                 return 1;
             }
         }
-        crate::sys::yield_now();
+        /* B-39: park a tick between polls. While this spun, the 1200-tick
+         * deadline below could never be reached (uptime barely moved per
+         * poll), so a hung novusd meant an infinite busy loop instead of a
+         * "did not answer" after 12 s. */
+        crate::sys::sleep_ticks(1);
     }
 }
 

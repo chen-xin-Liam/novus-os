@@ -20,9 +20,15 @@ void kernel_entry(UINT64 memmap_addr, UINT64 memmap_size, UINT64 desc_size);
 
 /* Unified kernel-stage output: mirrors text to VGA and COM1. */
 void kputs(const char *s);
+void kputs_dec(UINT64 v);
 void kputs_hex(UINT64 v);
 /* Coarse boot timeline; mirrored by kputs to VGA, framebuffer and COM1. */
 void novus_timeline(const char *stage);
+/* Hand the firmware stage's TSC calibration to novus_timeline() so the first
+ * call there does not re-probe (see the note on the seed in kmain.c). The
+ * kernel stage calls the reset on entry to restart the numbering. */
+void novus_timeline_seed(UINT64 start_tsc, UINT64 hz);
+void novus_timeline_reset(void);
 
 /* Busy-wait |us| microseconds against the ACPI PM timer. Drivers that have
  * to let a device settle (a USB port reset, a controller reset) use this
@@ -30,6 +36,15 @@ void novus_timeline(const char *stage);
  * on real silicon, and on an emulated machine one read can cost hundreds of
  * microseconds, which turns a 60 ms reset settle into half a minute. */
 void cpu_delay_us(UINT32 us);
+
+/* Monotonic microseconds from the TSC and the rate novus_timeline() already
+ * calibrated (CPUID 0x15/0x16, else the PM timer the ACPI FADT names). A
+ * protocol that is specified in milliseconds needs a unit of time, and the
+ * TSC is the one clock a driver can rely on without probing a port itself:
+ * this laptop answers nothing at the literal 0x608 the USB driver used to
+ * assume, even though the FADT names a working port. Returns 0 when the boot
+ * could not calibrate the rate. */
+UINT64 cpu_uptime_us(void);
 
 /* Kernel version, as NKM module headers state it (spec 3.2: a module is
  * refused when its min_kernel_ver is higher than this). Major in the

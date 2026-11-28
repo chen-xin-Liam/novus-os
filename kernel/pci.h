@@ -38,10 +38,30 @@ typedef struct {
 } pci_dev_t;
 
 int    pci_scan(pci_dev_t *out, int max);
+/* The same walk, but into a shared .bss table big enough for a laptop's PCI
+ * tree. Callers that only need to look at every function use this instead of
+ * putting a PCI_MAX_DEVICES array (32 entries) on the stack: a laptop exposes
+ * far more than 32 functions, and everything past the cutoff - the HD audio
+ * codec, some I2C controllers - simply does not exist for the caller.
+ * Not re-entrant; returns the table and writes the count through n. */
+pci_dev_t *pci_scan_shared(int *n);
+#define PCI_SHARED_MAX 160
+/* Drop the cached table so the next lookup walks the tree again. */
+void   pci_scan_invalidate(void);
 UINT32 pci_read32(UINT8 bus, UINT8 dev, UINT8 func, UINT8 off);
 UINT16 pci_read16(UINT8 bus, UINT8 dev, UINT8 func, UINT8 off);
 UINT8  pci_read8(UINT8 bus, UINT8 dev, UINT8 func, UINT8 off);
 void   pci_write32(UINT8 bus, UINT8 dev, UINT8 func, UINT8 off, UINT32 val);
+
+/* B-20: memory-mapped configuration space. Take the MCFG table (ACPI) when the
+ * firmware publishes one and every later config access becomes an uncached
+ * load instead of a pair of trapped port I/Os. Falls back to mechanism #1
+ * silently: pci_ecam_info() returns 0 and nothing changes. */
+int pci_ecam_from_mcfg(UINT64 mmap, UINT64 size, UINT64 stride);
+int pci_ecam_init(UINT64 base, UINT8 first, UINT8 last);
+int pci_ecam_info(UINT64 *base, UINT8 *first, UINT8 *last);
+/* Cycles per config access for each mechanism, as measured at boot. */
+void pci_config_cost(UINT64 *ecam_cycles, UINT64 *io_cycles);
 
 int pci_find(UINT16 vendor, UINT16 device, pci_dev_t *out);
 int pci_find_class(UINT8 cls, UINT8 sub, int index, pci_dev_t *out);

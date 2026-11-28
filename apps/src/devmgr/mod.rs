@@ -580,7 +580,9 @@ impl App {
                 }
                 self.redraw = false;
             }
-            sys::yield_now();
+            /* B-39: an idle window must not burn a core; one tick per pass
+             * also gives `tick` a real 10 ms meaning. */
+            sys::sleep_ticks(1);
             self.tick = self.tick.wrapping_add(1);
         }
     }
