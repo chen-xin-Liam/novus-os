@@ -72,15 +72,36 @@ UINT64 virt_to_phys(const void *v);
 #define MM_MAP_WC 0x02u
 void *mm_map_phys(UINT64 phys, UINT64 size, UINT32 flags);
 
+/* Non-zero when the last MM_MAP_WC request was downgraded to uncached
+ * because neither PAT nor a WC MTRR could be used. Full-screen copies are
+ * far slower in that state, so an animation can pick a cheaper strategy. */
+int mm_wc_fell_back(void);
+
 /* Turn on CR4.PAT and make sure IA32_PAT has the standard layout, so that
  * MM_MAP_WC's PTE bit means write-combining instead of a reserved-bit fault.
  * Call once, before the first WC mapping (mm_init does it). */
 void mm_enable_pat(void);
 
+/* The second PAT pass (B-12): the machine's firmware left CR4.PAT clear, so
+ * the scanout was mapped strongly uncached and every pixel store cost its own
+ * bus transaction. Called from mm_init *after* CR3 has been switched to our
+ * own tables, it turns PAT on, repaints the scanout leaves write-combining
+ * and proves the result with a write/read on the first pixel; a mapping that
+ * does not answer goes back to uncached. Does nothing when mm_enable_pat()
+ * already succeeded or when there is no scanout to repaint. */
+void mm_enable_pat_late(UINT64 fb_phys, UINT64 fb_size);
+
 /* 1 when CR4.PAT is set and IA32_PAT entry 4 really means write-combining.
  * 0 on a CPU that does not advertise PAT (mm_map_phys then maps MM_MAP_WC as
  * uncached). */
 int mm_pat_available(void);
+
+/* B-18: one line stating what the scanout's memory type actually resolves to
+ * - the page attribute read back out of the live page table, the MTRR type
+ * covering that physical range, and the late PAT pass's verdict. The type a
+ * pixel store gets is the intersection of the first two, so this is what says
+ * whether the write-combining work paid off. Call it once, late in the boot. */
+void mm_report_scanout(UINT64 fb_phys, UINT64 fb_size);
 
 /* Read the same physical byte (kernel .text region) through the identity
  * map and through PHYSMAP_BASE and report PASS/FAIL on the console. */

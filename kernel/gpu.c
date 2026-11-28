@@ -5,6 +5,7 @@
 #include "kernel.h"
 #include "gpu.h"
 #include "pci.h"
+#include "mm.h"
 #include "nd.h"
 
 /* A handful of the integrated controllers people actually run Novus on.
@@ -26,7 +27,17 @@ static const gpu_name_t g_intel_names[] = {
   {0x46D0u, "Intel UHD Graphics 770"},
   {0x4680u, "Intel UHD Graphics (Alder Lake)"},
   {0xA780u, "Intel Iris Xe Graphics (Raptor Lake)"},
-  {0xA7A0u, "Intel UHD Graphics 710"},
+  {0xA7A0u, "Intel Iris Xe Graphics (Raptor Lake)"},
+  {0xA7A1u, "Intel Iris Xe Graphics (Raptor Lake)"},
+  {0xA7A8u, "Intel Iris Xe Graphics (Raptor Lake)"},
+  {0xA7AAu, "Intel Iris Xe Graphics (Raptor Lake)"},
+  {0xA721u, "Intel Iris Xe Graphics (Raptor Lake)"},
+  {0xA720u, "Intel Iris Xe Graphics (Raptor Lake)"},
+  {0x46A0u, "Intel Iris Xe Graphics (Alder Lake)"},
+  {0x46A1u, "Intel Iris Xe Graphics (Alder Lake)"},
+  {0x46A2u, "Intel Iris Xe Graphics (Alder Lake)"},
+  {0x46A8u, "Intel Iris Xe Graphics (Alder Lake)"},
+  {0x46AAu, "Intel Iris Xe Graphics (Alder Lake)"},
   {0x7D40u, "Intel Iris Xe Graphics (Meteor Lake)"},
   {0x1912u, "Intel HD Graphics 530"},
   {0x5912u, "Intel HD Graphics 630"},
@@ -100,6 +111,72 @@ static UINT32 mmio_read(UINT64 base, UINT32 off) {
   return *(volatile UINT32 *)(UINTN)(base + off);
 }
 
+/* ---- Intel register access ------------------------------------------- */
+
+/* Gen12 and later carry their graphics version in GMD_ID. The forcewake
+ * acknowledge registers sit beside it in the always-on part of the
+ * window, which answers without a forcewake request, so a first probe
+ * can read all three without poking the power management machinery. */
+#define IG_GMD_ID        0x0D8Cu
+/* Page-table control: bit 0 enables the GGTT, bits 31:12 are its base in
+ * 4 KiB units. The firmware already filled this in, so the driver reads
+ * where a GTT is instead of guessing. */
+#define IG_PGETBL_CTL    0x02020u
+#define IG_FW_ACK_GT     0x0D84u
+#define IG_FW_ACK_MEDIA  0x0D88u
+
+static void   *g_intel_va;
+static UINT64  g_intel_phys;
+static UINT32  g_intel_gen;
+static UINT32  g_intel_rel;
+static UINT32  g_intel_step;
+static int     g_intel_ok;
+static int     g_intel_gtt_ok;
+static UINT64  g_intel_gtt_base;
+static char    g_intel_line[48];
+
+/* Reading through the mapped window, never the identity map: the window
+ * may sit above 4 GiB, and a cached read of a device register is a bug
+ * even when it happens to return the right value. */
+static UINT32 ig_rd(UINT32 off) {
+  return *(volatile UINT32 *)((char *)g_intel_va + (UINTN)off);
+}
+
+static UINT32 ig_lit(char *p, const char *s) {
+  UINT32 n = 0u;
+
+  while (s[n] != '\0') {
+    p[n] = s[n];
+    n++;
+  }
+  return n;
+}
+
+static UINT32 ig_num(char *p, UINT32 v) {
+  UINT32 n = 0u;
+
+  if (v == 0u) {
+    p[0] = '0';
+    return 1u;
+  }
+  while (v != 0u) {
+    p[n++] = (char)('0' + (v % 10u));
+    v /= 10u;
+  }
+  {
+    UINT32 i = 0u;
+
+    while (i < n / 2u) {
+      char c = p[i];
+
+      p[i] = p[n - 1u - i];
+      p[n - 1u - i] = c;
+      i++;
+    }
+  }
+  return n;
+}
+
 static const char *name_for(UINT16 vendor, UINT16 device) {
   UINT32 i;
 
@@ -108,6 +185,16 @@ static const char *name_for(UINT16 vendor, UINT16 device) {
       if (g_intel_names[i].id == device) {
         return g_intel_names[i].name;
       }
+    }
+    /* A chip id the table does not list still has a family: the 12th and
+     * 13th generation parts keep their graphics ids in two blocks, and
+     * calling a Raptor Lake-U Iris Xe a "显示控制器" hides the one fact
+     * worth reading off the settings page. */
+    if ((device & 0xFF00u) == 0xA700u) {
+      return "Intel Iris Xe (Raptor Lake)";
+    }
+    if ((device & 0xFF00u) == 0x4600u) {
+      return "Intel Iris Xe (Alder Lake)";
     }
     return "Intel 显示控制器";
   }
@@ -336,6 +423,110 @@ void gpu_init(void) {
   kputs(" stolen=");
   kputs_hex(g_stolen_phys);
   kputs("\n");
+  /* ---- Intel register window -----------------------------------------
+   *
+   * The PCI probe above proves the BAR exists; it does not prove the
+   * kernel can touch it. Until now that check read one dword through the
+   * identity map, which stops at 4 GiB - and an integrated controller's
+   * register window is exactly the thing firmware likes to place above
+   * that line. Mapping it properly is the first real step of a driver:
+   * everything after this - forcewake, GMD_ID, the rings - is register
+   * access, and none of it works through a window the CPU cannot reach.
+   * MM_MAP_UC because device registers must never be cached or merged. */
+  g_intel_ok = 0;
+  g_intel_gen = 0u;
+  g_intel_rel = 0u;
+  g_intel_step = 0u;
+  g_intel_gtt_ok = 0;
+  g_intel_gtt_base = 0u;
+  g_intel_line[0] = '\0';
+  if (d.vendor == GPU_VENDOR_INTEL && g_mmio_phys != 0u) {
+    UINT64 win = g_mmio_bytes;
+    void  *map;
+
+    if (win == 0u) {
+      win = 0x1000000u;   /* no size decoded: map the usual 16 MiB window */
+    }
+    if (win > 0x1000000u) {
+      win = 0x1000000u;   /* only the register page range is needed now */
+    }
+    if (win < 0x1000u) {
+      win = 0x1000u;
+    }
+    map = mm_map_phys(g_mmio_phys, win, MM_MAP_UC);
+    if (map == 0) {
+      kputs("[GPU] intel: the register window could not be mapped\n");
+    } else {
+      g_intel_va = (void *)((char *)map + (g_mmio_phys & 0x1FFFFFull));
+      g_intel_phys = g_mmio_phys;
+
+      {
+        UINT32 gmd  = ig_rd(IG_GMD_ID);
+        UINT32 ack  = ig_rd(IG_FW_ACK_GT);
+        UINT32 ackm = ig_rd(IG_FW_ACK_MEDIA);
+
+        kputs("[GPU] intel mmio=");
+        kputs_hex(g_mmio_phys);
+        kputs(" gmd=0x");
+        kputs_hex(gmd);
+        if (gmd != 0u && gmd != 0xFFFFFFFFu && gmd != 0xDEADBEEFu) {
+          g_intel_gen  = (gmd >> 22) & 0x3FFu;
+          g_intel_rel  = (gmd >> 14) & 0xFFu;
+          g_intel_step = gmd & 0x3Fu;
+        }
+        /* GMD_ID reads zero on parts older than Gen12 and on a window the
+         * firmware left unpowered. The PCI family still says which
+         * generation this is, so a driver decision does not have to be
+         * abandoned over one unreadable register. */
+        if (g_intel_gen == 0u) {
+          if ((d.device & 0xFF00u) == 0xA700u ||
+              (d.device & 0xFF00u) == 0x4600u ||
+              (d.device & 0xFF00u) == 0x7D00u) {
+            g_intel_gen = 12u;
+          }
+        }
+        kputs(" gen=");
+        kputs_hex((UINT64)g_intel_gen);
+        kputs(" rel=");
+        kputs_hex((UINT64)g_intel_rel);
+        kputs(" step=");
+        kputs_hex((UINT64)g_intel_step);
+        kputs(" ack_gt=0x");
+        kputs_hex(ack);
+        kputs(" ack_media=0x");
+        kputs_hex(ackm);
+        /* P2 step 1: the page table the firmware already built. Its base and
+         * enable bit are the anchor the geometry pass needs before any PTE
+         * can be written, and a zero here says the acceleration path stops
+         * before the ring rather than after a wasted bring-up. */
+        {
+          UINT32 pg = ig_rd(IG_PGETBL_CTL);
+
+          g_intel_gtt_ok = ((pg & 1u) != 0u) ? 1 : 0;
+          g_intel_gtt_base = (UINT64)(pg & 0xFFFFF000u);
+          kputs(" gtt_en=");
+          kputs_hex((UINT64)((pg & 1u) != 0u ? 1u : 0u));
+          kputs(" gtt_base=");
+          kputs_hex(g_intel_gtt_base);
+        }
+        kputs("\n");
+        g_intel_ok = (g_intel_gen != 0u) ? 1 : 0;
+      }
+      if (g_intel_ok != 0) {
+        char *p = g_intel_line;
+
+        p += ig_lit(p, "intel gen=");
+        p += ig_num(p, g_intel_gen);
+        if (ig_rd(IG_FW_ACK_GT) == 0u) {
+          p += ig_lit(p, " gt=asleep");
+        }
+        if (g_intel_gtt_ok == 0) {
+          p += ig_lit(p, " gtt=none");
+        }
+        *p = '\0';
+      }
+    }
+  }
 
   /* Second step: locate the scanout. The firmware handed us a linear
    * framebuffer; the question a driver asks next is whether that memory is
@@ -446,6 +637,17 @@ int    gpu_mmio_is_64bit(void) { return g_mmio_64; }
 
 UINT64 gpu_stolen_phys(void) { return g_stolen_phys; }
 UINT64 gpu_stolen_bytes(void) { return g_stolen_bytes; }
+
+/* P1 of the acceleration plan: the graphics generation the hardware
+ * reports, and whether the register window is mapped and readable. A
+ * driver may only touch the controller when gpu_intel_ready() is non-zero;
+ * everything else stays on the software path. */
+int gpu_intel_gen(void) { return (int)g_intel_gen; }
+int gpu_intel_ready(void) { return g_intel_ok; }
+
+/* One short line for the on-screen status: "intel gen=12", or empty when
+ * the machine is not an Intel graphics machine we could reach. */
+const char *gpu_probe_line(void) { return g_intel_line; }
 
 const char *gpu_summary(void) {
   if (g_present == 0) {

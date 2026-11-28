@@ -190,12 +190,12 @@ void gpu2d_init(void) {
   if (g_ops != 0) {
     return;
   }
-  /* Install the CPU backend BEFORE any vendor init prints a line. kputs()
-   * reaches fbcon_puts(), which draws glyphs through gpu2d_fill_span(); if
-   * g_ops were still NULL that call would recurse into gpu2d_init() and the
-   * machine would hang while reporting "registers reachable". */
+  /* Install the CPU backend before probing anything. Vendor bring-up prints,
+   * and kputs() reaches fbcon_puts(), which draws glyphs through
+   * gpu2d_fill_span(); with g_ops still NULL that call re-enters gpu2d_lazy()
+   * forever and the machine hangs while reporting "registers reachable".
+   * The soft backend is also the answer when no vendor probe succeeds. */
   g_ops = &g_backend_soft;
-
   /* Order matters: a real engine always wins over the CPU when it says it
    * can drive the hardware. */
   for (i = 0; i < sizeof(g_vendors) / sizeof(g_vendors[0]); i++) {

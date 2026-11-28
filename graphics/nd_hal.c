@@ -60,6 +60,17 @@
  * the blank whenever its phase allows, and the row-wise blit that
  * follows is short enough to stay there. */
 #define ND_BLANK_SPINS   800u
+/* B-31: how long the one-shot retrace probe may take, in TSC cycles. The probe
+ * has to see the bit both set and clear, which on a real CRTC means watching
+ * for more than one frame - a fifth of a second of reads is not unreasonable
+ * when each of them costs a microsecond. What is unreasonable is that the
+ * count alone bounded it: 20000 reads of a port the firmware traps (the same
+ * trap that made COM1 cost 0.76 ms a character on the EliteBook) is fifteen
+ * seconds spent before the first frame, and the loop had no way to notice. So
+ * the loop is bounded by time as well, and the verdict says which bound ended
+ * it - "unavailable" after 40 ms and "unavailable" after 20000 reads are
+ * different facts about the machine. */
+#define ND_PROBE_CYCLES  100000000ULL /* 40 ms at 2.5 GHz, 100 ms at 1 GHz */
 /* Presents smaller than this skip the wait. Kept above the cursor/icon size so
  * latency-sensitive pointer moves are not delayed, but low enough that the
  * common window drag repaint (a few hundred squared pixels) lands in the blank.
@@ -81,6 +92,17 @@ static int          g_frame_ok;
 
 /* Vertical retrace probe: 0 not yet run, 1 usable, 2 not usable. */
 static UINT8 g_retrace;
+/* B-31: what the probe cost and how it ended - the read count and the
+ * microseconds, reported on the same line as the verdict, because "no retrace
+ * bit" on a machine whose every port read costs a millisecond is a different
+ * statement about that machine than the same words on a machine where the reads
+ * were free. */
+static UINT32 g_retrace_probe_reads;
+static UINT32 g_retrace_probe_us;
+
+/* Used by the boot-time report above, defined with the pointer diagnostics
+ * further down. */
+static void hal_dec(UINT32 v);
 
 /* ---- frame timing ----------------------------------------------------- */
 
@@ -195,6 +217,8 @@ void nd_frame_stats(nd_frame_stats_t *out) {
  * mm_map_phys() accepts any physical address but aligns the mapping to a 2
  * MiB boundary, so the offset between fb_phys and that boundary is added
  * back: otherwise pixel (0,0) would land up to 2 MiB into the device. */
+static int  g_fb_wc;
+
 static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
   void *base;
 
@@ -235,10 +259,27 @@ static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
   /* Only the scanout mm_init() marked write-combining may be used as it
    * stands. A second, mirrored output that happens to sit below ram_top is
    * inside the identity map but follows the generic MMIO policy (UC), so it
-   * still needs its own WC mapping. */
-  if (phys != 0u && phys == g_disp.fb_phys &&
-      size <= mm_ram_top() && phys <= mm_ram_top() - size) {
-    kputs("[ND] framebuffer inside the identity map, used as it stands\n");
+   * still needs its own WC mapping.
+   *
+   * Note the condition: the primary scanout is used as it stands whenever the
+   * boot stage could reach it, *including* when it sits above ram_top. That
+   * is the HP case - the panel's scanout is at 0x4000000000 - and mm_init()
+   * was handed fb_phys/fb_size precisely so it would identity-map that range
+   * uncached even though the firmware memory map does not describe it. The
+   * boot splash has been drawing through that address since the first frame,
+   * so it is known good. Building a second mapping for the same 8 MiB was
+   * the step that stopped this machine dead. */
+  if (phys != 0u && phys == g_disp.fb_phys && g_disp.fb_boot_usable) {
+    kputs("[ND] primary scanout used as it stands (boot mapping)\n");
+    /* B-12: this mapping is the one mm_init() built, and since that point
+     * mm_enable_pat_late() has had the chance to repaint it write-combining.
+     * mm_pat_available() is the single source of truth for which type it
+     * ended up with, so the full-frame paths can pick their strategy from
+     * this instead of assuming the worst. */
+    g_fb_wc = (mm_pat_available() != 0) ? 1 : 0;
+    kputs(g_fb_wc != 0
+              ? "[ND] boot scanout is write-combining (PAT)\n"
+              : "[ND] boot scanout stays uncached; full-frame copies stay slow\n");
     return (void *)(UINTN)phys;
   }
   /* Write-combining, not uncacheable. The scanout is written far more than
@@ -250,10 +291,20 @@ static void *nd_map_framebuffer(UINT64 phys, UINT64 size) {
    * uncached, so they stay correct, just slow. */
   base = mm_map_phys(phys, size, MM_MAP_WC);
   if (base == 0) {
+    g_fb_wc = 0;
     return 0;
   }
+  /* The mapping request is a wish; mm decides what the CPU can actually
+   * do. Recorded here so the desktop knows whether a full-screen copy is
+   * a few milliseconds or most of a frame: the hand-over animation should
+   * never be attempted on an uncached scanout. */
+  g_fb_wc = (mm_wc_fell_back() == 0) ? 1 : 0;
+  kputs(g_fb_wc != 0 ? "[ND] scanout is write-combining\n"
+                     : "[ND] scanout fell back to uncached; full-frame copies stay slow\n");
   return (void *)((char *)base + (phys & 0x1FFFFFull));
 }
+
+int nd_framebuffer_is_wc(void) { return g_fb_wc; }
 
 static INT32     g_cx;
 static INT32     g_cy;
@@ -597,7 +648,9 @@ int nd_init(void) {
     kputs(", ");
     kputs_hex(g_disp.fb_size);
     kputs(" bytes\n");
+    kputs("[ND] cache flush start\n");
     cpu_wbinvd(); /* drop WB data the boot splash wrote through the identity map */
+    kputs("[ND] cache flush done\n");
   }
   g_screen.w = (INT32)g_disp.width;
   g_screen.h = (INT32)g_disp.height;
@@ -625,6 +678,26 @@ int nd_init(void) {
     }
     g_reported[g_reported_count++] = g_outputs[i];
   }
+  /* Mirroring a second scanout is cosmetic; the desktop must never be held
+   * hostage by a head the firmware felt like listing. On the HP this machine
+   * stopped answering while the second framebuffer was being mapped, with no
+   * log line in between, so the list is now printed and no mirror is bound
+   * unless this is turned back on after the address has been looked at. */
+#define ND_MIRRORS_ENABLE 0
+  for (i = 0; i < g_reported_count; i++) {
+    kputs("[ND] reported ");
+    kputs_hex((UINT64)i);
+    kputs(" phys=");
+    kputs_hex(g_reported[i].fb_phys);
+    kputs(" size=");
+    kputs_hex(g_reported[i].fb_size);
+    kputs(" ");
+    kputs_hex(g_reported[i].width);
+    kputs("x");
+    kputs_hex(g_reported[i].height);
+    kputs("\n");
+  }
+#if ND_MIRRORS_ENABLE
   for (i = 1; i < g_reported_count && i < ND_MAX_OUTPUTS; i++) {
     nd_surface_t *m = &g_mirror[g_mirror_count];
     void         *fb;
@@ -645,16 +718,30 @@ int nd_init(void) {
     m->clip = nd_rect(0, 0, m->w, m->h);
     g_mirror_count++;
   }
+#endif
 
+#if !ND_MIRRORS_ENABLE
+  kputs("[ND] mirror binding disabled\n");
+#endif
+
+  kputs("[ND] display state commit\n");
   g_screen_ready = 1;
   g_cx = g_screen.w / 2;
   g_cy = g_screen.h / 2;
+  kputs("[ND] outputs prepared: ");
+  kputs_hex(g_reported_count);
+  kputs(" reported, ");
+  kputs_hex(g_mirror_count);
+  kputs(" mirrored\n");
+  kputs("[ND] compositor buffer alloc start\n");
 
   /* One compositor buffer for the whole display stack. Everything below
    * this line - the shell, the WM, client windows - draws into it and
    * reaches the glass only through nd_present(). A failed allocation is
    * not fatal: the stack falls back to the old direct path. */
   g_frame_ok = (nd_surface_create(&g_frame, g_screen.w, g_screen.h) == 0);
+  kputs("[ND] compositor buffer ");
+  kputs(g_frame_ok ? "ready\n" : "unavailable, direct scanout\n");
 
   kputs("[ND] NovusDisplay: ");
   kputs(g_disp.backend);
@@ -715,7 +802,14 @@ int nd_init(void) {
 
   kputs("[ND] compositor: ");
   kputs(g_frame_ok ? "off-screen buffer" : "direct to framebuffer");  kputs(", vsync ");
-  kputs(g_retrace == 1u ? "available\n" : "unavailable\n");
+  kputs(g_retrace == 1u ? "available" : "unavailable");
+  /* B-31: the probe's own cost, so a machine where the port is trapped shows
+   * it here instead of inside an unexplained gap before the first frame. */
+  kputs(" (probe ");
+  hal_dec(g_retrace_probe_reads);
+  kputs(" reads, ");
+  hal_dec(g_retrace_probe_us);
+  kputs(" us)\n");
 
   if (nd_boot_splash_active()) {
     /* The boot progress bar is on the glass; leave it there until the
@@ -763,22 +857,61 @@ static UINT32 swap_rb(UINT32 px) {
          ((px & 0x00FF0000u) >> 16);
 }
 
+/* The same exchange on two pixels carried in one 64-bit word: each 32-bit
+ * lane keeps its green byte and swaps the red and blue ones. */
+#define SWAP_RB64(v) ((((v) & 0x000000FF000000FFull) << 16) |               \
+                      (((v) & 0x00FF000000FF0000ull) >> 16) |               \
+                      ((v) & 0xFF00FF00FF00FF00ull))
+
+/* One 16-byte store straight to the bus, bypassing the cache (B-12). A
+ * framebuffer is write-combining device memory: the store path only turns
+ * into whole-line bursts when the writes arrive at least 8 bytes wide and
+ * in order. `movntdq` also drops the read-for-ownership the ordinary store
+ * would pay on a cacheable alias, so a full-screen present goes from one
+ * store per byte to one per 16 bytes. */
+static void nt_copy16(void *d, const void *s) {
+  __asm__ volatile("movdqu (%1), %%xmm0\n\t"
+                   "movntdq %%xmm0, (%0)"
+                   :
+                   : "r"(d), "r"(s)
+                   : "xmm0", "memory");
+}
+
+/* The same, with red and blue exchanged on the way out. */
+static void nt_copy16_swap(void *d, UINT64 lo, UINT64 hi) {
+  __asm__ volatile("movq %1, %%xmm0\n\t"
+                   "movq %2, %%xmm1\n\t"
+                   "punpcklqdq %%xmm1, %%xmm0\n\t"
+                   "movntdq %%xmm0, (%0)"
+                   :
+                   : "r"(d), "r"(lo), "r"(hi)
+                   : "xmm0", "xmm1", "memory");
+}
+
+static void nt_fence(void) { __asm__ volatile("sfence" ::: "memory"); }
+
 /* Copy `r` between two surfaces that share a coordinate system, one whole
  * row at a time. The row copy is a memcpy whenever the byte orders agree,
  * which is every GOP mode that names BGR - the common case, and the
  * difference between a present that fits inside the blank and one that
- * does not. */
+ * does not. A framebuffer destination always takes the 16-byte non-temporal
+ * path instead: that is the only copy in this system that lands in device
+ * memory. */
 static void surface_copy(nd_surface_t *dst, const nd_surface_t *src,
                          nd_rect_t r) {
   INT32  y;
   UINT64 bytes = (UINT64)r.w * 4u;
   int    swap = (surface_swapped(dst) != surface_swapped(src));
   /* The first two copies of a boot say where they read and where they
-   * write, and then every 128th row: a fault inside the copy has no
-   * meaningful RIP, only a faulting address, and this is the only way to
-   * tell which side of the copy it came from. */
+   * write: a fault inside the copy has no meaningful RIP, only a faulting
+   * address, and this is the only way to tell which side of the copy it came
+   * from. B-18 dropped the per-128-row echo that went with it - nine log
+   * lines per full-screen present, each of them a splash-panel repaint over
+   * an uncached scanout, which is itself a large part of the 586 ms that
+   * present was measured at. */
   static UINT32 copies;
   int    noisy = (copies < 2u);
+  int    nt = (dst->fb != 0) ? 1 : 0;
 
   if (noisy) {
     kputs("[ND] copy ");
@@ -789,31 +922,124 @@ static void surface_copy(nd_surface_t *dst, const nd_surface_t *src,
     kputs_hex((UINT64)(UINTN)src->px);
     kputs(" dst=");
     kputs_hex((UINT64)(UINTN)dst->px);
-    kputs(swap ? " swap\n" : " direct\n");
+    kputs(swap ? " swap" : " direct");
+    kputs(nt ? " nt\n" : "\n");
+    noisy = 0;
   }
   for (y = 0; y < r.h; y++) {
     const UINT32 *s = src->px + (UINT32)(r.y + y) * src->stride + (UINT32)r.x;
     UINT32       *d = dst->px + (UINT32)(r.y + y) * dst->stride + (UINT32)r.x;
 
-    if (noisy && (y % 128) == 0) {
-      kputs("[ND] copy row ");
-      kputs_hex((UINT64)y);
-      kputs(" read 0x");
-      kputs_hex((UINT64)(UINTN)s);
-      kputs(" write 0x");
-      kputs_hex((UINT64)(UINTN)d);
-      kputs("\n");
-    }
-    if (!swap) {
+    if (nt && !swap) {
+      UINT64 i = 0u;
+
+      for (; i + 16u <= bytes; i += 16u) {
+        nt_copy16((UINT8 *)(void *)d + i, (const UINT8 *)(const void *)s + i);
+      }
+      if (i < bytes) {
+        memcpy((UINT8 *)(void *)d + i, (const UINT8 *)(const void *)s + i,
+               bytes - i);
+      }
+    } else if (nt && swap) {
+      UINT32 x = 0u;
+
+      for (; x + 4u <= (UINT32)r.w; x += 4u) {
+        UINT64 lo = SWAP_RB64(*(const UINT64 *)(const void *)(s + x));
+        UINT64 hi = SWAP_RB64(*(const UINT64 *)(const void *)(s + x + 2));
+
+        nt_copy16_swap((UINT8 *)(void *)(d + x), lo, hi);
+      }
+      /* The tail has to be fenced off before the byte stores: they go
+       * through the cache, and without the fence the processor may retire
+       * them before the non-temporal lines ahead of them land. */
+      nt_fence();
+      for (; x < (UINT32)r.w; x++) {
+        d[x] = swap_rb(s[x]);
+      }
+    } else if (!swap) {
       memcpy(d, s, bytes);
     } else {
-      INT32 x;
-      for (x = 0; x < r.w; x++) {
+      /* Reorder two pixels per 64-bit load. The per-pixel version this
+       * replaces cost four masked shifts and a store for every pixel, and
+       * on a 1872x1080 panel that is the difference between a present that
+       * lands inside one blank and a full-screen copy the eye can watch
+       * crawling down the glass. */
+      UINT32 x = 0u;
+
+      for (; x + 4u <= (UINT32)r.w; x += 4u) {
+        UINT64 lo = SWAP_RB64(*(const UINT64 *)(const void *)(s + x));
+        UINT64 hi = SWAP_RB64(*(const UINT64 *)(const void *)(s + x + 2));
+
+        *(UINT64 *)(void *)(d + x) = lo;
+        *(UINT64 *)(void *)(d + x + 2) = hi;
+      }
+      for (; x < (UINT32)r.w; x++) {
         d[x] = swap_rb(s[x]);
       }
     }
   }
+  if (nt) {
+    /* One fence for the whole rectangle, not one per row: the stores are
+     * already in order, the fence only has to come before anything reads
+     * the scanout back (the cursor save/restore path does). */
+    nt_fence();
+  }
   copies++;
+}
+
+/* B-18: what the scanout's memory type resolves to, and how fast a pixel
+ * store into it really is. Both go to the log once, after the first frame,
+ * because the log medium loses the head of the boot - the earlier "present
+ * ... us=" numbers are measured but the PAT verdict that explains them is
+ * printed at +700 ms, where nobody can read it. */
+void nd_report_scanout(void) {
+  mm_report_scanout(g_disp.fb_phys, (UINT64)g_disp.fb_size);
+}
+
+void nd_fb_bench(void) {
+  UINT8   pattern[16];
+  UINT8  *dst;
+  UINT64  bytes;
+  UINT64  i;
+  UINT64  t0;
+  UINT64  cyc;
+  UINT32  k;
+
+  if (g_screen.px == 0 || g_screen.stride <= 0 || g_screen.h <= 0 ||
+      g_screen.w <= 0) {
+    return;
+  }
+  for (k = 0; k < 16u; k++) {
+    pattern[k] = (UINT8)(0x40u + k);
+  }
+  /* The last visible row, not the middle of the desktop: the bench overwrites
+   * what it touches and one row below the taskbar is the cheapest thing on
+   * the glass to lose. */
+  dst = (UINT8 *)(void *)g_screen.px +
+        (UINT64)(UINT32)(g_screen.h - 1) * (UINT64)(UINT32)g_screen.stride * 4u;
+  bytes = (UINT64)(UINT32)g_screen.w * 4u;
+  bytes &= ~15ULL;
+
+  t0 = nd_tsc();
+  for (i = 0; i + 16u <= bytes; i += 16u) {
+    nt_copy16(dst + i, pattern);
+  }
+  nt_fence();
+  cyc = nd_tsc() - t0;
+  if (bytes == 0u) {
+    return;
+  }
+  kputs("[ND] fb bench ");
+  kputs_hex(bytes);
+  kputs(" B in ");
+  kputs_hex(cyc);
+  kputs(" cycles, ");
+  kputs_hex(cyc / bytes);
+  kputs(" cycles/byte\n");
+  /* Put the row back. The canvas still holds the composed frame, so this is
+   * one row of copy rather than a repaint; when there is no canvas the glass
+   * keeps the pattern until the next present, which is a single dirty row. */
+  nd_present(nd_rect(0, g_screen.h - 1, g_screen.w, 1));
 }
 
 static void present_probe(void) {
@@ -823,12 +1049,23 @@ static void present_probe(void) {
   {
     UINT32 i;
     UINT8  seen = 0;
-
+    UINT64 t0 = nd_tsc();
+    /* B-31: bounded by count and by time. Both bounds exist because the two
+     * machines this has to survive are opposite: an emulator answers each read
+     * in a few dozen cycles and needs many reads to span a frame, a laptop with
+     * a firmware-trapped 0x3DA answers in a millisecond and needs almost none.
+     * The clock check runs once every 256 reads so it cannot itself become the
+     * cost. */
     for (i = 0; i < 20000u && seen != 3u; i++) {
       seen |= (UINT8)(1u << ((io_in8(ND_VGA_STATUS) & ND_VGA_VRETRACE) ? 1u
                                                                      : 0u));
+      if ((i & 255u) == 255u && (nd_tsc() - t0) > ND_PROBE_CYCLES) {
+        break;
+      }
     }
     g_retrace = (seen == 3u) ? 1u : 2u;
+    g_retrace_probe_us = (UINT32)((nd_tsc() - t0) / 1000u);
+    g_retrace_probe_reads = i;
   }
 }
 
@@ -941,8 +1178,11 @@ static UINT32     g_diag_present_diag;
 void nd_present(nd_rect_t r) {
   nd_rect_t area;
   UINT64    t0;
+  UINT64    t1;
+  UINT64    t2;
   UINT64    cycles;
   int       full;
+  int       first_full = 0;
 
   if (!g_screen_ready || g_screen.px == 0) {
     return;
@@ -957,9 +1197,11 @@ void nd_present(nd_rect_t r) {
    * final TSC read, so logging is never inside the measured interval. */
   t0 = nd_tsc();
   present_wait_blank(area);
+  t1 = nd_tsc();
   if (g_frame_ok) {
     surface_copy(&g_screen, &g_frame, area);
   }
+  t2 = nd_tsc();
   /* The mirrors are refreshed from the composed buffer, not from the
    * primary: reading the primary back would mean reading uncached MMIO a
    * pixel at a time, and it would copy whatever the scanout happens to
@@ -973,12 +1215,36 @@ void nd_present(nd_rect_t r) {
   __asm__ volatile("sfence" : : : "memory");
   cycles = nd_tsc() - t0;
 
+
   full = (area.w == g_screen.w && area.h == g_screen.h);
   g_present_stats.frames++;
   g_present_stats.cycles += cycles;
   g_present_stats.pixels += (UINT64)area.w * (UINT64)area.h;
   if (cycles > g_present_stats.max_cycles) {
     g_present_stats.max_cycles = cycles;
+  }
+  if (full && g_present_stats.frames <= 3u) {
+    first_full = 1;
+  }
+  /* B-28: split the first whole-screen presents into the three things they
+   * actually do - wait for blank, copy, everything else - and say what the
+   * scanout's memory type is at that moment. Measured on the EliteBook the
+   * first two whole-screen presents cost 586 ms and 707 ms while the third
+   * onward cost 1.4 ms; only a breakdown taken on the machine can say
+   * whether that was an uncached mapping (fixable) or something that
+   * resolves itself (not). */
+  if (first_full) {
+    kputs("[NDP] full present#");
+    hal_dec((UINT32)g_present_stats.frames);
+    kputs(" wait=");
+    hal_dec((UINT32)(t1 - t0));
+    kputs(" copy=");
+    hal_dec((UINT32)(t2 - t1));
+    kputs(" rest=");
+    hal_dec((UINT32)(cycles - (t2 - t0)));
+    kputs(" wc=");
+    hal_dec((UINT32)nd_framebuffer_is_wc());
+    kputs("\n");
   }
   g_present_seq++;
   /* (d) Paint/present geometry. The arrow is composited only where this

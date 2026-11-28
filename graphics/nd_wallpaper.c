@@ -334,17 +334,27 @@ UINT32 nd_wallpaper_luma(nd_rect_t area, nd_color_t fallback) {
           ((fallback >> 8) & 255u) * 587u + (fallback & 255u) * 114u) / 1000u;
 }
 
-static UINT32 wp_lerp(UINT32 a, UINT32 b, UINT32 t) {
-  /* t is 0..1024; interpolate the three colour channels of 0xAARRGGBB. */
-  INT32 ar = (INT32)((a >> 16) & 0xFFu), ag = (INT32)((a >> 8) & 0xFFu),
-        ab = (INT32)(a & 0xFFu);
-  INT32 br = (INT32)((b >> 16) & 0xFFu), bg = (INT32)((b >> 8) & 0xFFu),
-        bb = (INT32)(b & 0xFFu);
-  INT32 r = ar + (br - ar) * (INT32)t / 1024;
-  INT32 g = ag + (bg - ag) * (INT32)t / 1024;
-  INT32 bl = ab + (bb - ab) * (INT32)t / 1024;
-  return ((UINT32)0xFFu << 24) | (((UINT32)r & 0xFFu) << 16) |
-         (((UINT32)g & 0xFFu) << 8) | ((UINT32)bl & 0xFFu);
+ /* Ordered dither for the vertical gradient. A 1080-row ramp between two
+  * near-identical darks lands on about thirty distinct 8-bit steps, and a
+  * panel with a decent gamma curve shows every one of them as a band. The
+  * 4x4 Bayer pattern below is worth one extra level of brightness on the
+  * pixels whose exact value needs it, which pushes the step boundary into
+  * a texture instead of a line. */
+static const UINT8 wp_bayer[16] = {
+  0u, 8u, 2u, 10u, 12u, 4u, 14u, 6u, 3u, 11u, 1u, 9u, 15u, 7u, 13u, 5u
+};
+
+/* One channel of the ramp, dithered. `num` is the unrounded numerator and the
+ * remainder decides whether this pixel takes the next level. */
+static UINT32 wp_ch(INT32 a, INT32 b, UINT32 t, UINT32 dth) {
+  UINT32 num = (UINT32)(a * (INT32)(1024u - t) + b * (INT32)t);
+  UINT32 v = num >> 10;
+  UINT32 rem = num & 1023u;
+
+  if (rem * 16u >= ((UINT32)dth + 1u) * 1024u && v < 255u) {
+    v++;
+  }
+  return v;
 }
 
 void nd_wallpaper_paint(nd_surface_t *s, const nd_rect_t *area,
@@ -361,8 +371,33 @@ void nd_wallpaper_paint(nd_surface_t *s, const nd_rect_t *area,
     nd_fill_rect(s, a, bottom);
     return;
   }
-  for (y = a.y; y < a.y + a.h; y++) {
-    UINT32 t = (UINT32)(y - a.y) * 1024u / (UINT32)(a.h - 1);
-    nd_fill_rect(s, nd_rect(a.x, y, a.w, 1), wp_lerp(top, bottom, t));
+  {
+    INT32 ar = (INT32)((top >> 16) & 0xFFu), ag = (INT32)((top >> 8) & 0xFFu),
+          ab = (INT32)(top & 0xFFu);
+    INT32 br = (INT32)((bottom >> 16) & 0xFFu);
+    INT32 bg = (INT32)((bottom >> 8) & 0xFFu);
+    INT32 bb = (INT32)(bottom & 0xFFu);
+
+    for (y = a.y; y < a.y + a.h; y++) {
+      UINT32 t = (UINT32)(y - a.y) * 1024u / (UINT32)(a.h - 1);
+      UINT32 yy = (UINT32)(y & 3) * 4u;
+      UINT32 *row;
+      INT32   x;
+
+      if (y < s->clip.y || y >= s->clip.y + s->clip.h) {
+        continue;
+      }
+      row = s->px + (UINT32)y * s->stride;
+      for (x = a.x; x < a.x + a.w; x++) {
+        UINT32 dth = wp_bayer[yy + ((UINT32)(x & 3))];
+
+        if (x < s->clip.x || x >= s->clip.x + s->clip.w) {
+          continue;
+        }
+        row[x] = nd_hw_pixel(s, ND_RGB(wp_ch(ar, br, t, dth),
+                                       wp_ch(ag, bg, t, dth),
+                                       wp_ch(ab, bb, t, dth)));
+      }
+    }
   }
 }

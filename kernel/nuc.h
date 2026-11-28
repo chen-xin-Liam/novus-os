@@ -48,4 +48,12 @@ int nuc_selftest(void);
 int nuc_spawn_blob(const char *name, const UINT8 *blob, UINT32 size,
                    UINT32 entry);
 
+/* Wrap a flat blob in a one-segment NUC image inside `out` and report the
+ * image length. This is the byte-for-byte image nuc_spawn_blob hands the
+ * loader; the system-application seeder writes exactly these bytes to
+ * /Novus/bin so the file on the medium and the embedded copy are the same
+ * program, not two variants. */
+int nuc_pack_blob(const UINT8 *blob, UINT32 size, UINT8 *out, UINT32 cap,
+                  UINT32 *out_size);
+
 #endif /* NOVUS_NUC_H */

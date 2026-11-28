@@ -15,7 +15,7 @@
 
 #include "uefi.h"
 
-#define APPS_MAX 10
+#define APPS_MAX 12 /* built-in images: table entries plus room for one demo */
 #define APPS_EAUTH (-101)
 
 /* Number of embedded applications. */

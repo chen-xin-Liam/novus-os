@@ -74,6 +74,7 @@
 #define SYS_UPDATE      25u   /* update service control ABI */
 #define SYS_HTTPS       26u   /* https client control ABI  */
 #define SYS_CONSOLE     27u   /* serial console read/write  */
+#define SYS_SLEEP       38u   /* park the caller for N timer ticks (B-36) */
 #define SYS_PE32_EXEC   41u   /* run a PE32 image from the VFS (WOW32) */
 
 #define FS_PATH_MAX 256u
@@ -833,6 +834,14 @@ static void sys_ipc_stats(trap_frame_t *f) {
 
 static void sys_yield_call(trap_frame_t *f) {
   f->rax = 0;
+  /* B-34: an idle task that yields with nothing else runnable would be
+   * picked again immediately. Park it until the next tick so the machine
+   * can hlt; anything that becomes runnable in between wakes the scheduler
+   * through the ordinary path. */
+  if (sched_yield_is_idle_only() != 0) {
+    sched_park(0, 1);
+    return;
+  }
   sched_yield();
 }
 
@@ -868,6 +877,41 @@ static void sys_pe32_exec(trap_frame_t *f) {
 }
 
 typedef void (*sys_fn_t)(trap_frame_t *);
+
+/* sleep(ticks) - B-36. A window application has to refresh on a clock ("the
+ * stats page once every 40 ticks"), but the only clock a client could reach
+ * was `yield`, so every app wrote `idle += 1; yield()` and the 40 then
+ * counted *loop iterations*, not ticks: the settings window repainted
+ * itself every few hundred microseconds, which is where the 35 000 refused
+ * IPC sends per second came from. Parking for a tick is the primitive the
+ * app loops actually need.
+ *
+ * The park is the same replay contract ipc_recv uses: the frame is rewound
+ * to the `syscall` instruction, and the deadline expiry leaves
+ * IPC_ETIMEDOUT in wait_err as the "you slept, carry on" marker. */
+static void sys_sleep_call(trap_frame_t *f) {
+  task_t *t = sched_current();
+  UINT32  ticks = (UINT32)f->rdi;
+
+  if (t == NULL) {
+    f->rax = (UINT64)(INT64)IPC_EBADF;
+    return;
+  }
+  if (t->wait_err != 0) {
+    t->wait_err = 0;
+    f->rax = 0;
+    return;
+  }
+  if (ticks == 0u) {
+    f->rax = 0;
+    return;
+  }
+  if (ticks > 6000u) {
+    ticks = 6000u; /* a minute: no caller may park the desktop forever */
+  }
+  sched_park(0, ticks);
+  f->rip -= SYSCALL_INSN_LEN;
+}
 
 typedef struct {
   UINT32      num;
@@ -1119,6 +1163,7 @@ static const sys_ent_t g_syscalls[] = {
     {SYS_UPDATE, "update", sys_update_call},
     {SYS_HTTPS, "https", sys_https_call},
     {SYS_CONSOLE, "console", sys_console},
+    {SYS_SLEEP, "sleep", sys_sleep_call},
     {SYS_PE32_EXEC, "pe32_exec", sys_pe32_exec},
 #if CONFIG_NOVUS_DWM
     {SYS_VMEM_ALLOC, "vmem_alloc", dwm_sys_vmem_alloc},

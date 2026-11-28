@@ -37,6 +37,8 @@ path = "src/bin/devmgmt.rs"
 name = "dwm"
 path = "src/bin/dwm.rs"
 
+# The "hello" demo referenced by docs/应用图形化开发指南.md has no source
+# file in this tree; keep Cargo's target list buildable until it is added.
 [profile.release]
 panic = "abort"
 opt-level = "s"

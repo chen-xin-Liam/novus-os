@@ -18,6 +18,7 @@ typedef struct {
   UINT32    head;
   UINT32    tail;
   UINT32    count;
+  UINT32    dropped; /* refusals this port has handed back, cumulated */
   ipc_msg_t q[IPC_QUEUE_LEN];
 } ipc_port_t;
 
@@ -87,6 +88,15 @@ int ipc_port_create(const char *name, UINT64 owner, UINT64 id_hint,
       p->name[i] = name[i];
     }
     p->name[i] = '\0';
+    /* One line per named port, so a "[IPC] full target=0x…" line in the
+     * same log can be turned back into a service name without guessing. */
+    kputs("[IPC] port \"");
+    kputs(p->name);
+    kputs("\" id=");
+    kputs_hex(p->id);
+    kputs(" owner=");
+    kputs_hex(owner);
+    kputs("\n");
   }
   if (out_id != 0) {
     *out_id = p->id;
@@ -119,6 +129,37 @@ int ipc_port_lookup(const char *name, UINT64 *out_id) {
     }
   }
   return IPC_ENOENT;
+}
+
+/* One-shot dump of the port table. Called once the desktop is up: with
+ * "[IPC] full target=0x…" lines in the same log and the id/owner of every
+ * port here, the target stops being a hex number nobody can name. */
+void ipc_dump_ports(void) {
+  UINT32 i;
+
+  kputs("[IPC] port table:\n");
+  for (i = 0; i < IPC_MAX_PORTS; i++) {
+    const ipc_port_t *p = &g_ports[i];
+
+    if (!p->used) {
+      continue;
+    }
+    kputs("[IPC]  idx=");
+    kputs_hex(i);
+    kputs(" id=");
+    kputs_hex(p->id);
+    kputs(" owner=");
+    kputs_hex(p->owner);
+    kputs(" queued=");
+    kputs_hex(p->count);
+    kputs(" refused=");
+    kputs_hex(p->dropped);
+    if (p->name[0] != '\0') {
+      kputs(" name=");
+      kputs(p->name);
+    }
+    kputs("\n");
+  }
 }
 
 int ipc_task_attach(UINT64 pid) {
@@ -164,7 +205,21 @@ int ipc_send(UINT64 dst_port, UINT64 sender, UINT16 type, UINT16 flags,
    * "empty" and "full". */
   next = (p->head + 1u) % IPC_QUEUE_LEN;
   if (next == p->tail) {
+    /* First refusals only: a client retrying a full queue can produce tens
+     * of thousands per second, and the one thing worth knowing is who it is
+     * (sender), which port is full (target) and what kind of traffic it is.
+     * Sixteen lines are enough to see it in a serial log. */
+    if (p->dropped == 0u && g_stats.dropped < 16u) {
+      kputs("[IPC] full target=");
+      kputs_hex(dst_port);
+      kputs(" sender=");
+      kputs_hex(sender);
+      kputs(" type=");
+      kputs_hex(type);
+      kputs("\n");
+    }
     g_stats.dropped++;
+    p->dropped++;
     return IPC_EBUSY;
   }
   m = &p->q[p->head];
@@ -206,6 +261,22 @@ int ipc_try_recv(UINT64 port, ipc_msg_t *out) {
     }
     if (m->hdr.magic != IPC_MAGIC || m->hdr.len > IPC_PAYLOAD_MAX ||
         want != m->hdr.checksum) {
+      /* Two per boot on QEMU: worth naming, because a rejected message is
+       * a request a client believes it delivered (a repaint that never
+       * happens). Sixteen lines are enough to identify the sender. */
+      if (g_stats.bad < 16u) {
+        kputs("[IPC] bad target=");
+        kputs_hex(port);
+        kputs(" sender=");
+        kputs_hex(m->hdr.sender);
+        kputs(" type=");
+        kputs_hex(m->hdr.type);
+        kputs(" len=");
+        kputs_hex(m->hdr.len);
+        kputs(" magic=");
+        kputs_hex(m->hdr.magic);
+        kputs("\n");
+      }
       g_stats.bad++;
       continue;
     }

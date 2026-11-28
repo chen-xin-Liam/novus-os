@@ -3370,7 +3370,12 @@ static void api_destroy_menu(trap_frame_t *f) {
   f->rax = 1u;
 }
 
-static void api_draw_menu_bar(trap_frame_t *f) {
+/* UpdateWindow() and DrawMenuBar() both mean the same thing here: the
+ * compositor owns the pixels, so a caller can only ask for a repaint, and
+ * Win32 programs observe exactly that (the call returns and the next frame
+ * is whole). One helper keeps the two entry points honest instead of two
+ * copies that will drift apart. */
+static void api_touch_window(trap_frame_t *f) {
   task_t      *t = sched_current();
   win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
   win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
@@ -3381,6 +3386,10 @@ static void api_draw_menu_bar(trap_frame_t *f) {
   }
   w->dirty = 1u;
   f->rax = 1u;
+}
+
+static void api_draw_menu_bar(trap_frame_t *f) {
+  api_touch_window(f);
 }
 
 /* TrackPopupMenu(hMenu, flags, x, y, reserved, hwnd, reserved).
@@ -4616,16 +4625,7 @@ static void api_post_quit_message(trap_frame_t *f) {
 }
 
 static void api_update_window(trap_frame_t *f) {
-  task_t      *t = sched_current();
-  win32_gui_t *gu = (t != NULL) ? gui_state(t->pid, 0) : NULL;
-  win32_wnd_t *w = gui_window(gu, (UINT32)f->rdi);
-
-  if (w == NULL) {
-    f->rax = 0u;
-    return;
-  }
-  w->dirty = 1u;
-  f->rax = 1u;
+  api_touch_window(f);
 }
 
 static void api_set_window_text(trap_frame_t *f) {

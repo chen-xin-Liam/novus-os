@@ -16,6 +16,7 @@
 #include "stage3.h"
 #include "nd.h"
 #include "nd_oemlogo.h"
+#include "blkdev.h"   /* local boot beacon: raw sectors on the boot device */
 
 /* A-core switch (README 2.2 step 7): 1 = skip the boot self-check
  * output. The Makefile passes -DCONFIG_NOVUS_A_CORE_DISABLE=0/1. */
@@ -260,6 +261,16 @@ static UINT64 timeline_ms(void) {
   }
 }
 
+/* The display code shares novus_timeline() with the kernel stage, and its
+ * first call there would probe the TSC rate again - with none of the fallback
+ * PM timer ports this firmware actually has, which costs about four seconds
+ * before the splash's first own line appears. Hand it the rate this stage
+ * measured at +0 ms instead. */
+static void boot_timeline_publish(void) {
+  (void)timeline_ms();
+  novus_timeline_seed(g_timeline_start, g_timeline_hz);
+}
+
 static void boot_serial_write(const CHAR16 *s);
 
 static UINT64 timeline_cycles(void) {
@@ -287,48 +298,56 @@ UINT64 boot_now_ms(void) {
   return timeline_ms();
 }
 
+/* Append `v` in decimal to buf at `at`, never past `cap`, and return the
+ * new end. The boot stage formats numbers in four places (timeline, beacon,
+ * the ASCII renderers); this is the one digit loop they all use. */
+static UINTN boot_buf_dec(CHAR16 *buf, UINTN at, UINT64 v, UINTN cap) {
+  CHAR16 rev[20];
+  UINTN n = 0;
+
+  do {
+    rev[n++] = (CHAR16)(L'0' + (CHAR16)(v % 10u));
+    v /= 10u;
+  } while (v != 0u && n < 20u);
+  while (n > 0u && at + 1u < cap) {
+    buf[at++] = rev[--n];
+  }
+  return at;
+}
+
+/* Append the ASCII string `s` as UTF-16 at `at`, never past `cap`. The
+ * boot stage builds every log line this way; one loop keeps the byte/width
+ * arithmetic in one place instead of three near-copies. */
+static UINTN boot_buf_ascii(CHAR16 *buf, UINTN at, const char *s, UINTN cap) {
+  while (s != 0 && *s != '\0' && at + 1u < cap) {
+    buf[at++] = (CHAR16)(UINT8)*s++;
+  }
+  return at;
+}
+
 static void boot_timeline(const char *stage) {
   CHAR16 buf[96];
   UINTN i = 0;
-  UINTN n;
   int in_cycles;
-  UINT64 ms = timeline_ms(); /* also probes the frequency on first call */
   UINT64 value;
-  CHAR16 rev[20];
 
   in_cycles = (g_timeline_hz == 0u);
-  value = in_cycles ? timeline_cycles() : ms;
+  value = in_cycles ? timeline_cycles() : timeline_ms(); /* probes hz */
 
   buf[i++] = L'[';
   buf[i++] = L'T';
   buf[i++] = L']';
   buf[i++] = L' ';
   buf[i++] = L'+';
-  n = 0;
-  do {
-    rev[n++] = (CHAR16)(L'0' + (CHAR16)(value % 10u));
-    value /= 10u;
-  } while (value != 0u && n < 20u);
-  while (n > 0u) {
-    buf[i++] = rev[--n];
-  }
+  i = boot_buf_dec(buf, i, value, 96u);
   if (in_cycles) {
-    const char *suffix = "cyc (tsc hz unknown) ";
-    const char *s = suffix;
-
-    while (*s != '\0' && i + 2u < 96u) {
-      buf[i++] = (CHAR16)(UINT8)*s++;
-    }
+    i = boot_buf_ascii(buf, i, "cyc (tsc hz unknown) ", 96u);
   } else {
     buf[i++] = L'm';
     buf[i++] = L's';
     buf[i++] = L' ';
   }
-  if (stage != 0) {
-    while (*stage != '\0' && i + 2u < 96u) {
-      buf[i++] = (CHAR16)(UINT8)*stage++;
-    }
-  }
+  i = boot_buf_ascii(buf, i, stage, 96u);
   buf[i++] = L'\r';
   buf[i++] = L'\n';
   buf[i] = 0;
@@ -442,6 +461,19 @@ static void boot_anim_play(void) {
     const boot_frame_t *f = &g_boot_frames[i];
     UINT64              landed;
 
+    /* The medium is read in this same window. Between frame i-1 and frame i
+     * the loop would otherwise sit in boot_stall_ms(1) doing nothing, so it
+     * pumps one budgeted slice of the boot stage's load sequence first and
+     * waits out only the remainder. The budget is shorter than the frame
+     * interval, which keeps the frames on their deadlines; if the reads
+     * finish early the frames simply land with more slack. This is the same
+     * idea as systemd starting timers.target asynchronously instead of
+     * waiting for it before graphical.target: work that can overlap a wait
+     * does not get to extend it. Only the first frame is immediate - its
+     * deadline is zero by authoring. */
+    if (i > 0u) {
+      (void)stage3_load_pump(100u);
+    }
     boot_anim_wait(base + (UINT64)f->at_ms);
     /* The frame itself is drawn straight into the GOP scanout through the
      * splash surface - no GPU, no kernel driver, no heap: the same software
@@ -450,6 +482,64 @@ static void boot_anim_play(void) {
     nd_boot_anim_frame(f->scale, f->fade, f->bar, f->label);
     landed = timeline_ms();
     boot_anim_log(i + 1, f, landed >= base ? landed - base : 0u);
+  }
+
+  /* B-52: after the authored frames the boot is "entering the kernel", and
+   * the rest of the load has no honest percentage left - a cold medium can
+   * take ten times as long as a warm one. So the rail switches to an
+   * indeterminate comet while the last slices are read: the drawing is pure
+   * geometry (a few rounded rects), each wait is spent on real I/O, and the
+   * loop leaves the moment the load reports done. The tick ceiling is a
+   * safety valve, not a dwell: a boot stuck on a dead medium must not keep
+   * a pretty widget on screen forever.
+   *
+   * Minimum four ticks: on a warm medium the load finishes inside the authored
+   * frames, so without a floor the comet would never be drawn at all and the
+   * hand-off would still be a still image. Four ticks cost about 64 ms - under
+   * 2% of the boot - and buy the move this stage exists to show.
+   *
+   * Frame-paced, not I/O-paced. The first version pumped 20 ms and stalled the
+   * rest, which let one slow read (a flash erase, a sparse FAT lookup) swallow
+   * ten frames and leave the comet parked: the animation froze exactly when the
+   * medium was slow, i.e. when it was needed. Instead each turn draws, gives
+   * the load a short 8 ms slice, and then waits out the remainder of a 16 ms
+   * frame - so a slow medium lengthens the spin instead of stopping it, and
+   * the pump still gets half the wall time it had before. */
+  {
+    UINT32 tick = 0;
+    UINT64 next = timeline_ms();
+    int    done;
+
+    do {
+      UINT64 now;
+
+      nd_boot_spin(tick++);
+      done = stage3_load_pump(8u);
+      next += 16u;
+      now = timeline_ms();
+      if (now < next) {
+        boot_stall_ms((UINT32)(next - now));
+      } else {
+        next = now;
+      }
+      if (tick >= 240u) {
+        break;
+      }
+    } while (!done || tick < 4u);
+
+    /* Ceiling hit: stop animating and just finish the load, so a medium that
+     * never completes cannot hold the boot at a spinner. */
+    if (!done) {
+      (void)stage3_load_pump(0u);
+    }
+
+    boot_timeline("kernel handoff spin done");
+    /* The count is the only proof of motion that survives a screenshot: QEMU
+     * hands out stale surfaces while the boot writes the scanout directly, so
+     * a captured frame says the comet was drawn but not that it moved. */
+    boot_puts(L"[BA] handoff spin ticks=");
+    boot_put_dec((UINT64)tick);
+    boot_puts(L"\r\n");
   }
 }
 #endif /* CONFIG_NOVUS_DISPLAY */
@@ -691,6 +781,127 @@ static EFI_STATUS boot_exit_bs(EFI_HANDLE image, EFI_BOOT_SERVICES *bs,
   return status;
 }
 
+/* ------------------------------------------------------------------ */
+/* Local boot beacon - diagnosis only, not part of the shipped system  */
+/* ------------------------------------------------------------------ */
+/* A machine with no serial port and no readable log is a black box once a
+ * boot stops: the last thing on screen is a progress rail and no line says
+ * which call died. These markers go to raw sectors 0xC920.. (51500) of the
+ * boot disk, past the end of the GPT (which stops at LBA 51199), using the
+ * same block layer the built-in FAT reader already drives. The kernel's own
+ * log starts at 51200, so the two never meet. Read them back with
+ * .workbuddy/usblog/read-bootlog.ps1. */
+#define BEACON_LBA 51500u
+
+static blkdev_t *g_bcn_dev;
+static UINT8     g_bcn_buf[512];
+static UINT32    g_bcn_len;
+static int       g_bcn_init;
+
+static UINT32 bcn_dec(UINT8 *dst, UINT32 at, UINT64 v) {
+  char   rev[24];
+  UINT32 n = 0;
+  UINT32 i;
+
+  if (v == 0u) {
+    dst[at++] = (UINT8)'0';
+    return at;
+  }
+  while (v > 0u && n < 20u) {
+    rev[n++] = (char)('0' + (int)(v % 10u));
+    v /= 10u;
+  }
+  for (i = n; i > 0u; i--) {
+    dst[at++] = (UINT8)rev[i - 1u];
+  }
+  return at;
+}
+
+/* B-47/B-49: which device may take the boot breadcrumb, or NULL.
+ *
+ * Strict on purpose. A beacon is a write the firmware can fault on, and a
+ * scan for "some other writable disk" is exactly how a guess turns into a
+ * #GP before the kernel starts: the first version of this picked a device
+ * whose advertised size covered sector 51500 but whose backend only owned
+ * its own partition window, and the WriteBlocks call died right after the
+ * splash. So the breadcrumb goes only to the volume the firmware says it
+ * booted from, and only when that volume is the medium itself, writable,
+ * and long enough to own sector 51500. Everything else - the common
+ * partitioned ESP, an optical disc - is skipped with one log line, and the
+ * kernel's own usblog stays the source of truth. */
+static blkdev_t *beacon_host_for(blkdev_t *boot_dev) {
+  if (boot_dev == 0) {
+    return 0;
+  }
+  if ((boot_dev->flags & BLKDEV_FLAG_PARTITION) != 0) {
+    return 0; /* a partition window cannot address sector 51500 */
+  }
+  if (boot_dev->write == 0 ||
+      boot_dev->sector_count <= (UINT64)BEACON_LBA) {
+    return 0;
+  }
+  if (blkdev_medium_writable(boot_dev) == 0) {
+    return 0;
+  }
+  return boot_dev;
+}
+
+static void beacon(const char *tag) {
+  UINT8  line[96];
+  UINT32 n;
+  UINT32 t;
+
+  if (g_bcn_init == 0) {
+    int boot;
+
+    g_bcn_init = 1;
+    boot = blkdev_uefi_boot_device();
+    if (boot >= 0) {
+      blkdev_t *d = blkdev_get_at((UINTN)boot);
+
+      /* B-47 + B-49: pick the medium the breadcrumb may be written to.
+       *
+       * The firmware answers with the volume Novus was loaded from, which
+       * on every partitioned layout is a handle covering that one partition
+       * (16 MiB here) - sector 51500 does not exist in it, and the firmware
+       * partition handle carries no link back to the disk it lives on. So
+       * fall back to a whole medium: same removability as the boot volume
+       * first (a U disk boot must never beacon onto the internal SSD),
+       * writable, and long enough to own sector 51500. */
+      g_bcn_dev = beacon_host_for(d);
+      if (g_bcn_dev == 0 && d != 0) {
+        boot_timeline("boot beacon: no writable boot medium, no sector log");
+      }
+    }
+  }
+  if (g_bcn_dev == 0) {
+    return;
+  }
+
+  n = bcn_dec(line, 0, timeline_ms());
+  line[n++] = (UINT8)'m';
+  line[n++] = (UINT8)'s';
+  line[n++] = (UINT8)' ';
+  for (t = 0; tag[t] != '\0' && n < 92u; t++) {
+    line[n++] = (UINT8)tag[t];
+  }
+  line[n++] = (UINT8)'\n';
+
+  if (g_bcn_len + n > 500u) {
+    g_bcn_len = 0u; /* wrap: the reader then sees the newest window */
+    g_bcn_buf[0] = 0u;
+    g_bcn_len = 0u;
+  }
+  for (t = 0; t < n; t++) {
+    g_bcn_buf[g_bcn_len + t] = line[t];
+  }
+  g_bcn_len += n;
+  for (t = g_bcn_len; t < 512u; t++) {
+    g_bcn_buf[t] = 0u;
+  }
+  (void)g_bcn_dev->write(g_bcn_dev, (UINT64)BEACON_LBA, 1u, g_bcn_buf);
+}
+
 static void boot_check_cpu(void) {
   UINT32 a, b, c, d;
   UINT32 max_leaf;
@@ -925,6 +1136,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   boot_quiet(1);
   boot_timeline("splash capture start");
   boot_timeline("splash capture print done");
+  boot_timeline_publish();
   nd_boot_clock_set(boot_now_ms);
   {
     int cap_ok = nd_capture_boot(SystemTable);
@@ -974,8 +1186,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
 
   /* The slow half of the boot stage: integrity check, modules, application,
    * wallpaper, live root and install template. */
+  beacon("s3 load start");
   stage3_load();
   boot_timeline("stage3 load done");
+  beacon("s3 load done");
   nd_boot_stage(86, "进入内核");
 
   boot_puts(L"[BOOT] Exiting boot services, entering BSP kernel stage...\r\n");
@@ -984,7 +1198,9 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* Cut every tie to the firmware before the final map is taken: the
    * live root range is published here, and any allocation after this
    * point would land in a map the kernel then trusts. */
+  beacon("s3 finish start");
   stage3_finish();
+  beacon("s3 finish done");
 
   /* Final memory map. The pool buffer is EfiLoaderData memory, which
    * stays valid after ExitBootServices; it is handed to the kernel. */
@@ -993,6 +1209,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_puts(L"[FATAL] Failed to fetch final memory map.\r\n");
     return EFI_LOAD_ERROR;
   }
+  beacon("final map ok, EBS next");
 
   status = boot_exit_bs(ImageHandle, bs, &mmap, &map_size, &map_key, &desc_size);
   if (EFI_ERROR(status)) {
@@ -1003,6 +1220,7 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
     boot_puts(L"[FATAL] ExitBootServices failed. status=");
     boot_put_hex((UINT64)status);
     boot_puts(L"\r\n");
+    beacon("EBS FAILED");
     for (;;) {
       __asm__ volatile("cli; hlt");
     }

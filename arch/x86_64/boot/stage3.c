@@ -84,6 +84,9 @@ static UINT64 g_esp_tpl_size;
  * system, so the installer can refuse to write over it. */
 static UINT32 g_boot_usb_port;
 static UINT32 g_boot_is_usb;
+/* Controller function (dev << 8 | fn) the boot volume hangs off, from the
+ * PCI node of its device path; 0xFFFFFFFF when the path named no controller. */
+static UINT32 g_boot_ctrl_df = 0xFFFFFFFFu;
 
 /* ------------------------------------------------------------------ */
 /* Allocator for filesystem buffers                                    */
@@ -186,6 +189,91 @@ static void say_span(const char *tag, UINT64 from, UINT64 to);
 static UINT64 boot_ms(void);
 static int prefetch_take(const CHAR16 *path, UINT8 **out_buf, UINT64 *out_len);
 
+/* Walk a device path: the PCI node before the USB node names the controller
+ * function, the USB node names the root port the device hangs off. */
+static int dp_usb_hit(EFI_DEVICE_PATH_PROTOCOL *dp, UINT32 *devfn,
+                      UINT32 *port) {
+  UINT8 *p = (UINT8 *)dp;
+  int    seen_pci = 0;
+  UINT32 df = 0u;
+
+  while (p != NULL && p[0] != 0x7Fu) { /* END_ENTIRE_DEVICE_PATH */
+    UINT16 len = (UINT16)p[2] | (UINT16)((UINT16)p[3] << 8);
+
+    if (len < 4u) {
+      break;
+    }
+    if (p[0] == 0x01u && p[1] == 0x01u && len >= 6u) { /* HARDWARE / PCI */
+      df = ((UINT32)p[5] << 8) | (UINT32)p[4];
+      seen_pci = 1;
+    } else if (p[0] == 0x03u && p[1] == 0x05u) { /* MESSAGING / USB */
+      if (devfn != NULL) {
+        *devfn = seen_pci ? df : 0xFFFFFFFFu;
+      }
+      if (port != NULL) {
+        *port = (UINT32)p[4];
+      }
+      return 1;
+    }
+    p += len;
+  }
+  return 0;
+}
+
+static UINT32 g_fw_usb_n;
+static UINT32 g_fw_usb[8];
+
+/* What the firmware itself sees on the USB roots, read off the device paths
+ * it published before ExitBootServices. The kernel has no way to ask the
+ * firmware anything afterwards, and the machine has no serial port, so this
+ * is the only cross-check that survives: if the firmware booted off a port
+ * the kernel's own controller dump calls idle, the photograph says so. */
+static void fw_usb_probe(void) {
+  EFI_GUID    dp_guid = EFI_DEVICE_PATH_PROTOCOL_GUID;
+  EFI_HANDLE *handles = NULL;
+  UINTN       count = 0u;
+  UINTN       i;
+
+  g_fw_usb_n = 0u;
+  if (g_bs == NULL) {
+    return;
+  }
+  if (g_bs->LocateHandleBuffer(ByProtocol, &dp_guid, NULL,
+                               &count, &handles) != EFI_SUCCESS ||
+      handles == NULL) {
+    return;
+  }
+  for (i = 0u; i < count; i++) {
+    EFI_DEVICE_PATH_PROTOCOL *dp = NULL;
+    UINT32                    df = 0u;
+    UINT32                    port = 0u;
+    UINT32                    rec;
+    UINT32                    k;
+
+    if (open_by_guid(handles[i], &dp_guid, (VOID **)&dp) != EFI_SUCCESS ||
+        dp == NULL) {
+      continue;
+    }
+    if (dp_usb_hit(dp, &df, &port) == 0) {
+      continue;
+    }
+    rec = (df << 8) | (port & 0xFFu);
+    for (k = 0u; k < g_fw_usb_n; k++) {
+      if (g_fw_usb[k] == rec) {
+        break;
+      }
+    }
+    if (k != g_fw_usb_n) {
+      continue; /* the same device behind several volume handles */
+    }
+    if (g_fw_usb_n >= 8u) {
+      break;
+    }
+    g_fw_usb[g_fw_usb_n++] = rec;
+  }
+  g_bs->FreePool(handles);
+}
+
 /* Is the volume we booted from sitting on a USB controller?
  *
  * The loaded image only carries a file path node, but the volume handle
@@ -201,6 +289,16 @@ static UINT32 volume_usb_port(EFI_HANDLE volume) {
       dp == NULL) {
     return 0;
   }
+  {
+    UINT32 df = 0u;
+    UINT32 port = 0u;
+
+    if (dp_usb_hit(dp, &df, &port) != 0) {
+      g_boot_is_usb = 1;
+      g_boot_ctrl_df = df;
+      return port;
+    }
+  }
   p = (UINT8 *)dp;
   while (p[0] != 0x7Fu) { /* END_ENTIRE_DEVICE_PATH */
     UINT16 len = (UINT16)p[2] | (UINT16)((UINT16)p[3] << 8);
@@ -210,6 +308,7 @@ static UINT32 volume_usb_port(EFI_HANDLE volume) {
     }
     if (p[0] == 0x03u && p[1] == 0x05u) { /* MESSAGING / USB */
       g_boot_is_usb = 1;
+      g_boot_ctrl_df = 0xFFFFFFFFu;
       return (UINT32)p[4];
     }
     p += len;
@@ -1116,6 +1215,155 @@ static int fat32_read_file(const CHAR16 *path, UINT8 **out_buf,
 }
 
 /* ------------------------------------------------------------------ */
+/* Sliced payload reader                                               */
+/* ------------------------------------------------------------------ */
+/* SYSTEM.IMG is 8 MiB and reading it in one call blocks the boot for a
+ * third of a second. The splash animation that follows is 720 ms of pure
+ * drawing, so the read can happen *inside* that window instead of after it:
+ * same bytes, same reserved pages, but the two stop adding up. A slice is
+ * one Block I/O run - the boundary fat32_read_file already uses - and the
+ * bytes land straight in the reserved pages the kernel will read, which
+ * also removes the pool buffer and the copy esp_read_reserved used to take.
+ * The range is allocated up front because the directory entry knows the
+ * size; nothing publishes it until the last slice lands. */
+typedef struct {
+  int         state;   /* 0 idle, 1 reading, 2 done, -1 failed */
+  fat32_ctx_t ctx;
+  UINT64      size;
+  UINT64      wrote;
+  UINT64      t0;      /* boot_ms() when the read opened */
+  UINT32      runs;    /* Block I/O calls spent on this file */
+  UINT32      clus;
+  UINT32      eoc;
+  UINT32      mask;
+  UINT32      max_run;
+} slice_t;
+
+static slice_t g_slice;
+static UINT64  g_slice_base; /* reserved pages, valid once state == 2 */
+
+static int slice_open(const CHAR16 *path) {
+  UINT32              clus = 0;
+  UINT64              size = 0;
+  UINT64              pages;
+  EFI_PHYSICAL_ADDRESS addr = 0;
+  UINT32              spc;
+
+  g_slice.state = -1;
+  g_slice.wrote = 0;
+  g_slice_base = 0;
+  if (esp_volume(&g_slice.ctx) != 0) {
+    say_line(L"[SLICE] locate failed");
+    return -1;
+  }
+  esp_report_route("built-in FAT reader", g_slice.ctx.dev);
+  if (fat32_find_root(&g_slice.ctx, path, &clus, &size) != 0 || size == 0 ||
+      size > (64u * 1024u * 1024u)) {
+    return -1;
+  }
+  pages = (size + 4095u) / 4096u;
+  if (g_bs->AllocatePages(NOVUS_EFI_ALLOCATE_ANY_PAGES, EfiReservedMemoryType,
+                          (UINTN)pages, &addr) != EFI_SUCCESS) {
+    say_line(L"[SLICE] no reserved pages");
+    return -1;
+  }
+  spc = g_slice.ctx.sectors_per_cluster;
+  g_slice.max_run = FAT32_MAX_RUN_SECTORS / (spc == 0u ? 1u : spc);
+  if (g_slice.max_run < 1u) {
+    g_slice.max_run = 1u;
+  }
+  /* The end-of-chain marker is what fat32_get() already normalises to for
+   * both FAT widths (a FAT16 0xFFF8.. entry comes back as 0x0FFFFFFF), so
+   * the mask has to keep the full width of the entry or a 16-bit chain
+   * pointer loses its high bits and lands on the wrong cluster. */
+  g_slice.mask = (g_slice.ctx.fat_type == 16) ? 0xffffu : 0x0fffffffu;
+  g_slice.eoc = 0x0ffffff8u;
+  g_slice.clus = clus;
+  g_slice.size = size;
+  g_slice.runs = 0;
+  g_slice.t0 = boot_ms();
+  g_slice_base = (UINT64)addr;
+  g_slice.state = 1;
+  return 0;
+}
+
+/* One run. Returns 0 while more remains, 1 when the file is whole, -1 on
+ * failure (and then g_slice_base must not be used). */
+static int slice_step(void) {
+  UINT32 run_start;
+  UINT32 run_len;
+  UINT32 next;
+  UINTN  run_sect;
+  UINTN  want_sect;
+
+  if (g_slice.state == 2) {
+    return 1;
+  }
+  if (g_slice.state != 1) {
+    return -1;
+  }
+  if (g_slice.wrote < g_slice.size && g_slice.clus < g_slice.eoc) {
+    run_start = g_slice.clus;
+    run_len = 1u;
+    while (run_len < g_slice.max_run) {
+      next = fat32_get(&g_slice.ctx, run_start + run_len - 1u) & g_slice.mask;
+      if (next >= g_slice.eoc || next != run_start + run_len) {
+        break;
+      }
+      run_len++;
+    }
+    run_sect = (UINTN)run_len * (UINTN)g_slice.ctx.sectors_per_cluster;
+    want_sect = (UINTN)((g_slice.size - g_slice.wrote + 511u) / 512u);
+    if (run_sect > want_sect) {
+      run_sect = want_sect;
+    }
+    if (fat32_read_sectors(&g_slice.ctx,
+                           fat32_cluster_lba(&g_slice.ctx, run_start), run_sect,
+                           (UINT8 *)(UINTN)(g_slice_base + g_slice.wrote)) != 0) {
+      say_line(L"[SLICE] read failed");
+      g_slice.state = -1;
+      return -1;
+    }
+    g_slice.wrote += (UINT64)run_sect * 512u;
+    g_slice.clus =
+        fat32_get(&g_slice.ctx, run_start + run_len - 1u) & g_slice.mask;
+    g_slice.runs++;
+  }
+  if (g_slice.wrote < g_slice.size && g_slice.clus < g_slice.eoc) {
+    return 0;
+  }
+  /* One line per payload: how much came off the medium, how many Block I/O
+   * calls it took, how long, and the hash of the bytes that reached reserved
+   * memory. The run count is the number that used to be 8192 (one sector per
+   * call) and is now a handful - it is the reason the read fits in the
+   * animation window. */
+  say(L"[SLICE] read ");
+  boot_put_dec(g_slice.size);
+  say(L" bytes in ");
+  boot_put_dec((UINT64)g_slice.runs);
+  say(L" runs, ");
+  boot_put_dec(boot_ms() - g_slice.t0);
+  say(L"ms, fnv ");
+  boot_put_hex(fnv1a64((const UINT8 *)(UINTN)g_slice_base, g_slice.size));
+  say_line(L"");
+  g_slice.state = 2;
+  return 1;
+}
+
+/* A half-read image must never be published as a root: the kernel would
+ * mount a truncated filesystem and read past the last good slice. */
+static int slice_result(UINT64 *out_base, UINT64 *out_size) {
+  *out_base = 0;
+  *out_size = 0;
+  if (g_slice.state != 2) {
+    return -1;
+  }
+  *out_base = g_slice_base;
+  *out_size = g_slice.size;
+  return 0;
+}
+
+/* ------------------------------------------------------------------ */
 /* Partition wrapper                                                   */
 /* ------------------------------------------------------------------ */
 /* NovusFS addresses its device from sector 0, but a partition starts
@@ -1874,15 +2122,28 @@ static void menu_show(void) {
  * subdirectories. */
 #define MENU_MARKER_INSTALL L"INSTALL.YES"
 
-static int menu_marker_present(void) {
+/* The desktop and shell sessions ship as two separate images instead of one
+ * image with a prompt. Which session an image boots is decided when the ESP
+ * is assembled: the desktop build carries DESKTOP.YES, the shell build
+ * carries SHELL.YES. Neither file has content the boot stage reads - their
+ * presence is the whole message - and both are 8.3 for the built-in FAT
+ * reader, which never walks a subdirectory. */
+#define MENU_MARKER_DESKTOP L"DESKTOP.YES"
+#define MENU_MARKER_SHELL   L"SHELL.YES"
+
+static int menu_marker_named(const CHAR16 *name) {
   UINT8 *buf = NULL;
   UINT64 len = 0;
 
-  if (esp_read(MENU_MARKER_INSTALL, &buf, &len) != 0) {
+  if (esp_read(name, &buf, &len) != 0) {
     return 0;
   }
   efi_free(buf);
   return 1;
+}
+
+static int menu_marker_present(void) {
+  return menu_marker_named(MENU_MARKER_INSTALL);
 }
 
 /* Stage the live-boot payloads inside the countdown. Returns 1 when the
@@ -1919,6 +2180,20 @@ static void menu_run(void) {
     return;
   }
 #endif
+
+  /* A split image answers before the menu is ever drawn: the marker decides
+   * the session, so there is no countdown to wait through and no key to
+   * press on a machine whose keyboard answers after the prompt has gone. */
+  if (menu_marker_named(MENU_MARKER_DESKTOP)) {
+    say_line(L"[MENU] DESKTOP.YES on the ESP: booting the desktop build");
+    shared_mem_get()->boot_mode = SHM_BOOT_MODE_DESKTOP;
+    return;
+  }
+  if (menu_marker_named(MENU_MARKER_SHELL)) {
+    say_line(L"[MENU] SHELL.YES on the ESP: booting the shell build");
+    shared_mem_get()->boot_mode = SHM_BOOT_MODE_NO_DESKTOP;
+    return;
+  }
 
   menu_show();
   {
@@ -2163,54 +2438,32 @@ static void stage_at(UINT32 percent, const char *text) {
  * install ESP template. Each step advances the boot progress bar, because
  * this is where a live boot spends its time.
  *
+ * The work is a state machine rather than one blocking function, because the
+ * splash animation is already on screen and its 720 ms window is idle time
+ * that the reads can use: efi_main drives both from one loop, pumping a
+ * budgeted slice of this machine between animation frames. An image without
+ * animation support calls stage3_load(), which is the same machine with an
+ * unbounded budget - one sequence of steps, two schedules.
+ *
  * The log still goes out on COM1; the screen belongs to the splash by now,
  * so nothing here may write the firmware console. */
-void stage3_load(void) {
-  UINT32 boot_mode = shared_mem_get() != NULL ? shared_mem_get()->boot_mode
-                                              : SHM_BOOT_MODE_LIVE;
+typedef enum {
+  LOAD_PHASE_START = 0,
+  LOAD_PHASE_MERKLE,
+  LOAD_PHASE_MODULES,
+  LOAD_PHASE_APP,
+  LOAD_PHASE_WALLPAPER,
+  LOAD_PHASE_LIVE_OPEN,
+  LOAD_PHASE_LIVE_SLICES,
+  LOAD_PHASE_TPL_OPEN,
+  LOAD_PHASE_TPL_SLICES,
+  LOAD_PHASE_DONE
+} load_phase_t;
 
-  stage_at(12, "校验系统");
-  say_ms("load start");
-#if CONFIG_NOVUS_MERKLE
-  /* Verify the NovusFS partition only for the installer, which is about to
-   * write over a disk and wants to know what is on it. A live boot mounts
-   * SYSTEM.IMG from the ESP and never touches that partition, and the
-   * kernel verifies that image from RAM after mount - so re-reading the
-   * whole partition through firmware Block I/O here is pure boot latency.
-   * On a USB stick with a firmware that moves one sector per call it was
-   * minutes. Menu option 1 still runs the full check on demand. */
-  if (boot_mode == SHM_BOOT_MODE_INSTALL) {
-    (VOID)syspart_verify();
-  } else {
-    say_line(L"[MRKL] live boot: partition check skipped (option 1 runs it)");
-    if (shared_mem_get() != NULL) {
-      shared_mem_get()->merkle_status = SHM_MERKLE_UNKNOWN;
-    }
-  }
-#endif
+static UINT32 g_load_phase = (UINT32)LOAD_PHASE_START;
 
-#if CONFIG_NOVUS_NKM
-  stage_at(26, "加载内核模块");
-  modules_load();
-  say_ms("modules load done");
-#endif
-
-  /* M4: stage the NUC application next to the module. */
-  stage_at(38, "加载应用程序");
-  app_load();
-  say_ms("app load done");
-
-  /* The photo package: one file, same staging path as everything else. */
-  stage_at(50, "加载壁纸");
-  wpkg_load();
-  say_ms("wallpaper load done");
-
-  /* Live root: adopt the NovusFS image off the ESP into reserved pages.
-   * Without it the kernel has no filesystem at all, so a failure here is
-   * worth saying loudly - but it is still not fatal. */
-  stage_at(64, "挂载系统镜像");
-  if (esp_read_reserved(L"SYSTEM.IMG", &g_live_base, &g_live_size) ==
-      0) {
+static void load_live_report(int ok) {
+  if (ok != 0) {
     say(L"[BOOT] live root: ");
     boot_put_dec(g_live_size / 1024u);
     say(L" KiB at ");
@@ -2218,26 +2471,178 @@ void stage3_load(void) {
     say_line(L"");
   } else {
     say_line(L"[BOOT] WARN live root not loaded");
-    g_live_base = 0;
-    g_live_size = 0;
   }
   say_ms("live root done");
+  g_load_phase = (UINT32)LOAD_PHASE_TPL_OPEN;
+}
 
-  /* The installer writes a complete ESP, including the boot loader, so
-   * its template has to come off the live medium while the firmware file
-   * protocol still exists. Without it the graphical installer still runs
-   * and says so, instead of failing halfway through a disk. */
-  stage_at(78, "准备安装介质");
-  if (esp_read_reserved(L"ESP.IMG", &g_esp_tpl_base, &g_esp_tpl_size) == 0) {
+static void load_tpl_report(int ok) {
+  if (ok != 0) {
     say(L"[BOOT] install ESP template: ");
     boot_put_dec(g_esp_tpl_size / 1024u);
     say_line(L" KiB staged");
   } else {
     say_line(L"[BOOT] WARN install ESP template not staged");
-    g_esp_tpl_base = 0;
-    g_esp_tpl_size = 0;
   }
   say_ms("install template done");
+  g_load_phase = (UINT32)LOAD_PHASE_DONE;
+}
+
+/* Run the machine until it is finished or `budget_ms` of wall-clock has been
+ * spent (guard_ms == 0 means "no budget"). At least one unit always runs, so
+ * a zero budget still makes progress. Returns 1 when there is nothing left
+ * to read. */
+int stage3_load_pump(UINT32 budget_ms) {
+  UINT64 t0 = boot_ms();
+  int    units = 0;
+
+  if (g_load_phase == (UINT32)LOAD_PHASE_DONE) {
+    return 1;
+  }
+  if (budget_ms == 0u) {
+    budget_ms = 0xFFFFFFFFu;
+  }
+  for (;;) {
+    if (g_load_phase == (UINT32)LOAD_PHASE_DONE) {
+      say(L"[SLICE] pump units=");
+      boot_put_dec((UINT64)units);
+      say(L" spent=");
+      boot_put_dec(boot_ms() - t0);
+      say_line(L"ms done");
+      return 1;
+    }
+    if (units > 0 && boot_ms() - t0 >= (UINT64)budget_ms) {
+      say(L"[SLICE] pump units=");
+      boot_put_dec((UINT64)units);
+      say(L" spent=");
+      boot_put_dec(boot_ms() - t0);
+      say(L"ms budget hit, next phase=");
+      boot_put_dec((UINT64)g_load_phase);
+      say_line(L"");
+      return 0;
+    }
+    units++;
+    switch ((load_phase_t)g_load_phase) {
+      case LOAD_PHASE_START:
+        stage_at(12, "校验系统");
+        say_ms("load start");
+        g_load_phase = (UINT32)LOAD_PHASE_MERKLE;
+        break;
+
+      case LOAD_PHASE_MERKLE:
+#if CONFIG_NOVUS_MERKLE
+        /* Verify the NovusFS partition only for the installer, which is
+         * about to write over a disk and wants to know what is on it. A live
+         * boot mounts SYSTEM.IMG from the ESP and never touches that
+         * partition, and the kernel verifies that image from RAM after
+         * mount - so re-reading the whole partition through firmware Block
+         * I/O here is pure boot latency. On a USB stick with a firmware that
+         * moves one sector per call it was minutes. Menu option 1 still runs
+         * the full check on demand. */
+        if (shared_mem_get() != NULL &&
+            shared_mem_get()->boot_mode == SHM_BOOT_MODE_INSTALL) {
+          (VOID)syspart_verify();
+        } else {
+          say_line(L"[MRKL] live boot: partition check skipped (option 1 runs it)");
+          if (shared_mem_get() != NULL) {
+            shared_mem_get()->merkle_status = SHM_MERKLE_UNKNOWN;
+          }
+        }
+#endif
+        g_load_phase = (UINT32)LOAD_PHASE_MODULES;
+        break;
+
+      case LOAD_PHASE_MODULES:
+#if CONFIG_NOVUS_NKM
+        stage_at(26, "加载内核模块");
+        modules_load();
+        say_ms("modules load done");
+#endif
+        g_load_phase = (UINT32)LOAD_PHASE_APP;
+        break;
+
+      case LOAD_PHASE_APP:
+        /* M4: stage the NUC application next to the module. */
+        stage_at(38, "加载应用程序");
+        app_load();
+        say_ms("app load done");
+        g_load_phase = (UINT32)LOAD_PHASE_WALLPAPER;
+        break;
+
+      case LOAD_PHASE_WALLPAPER:
+        /* The photo package: one file, same staging path as everything else. */
+        stage_at(50, "加载壁纸");
+        wpkg_load();
+        say_ms("wallpaper load done");
+        g_load_phase = (UINT32)LOAD_PHASE_LIVE_OPEN;
+        break;
+
+      case LOAD_PHASE_LIVE_OPEN:
+        /* Live root: adopt the NovusFS image off the ESP into reserved pages.
+         * Without it the kernel has no filesystem at all, so a failure here
+         * is worth saying loudly - but it is still not fatal. */
+        stage_at(64, "挂载系统镜像");
+        g_live_base = 0;
+        g_live_size = 0;
+        if (slice_open(L"SYSTEM.IMG") != 0) {
+          load_live_report(0);
+        } else {
+          g_load_phase = (UINT32)LOAD_PHASE_LIVE_SLICES;
+        }
+        break;
+
+      case LOAD_PHASE_LIVE_SLICES:
+        if (slice_step() != 0) {
+          int ok = slice_result(&g_live_base, &g_live_size) == 0;
+
+          if (ok == 0) {
+            g_live_base = 0;
+            g_live_size = 0;
+          }
+          load_live_report(ok);
+        } else if (g_slice.size != 0u) {
+          /* The rail moves with the bytes, not with the step boundaries. */
+          stage_at(64u + (UINT32)((g_slice.wrote * 14u) / g_slice.size),
+                   "挂载系统镜像");
+        }
+        break;
+
+      case LOAD_PHASE_TPL_OPEN:
+        /* The installer writes a complete ESP, including the boot loader, so
+         * its template has to come off the live medium while the firmware
+         * file protocol still exists. Without it the graphical installer
+         * still runs and says so, instead of failing halfway through a disk. */
+        stage_at(78, "准备安装介质");
+        g_esp_tpl_base = 0;
+        g_esp_tpl_size = 0;
+        if (slice_open(L"ESP.IMG") != 0) {
+          load_tpl_report(0);
+        } else {
+          g_load_phase = (UINT32)LOAD_PHASE_TPL_SLICES;
+        }
+        break;
+
+      case LOAD_PHASE_TPL_SLICES:
+        if (slice_step() != 0) {
+          int ok = slice_result(&g_esp_tpl_base, &g_esp_tpl_size) == 0;
+
+          if (ok == 0) {
+            g_esp_tpl_base = 0;
+            g_esp_tpl_size = 0;
+          }
+          load_tpl_report(ok);
+        }
+        break;
+
+      default:
+        g_load_phase = (UINT32)LOAD_PHASE_DONE;
+        break;
+    }
+  }
+}
+
+void stage3_load(void) {
+  (void)stage3_load_pump(0u);
 }
 
 void stage3_menu(void) {
@@ -2248,7 +2653,13 @@ void stage3_menu(void) {
  * run immediately before ExitBootServices. */
 void stage3_finish(void) {
   shared_mem_t *shm = shared_mem_get();
+  UINT32        k;
 
+  fw_usb_probe();
+  shm->fw_usb_n = g_fw_usb_n;
+  for (k = 0u; k < 8u; k++) {
+    shm->fw_usb[k] = (k < g_fw_usb_n) ? g_fw_usb[k] : 0u;
+  }
   shm->live_root_base = g_live_base;
   shm->live_root_size = g_live_size;
   shm->esp_img_base = g_esp_tpl_base;

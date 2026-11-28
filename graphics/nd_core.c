@@ -360,47 +360,95 @@ void nd_ellipse(nd_surface_t *s, INT32 cx, INT32 cy, INT32 rx, INT32 ry,
   }
 }
 
-/* Left-edge inset of row `y` inside a rounded rectangle, in 1/16 px.
- *
- * The row is sampled at its vertical centre, so the edge moves by a
- * fraction of a pixel per row instead of jumping several whole pixels the
- * way the old table did. That jump is what made a small radius look like a
- * spike rather than a curve. */
-static INT32 round_edge16(INT32 y, INT32 h, INT32 radius) {
-  INT32 dy16;
-  INT32 r16;
+/* A rounded corner is sampled at four heights per pixel row, with the arc
+ * inset kept in 1/16 px, and a boundary pixel takes the fraction of those
+ * samples that fall inside the arc. The old code moved the edge once per
+ * row at the pixel centre, so every row jumped a whole pixel and a 4-6 px
+ * radius read as a staircase. */
+#define ROUND_AA_SUB 4
 
-  if (radius <= 0) {
+/* Inset of the arc from its left edge, in 1/16 px, at height y16 (also 1/16
+ * px). The corner arc centre sits at (radius, radius) inside the shape, so
+ * the inset is r - sqrt(r^2 - dy^2); a row above the tangent line returns
+ * r16, which leaves only the straight middle of the row to paint. */
+static INT32 round_inset16(INT32 y16, INT32 h16, INT32 r16) {
+  INT32 dy16;
+  INT32 sq;
+
+  if (r16 <= 0) {
     return 0;
   }
-  r16 = radius * 16;
-  if (y < radius) {
-    dy16 = (radius - y) * 16 - 8;
-  } else if (y >= h - radius) {
-    dy16 = (y - (h - radius)) * 16 + 8;
+  if (y16 < r16) {
+    dy16 = r16 - y16;
+  } else if (y16 > h16 - r16) {
+    dy16 = y16 - (h16 - r16);
   } else {
     return 0;
   }
-  if (dy16 < 0) {
-    dy16 = 0;
+  if (dy16 >= r16) {
+    return r16;
   }
-  if (dy16 > r16) {
-    return 0;
+  sq = r16 * r16 - dy16 * dy16;
+  if (sq < 0) {
+    sq = 0;
   }
-  return r16 - isqrt_i32(radius * radius * 256 - dy16 * dy16);
+  return r16 - isqrt_i32(sq);
 }
 
-/* Paint the one boundary pixel of a row that the arc only partly covers. */
-static void round_edge_pixel(nd_surface_t *s, INT32 x, INT32 y, INT32 edge16,
-                             nd_color_t c) {
-  INT32 rem = edge16 & 15;
+/* Insets of one row at its four sub-heights, plus the pixel range that can
+ * carry a partial edge: p0 .. p1-1. From p1 inwards the row is solid. */
+static void round_row_insets(INT32 y, INT32 h, INT32 radius, INT32 *ins,
+                             INT32 *p0, INT32 *p1) {
+  INT32 k;
+  INT32 lo;
+  INT32 hi;
 
-  if (rem == 0) {
-    nd_fill_rect(s, nd_rect(x, y, 1, 1), c);
-  } else {
-    nd_blend_rect(s, nd_rect(x, y, 1, 1), c,
-                  (UINT8)((16 - rem) * 255 / 16));
+  for (k = 0; k < ROUND_AA_SUB; k++) {
+    ins[k] = round_inset16(y * 16 + (2 * k + 1) * 2, h * 16, radius * 16);
   }
+  lo = ins[0];
+  hi = ins[0];
+  for (k = 1; k < ROUND_AA_SUB; k++) {
+    if (ins[k] < lo) {
+      lo = ins[k];
+    }
+    if (ins[k] > hi) {
+      hi = ins[k];
+    }
+  }
+  *p0 = (lo > 0) ? lo / 16 : 0;
+  *p1 = (hi > 0) ? (hi + 15) / 16 : 0;
+}
+
+/* Coverage of pixel `p` of a shape whose left edge is at off16, in 64ths:
+ * each of the four sub-heights contributes up to sixteen sixteenths. */
+static UINT32 round_cov(const INT32 *ins, INT32 p, INT32 off16) {
+  UINT32 cov = 0u;
+  INT32  k;
+
+  for (k = 0; k < ROUND_AA_SUB; k++) {
+    INT32 v = (p + 1) * 16 - off16 - ins[k];
+
+    if (v < 0) {
+      v = 0;
+    } else if (v > 16) {
+      v = 16;
+    }
+    cov += (UINT32)v;
+  }
+  return cov;
+}
+
+static void round_blend_px(nd_surface_t *s, INT32 x, INT32 y, nd_color_t c,
+                           UINT32 cov) {
+  if (cov == 0u) {
+    return;
+  }
+  if (cov >= 64u) {
+    nd_fill_rect(s, nd_rect(x, y, 1, 1), c);
+    return;
+  }
+  nd_blend_rect(s, nd_rect(x, y, 1, 1), c, (UINT8)((cov * 255u) / 64u));
 }
 
 void nd_round_rect(nd_surface_t *s, nd_rect_t r, INT32 radius, nd_color_t c) {
@@ -419,16 +467,21 @@ void nd_round_rect(nd_surface_t *s, nd_rect_t r, INT32 radius, nd_color_t c) {
     return;
   }
   for (y = 0; y < r.h; y++) {
-    INT32 edge16 = round_edge16(y, r.h, radius);
-    INT32 start = (edge16 + 15) / 16;
+    INT32 ins[ROUND_AA_SUB];
+    INT32 p0;
+    INT32 p1;
+    INT32 p;
 
-    if (start * 2 >= r.w) {
+    round_row_insets(y, r.h, radius, ins, &p0, &p1);
+    if (p1 * 2 >= r.w) {
       continue;
     }
-    nd_fill_rect(s, nd_rect(r.x + start, r.y + y, r.w - start * 2, 1), c);
-    if (start > 0) {
-      round_edge_pixel(s, r.x + start - 1, r.y + y, edge16, c);
-      round_edge_pixel(s, r.x + r.w - start, r.y + y, edge16, c);
+    nd_fill_rect(s, nd_rect(r.x + p1, r.y + y, r.w - p1 * 2, 1), c);
+    for (p = p0; p < p1; p++) {
+      UINT32 cov = round_cov(ins, p, 0);
+
+      round_blend_px(s, r.x + p, r.y + y, c, cov);
+      round_blend_px(s, r.x + r.w - 1 - p, r.y + y, c, cov);
     }
   }
 }
@@ -458,27 +511,57 @@ void nd_round_frame(nd_surface_t *s, nd_rect_t r, INT32 radius, INT32 thick,
   inner_h = r.h - thick * 2;
 
   /* Row by row: the outer boundary moves in at the corners, the inner
-   * boundary moves in behind it. What is left between them is the frame.
-   * Top and bottom rows have no inner span at all, so the horizontal
-   * bands fall out of the same loop instead of needing a special case. */
+   * boundary moves in behind it, and what is left between them is the
+   * frame. Top and bottom rows have no inner span at all, so the horizontal
+   * bands fall out of the same loop. */
   for (y = 0; y < r.h; y++) {
-    INT32 edge16 = round_edge16(y, r.h, radius);
-    INT32 outer = (edge16 + 15) / 16;
-    INT32 inner;
+    INT32 ins[ROUND_AA_SUB];
+    INT32 p0;
+    INT32 p1;
+    INT32 mid;
+    INT32 iins[ROUND_AA_SUB];
+    INT32 ip1 = 0;
+    INT32 start;
+    INT32 p;
 
-    if (y < thick || y >= r.h - thick) {
-      nd_fill_rect(s, nd_rect(r.x + outer, r.y + y, r.w - outer * 2, 1), c);
-    } else {
-      inner = thick + (round_edge16(y - thick, inner_h, inner_r) + 15) / 16;
-      if (inner > outer) {
-        nd_fill_rect(s, nd_rect(r.x + outer, r.y + y, inner - outer, 1), c);
-        nd_fill_rect(s,
-                     nd_rect(r.x + r.w - inner, r.y + y, inner - outer, 1), c);
+    round_row_insets(y, r.h, radius, ins, &p0, &p1);
+    mid = (y >= thick && y < r.h - thick) ? 1 : 0;
+    if (mid != 0) {
+      INT32 ip0;
+
+      round_row_insets(y - thick, inner_h, inner_r, iins, &ip0, &ip1);
+    }
+    start = p1;
+    if (mid != 0 && thick + ip1 > start) {
+      start = thick + ip1;
+    }
+    /* The frame is the band between the two boundaries, not the whole row:
+     * top and bottom bands reach the middle of the row, middle rows stop at
+     * the inner shape's straight edge and leave the hole empty. */
+    {
+      INT32 in_start = (mid != 0) ? (thick + ip1) : (r.w / 2);
+
+      if (in_start < start) {
+        in_start = start;
+      }
+      if (in_start - start > 0) {
+        nd_fill_rect(s, nd_rect(r.x + start, r.y + y, in_start - start, 1), c);
+        nd_fill_rect(s, nd_rect(r.x + r.w - in_start, r.y + y,
+                                in_start - start, 1),
+                     c);
       }
     }
-    if (outer > 0 && outer * 2 <= r.w) {
-      round_edge_pixel(s, r.x + outer - 1, r.y + y, edge16, c);
-      round_edge_pixel(s, r.x + r.w - outer, r.y + y, edge16, c);
+    for (p = p0; p < start && p * 2 < r.w; p++) {
+      UINT32 cov = round_cov(ins, p, 0);
+      UINT32 hole = 0u;
+
+      if (mid != 0) {
+        hole = round_cov(iins, p, thick * 16);
+      }
+      if (cov > hole) {
+        round_blend_px(s, r.x + p, r.y + y, c, cov - hole);
+        round_blend_px(s, r.x + r.w - 1 - p, r.y + y, c, cov - hole);
+      }
     }
   }
 }
@@ -705,15 +788,13 @@ static void draw_uni_gray(nd_surface_t *s, INT32 x, INT32 y,
   if (blk == 0u) {
     blk = 1u;
   }
-  stride = px / 2u;
+  stride = px;
   for (gy = 0; gy < px; gy++) {
     const UINT8 *row = &gray[gy * stride];
     UINT32       gx;
 
     for (gx = 0; gx < px; gx++) {
-      UINT8 b = row[gx >> 1u];
-      UINT8 nib = (gx & 1u) != 0u ? (UINT8)(b & 0x0Fu) : (UINT8)(b >> 4);
-      UINT8 a = (UINT8)(nib * 17u); /* 15 -> 255 */
+      UINT8 a = row[gx];
 
       if (a == 0u) {
         continue;

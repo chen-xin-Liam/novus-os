@@ -33,7 +33,7 @@ typedef struct {
   UINT32 wide;
   UINT32 used;
   UINT8  cell[TTF_EM_MAX * (TTF_EM_MAX / 8u)];      /* 1bpp rows */
-  UINT8  gray[TTF_EM_MAX * (TTF_EM_MAX / 2u)];      /* 4bpp rows */
+  UINT8  gray[TTF_EM_MAX * TTF_EM_MAX];            /* one byte per px */
 } ttf_cache_t;
 
 typedef struct {
@@ -657,9 +657,11 @@ static int glyph_outline(UINT32 gid, UINT32 depth) {
 static INT32 g_xs[TTF_CROSS_MAX];
 static INT8  g_dirs[TTF_CROSS_MAX];
 
-/* Vertical sampling: four sub-scans per pixel row. Horizontal coverage is
+/* Vertical sampling: eight sub-scans per pixel row. Horizontal coverage is
  * accumulated in sixteenths, so a hairline thinner than a pixel still
- * leaves a trace instead of vanishing. */
+ * leaves a trace instead of vanishing. Eight sub-scans times sixteen steps
+ * is 128 levels, and the cache keeps one byte per pixel: the old sixteen
+ * levels were visible as banding on the large text of the boot menu. */
 static void raster(void) {
   UINT32 cont;
   UINT32 start = 0u;
@@ -678,8 +680,8 @@ static void raster(void) {
     start = end + 1u;
   }
   for (row = 0; row < g_px; row++) {
-    for (sub = 0; sub < 4u; sub++) {
-      INT32  y = (INT32)(row * 16u + sub * 4u + 2u);
+    for (sub = 0; sub < 8u; sub++) {
+      INT32  y = (INT32)(row * 16u + sub * 2u + 1u);
       UINT32 n = 0u;
       UINT32 i;
 
@@ -830,7 +832,7 @@ static ttf_cache_t *glyph_build(UINT32 cp, UINT32 px, UINT32 *wide) {
   }
   if (g_cont_n != 0u) {
     UINT32 row;
-    UINT32 gstride = px / 2u; /* one nibble per pixel, high nibble first */
+    UINT32 gstride = px;      /* one byte of coverage per pixel */
     UINT32 cstride = px / 8u; /* one bit per pixel, MSB leftmost */
 
     raster();
@@ -838,24 +840,17 @@ static ttf_cache_t *glyph_build(UINT32 cp, UINT32 px, UINT32 *wide) {
       UINT32 col;
 
       for (col = 0; col < px; col++) {
-        /* Four sub-scanlines times 16 steps is full coverage 64; the
-         * 4-bit map keeps 16 levels so edges can be blended. The 1bpp
-         * cell stays as the thresholded fallback (34% ink) for the
-         * monochrome path. */
+        /* Eight sub-scanlines times 16 steps is full coverage 128, mapped
+         * onto 0..255 so the blend sees a real alpha. The 1bpp cell stays
+         * as the thresholded fallback (one third ink) for the monochrome
+         * path. */
         UINT32 cov = g_cov[row][col];
-        UINT32 lev = (cov * 15u + 32u) / 64u;
+        UINT32 lev = (cov * 255u + 64u) / 128u;
 
         if (lev != 0u) {
-          UINT8 *grow = &c->gray[row * gstride];
-          UINT8  nib = (UINT8)lev;
-
-          if ((col & 1u) != 0u) {
-            grow[col >> 1] = (UINT8)(grow[col >> 1] | nib);
-          } else {
-            grow[col >> 1] = (UINT8)(grow[col >> 1] | (UINT8)(nib << 4));
-          }
+          c->gray[row * gstride + col] = (UINT8)lev;
         }
-        if (cov >= 34u) {
+        if (cov >= 43u) {
           UINT8 *crow = &c->cell[row * cstride + (col >> 3)];
 
           *crow = (UINT8)(*crow | (UINT8)(0x80u >> (col & 7u)));

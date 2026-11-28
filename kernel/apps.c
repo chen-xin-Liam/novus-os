@@ -13,6 +13,7 @@
 #include "kernel.h"
 #include "session.h"
 #include "install.h"
+#include "sysapps.h"
 #if CONFIG_NOVUS_WIN32
 #include "win32_blobs.h"
 #include "pe.h"
@@ -122,7 +123,21 @@ int apps_launch(UINT32 i) {
   kputs(" bytes)\n");
   /* The blobs are linked at 0x400000, which is where nuc_spawn_blob maps
    * them; entry offset 0 is `_start`, forced by the linker script. */
-  rc = nuc_spawn_blob(g_apps[i].name, g_apps[i].data, *g_apps[i].size, 0);
+  /* The system tree first. /Novus/bin/<name>.nuc holds the same image that
+   * is embedded below, written out at boot; running the file means there is
+   * one definition of the program and it is a file the user can see. The
+   * embedded copy is still the answer when the medium has none (read-only
+   * ISO, or a volume the seed could not write). */
+  rc = sysapps_spawn(g_apps[i].name);
+  if (rc == 0) {
+    kputs("[APPS] image from " SYSAPP_DIR "\n");
+  } else {
+    if (rc != SYSAPP_ENOFILE) {
+      kputs("[APPS] " SYSAPP_DIR " load failed, falling back to the "
+            "embedded image\n");
+    }
+    rc = nuc_spawn_blob(g_apps[i].name, g_apps[i].data, *g_apps[i].size, 0);
+  }
   if (rc != 0) {
     kputs("[APPS] spawn failed: ");
     kputs_hex((UINT64)(INT64)rc);

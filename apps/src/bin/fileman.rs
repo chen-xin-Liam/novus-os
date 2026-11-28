@@ -1033,6 +1033,9 @@ pub extern "C" fn _start() -> ! {
             accent = ui::accent();
             draw(&mut win, &mut st, accent);
         }
-        sys::yield_now();
+        /* B-36: park for a tick instead of yielding. The yield loop gave the
+         * file manager a full-speed spin (one query per iteration against
+         * the desktop's clock) for no event-latency gain a user can see. */
+        sys::sleep_ticks(1);
     }
 }

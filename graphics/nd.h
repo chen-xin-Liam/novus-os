@@ -178,6 +178,19 @@ nd_surface_t *nd_canvas(void);
  * rather than every drawing call landing on the glass. */
 int nd_canvas_buffered(void);
 
+/* 1 when the scanout mapping really is write-combining (PAT or a WC MTRR
+ * honoured). Full-frame copies are the only thing this decides: an
+ * uncached scanout can be tens of milliseconds per frame, so the boot
+ * hand-over must not animate on one. */
+int nd_framebuffer_is_wc(void);
+
+/* B-18: a one-line verdict on the scanout's memory type (page attribute +
+ * MTRR + the late PAT pass's own state) followed by a timed non-temporal
+ * burst into the last visible row. Printed once, after the first frame, so the
+ * boot log actually keeps it. */
+void nd_report_scanout(void);
+void nd_fb_bench(void);
+
 /* Copy one finished rectangle from nd_canvas() to the visible screen and to
  * every mirror output, then repaint the software pointer on top.
  *
@@ -256,6 +269,13 @@ int nd_cursor_take_damage(nd_rect_t *out);
  * before nd_init(); returns 0 when there is no drawable output. */
 int nd_boot_splash(void);
 
+/* Re-paint the whole splash after the kernel has rebound the framebuffer
+ * (nd_init()). The boot stage's frame was painted through the firmware's
+ * mapping and is covered by the text console by then, so this redraws the
+ * black field, the mark, the rail, the status line and the bottom log on
+ * the bound surface. Returns 0 when there is no drawable output. */
+int nd_boot_splash_rebind(void);
+
 /* Advance the bar. `percent` is clamped and never goes backwards; `text`
  * replaces the stage label under the bar when it is not NULL. Only the bar
  * and the label are repainted, so the splash never flickers. */
@@ -274,11 +294,37 @@ nd_surface_t *splash_surface(void);
  * screen. */
 void nd_boot_splash_end(void);
 
+/* Something painted over the splash frame (the pre-desktop menu draws its own
+ * full-screen card). The mark is no longer on the glass, so the next
+ * nd_boot_stage() lays it down again - once, not once per log line. */
+void nd_boot_splash_mark_dirty(void);
+
 /* Where the splash drew the machine's boot logo (its resting rectangle on
  * the splash surface), for the boot-to-desktop transition. Answers for both
  * the firmware's captured logo and the baked mark. Returns 0 when the splash
  * drew no mark at all. */
 int nd_boot_logo_rect(nd_rect_t *out);
+
+/* "mk" / "fw" / "bak" / "none": which boot picture the splash actually used.
+ * Shown in the desktop status line so the board-logo verdict is readable
+ * without a log. */
+const char *nd_boot_logo_tag(void);
+
+/* The rectangle the splash reserves for the boot log. The kernel's text
+ * console takes that band over, so what the user reads at the bottom of the
+ * panel is the live kputs() stream and the last line is where the boot
+ * actually stopped. Returns 0 when the splash never laid a panel out. */
+int nd_boot_log_rect(nd_rect_t *out);
+
+/* Tells the splash to stop painting its snapshot of the log: the text console
+ * owns the band from that point on. */
+void nd_boot_splash_log_off(void);
+
+/* Eagerly repaint the boot-log panel from the kernel's ring. Called once per
+ * completed log line while the splash is up; without this the panel is only
+ * as fresh as the last nd_boot_stage(), and a machine that stops in the
+ * middle of a driver probe would show a log that already looks finished. */
+void nd_boot_log_refresh(void);
 
 /* Draw that same mark into `s` at `r` with `alpha` (0 = invisible). The
  * desktop transition uses it to lift the mark off the splash; the sampler is
@@ -302,12 +348,35 @@ int nd_boot_anim_begin(void);
 void nd_boot_anim_frame(UINT32 logo_scale, UINT8 logo_alpha, UINT32 bar,
                         const char *label);
 
+/* B-52: indeterminate motion on the same rail. Used for the last stretch
+ * ("entering the kernel"), where the remaining work has no honest
+ * percentage: a short comet runs along the bar, drawn from primitives only
+ * (no bitmap, no glyph). `tick` is the caller's frame counter - any
+ * increasing value works, and the caller owns the pace. Whole rail only. */
+void nd_boot_spin(UINT32 tick);
+
+/* B-53: nd_boot_spin() for the kernel side, where there is no timer yet.
+ * Call it from a driver's own wait loop: it self-clocks off cpu_uptime_us()
+ * and repaints at most once per 16 ms, so a tight poll loop costs a call and
+ * a compare. No-op once the splash is gone. */
+void nd_boot_spin_tick(void);
+
+/* Frames the kernel-side hook above has painted. Diagnostics only: a screenshot
+ * proves a frame was drawn, not that it moved. */
+UINT32 nd_boot_spin_ticks(void);
+
 /* The closing move: dim the boot screen to black while the mark stays
  * opaque, leaving the exact frame the desktop transition starts from. Call
  * it immediately before nd_boot_transition(); it is the last thing the boot
  * animation does, and it is what makes the hand-over a fade rather than a
  * cut. Kernel stage only (it sleeps on the scheduler tick). */
 void nd_boot_anim_close(void);
+
+/* One frame of the splash-to-desktop crossfade over `r`: the boot screen's
+ * field and mark at `veil` opacity, composited over what `dst` already holds.
+ * Called with the mark's rectangle, the only area that still changes once the
+ * desktop itself is on the glass. */
+void nd_boot_handover_frame(nd_surface_t *dst, nd_rect_t r, UINT8 veil);
 
 /* Convert one canonical colour to what the framebuffer expects. */
 UINT32 nd_hw_pixel(const nd_surface_t *s, nd_color_t c);
@@ -430,6 +499,24 @@ int nd_demo_take_damage(nd_rect_t *out);
 /* Repaint the shell scene clipped to `clip` (the WM composites windows
  * on top of this). */
 void nd_demo_paint(nd_rect_t clip);
+
+/* Replace the desktop's bottom-left status line. Used for a one-off pointer
+ * verdict that has to survive the splash going away. */
+void nd_demo_status(const char *s);
+
+/* A one-off strip across the top of the desktop, held for `hold_ms` and then
+ * repainted away. Nothing a client window can cover. */
+void nd_demo_banner(const char *text, UINT32 hold_ms);
+
+/* Full-screen boot report: one line per item, kept on the glass for
+ * `hold_ms` before the desktop takes over. This is the report a machine with
+ * no serial port gives: the numbers are on the screen, so a photograph of
+ * this page is the whole diagnosis. */
+void nd_demo_report(const char *text, UINT32 hold_ms);
+
+/* Paint the full-screen report without the hold. The boot diagnostic loop
+ * calls this between feed slices so the page reflects the latest port pass. */
+void nd_demo_report_draw(const char *text);
 
 /* Rebuild the shell widget tree after a theme change. Client windows are
  * owned by the WM and survive; the shell's own demo windows are recreated
