@@ -305,11 +305,6 @@ void nd_boot_splash_mark_dirty(void);
  * drew no mark at all. */
 int nd_boot_logo_rect(nd_rect_t *out);
 
-/* "mk" / "fw" / "bak" / "none": which boot picture the splash actually used.
- * Shown in the desktop status line so the board-logo verdict is readable
- * without a log. */
-const char *nd_boot_logo_tag(void);
-
 /* The rectangle the splash reserves for the boot log. The kernel's text
  * console takes that band over, so what the user reads at the bottom of the
  * panel is the live kputs() stream and the last line is where the boot

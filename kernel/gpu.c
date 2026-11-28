@@ -645,10 +645,6 @@ UINT64 gpu_stolen_bytes(void) { return g_stolen_bytes; }
 int gpu_intel_gen(void) { return (int)g_intel_gen; }
 int gpu_intel_ready(void) { return g_intel_ok; }
 
-/* One short line for the on-screen status: "intel gen=12", or empty when
- * the machine is not an Intel graphics machine we could reach. */
-const char *gpu_probe_line(void) { return g_intel_line; }
-
 const char *gpu_summary(void) {
   if (g_present == 0) {
     return "未检测到显示控制器";

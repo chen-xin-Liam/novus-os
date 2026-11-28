@@ -169,7 +169,7 @@ static void bsod_set_names(bsod_snapshot_t *s) {
   case BSOD_BC_MANUAL:
     bsod_copy(s->short_name, "MANUAL_STOP");
     bsod_copy(s->desc[0], "The stop screen was triggered from the keyboard.");
-    bsod_copy(s->desc[1], "Press Ctrl+Alt+Esc to restart the machine.");
+    bsod_copy(s->desc[1], "Press Ctrl+Alt+R to restart the machine.");
     break;
   default:
     bsod_copy(s->short_name, "KMODE_EXCEPTION_NOT_HANDLED");
@@ -295,7 +295,7 @@ static void bsod_draw(nd_surface_t *s, bsod_snapshot_t *snap) {
     nd_fill_rect(s, nd_rect(0, footer_y, W, 40), BSOD_C_BAR);
     nd_hline(s, 0, W - 1, footer_y, BSOD_C_LINE);
     nd_text(s, 24, footer_y + 12,
-            "Press Ctrl+Alt+Esc to restart / 按 Ctrl+Alt+Esc 重启",
+            "Press Ctrl+Alt+R to restart / 按 Ctrl+Alt+R 重启",
             BSOD_C_DIM, 1u);
     return;
   }
@@ -367,7 +367,7 @@ static void bsod_draw(nd_surface_t *s, bsod_snapshot_t *snap) {
   nd_fill_rect(s, nd_rect(0, footer_y, W, 40), BSOD_C_BAR);
   nd_hline(s, 0, W - 1, footer_y, BSOD_C_LINE);
   nd_text(s, 24, footer_y + 12,
-          "Press Ctrl+Alt+Esc to restart / 按 Ctrl+Alt+Esc 重启",
+          "Press Ctrl+Alt+R to restart / 按 Ctrl+Alt+R 重启",
           BSOD_C_DIM, 1u);
 }
 
@@ -440,7 +440,7 @@ static void bsod_key_common(UINT8 sc, int down, UINT8 mods) {
   if (down == 0) {
     return;
   }
-  if (sc == BSOD_SCAN_ESC &&
+  if (sc == BSOD_SCAN_R &&
       (mods & (BSOD_MOD_CTRL | BSOD_MOD_ALT)) ==
           (BSOD_MOD_CTRL | BSOD_MOD_ALT)) {
     bsod_request_reset();
@@ -479,6 +479,8 @@ int bsod_active(void) {
 
 /* Poll 8042 directly. Interrupts are already off and stay off, so no other
  * driver can consume the reset keystrokes before this loop sees them. */
+static void bsod_wait_reboot(void) __attribute__((noreturn));
+
 static void bsod_wait_reboot(void) {
   for (;;) {
     UINT8 st = io_in8(0x64u);
@@ -509,6 +511,8 @@ static void bsod_wait_reboot(void) {
 /* ------------------------------------------------------------------ */
 /* Entry points                                                        */
 /* ------------------------------------------------------------------ */
+
+static void bsod_present(bsod_snapshot_t *s) __attribute__((noreturn));
 
 static void bsod_present(bsod_snapshot_t *s) {
   nd_surface_t *surf;

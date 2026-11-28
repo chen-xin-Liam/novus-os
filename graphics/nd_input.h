@@ -84,10 +84,6 @@ void nd_input_report(void);
  * keep the diagnostic line on the glass long enough to read. */
 int nd_input_pointer_missing(void);
 
-/* Compact one-line pointer verdict, for a status label that outlives the
- * splash: "输入 ps2 aux=1 rst=1 dev=0 byt=0 usb=0 rep=0". */
-void nd_input_banner(char *out, UINT32 cap);
-
 int nd_input_pop(nd_event_t *out);
 void nd_input_push(const nd_event_t *ev);
 

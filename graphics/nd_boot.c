@@ -830,17 +830,6 @@ void nd_boot_splash_mark_dirty(void) {
   g_splash.status_seen[0] = '\0';
 }
 
-/* Which picture the splash took, in three letters: the firmware's own mark
- * (mk), its whole first frame (fw), or the baked fallback (none). The desktop
- * shows this in its status line - one short word is the only on-screen
- * report, and it says at a glance whether the board logo was found. */
-const char *nd_boot_logo_tag(void) {
-  if (g_splash.mark.w <= 0 && !g_splash.has_mark) {
-    return nd_oem_frame_available() ? "fw" : "none";
-  }
-  return nd_oem_logo_available() ? "mk" : "bak";
-}
-
 int nd_boot_logo_rect(nd_rect_t *out) {  if (out == 0 || !g_splash.has_mark || g_splash.mark.w <= 0) {
     return 0;
   }

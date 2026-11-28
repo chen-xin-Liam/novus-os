@@ -5,7 +5,7 @@
  * scheduler, the IPC window manager or a client display list. Entry points
  * are the ring-0 fault path, the kernel panic landing pad and a hidden key
  * sequence. Once entered the function never returns; the only exit is a
- * reset requested with Ctrl+Alt+Esc.
+ * reset requested with Ctrl+Alt+R.
  */
 
 #ifndef NOVUS_BSOD_H
@@ -23,7 +23,7 @@
 #define BSOD_BC_MANUAL          0x000000E3u
 
 /* Set-1 scancodes the hook understands. USB reports are mapped onto these. */
-#define BSOD_SCAN_ESC      0x01u
+#define BSOD_SCAN_R        0x13u
 #define BSOD_SCAN_TAB      0x0Fu
 #define BSOD_SCAN_CTRL     0x1Du
 #define BSOD_SCAN_SHIFT_L  0x2Au
@@ -36,10 +36,11 @@
 #define BSOD_MOD_ALT   0x04u
 
 /* Ring-0 exception: captures the trap frame and never returns. */
-void bsod_fault(const trap_frame_t *f);
+void bsod_fault(const trap_frame_t *f)
+    __attribute__((noreturn));
 
 /* Explicit stop code (manual trigger, panic hook, etc.): never returns. */
-void bsod_manual(UINT32 code);
+void bsod_manual(UINT32 code) __attribute__((noreturn));
 
 /* Raw PS/2 set-1 scancode, with the break bit already removed. */
 void bsod_key_hook(UINT8 scancode, int down);

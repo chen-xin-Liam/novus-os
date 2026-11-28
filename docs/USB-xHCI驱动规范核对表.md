@@ -1,5 +1,7 @@
 # USB / xHCI 驱动规范核对表
 
+> 历史说明：全屏启动诊断页及其 `diag_strip()` / `diag_report()` / `usb_banner()` / `usb_port_dump()` 等辅助代码已移除；文中 U-50/U-61 相关段落仅作历史记录，不再代表现行代码。
+
 本文是 `kernel/usb.c` 的**唯一改动依据**。目的不是记录已经修过什么，而是把 xHCI 1.1 规范里每一条会决定"设备到底能不能被认出来"的要求，落到具体代码位置和具体验证手段上。
 
 ## 使用纪律
@@ -409,11 +411,11 @@ banner 字段：`cn=` link 数、`msd=` U 盘数、`mi=` 鼠标数、`ht=` 停�
 - 位置：`xhci_hotplug_scan()` attach 成功分支——`usblog_retry()`，随后 `if (usblog_state() == 1) usblog_flush(1);`（强制 flush 把 64 KiB 缓冲里从 `[T] +55ms kmain start` 起的整段日志一次写进去）。
 - 验证：镜像 `3a9ddcb584b6`，空控制器起机 → 报告页 → 桌面 → 运行中插 64 MiB 原始介质：日志 `hotplug: device on port 0x4 attached` → `[LOG] boot log -> usb00 at raw LBA 0xC801`；停机后读镜像，LBA 0xC800 是 `NOVUS boot log (local test build) / device: usb00`，文字段 47 扇区全非零，首行 `[T] +55ms kmain start`。未加 flush 的同场景版本文字段为 0，只有头部。
 
-### U-50 报告页退出后必须整屏重绘
+### U-50 报告页退出后必须整屏重绘（历史记录：报告页已移除，见 B-5）
 
 - 要求：`nd_demo_report()` 直接写 framebuffer 并 `nd_present(全屏)`，窗口管理器对这块像素一无所知，damage 集合里也没有它。桌面起来后只重绘自己认为脏的区域，页面上留下的像素就成了"内容区纯白、边框和标题栏还在"的真机症状。
 - 旧状：报告页返回后无人通知 WM。
-- 位置：`wm/novus-wm/nwm.c` 新增 `g_repaint_all` 与 `nwm_repaint_all()`，`nwm_tick()` 开头把它变成一次全屏 damage 并打印 `[NWM] full repaint requested by an outside writer`；`kernel/kmain.c` 在 `nd_demo_report()` 之后（仅"没有日志介质"分支）调用。
+- 位置：`wm/novus-wm/nwm.c` 的 `g_repaint_all` 与 `nwm_repaint_all()`，`nwm_tick()` 开头把它变成一次全屏 damage 并打印 `[NWM] full repaint requested by an outside writer`；`kernel/kmain.c` 在启动桌面前保留一次调用。原报告页已移除（B-5），但任何绕过 WM 直写 framebuffer 的路径仍须遵守该规则。
 - 验证：QEMU 两个场景日志里 `[NWM] full repaint requested by an outside writer` 都出现在报告页 dump 之后、桌面首帧之前；截图里文件管理器/设置窗口内容完整。
 
 ### U-51 介质搜索要能重试到"枚举完成之后"
@@ -486,7 +488,7 @@ banner 字段：`cn=` link 数、`msd=` U 盘数、`mi=` 鼠标数、`ht=` 停�
 - 位置：`hub_port_probe()` 末尾 `[USB] probe port <p> speed=<s> step=<k> ok|failed`（`g_att_step`）；`ep0_wait_stopped()` 内本 slot/EP0 事件 code 与 resid 日志（`g_stop_ev_n` 上限 8 条）。
 - 验证：QEMU 下探针行格式正常（镜像 `938E7430318E`：`probe port 5 speed=3 step=9 ok`、`probe port 7 speed=3 step=9 ok`）。真机镜像 `10C37B18AE92` 的首启照片 `at=3000000000000000`（仅口 1 走到 step 3，口 2…16 未走到）；当次探针行落在 RAM、因内盘写拒绝（`log=2 pend=0x4e0e`）未回读到磁盘日志，真机探针读数待下一次可写介质或报告页照片复核。
 
-### U-61 报告页停留期间切片喂端口遍历续跑（本轮 Fix A）
+### U-61 报告页停留期间切片喂端口遍历续跑（历史记录：报告页已移除，见 B-5）
 
 - 要求：端口遍历的续跑挂在输入 tick 的 `usb_hid_poll()` 上（`g_hub_done==0` 时 `usb_hub_step(40)`，口预算 250 ms）；而诊断报告页在 `usblog_state()!=1` 时阻塞停留 45 s，期间不跑任何 tick，其余端口永远走不到——真机照片里 `at=3000000000000000`（游标停在口 2）正是这个缺口：用户拍完照即关机，续跑拿不到机会。
 - 旧状：报告页整段 `nd_demo_report(rep, 45000)` 一次性停留，遍历续跑要等报告页结束、调度器桌面 tick 起来之后才发生。

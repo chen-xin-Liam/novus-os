@@ -137,8 +137,8 @@ void hid_boot_kbd_decode(hid_boot_kbd_t *s, const UINT8 *rep, UINT8 src) {
 
       if (code == 0x2Bu) {
         hook_sc = BSOD_SCAN_TAB;
-      } else if (code == 0x29u) {
-        hook_sc = BSOD_SCAN_ESC;
+      } else if (code == 0x15u) {
+        hook_sc = BSOD_SCAN_R;
       }
       if (hook_sc != 0u) {
         bsod_key_hook_mods(hook_sc, 1, mods);

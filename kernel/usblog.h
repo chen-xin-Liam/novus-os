@@ -18,13 +18,4 @@ void usblog_flush(int force);
  * device was found but refused writes. The desktop status line shows this
  * so a single screenshot says whether the stick received the log. */
 int usblog_state(void);
-/* Why the disk fallback picked or refused its device: ok, noread, nogpt,
- * notable, smallpart, noidev. Compact enough to sit in the on-screen
- * strip when the log itself could not be stored. */
-const char *usblog_gap_reason(void);
-
-/* One compact line for the on-screen boot report: state, device name, the
- * LBA it writes at, sectors written, bytes still pending, bytes dropped. */
-void usblog_report(char *out, UINT32 cap);
-
 #endif

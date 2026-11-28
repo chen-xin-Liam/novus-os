@@ -61,53 +61,54 @@ todos:
       - debug-doc
 ---
 
-## User Requirements
-### Product Overview
-删除启动过程中标题为「Novus OS · 启动诊断」的全屏 45 秒报告页，使桌面构建启动后直接进入桌面，不再因日志未落盘而停留等待拍照取证。
+## 用户要求
 
-### Core Features
-- 移除全屏启动诊断页的绘制、保持与重新绘制逻辑。
-- 移除仅为该页面服务的报告文本装配、串口诊断打印和相关静态缓冲。
-- 保留启动后期的 USB 输入轮询、日志介质重试与刷盘，避免影响 USB 键鼠枚举和日志写入。
-- 保留正常串口自检日志、蓝屏能力和窗口管理器的通用全屏重绘接口。
+在已实现的蓝屏界面中，将顶部标识条与主体标题区改为整体水平居中，仅调整视觉布局，不改变蓝屏触发、停止码映射、日志显示与重启逻辑。
+
+## 产品概述
+
+蓝屏触发后仍保持全屏蓝底白字的经典风格。顶部蓝色横条中的 `:(` 图标、`Novus OS` 文本和 `STOP` 标签作为一组整体居中；主体区域的停止码与错误名作为一组整体居中，使界面更接近 Windows 11 蓝屏的对称视觉。
+
+## 核心功能
+
+- 顶部标识条三元素整体水平居中。
+- 移除右上角独立停止码，避免与主体标题重复。
+- 主体停止码与错误名宽屏时同排整体居中，窄屏时上下堆叠并各自居中。
+- 描述文字、寄存器区、日志区、底部重启提示保持现有布局不变。
 
 ## Tech Stack Selection
-沿用现有 Novus OS 自由站立 C 内核与 NovusDisplay 图形栈，不新增依赖、不新增 syscall、不改 ABI、不改构建脚本。
+
+沿用现有 C 内核与 NovusDisplay 绘制接口，不新增文件、类型、syscall 或构建配置。使用 `nd_text_width()` 计算文本像素宽度，使用现有 `nd_text()`、`nd_frame()`、`nd_fill_rect()` 完成绘制。
 
 ## Implementation Approach
-采用最小删除策略：移除 `nd_demo_report_draw()` / `nd_demo_report()` 及其声明，删除 `kernel/kmain.c` 中仅用于诊断报告的 `rep_line()` / `diag_strip()` / `diag_report()` 和 45 秒循环。把该循环替换为一次有界的 `usb_hid_poll()`，随后执行 `usblog_retry()` 与 `usblog_flush(1)`，再继续启动桌面。USB 端口遍历的续跑仍由调度启动后的 `nd_input_poll()` 调用 `usb_hid_poll()` 承担，因此不需要保留页面等待。
 
-关键决策：不删除 `nwm_repaint_all()`，因为它是绕过 WM 写屏后的通用恢复接口；不删除 `nd_input_report()`，因为它是串口取证信息，不属于屏幕页面；不批量清理历史文档中的截图记录，因为这些是历史验证证据。
+在 `kernel/bsod.c` 的 `bsod_draw()` 中只修改顶部蓝条和主体标题绘制：
 
-## Implementation Notes (Execution Details)
-- `graphics/nd_demo.c` 删除 `nd_demo_report_draw()` 和 `nd_demo_report()`；`graphics/nd.h` 删除两者声明与注释。
-- `kernel/kmain.c` 删除 `char ib[256]`、报告装配 helper、`[BOOT] diag:` / `[BOOT] report drawn` / `[BOOT] report page skipped` 打印，以及 `char rest/rep/pd/tmp` 缓冲。
-- 删除 45 秒 `nd_wait_ms(250)` 循环；用一次 `usb_hid_poll()` 保持端口推进，再做最终 `usblog_retry()` 和 `usblog_flush(1)`。
-- `nd_input_banner()` 及 `ban_lit()` / `ban_num()` 在报告装配删除后无调用方，可一并从 `graphics/nd_input.c` 与 `graphics/nd_input.h` 删除；`nd_input_report()` 保留。
-- 调整 `kernel/kmain.c` 中 PS/2 报告注释，避免继续声称结果会写入桌面状态条。
-- 不使用动态内存，不增加启动路径上的额外遍历；删除后启动关键路径减少一次 45 秒阻塞和约 1600 字节报告文本装配。
-- 保留 `docs/启动顺序与启动速度规范.md` 中的通用原则，只把 B-5 标记为已移除，并说明 USB 轮询改由输入 tick 承担。
+- 顶部蓝条：把 52 像素方框图标、`Novus OS` 文本、`STOP / KERNEL FAULT` 标签视为一个整体，先计算组合宽度，再从屏幕水平中点左侧起依次绘制。删除原先右上角独立绘制停止码的代码。
+- 主体标题：格式化停止码后，用 `nd_text_width()` 分别取得停止码与错误名宽度。宽屏且两者可同排放下时，按固定间距计算组合起点并整体绘制；窄屏时停止码与错误名上下堆叠，每行各自居中。
+- 保留故障提示行和两行描述文字的左对齐布局；寄存器、技术信息、日志尾部、底部提示条完全不变。
 
-## Architecture Design
-本次为单点删除，不改变系统分层和数据流。启动流程从「首帧 → 诊断报告装配 → 条件性 45 秒页面 → 桌面」简化为「首帧 → 一次 USB 轮询与日志落盘重试 → 桌面」。
+该改动只增加少量字符串宽度计算，复杂度为常量级，无堆分配、无内核状态变化、无新增日志。
+
+## Implementation Notes
+
+- 只修改 `kernel/bsod.c`，不触碰 `kernel/bsod.h`、`DEBUG.md`、热键状态机和停止码映射。
+- 顶部蓝条删除右上停止码后，主体标题是唯一停止码展示位置，需避免重复显示。
+- 居中计算需防止低分辨率下出现负坐标；宽屏分支仅在计算宽度加间距不超过可用宽度时使用，否则走窄屏堆叠。
+- 不改变 `nd_present()`、`nd_cursor_hide()` 和蓝屏冻结行为。
 
 ## Directory Structure
-```text
+
+```
 project-root/
-├── graphics/
-│   ├── nd_demo.c        # [MODIFY] 删除全屏启动诊断页绘制与保持函数。
-│   ├── nd.h             # [MODIFY] 删除 nd_demo_report / nd_demo_report_draw 声明和注释。
-│   ├── nd_input.c       # [MODIFY] 删除仅服务诊断横幅的 nd_input_banner 与 ban_lit/ban_num。
-│   └── nd_input.h       # [MODIFY] 删除 nd_input_banner 声明。
-├── kernel/
-│   └── kmain.c          # [MODIFY] 删除报告 helper、缓冲与 45 秒循环；保留一次 USB 轮询和日志重试/刷盘；调整注释。
-├── docs/
-│   └── 启动顺序与启动速度规范.md # [MODIFY] 更新 B-5，说明全屏诊断页已移除及替代轮询路径。
-└── wm/novus-wm/         # [NO CHANGE] nwm_repaint_all() 与相关注释保留为通用写屏恢复接口。
+└── kernel/
+    └── bsod.c  # [MODIFY] 调整 bsod_draw() 的顶部标识条和主体标题布局：整体宽度计算、水平居中、宽屏同排与窄屏堆叠；保持其余区域不动。
 ```
 
 ## Agent Extensions
+
 ### SubAgent
+
 - **code-explorer**
-  - Purpose: 在修改完成后复核所有被删符号的残留引用、启动路径副作用和文档一致性。
-  - Expected outcome: 确认无悬空声明、无未定义符号、USB 轮询与日志重试仍存在、串口日志不再出现诊断页标记。
+  - Purpose: 复核 `kernel/bsod.c` 中蓝屏绘制函数的布局改动点，确认没有残留的右上停止码绘制或影响其他区域的改动。
+  - Expected outcome: 输出顶部蓝条、主体标题、描述区、寄存器区、日志区和底部提示条的修改边界核对结果，确认仅布局逻辑变化且无功能回归风险。

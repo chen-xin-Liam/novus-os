@@ -18,7 +18,4 @@ int hda_init(void);
  * advanced and the stream was stopped cleanly. */
 int hda_selftest(void);
 
-/* One line for the diagnostics strip: hda=/codec=/nsdo=/lpib=. */
-void hda_banner(char *out, UINT32 cap);
-
 #endif /* NOVUS_HDA_H */

@@ -1,5 +1,7 @@
 # 任务提示词：Novus-OS Intel HDA 音频驱动收尾
 
+> 历史说明：`hda_banner()` 与 `[BOOT] diag:` 诊断条已随启动诊断页一并移除；文中相关 API 说明仅作历史记录。
+
 > 直接把你（接手方）要执行的完整上下文写在下面，照着做即可，不需要再问需求方。
 
 ## 0. 一句话目标
@@ -18,7 +20,7 @@
 
 | 文件 | 状态 | 内容 |
 |---|---|---|
-| `kernel/hda.h` | 新增 | `hda_init()` / `hda_selftest()` / `hda_banner()`，`NOVUS_HDA_SELFTEST` 默认 0 |
+| `kernel/hda.h` | 新增 | `hda_init()` / `hda_selftest()`，`NOVUS_HDA_SELFTEST` 默认 0 |
 | `kernel/hda.c` | 新增，**有 bug 待修** | HDA 控制器探测、GCTL 复位、STATESTS 读 codec、CORB/RIRB 建环、节点枚举、converter+pin 配置、BDL 播放 440 Hz 方波 |
 | `Makefile` | 已改 | `SRC` 加了 `kernel/hda.c`；CFLAGS 加了 `-DNOVUS_HDA_SELFTEST=$(if $(filter 1,$(HDA)),1,0)` |
 | `kernel/kmain.c` | 已改 | 顶部 `#include "hda.h"`；`i2c_hid_init();` 之后加了 `(void)hda_init();` 与 `#if NOVUS_HDA_SELFTEST (void)hda_selftest(); #endif` |
@@ -134,4 +136,4 @@ ls -l /tmp/hdaN.wav
 - 现有实现只覆盖 QEMU 的 codec 行为；真机（HP EliteBook 640 G10 的 Sunrise Point-LP HD Audio）还需要：codec 上电（`0x705` D0 已发）、amp gain 具体 index、pin 的具体输出选择（HP out vs speaker），以及 AC'97 之外的机型兜底。
 - 没有中断（IRQ）驱动：靠轮询 LPIB 300 ms 判断是否在跑；后续可以接 IOAPIC。
 - 没有混音/多流/录音（ADC）、没有音量控制接口、没有和用户态（syscall）打通。
-- `hda_banner()` 目前没人调用；如果要做真机诊断条，接到 `kernel/kmain.c` 里已有 `[BOOT] diag:` 那段即可（注意那里曾把屏上诊断条删掉过，因为压住 dock）。
+- 原 `hda_banner()` 只服务于已删除的全屏启动诊断页，现一并移除；真机音频状态请从串口 `[HDA]` 日志读取。

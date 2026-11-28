@@ -535,114 +535,6 @@ static void kbm(UINT32 slot, UINT8 r, UINT8 g, UINT8 b) {
 #endif
 }
 
-/* Append one line to the boot report text: the string, then a newline. The
- * buffer is fixed and the truncation is silent, because this text is read off
- * the screen and a clipped tail is better than a missing page. */
-static void rep_line(char *dst, UINT32 *at, UINT32 cap, const char *s) {
-  while (*s != '\0' && *at + 2u < cap) {
-    dst[(*at)++] = *s++;
-  }
-  if (*at + 1u < cap) {
-    dst[(*at)++] = '\n';
-  }
-  dst[*at] = '\0';
-}
-
-/* Build the two-line status strip: logo tag, log state, logo-reason, GPU
- * probe, gap reason, then the pointer verdicts (PS/2 + USB banner). Split
- * out of the report block so the diagnostic hold loop can repaint a fresh
- * strip after every port-pass slice. */
-static void diag_strip(char *ib, UINT32 ib_cap, char *rest, UINT32 rest_cap) {
-  UINT32 n = 0u;
-  const char *tag = nd_boot_logo_tag();
-
-  ib[n++] = 'l'; ib[n++] = 'o'; ib[n++] = 'g'; ib[n++] = 'o'; ib[n++] = '=';
-  while (*tag != '\0' && n + 8u < ib_cap) {
-    ib[n++] = *tag++;
-  }
-  ib[n++] = ' ';
-  ib[n++] = 'l'; ib[n++] = 'o'; ib[n++] = 'g'; ib[n++] = '=';
-  ib[n++] = (char)('0' + (char)usblog_state());
-  ib[n++] = ' ';
-  {
-    const char *why = nd_oem_logo_reason();
-    UINT32      w = 0u;
-
-    ib[n++] = 'w'; ib[n++] = 'h'; ib[n++] = 'y'; ib[n++] = '=';
-    while (why != NULL && why[w] != '\0' && w < 28u && n + 2u < ib_cap) {
-      ib[n++] = (why[w] == ' ') ? '_' : why[w];
-      w++;
-    }
-  }
-  ib[n++] = ' ';
-  {
-    const char *g = gpu_probe_line();
-    UINT32      i = 0u;
-
-    while (g[i] != '\0' && n + 2u < ib_cap) {
-      ib[n++] = g[i++];
-    }
-    if (i != 0u) {
-      ib[n++] = ' ';
-    }
-  }
-  {
-    const char *r = usblog_gap_reason();
-    UINT32      i = 0u;
-
-    ib[n++] = ' ';
-    while (r[i] != '\0' && n + 2u < ib_cap) {
-      ib[n++] = r[i++];
-    }
-  }
-  ib[n++] = '\n';
-  nd_input_banner(rest, rest_cap);
-  {
-    char   ub[48];
-    UINT32 i = 0u;
-
-    usb_banner(ub, (UINT32)sizeof(ub));
-    ib[n++] = ' ';
-    while (ub[i] != '\0' && n + 2u < ib_cap) {
-      ib[n++] = ub[i++];
-    }
-  }
-  {
-    UINT32 i = 0u;
-
-    while (rest[i] != '\0' && n + 2u < ib_cap) {
-      ib[n++] = rest[i++];
-    }
-  }
-  ib[n] = '\0';
-}
-
-/* Assemble the full-screen diagnostic report from the current global state.
- * Rebuilt every hold slice so the arrays reflect ports walked after the
- * first paint. */
-static void diag_report(char *rep, UINT32 rep_cap, const char *ib,
-                        char *tmp, char *pd) {
-  UINT32 rn = 0u;
-  UINT32 mice = 0u;
-  UINT32 reports = 0u;
-
-  rep_line(rep, &rn, rep_cap, ib);
-  usblog_report(tmp, (UINT32)168);
-  rep_line(rep, &rn, rep_cap, tmp);
-  usb_hid_stats(&mice, &reports);
-  rep_line(rep, &rn, rep_cap,
-           mice != 0u ? "usb hid: mouse present" : "usb hid: no mouse interface");
-  usb_port_dump(pd, (UINT32)1400);
-  kputs("[BOOT] usb dump: ");
-  kputs(pd);
-  kputs("\n");
-  rep_line(rep, &rn, rep_cap, pd);
-  hda_banner(tmp, (UINT32)168);
-  rep_line(rep, &rn, rep_cap, tmp);
-  rep_line(rep, &rn, rep_cap,
-           "指针仍无效时：这一屏就是全部证据，拍照后关机即可");
-}
-
 /* ------------------------------------------------------------------ */
 /* Deferred boot phase                                                 */
 /* ------------------------------------------------------------------ */
@@ -1513,8 +1405,6 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
               (void)apps_launch_name("nsh");
             }
           } else {
-            char ib[256];
-
             nd_boot_stage(99, "绘制桌面");
             nd_demo_init();
             /* First frame is on the glass: the whole deferred phase (checks
@@ -1557,58 +1447,12 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
              * delivered a byte (byt), or a USB mouse that was never
              * enumerated (usb). */
             nd_input_report();
-            /* The status strip and the full-screen report are rebuilt by the
-             * helpers below, once per hold slice, so the page shows the ports
-             * walked after the first paint. */
-            {
-              char rest[168];
-
-              diag_strip(ib, (UINT32)sizeof(ib), rest, (UINT32)sizeof(rest));
-              /* The strip is a fallback, not a feature: when the boot log
-               * reached the stick these verdicts are in that file, so the
-               * screen stays clean and the report is read from the stick like
-               * any other log. A machine whose stick was never mounted still
-               * gets the strip, because then a photograph is all it can give. */
-              kputs("[BOOT] diag: ");
-              kputs(ib);
-              kputs("\n");
-              /* Last chance to attach a medium before the report is drawn. */
-              usblog_retry();
-              usblog_flush(1);
-              {
-                static char rep[1600];
-                static char pd[1400];
-                char   tmp[168];
-
-                diag_report(rep, (UINT32)sizeof(rep), ib, tmp, pd);
-                kputs("[BOOT] report drawn\n");
-                if (usblog_state() != 1) {
-                  UINT32 held = 0u;
-
-                  /* The port pass's continuation rides the input tick
-                   * (usb_hid_poll), and no tick runs while this page holds:
-                   * without a feed here the remaining ports stay untouched
-                   * until the desktop starts, so the photograph only ever
-                   * sees the first port. Slice the hold the same way a tick
-                   * would: poll HID, advance the pass, retry the log medium,
-                   * then repaint the fresh numbers. */
-                  while (held < 45000u) {
-                    nd_demo_report_draw(rep);
-                    nd_wait_ms(250u);
-                    held += 250u;
-                    usb_hid_poll();
-                    usblog_retry();
-                    usblog_flush(1);
-                    diag_report(rep, (UINT32)sizeof(rep), ib, tmp, pd);
-                  }
-                  /* The page wrote the glass directly: ask the WM for one
-                   * whole-screen compose on the next tick. */
-                  nwm_repaint_all();
-                } else {
-                  kputs("[BOOT] report page skipped: the log is on the medium\n");
-                }
-              }
-            }
+            /* Last chance to attach a log medium and flush before the desktop
+             * starts. USB HID enumeration continues on the input tick once the
+             * scheduler is up, so no boot-time hold is needed for it. */
+            usblog_retry();
+            usblog_flush(1);
+            nwm_repaint_all();
             if (session_live()) {
               session_start_desktop();
             } else {
