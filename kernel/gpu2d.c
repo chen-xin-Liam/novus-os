@@ -175,12 +175,13 @@ static int nvidia_init(void) {
 typedef struct {
   const char *name;
   int (*init)(void);
+  const gpu2d_ops_t *ops;   /* non-NULL only for a working hardware backend */
 } gpu2d_vendor_t;
 
 static const gpu2d_vendor_t g_vendors[] = {
-  {"intel", intel_init},
-  {"amd", amd_init},
-  {"nvidia", nvidia_init},
+  {"intel", intel_init, 0},
+  {"amd", amd_init, 0},
+  {"nvidia", nvidia_init, 0},
 };
 
 void gpu2d_init(void) {
@@ -189,17 +190,25 @@ void gpu2d_init(void) {
   if (g_ops != 0) {
     return;
   }
+  /* Install the CPU backend BEFORE any vendor init prints a line. kputs()
+   * reaches fbcon_puts(), which draws glyphs through gpu2d_fill_span(); if
+   * g_ops were still NULL that call would recurse into gpu2d_init() and the
+   * machine would hang while reporting "registers reachable". */
+  g_ops = &g_backend_soft;
+
   /* Order matters: a real engine always wins over the CPU when it says it
    * can drive the hardware. */
   for (i = 0; i < sizeof(g_vendors) / sizeof(g_vendors[0]); i++) {
     int rc = g_vendors[i].init();
 
-    (void)rc;
+    if (rc == 0 && g_vendors[i].ops != 0) {
+      g_ops = g_vendors[i].ops;
+      break;
+    }
   }
-  g_ops = &g_backend_soft;
   kputs("[GPU2D] backend=");
   kputs(g_ops->name);
-  kputs(" (64-bit span stores; no vendor engine wired up)\n");
+  kputs("\n");
 }
 
 const char *gpu2d_backend(void) {

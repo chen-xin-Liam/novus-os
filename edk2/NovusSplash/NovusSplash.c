@@ -130,6 +130,13 @@ STATIC CONST CHAR16 *CONST mKernelPaths[] = {
   L"\\EFI\\BOOT\\BOOTX64.EFI"
 };
 
+EFI_STATUS
+EFIAPI
+UefiMain (
+  IN EFI_HANDLE       ImageHandle,
+  IN EFI_SYSTEM_TABLE *SystemTable
+  );
+
 /**
   Blend one source pixel over the snapshot. Dst->Reserved is the GOP's
   unused byte; we clear it so the value written back is a plain video pixel.
@@ -602,6 +609,7 @@ LoadNovusKernel (
   EFI_FILE_PROTOCOL               *File;
   EFI_DEVICE_PATH_PROTOCOL        *Path;
   EFI_HANDLE                      ChildImage;
+  EFI_LOADED_IMAGE_PROTOCOL       *ChildLoaded;
   UINTN                           ExitDataSize;
   CHAR16                          *ExitData;
   EFI_STATUS                      Status;
@@ -656,6 +664,17 @@ LoadNovusKernel (
       if (EFI_ERROR (Status)) {
         FreePool (Handles);
         return Status;
+      }
+      /* Boot options may launch this application with FilePath == NULL, so
+       * the device-path check above can miss a self-load. The entry point is
+       * unambiguous: if the child is us, unload it instead of recursing. */
+      ChildLoaded = NULL;
+      if (gBS->HandleProtocol (ChildImage, &gEfiLoadedImageProtocolGuid,
+                               (VOID **)&ChildLoaded) == EFI_SUCCESS &&
+          ChildLoaded != NULL && ChildLoaded->EntryPoint == UefiMain) {
+        gBS->UnloadImage (ChildImage);
+        FreePool (Handles);
+        return EFI_NOT_FOUND;
       }
       // The firmware's PE loader reads and relocates the kernel here.
       for (Tick = 0; Tick < NOVUS_MIN_SPINS; Tick++) {

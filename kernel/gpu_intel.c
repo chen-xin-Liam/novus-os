@@ -76,20 +76,19 @@ static const intel_id_t *lookup(UINT16 id) {
   return 0;
 }
 
-/* Gen8+ keeps the graphics synthesis configuration at 0x108040. Bits 0..2
- * are the stolen-memory size code; BDSM in PCI config 0x5C holds its base. */
-static void read_stolen(UINT64 mmio_va, UINT32 gen) {
-  UINT32 off = (gen >= INTEL_GEN8) ? 0x108040u : 0x50u;
-  UINT32 gcc;
+/* GGC lives in PCI configuration space at 0x52; bits 0..2 are the stolen
+ * memory size code, and BDSM at 0x5C holds its base. Reading 0x108040
+ * through the BAR0 mapping is wrong on Gen8+: that offset belongs to the
+ * separate GGTT MMIO window and is often outside the 16 KiB BAR0. On a real
+ * i5 that read faults while starting the kernel, so use config space only. */
+static void read_stolen(const pci_dev_t *dev) {
+  UINT8 gcc;
   UINT32 mb;
 
-  if (mmio_va == 0u) {
+  if (dev == 0) {
     return;
   }
-  gcc = *(volatile UINT32 *)(UINTN)(mmio_va + off);
-  if (gcc == 0xFFFFFFFFu) {
-    return;
-  }
+  gcc = pci_read8(dev->bus, dev->dev, dev->func, 0x52u);
   switch (gcc & 7u) {
   case 1u: mb = 32u;  break;
   case 2u: mb = 64u;  break;
@@ -111,6 +110,7 @@ void intel_gpu_init(void) {
   UINT64 aper_bytes;
   const intel_id_t *id;
   pci_dev_t dev;
+  int found;
   UINT32 probe;
 
   if (g_ready || gpu_vendor() != GPU_VENDOR_INTEL) {
@@ -125,7 +125,8 @@ void intel_gpu_init(void) {
 
   /* Claim the device. gpu_init() may have found it through the framebuffer
    * BAR instead of by id, so look it up by the id it reported. */
-  if (pci_find(GPU_VENDOR_INTEL, g_device, &dev) == 0) {
+  found = (pci_find(GPU_VENDOR_INTEL, g_device, &dev) == 0);
+  if (found) {
     pci_enable_device(&dev);
   }
 
@@ -159,7 +160,7 @@ void intel_gpu_init(void) {
     g_aperture_va = (UINT64)(UINTN)mm_map_phys(aper_phys, aper_bytes,
                                                MM_MAP_WC);
   }
-  read_stolen(g_mmio_va, g_gen);
+  read_stolen(found ? &dev : 0);
 
   kputs("[INTEL-GPU] ");
   kputs(g_name);
