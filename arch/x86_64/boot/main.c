@@ -592,6 +592,60 @@ static void boot_serial_write(const CHAR16 *s) {
   }
 }
 
+/* The user can ask for the boot UI by holding (or pressing) Shift while the
+ * image starts. Everything else boots silently: no text menu, no splash, no
+ * countdown. The kernel receives the choice through boot_mode in the frozen
+ * shared-memory block. */
+static const EFI_GUID gSimpleTextInputExGuid = {
+  0xDD9E7534u, 0x7762u, 0x4698u,
+  { 0x8Cu, 0x14u, 0xF5u, 0x85u, 0x17u, 0xA6u, 0x25u, 0xAAu }
+};
+static int g_boot_ui_visible;
+
+static BOOLEAN boot_shift_held(EFI_SYSTEM_TABLE *st) {
+  EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *ex = 0;
+  EFI_SIMPLE_TEXT_INPUT_PROTOCOL *conin;
+  EFI_KEY_DATA key;
+  EFI_INPUT_KEY plain;
+  UINTN i;
+
+  if (st == 0 || st->BootServices == 0) {
+    return FALSE;
+  }
+  if (st->BootServices->LocateProtocol(
+          (EFI_GUID *)&gSimpleTextInputExGuid, 0, (VOID **)&ex) == EFI_SUCCESS &&
+      ex != 0 && ex->ReadKeyStrokeEx != 0) {
+    for (i = 0; i < 96; i++) {
+      key.KeyState.KeyShiftState = 0;
+      key.KeyState.KeyToggleState = 0;
+      if (ex->ReadKeyStrokeEx(ex, &key) == EFI_SUCCESS) {
+        if ((key.KeyState.KeyShiftState &
+             (EFI_SHIFT_STATE_VALID | EFI_LEFT_SHIFT_PRESSED |
+              EFI_RIGHT_SHIFT_PRESSED)) != 0) {
+          return TRUE;
+        }
+        if (key.Key.ScanCode == 0x2Au || key.Key.ScanCode == 0x36u) {
+          return TRUE;
+        }
+      }
+      st->BootServices->Stall(1000u);
+    }
+  }
+  /* Firmware without ReadKeyStrokeEx still queues the Shift make code on
+   * the plain console. It reports no modifier, so match the scan codes. */
+  conin = (EFI_SIMPLE_TEXT_INPUT_PROTOCOL *)st->ConIn;
+  if (conin != 0 && conin->ReadKeyStroke != 0) {
+    for (i = 0; i < 48; i++) {
+      if (conin->ReadKeyStroke(conin, &plain) == EFI_SUCCESS &&
+          (plain.ScanCode == 0x2Au || plain.ScanCode == 0x36u)) {
+        return TRUE;
+      }
+      st->BootServices->Stall(1000u);
+    }
+  }
+  return FALSE;
+}
+
 void boot_quiet(int on) {
   g_quiet = on;
   if (g_con != 0) {
@@ -1050,6 +1104,13 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   g_bs = bs;
   g_st = SystemTable;
   boot_serial_init();
+  /* Silent by default. Holding Shift brings back the text menu, boot
+   * animation and kernel boot menu; otherwise the firmware logo stays on
+   * the panel until the first desktop frame. */
+  g_boot_ui_visible = boot_shift_held(SystemTable) ? 1 : 0;
+  if (!g_boot_ui_visible) {
+    boot_quiet(1);
+  }
   /* Publish the handoff block before the first log line: boot_puts() and
    * boot_timeline() now also fill the shared log ring, and the kernel seeds
    * its own ring from it before printing its first line. */
@@ -1078,8 +1139,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* Disable the firmware watchdog timer. */
   bs->SetWatchdogTimer(0, 0, 0, 0);
 
-  g_con->Reset(g_con, FALSE);
-  g_con->ClearScreen(g_con);
+  if (g_boot_ui_visible) {
+    g_con->Reset(g_con, FALSE);
+    g_con->ClearScreen(g_con);
+  }
 
   boot_puts(L"=========================================\r\n");
   boot_puts(L"      Novus OS - Boot Stage\r\n");
@@ -1120,7 +1183,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
   /* M3: probe the block devices and open the ESP first, because the menu
    * operates on what they find; the payload reads come after the menu. */
   stage3_prepare();
-  stage3_menu();
+  if (g_boot_ui_visible) {
+    stage3_menu();
+  } else if (shared_mem_get() != 0) {
+    shared_mem_get()->boot_mode = SHM_BOOT_MODE_QUIET;
+  }
   boot_timeline("stage3 menu done");
 
 #if CONFIG_NOVUS_DISPLAY
@@ -1155,7 +1222,10 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
       boot_puts(L", ");
       boot_put_dec(d->fb_size);
       boot_puts(L" bytes\r\n");
-      if (nd_boot_anim_begin()) {
+      /* Without Shift the firmware logo stays untouched: capture its mode
+       * for the kernel, but never paint a splash or restore a text console
+       * over it. */
+      if (g_boot_ui_visible && nd_boot_anim_begin()) {
         /* Opening move: seven authored frames on the TSC timeline - the mark
          * scales and fades in, the rail fills, the stage line names the step.
          * The kernel carries the same rail to 100% and the hand-over ends on
@@ -1163,7 +1233,8 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
          * screen between the two halves. */
         boot_anim_play();
         boot_timeline("splash anim done");
-      } else if (d->fb_phys != 0 && !d->fb_boot_usable) {
+      } else if (g_boot_ui_visible && d->fb_phys != 0 &&
+                 !d->fb_boot_usable) {
         /* The numbers are the point here: the splash is skipped only when the
          * boot stage could not map the scanout at all, and on a laptop that is
          * the difference between the splash and a text log. Print it where the
@@ -1173,11 +1244,11 @@ EFI_STATUS efi_main(EFI_HANDLE ImageHandle, EFI_SYSTEM_TABLE *SystemTable) {
         boot_put_hex(d->fb_phys);
         boot_puts(L" is not reachable from the boot page tables, ");
         boot_puts(L"kernel text console takes over\r\n");
-      } else {
+      } else if (g_boot_ui_visible) {
         boot_quiet(0);
         boot_puts(L"[BOOT] boot splash unavailable, text console stays\r\n");
       }
-    } else {
+    } else if (g_boot_ui_visible) {
       boot_quiet(0);
       boot_puts(L"[BOOT] NovusDisplay: no linear framebuffer, VGA fallback\r\n");
     }

@@ -685,6 +685,38 @@ struct _EFI_SIMPLE_TEXT_INPUT_PROTOCOL {
   VOID              *WaitForKey;
 };
 
+/* Extended input is optional firmware, but it is the only UEFI service that
+ * reports modifier keys. The boot stage uses it to decide whether the user
+ * is holding Shift and wants the boot UI. Only the first three members are
+ * needed; the rest of the protocol is deliberately opaque here. */
+#define EFI_SHIFT_STATE_VALID       0x80000000u
+#define EFI_LEFT_SHIFT_PRESSED      0x00000001u
+#define EFI_RIGHT_SHIFT_PRESSED     0x00000002u
+
+typedef struct {
+  UINT32 KeyShiftState;
+  UINT8  KeyToggleState;
+} EFI_KEY_STATE;
+
+typedef struct {
+  EFI_INPUT_KEY Key;
+  EFI_KEY_STATE KeyState;
+} EFI_KEY_DATA;
+
+typedef struct _EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL
+    EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL;
+
+typedef EFI_STATUS(EFIAPI *EFI_INPUT_RESET_EX)(
+    EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *This, BOOLEAN ExtendedVerification);
+typedef EFI_STATUS(EFIAPI *EFI_INPUT_READ_KEY_EX)(
+    EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL *This, EFI_KEY_DATA *KeyData);
+
+struct _EFI_SIMPLE_TEXT_INPUT_EX_PROTOCOL {
+  EFI_INPUT_RESET_EX    Reset;
+  EFI_INPUT_READ_KEY_EX ReadKeyStrokeEx;
+  VOID                 *WaitForKeyEx;
+};
+
 /* ------------------------------------------------------------------ */
 /* Loaded Image protocol                                               */
 /* ------------------------------------------------------------------ */

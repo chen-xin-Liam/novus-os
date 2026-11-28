@@ -55,6 +55,10 @@
 /* 3: the image itself is the desktop build (DESKTOP.YES on its ESP).
  * Like 2 it means "no menu"; unlike 2 it is not a user choice. */
 #define SHM_BOOT_MODE_DESKTOP  3
+/* 4: no boot UI at all - the firmware logo stays until the desktop paints.
+ * The boot stage sets this by default and switches back to LIVE only when
+ * Shift is held, so the kernel can skip both its splash and boot menu. */
+#define SHM_BOOT_MODE_QUIET    4
 
 /* M3: module-loading outcome. Modules are verified in the boot stage
  * too, because they are read off the ESP with the firmware's FAT driver

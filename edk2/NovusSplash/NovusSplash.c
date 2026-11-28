@@ -41,9 +41,23 @@
 
 #include "LogoPixels.h"
 
-#define NOVUS_SPINNER_FRAMES   24u
-#define NOVUS_SPINNER_SAMPLES  64u
-#define NOVUS_SPINNER_RADIUS   36
+#pragma pack(1)
+/* Sparse RGBA sprite pixel. Pixel.Reserved carries the source alpha; the
+ * loader clears it when writing the blended result back to the GOP. */
+typedef struct {
+  UINT8 X;
+  UINT8 Y;
+  EFI_GRAPHICS_OUTPUT_BLT_PIXEL Pixel;
+} NOVUS_SPRITE_PIXEL;
+
+typedef struct {
+  CONST NOVUS_SPRITE_PIXEL *Pixels;
+  UINT16                   Count;
+} NOVUS_SPRITE_FRAME;
+#pragma pack()
+
+#include "SpinnerFrames.h"
+
 #define NOVUS_MIN_SPINS        2u
 #define NOVUS_FRAME_STALL_US   16000u   // ~62.5 FPS
 #define NOVUS_LOGO_GAP         24u
@@ -89,34 +103,14 @@ typedef struct {
 #pragma pack()
 
 typedef struct {
-  INT16 X;
-  INT16 Y;
-  UINT8 Alpha;
-} NOVUS_SPINNER_POINT;
-
-typedef struct {
   EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop;
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Background;
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Frame;
   UINTN X;
   UINTN Y;
   UINTN Size;
-  UINTN Center;
   UINTN FrameIndex;
 } NOVUS_SPINNER;
-
-STATIC NOVUS_SPINNER_POINT mSpinnerPoints[NOVUS_SPINNER_FRAMES][NOVUS_SPINNER_SAMPLES];
-STATIC UINTN                mSpinnerCount[NOVUS_SPINNER_FRAMES];
-
-// sin(0..90 degrees) scaled by 256, one entry every 5.625 degrees.
-STATIC CONST INT16 mSinQuarter[17] = {
-  0, 25, 50, 74, 98, 121, 142, 161, 181,
-  198, 213, 226, 237, 245, 250, 254, 256
-};
-
-STATIC CONST EFI_GRAPHICS_OUTPUT_BLT_PIXEL mSpinnerColor = {
-  0x2C, 0x93, 0xFF, 0xFF   // Blue, Green, Red, Reserved (=alpha for our source)
-};
 
 STATIC CONST EFI_GUID mAcpiRsdpGuid = NOVUS_RSDP_GUID;
 
@@ -176,105 +170,6 @@ BlendPixel (
   Dst->Red = (UINT8)(((UINT16)Source->Red * Alpha +
                       (UINT16)Dst->Red * InvAlpha) / 255u);
   Dst->Reserved = 0;
-}
-
-/**
-  A 3x3 dab keeps the ring continuous on high-resolution panels.
-**/
-STATIC
-VOID
-BlendDot (
-  IN OUT EFI_GRAPHICS_OUTPUT_BLT_PIXEL       *Buffer,
-  IN     UINTN                                Width,
-  IN     UINTN                                Height,
-  IN     INTN                                 CenterX,
-  IN     INTN                                 CenterY,
-  IN     UINT8                               Alpha,
-  IN     CONST EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Color
-  )
-{
-  INTN  Dx;
-  INTN  Dy;
-  UINT8 EdgeAlpha;
-
-  EdgeAlpha = (UINT8)(Alpha / 3u);
-  for (Dy = -1; Dy <= 1; Dy++) {
-    for (Dx = -1; Dx <= 1; Dx++) {
-      BlendPixel (Buffer, Width, Height, CenterX + Dx, CenterY + Dy,
-                  (Dx == 0 && Dy == 0) ? Alpha : EdgeAlpha, Color);
-    }
-  }
-}
-
-STATIC
-VOID
-CirclePoint (
-  IN  UINTN Index,
-  OUT INT16 *X,
-  OUT INT16 *Y
-  )
-{
-  UINTN Quadrant;
-  UINTN Step;
-  INT16 S;
-  INT16 C;
-
-  Quadrant = Index >> 4;
-  Step = Index & 15u;
-  S = mSinQuarter[Step];
-  C = mSinQuarter[16u - Step];
-  switch (Quadrant) {
-  case 0:
-    *X = C;  *Y = S;  break;
-  case 1:
-    *X = (INT16)-S;  *Y = C;  break;
-  case 2:
-    *X = (INT16)-C;  *Y = (INT16)-S;  break;
-  default:
-    *X = S;  *Y = (INT16)-C;  break;
-  }
-}
-
-/**
-  Pre-generate all spinner frames before the animation loop starts.
-**/
-STATIC
-VOID
-GenerateSpinner (
-  VOID
-  )
-{
-  UINTN Frame;
-  UINTN Sample;
-  INTN  Phase;
-  UINT8 Alpha;
-  INT16 UnitX;
-  INT16 UnitY;
-
-  for (Frame = 0; Frame < NOVUS_SPINNER_FRAMES; Frame++) {
-    mSpinnerCount[Frame] = 0;
-    for (Sample = 0; Sample < NOVUS_SPINNER_SAMPLES; Sample++) {
-      Phase = (INTN)((Sample * 256u) / NOVUS_SPINNER_SAMPLES) -
-              (INTN)((Frame * 256u) / NOVUS_SPINNER_FRAMES);
-      while (Phase < 0) {
-        Phase += 256;
-      }
-      if (Phase > 112) {
-        continue;
-      }
-      Alpha = (UINT8)(255u - (UINTN)(Phase * 255) / 112u);
-      if (Alpha == 0) {
-        continue;
-      }
-      CirclePoint (Sample, &UnitX, &UnitY);
-      mSpinnerPoints[Frame][mSpinnerCount[Frame]].X =
-        (INT16)((UnitX * NOVUS_SPINNER_RADIUS) / 256);
-      mSpinnerPoints[Frame][mSpinnerCount[Frame]].Y =
-        (INT16)((UnitY * NOVUS_SPINNER_RADIUS) / 256);
-      mSpinnerPoints[Frame][mSpinnerCount[Frame]].Alpha = Alpha;
-      mSpinnerCount[Frame]++;
-    }
-  }
 }
 
 STATIC
@@ -437,10 +332,11 @@ SpinnerStart (
   }
   ScreenW = Spin->Gop->Mode->Info->HorizontalResolution;
   ScreenH = Spin->Gop->Mode->Info->VerticalResolution;
-  Spin->Size = (UINTN)(NOVUS_SPINNER_RADIUS + 3) * 2u + 1u;
-  Spin->Center = (UINTN)(NOVUS_SPINNER_RADIUS + 3);
-  Spin->X = (CenterX > Spin->Center) ? CenterX - Spin->Center : 0;
-  Spin->Y = (CenterY > Spin->Center) ? CenterY - Spin->Center : 0;
+  Spin->Size = NOVUS_SPINNER_W;
+  Spin->X = (CenterX > NOVUS_SPINNER_W / 2u)
+                ? CenterX - NOVUS_SPINNER_W / 2u : 0;
+  Spin->Y = (CenterY > NOVUS_SPINNER_H / 2u)
+                ? CenterY - NOVUS_SPINNER_H / 2u : 0;
   if (Spin->X + Spin->Size > ScreenW) {
     Spin->X = (ScreenW > Spin->Size) ? ScreenW - Spin->Size : 0;
   }
@@ -492,20 +388,22 @@ SpinnerTick (
   IN OUT NOVUS_SPINNER *Spin
   )
 {
-  UINTN Frame;
-  UINTN Point;
+  UINTN                      Frame;
+  UINTN                      Index;
+  CONST NOVUS_SPRITE_PIXEL  *Pixel;
 
   if (Spin == NULL || Spin->Background == NULL || Spin->Frame == NULL) {
     return;
   }
+  /* Restore the exact pixels captured at loader entry, then blend one
+   * pre-rendered RGBA sprite over them. Nothing else touches this rect. */
   CopyMem (Spin->Frame, Spin->Background,
            Spin->Size * Spin->Size * sizeof (EFI_GRAPHICS_OUTPUT_BLT_PIXEL));
   Frame = Spin->FrameIndex % NOVUS_SPINNER_FRAMES;
-  for (Point = 0; Point < mSpinnerCount[Frame]; Point++) {
-    BlendDot (Spin->Frame, Spin->Size, Spin->Size,
-              (INTN)Spin->Center + mSpinnerPoints[Frame][Point].X,
-              (INTN)Spin->Center + mSpinnerPoints[Frame][Point].Y,
-              mSpinnerPoints[Frame][Point].Alpha, &mSpinnerColor);
+  for (Index = 0; Index < mNovusSpinnerFrames[Frame].Count; Index++) {
+    Pixel = &mNovusSpinnerFrames[Frame].Pixels[Index];
+    BlendPixel (Spin->Frame, NOVUS_SPINNER_W, NOVUS_SPINNER_H,
+                Pixel->X, Pixel->Y, Pixel->Pixel.Reserved, &Pixel->Pixel);
   }
   Spin->Gop->Blt (Spin->Gop, Spin->Frame, EfiBltBufferToVideo,
                   0, 0, Spin->X, Spin->Y, Spin->Size, Spin->Size, 0);
@@ -514,38 +412,28 @@ SpinnerTick (
 }
 
 /**
-  Draw the baked logo only when the firmware did not report one through BGRT.
+  Alpha-blend boot.png at an explicit rectangle. The logo is our resource,
+  not the firmware's; BGRT is only used to choose where the firmware put its
+  own mark, so our mark and the spinner feel like one boot animation.
 **/
 STATIC
 VOID
-DrawFallbackLogo (
-  IN EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop
+DrawLogoAt (
+  IN EFI_GRAPHICS_OUTPUT_PROTOCOL *Gop,
+  IN UINTN                         X,
+  IN UINTN                         Y,
+  IN UINTN                         Width,
+  IN UINTN                         Height
   )
 {
   EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Pixels;
-  UINTN ScreenW;
-  UINTN ScreenH;
-  UINTN Width;
-  UINTN Height;
-  UINTN X;
-  UINTN Y;
   UINTN Sx;
   UINTN Sy;
   CONST EFI_GRAPHICS_OUTPUT_BLT_PIXEL *Source;
 
-  ScreenW = Gop->Mode->Info->HorizontalResolution;
-  ScreenH = Gop->Mode->Info->VerticalResolution;
-  Width = ScreenW / 3;
-  if (Width > 480) {
-    Width = 480;
+  if (Width == 0 || Height == 0) {
+    return;
   }
-  Height = (Width * NOVUS_EFI_LOGO_HEIGHT) / NOVUS_EFI_LOGO_WIDTH;
-  if (Height > ScreenH / 2) {
-    Height = ScreenH / 2;
-    Width = (Height * NOVUS_EFI_LOGO_WIDTH) / NOVUS_EFI_LOGO_HEIGHT;
-  }
-  X = (ScreenW - Width) / 2;
-  Y = ScreenH / 6;
   Pixels = AllocatePool (Width * Height * sizeof (EFI_GRAPHICS_OUTPUT_BLT_PIXEL));
   if (Pixels == NULL) {
     return;
@@ -705,6 +593,8 @@ UefiMain (
   CONST NOVUS_BGRT             *Bgrt;
   NOVUS_SPINNER                 Spin;
   EFI_STATUS                    Status;
+  UINTN                         ScreenW;
+  UINTN                         ScreenH;
   UINTN                         LogoX;
   UINTN                         LogoY;
   UINTN                         LogoW;
@@ -713,7 +603,6 @@ UefiMain (
   UINTN                         SpinY;
   UINTN                         Tick;
 
-  GenerateSpinner ();
   ZeroMem (&Spin, sizeof (Spin));
 
   // Keep whatever mode the firmware/Quiet Boot selected. SetMode() would
@@ -726,21 +615,43 @@ UefiMain (
   }
   Spin.Gop = Gop;
 
+  ScreenW = Gop->Mode->Info->HorizontalResolution;
+  ScreenH = Gop->Mode->Info->VerticalResolution;
   Bgrt = FindBgrt (SystemTable);
   if (Bgrt != NULL && BgrtLogoRect (Bgrt, &LogoX, &LogoY, &LogoW, &LogoH)) {
-    SpinX = LogoX + LogoW / 2u;
-    SpinY = LogoY + LogoH + NOVUS_LOGO_GAP;
+    /* Use the firmware's mark position so our logo replaces it in place. */
+    if (LogoX >= ScreenW) {
+      LogoX = 0;
+    }
+    if (LogoY >= ScreenH) {
+      LogoY = ScreenH / 6u;
+    }
+    if (LogoW == 0 || LogoW > ScreenW - LogoX) {
+      LogoW = ScreenW - LogoX;
+    }
+    if (LogoH == 0 || LogoH > ScreenH - LogoY) {
+      LogoH = ScreenH - LogoY;
+    }
   } else {
-    DrawFallbackLogo (Gop);
-    LogoW = Gop->Mode->Info->HorizontalResolution / 3;
+    LogoW = ScreenW / 3u;
     if (LogoW > 480) {
       LogoW = 480;
     }
     LogoH = (LogoW * NOVUS_EFI_LOGO_HEIGHT) / NOVUS_EFI_LOGO_WIDTH;
-    SpinX = (Gop->Mode->Info->HorizontalResolution - LogoW) / 2u;
-    SpinY = Gop->Mode->Info->VerticalResolution / 6u + LogoH +
-            NOVUS_LOGO_GAP;
+    if (LogoH > ScreenH / 2u) {
+      LogoH = ScreenH / 2u;
+      LogoW = (LogoH * NOVUS_EFI_LOGO_WIDTH) / NOVUS_EFI_LOGO_HEIGHT;
+    }
+    LogoX = (ScreenW - LogoW) / 2u;
+    LogoY = ScreenH / 6u;
   }
+
+  /* boot.png is our resource: alpha-blend it over whatever the firmware left
+   * on the panel, then place the spinner directly below it. */
+  DrawLogoAt (Gop, LogoX, LogoY, LogoW, LogoH);
+  SpinX = LogoX + LogoW / 2u;
+  SpinY = LogoY + LogoH + NOVUS_LOGO_GAP;
+
   Status = SpinnerStart (&Spin, SpinX, SpinY);
   if (EFI_ERROR (Status)) {
     return LoadNovusKernel (ImageHandle, &Spin);

@@ -795,8 +795,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
    * here, before the first line is printed, so the whole kernel stage is
    * readable on screen. The desktop repaints over it at the end. */
 #if CONFIG_NOVUS_DISPLAY
-  if (nd_boot_splash() == 0) {
-    (void)fbcon_begin();
+  /* The boot stage set QUIET when Shift was not held. In that case leave
+   * the firmware logo on the glass: no splash, no framebuffer text console;
+   * the desktop paints over it at the end of startup. */
+  if (shared_mem_get() == 0 ||
+      shared_mem_get()->boot_mode != SHM_BOOT_MODE_QUIET) {
+    if (nd_boot_splash() == 0) {
+      (void)fbcon_begin();
+    }
   }
 #endif
 
@@ -1480,11 +1486,14 @@ void kmain(UINT64 mmap_addr, UINT64 map_size, UINT64 desc_size) {
                                                    : SHM_BOOT_MODE_LIVE;
           int no_desktop = (mode == SHM_BOOT_MODE_NO_DESKTOP);
           int image_chose = (mode == SHM_BOOT_MODE_DESKTOP ||
-                             mode == SHM_BOOT_MODE_NO_DESKTOP);
+                             mode == SHM_BOOT_MODE_NO_DESKTOP ||
+                             mode == SHM_BOOT_MODE_QUIET);
           if (image_chose) {
-            kputs(no_desktop
-                  ? "[BOOT] this image is the shell build: no menu\n"
-                  : "[BOOT] this image is the desktop build: no menu\n");
+            kputs(mode == SHM_BOOT_MODE_QUIET
+                  ? "[BOOT] silent boot: no menu (hold Shift to show it)\n"
+                  : (no_desktop
+                     ? "[BOOT] this image is the shell build: no menu\n"
+                     : "[BOOT] this image is the desktop build: no menu\n"));
           } else {
             /* Boot menu: choose the desktop (default) or a bare shell. It draws on
              * the framebuffer, reads the USB keyboard and counts down two seconds

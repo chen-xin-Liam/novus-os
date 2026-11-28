@@ -79,6 +79,12 @@ MEM ?= 4G
 # the serial console) for end-to-end verification against a local updatesrv.
 E2E ?= 0
 
+# Late PAT reprogramming is an optional speed-up. On some firmware the
+# CR4.PAT write / framebuffer invalidation path stops the boot before the
+# kernel stage, so keep it opt-in; pass PATLATE=1 to try it on known-good
+# hardware.
+PATLATE ?= 0
+
 # ---------------------------------------------------------------------------
 # Sources and flags
 # ---------------------------------------------------------------------------
@@ -452,13 +458,18 @@ build/graphics_nd_boot.o: $(BOOT_LOGO_H)
 # EDK II splash: keep the PNG alpha channel for the standalone GOP app. This
 # header is an input to the EDK II build, not to the normal kernel build, so
 # it is generated on demand rather than pulled into $(OBJS).
-EFI_LOGO_H := edk2/NovusSplash/LogoPixels.h
+EFI_LOGO_H    := edk2/NovusSplash/LogoPixels.h
+EFI_SPINNER_H := edk2/NovusSplash/SpinnerFrames.h
 
-.PHONY: efi-logo
+.PHONY: efi-logo efi-spinner
 efi-logo: $(EFI_LOGO_H)
+efi-spinner: $(EFI_SPINNER_H)
 
 $(EFI_LOGO_H): $(BOOT_LOGO_PNG) tools/splash/mkefilogo.py
 	python3 tools/splash/mkefilogo.py $@
+
+$(EFI_SPINNER_H): tools/splash/mkspinner.py
+	python3 tools/splash/mkspinner.py $@
 
 # Link the final EFI image. Static archives go after the plain objects so
 # the linker extracts members on demand; the tramp_blob object carries the

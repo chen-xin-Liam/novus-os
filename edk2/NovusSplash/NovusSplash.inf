@@ -15,6 +15,7 @@
 [Sources]
   NovusSplash.c
   LogoPixels.h
+  SpinnerFrames.h
 
 [Packages]
   MdePkg/MdePkg.dec
