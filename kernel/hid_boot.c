@@ -8,6 +8,7 @@
 
 #include "hid_boot.h"
 #include "kernel.h"
+#include "bsod.h"
 #include "nd_input.h"
 #include <stddef.h>
 
@@ -106,6 +107,14 @@ void hid_boot_kbd_decode(hid_boot_kbd_t *s, const UINT8 *rep, UINT8 src) {
   if (ctrl)  { mods |= ND_MOD_CTRL; }
   if (alt)   { mods |= ND_MOD_ALT; }
 
+  /* Shift is a modifier bit in byte 0, not a key code in bytes 2..7. Turn
+   * its edges into the synthetic scancode the stop-screen state machine
+   * understands, otherwise USB keyboards can never finish Tab x5 + Shift x2. */
+  if (((mods ^ s->bsod_mods) & ND_MOD_SHIFT) != 0u) {
+    bsod_key_hook_mods(BSOD_SCAN_SHIFT_L, (mods & ND_MOD_SHIFT) != 0u, mods);
+  }
+  s->bsod_mods = mods;
+
   for (k = 2; k < HID_BOOT_KBD_REPORT; k++) {
     UINT8 code = rep[k];
 
@@ -119,6 +128,21 @@ void hid_boot_kbd_decode(hid_boot_kbd_t *s, const UINT8 *rep, UINT8 src) {
     }
     if (i < 6) {
       continue;
+    }
+    /* USB keyboards carry the same global hotkeys. Map the few usages the
+     * stop screen cares about onto the PS/2 scancode space; modifiers come
+     * directly from the boot report's byte 0. */
+    {
+      UINT8 hook_sc = 0u;
+
+      if (code == 0x2Bu) {
+        hook_sc = BSOD_SCAN_TAB;
+      } else if (code == 0x29u) {
+        hook_sc = BSOD_SCAN_ESC;
+      }
+      if (hook_sc != 0u) {
+        bsod_key_hook_mods(hook_sc, 1, mods);
+      }
     }
     if (code == 0x39u) { /* Caps Lock: toggle on press */
       s->caps ^= 1u;

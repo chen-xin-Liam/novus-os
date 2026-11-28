@@ -14,6 +14,7 @@
 
 #include "kernel.h"
 #include "cpu.h"
+#include "bsod.h"
 #include "nd.h"
 #include "nd_input.h"
 #include "irq.h"
@@ -907,9 +908,15 @@ static void kbd_byte(UINT8 b) {
   if (b == 0xE1) {
     return; /* pause key: its multi-byte sequence is ignored */
   }
+  /* Global stop-screen hotkeys see raw scancodes: Shift/Alt/Ctrl never
+   * become key events in key_down(), so they must be observed here. */
   if ((b & 0x80u) != 0u) {
-    key_up((UINT8)(b & 0x7Fu));
+    UINT8 sc = (UINT8)(b & 0x7Fu);
+
+    bsod_key_hook(sc, 0);
+    key_up(sc);
   } else {
+    bsod_key_hook(b, 1);
     key_down(b);
     g_extended = 0;
   }

@@ -22,6 +22,7 @@
 typedef struct {
   UINT8 prev[6];      /* keys held in the previous report */
   UINT8 caps;         /* software Caps Lock toggle */
+  UINT8 bsod_mods;    /* previous modifier mask, for hotkey edge detect */
   hid_kbd_led_t led;  /* Num / Caps / Scroll state mirrored to hardware */
   void *ctx;          /* controller device passed to set_report */
   int (*set_report)(void *ctx, UINT8 value);

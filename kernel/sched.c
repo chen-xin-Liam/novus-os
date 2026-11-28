@@ -8,6 +8,7 @@
 
 #include "kernel.h"
 #include "sched.h"
+#include "bsod.h"
 #include "blkdev.h"
 #include "gdt.h"
 #include "idt.h"
@@ -637,6 +638,8 @@ void sched_tick(void) {
    * is what lets the boot menu enable interrupts for keyboard input without
    * the timer ISR corrupting kernel state. */
   if (g_sched_started) {
+    /* Hidden-sequence timeout, independent of the WM configuration. */
+    bsod_hotkey_tick();
 #if CONFIG_NOVUS_WM
     /* M6: Novus-WM drives the whole desktop from the tick - input routing,
      * the IPC server queue and the compositor. M5's nd_demo_tick() is what

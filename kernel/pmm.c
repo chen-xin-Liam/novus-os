@@ -21,6 +21,7 @@
 
 #include "pmm.h"
 #include "kernel.h"
+#include "bsod.h"
 
 #define PMM_PAGE_SIZE    4096ULL
 #define PMM_BITMAP_BYTES 2097152ULL                  /* 2 MiB in .bss        */
@@ -317,9 +318,7 @@ VOID novus_rs_panic_hook(const UINT8 *msg, UINT64 len) {
   kputs("[PANIC] novuslib-rs: ");
   kputs(buf);
   kputs("\n");
-  for (;;) {
-    __asm__ volatile("cli; hlt");
-  }
+  bsod_manual(BSOD_BC_BAD_POOL);
 }
 
 /* ------------------------------------------------------------------ */

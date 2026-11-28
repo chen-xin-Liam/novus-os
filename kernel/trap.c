@@ -14,6 +14,7 @@
 
 #include "kernel.h"
 #include "idt.h"
+#include "bsod.h"
 #include "sched.h"
 #include "lapic.h"
 #include "vm.h"
@@ -1248,10 +1249,9 @@ static void trap_exception(trap_frame_t *f) {
     sched_exit_current(-1);
     return;
   }
-  kputs("[TRAP] kernel fault: halting\n");
-  for (;;) {
-    cpu_halt();
-  }
+  kputs("[TRAP] kernel fault: stopping the machine\n");
+  /* The A-core stop path owns the glass directly; it never returns. */
+  bsod_fault(f);
 }
 
 UINT64 trap_dispatch(trap_frame_t *f) {

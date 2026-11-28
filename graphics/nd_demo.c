@@ -442,53 +442,6 @@ void nd_demo_banner(const char *text, UINT32 hold_ms) {
   nd_present(r);
 }
 
-/* Full-screen boot report: dark page, a title, the hint that says the
- * machine may now be switched off, and the caller's lines underneath. Held
- * for `hold_ms` and then the caller's next paint covers it. */
-void nd_demo_report_draw(const char *text) {
-  nd_surface_t *c = nd_canvas();
-  nd_rect_t     r;
-  INT32         y;
-  UINT32        at = 0u;
-
-  if (c == 0 || text == 0) {
-    return;
-  }
-  r = nd_rect(0, 0, c->w, c->h);
-  nd_fill_rect(c, r, ND_RGB(0x07, 0x0B, 0x12));
-  nd_fill_rect(c, nd_rect(0, 0, c->w, 6u), ND_RGB(0x2E, 0x9E, 0xFF));
-  nd_text(c, 24, 20, "Novus OS · 启动诊断", ND_RGB(0xA8, 0xD8, 0xFF), 2u);
-  nd_text(c, 24, 56, "把这一屏拍下来（或抄下数字），然后就可以关机了。",
-          ND_RGB(0xFF, 0xD4, 0x66), 1u);
-
-  y = 92;
-  while (text[at] != '\0' && y + (INT32)(ND_CJK_H) < (INT32)c->h - 24) {
-    char   line[128];
-    UINT32 n = 0u;
-    UINT32 max_px = (UINT32)(c->w - 48);
-
-    while (text[at] != '\0' && text[at] != '\n' && n + 1u < sizeof(line)) {
-      line[n++] = text[at++];
-    }
-    line[n] = '\0';
-    if (text[at] == '\n') {
-      at++;
-    }
-    nd_text_limit(c, 24, y, line, max_px, ND_RGB(0xE6, 0xEE, 0xF8), 1u);
-    y += (INT32)ND_CJK_H + 6;
-  }
-  nd_text_limit(c, 24, (INT32)c->h - 40, "日志若已写入，读卡即可；未写入就靠这一屏。",
-                (UINT32)(c->w - 48), ND_RGB(0x8F, 0xA6, 0xBF), 1u);
-  nd_present(r);
-}
-
-void nd_demo_report(const char *text, UINT32 hold_ms) {
-  nd_demo_report_draw(text);
-  if (hold_ms != 0u) {
-    nd_wait_ms(hold_ms);
-  }
-}
-
 static void on_apply(ng_ctx_t *ctx, ng_widget_t *w) {
   (void)ctx;
   (void)w;

@@ -508,16 +508,6 @@ void nd_demo_status(const char *s);
  * repainted away. Nothing a client window can cover. */
 void nd_demo_banner(const char *text, UINT32 hold_ms);
 
-/* Full-screen boot report: one line per item, kept on the glass for
- * `hold_ms` before the desktop takes over. This is the report a machine with
- * no serial port gives: the numbers are on the screen, so a photograph of
- * this page is the whole diagnosis. */
-void nd_demo_report(const char *text, UINT32 hold_ms);
-
-/* Paint the full-screen report without the hold. The boot diagnostic loop
- * calls this between feed slices so the page reflects the latest port pass. */
-void nd_demo_report_draw(const char *text);
-
 /* Rebuild the shell widget tree after a theme change. Client windows are
  * owned by the WM and survive; the shell's own demo windows are recreated
  * hidden, which is the price of a static widget pool. */

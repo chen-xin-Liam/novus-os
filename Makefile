@@ -116,6 +116,7 @@ SRC := arch/x86_64/boot/main.c \
         kernel/hid.c \
         kernel/power.c \
     kernel/trap.c \
+    kernel/bsod.c \
     kernel/session.c \
     kernel/con.c \
     kernel/boot_menu.c \
